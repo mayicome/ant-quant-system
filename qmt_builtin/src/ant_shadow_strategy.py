@@ -259,7 +259,7 @@ def _get_after_hours_rank_runner():
     _AFTER_RANK_MOD = mod
     _AFTER_RANK_MTIME = mtime
     print(
-        "[盘后排名] module loaded version=%s file=%s"
+        "[盘后排名] 模块已加载 版本=%s 文件=%s"
         % (getattr(mod, "AFTER_HOURS_RANK_VERSION", "?"), path)
     )
     return mod

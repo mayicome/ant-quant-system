@@ -3,12 +3,14 @@
 Tick 本地缓存（全项目统一口径）：
 
   data/ticks/{YYYYMMDD}/{6位代码}.parquet   （主格式，五档展平 + zstd/snappy）
-  data/ticks/{YYYYMMDD}/{6位代码}.pkl       （旧格式，只读回退）
+  data/ticks/{YYYYMMDD}/{6位代码}.pkl       （旧格式，只读回退；有数据）
 
 读取顺序：进程内内存 → 本地 parquet → 本地 pkl → QMT 拉取。
 落盘条件：规范化后通过 is_full_day_ticks；不完整数据仅用内存、不落盘。
 读盘时若发现不完整，删除该文件并改走 QMT。
 新写入只写 parquet（盘口展平为 ask1..ask5 等标量列）；读出时拼回 list 列供真突破/滑点使用。
+警告：pkl 本身就是可用 tick 副本。没有同代码 parquet 前禁止删除 pkl。
+本地迁移（无下载）：tools/convert_tick_pkl_to_parquet.py
 
 内存缓存生命周期：回测按「加载一天 → 用完 → 清一天」调用
 clear_tick_memory_cache(trade_date=...)，避免跨日囤积导致十几 GB。

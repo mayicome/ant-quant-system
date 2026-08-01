@@ -13,7 +13,7 @@ import time
 from datetime import date, datetime, time as dt_time
 from typing import Any, Dict, List, Optional, Tuple
 
-AFTER_HOURS_RANK_VERSION = "20260801.01"
+AFTER_HOURS_RANK_VERSION = "20260801.03"
 # 与日线同点：仅作 catch-up 判断；正式启动由 tick 落盘串行触发
 RANK_HOUR = 15
 RANK_MINUTE = 35
@@ -173,7 +173,7 @@ def _get_xtdata():
             pass
         return xtdata
     except Exception as e:
-        _log("xtdata import failed: %s" % e)
+        _log("xtdata导入失败: %s" % e)
         return None
 
 
@@ -191,8 +191,9 @@ def _is_tradeday(day: date, ContextInfo=None, xtdata=None) -> bool:
             return bool(arr)
         except Exception:
             continue
-    # 本地 tick 已落盘则视为交易日（比 weekday 更准）
-    if _tick_full_sync_ready(ds) or os.path.isdir(_ticks_day_dir(ds)):
+    # 仅「落盘完成」可证明是交易日；空目录不能当交易日
+    # （分笔 catch-up 探测曾误建空 ticks/{今日}/，导致周末一直「等待分笔」）
+    if _tick_full_sync_ready(ds):
         return True
     return day.weekday() < 5
 
@@ -207,10 +208,10 @@ def _load_universe_from_file() -> List[str]:
         raw = list(payload.get("codes") or [])
         out = [str(c).strip() for c in raw if str(c).strip()]
         if out:
-            _log("universe fallback file n=%d" % len(out))
+            _log("股票池回退文件 n=%d" % len(out))
         return out
     except Exception as e:
-        _log("universe file fail: %s" % e)
+        _log("股票池文件失败: %s" % e)
         return []
 
 
@@ -259,7 +260,7 @@ def _load_universe(xtdata, limit: int = 0, ContextInfo=None) -> List[str]:
     if limit and limit > 0:
         out = out[:limit]
     if out:
-        _log("universe source=%s n=%d" % (src, len(out)))
+        _log("股票池来源=%s n=%d" % (src, len(out)))
     return out
 
 
@@ -455,7 +456,7 @@ def _fill_missing_from_qmt(
             allow_builtin_download=True,
         )
     except Exception as e:
-        _log("fill missing fail: %s: %s" % (type(e).__name__, e))
+        _log("补缺失败: %s: %s" % (type(e).__name__, e))
         return {}
 
     out = {}  # type: Dict[str, Any]
@@ -757,7 +758,7 @@ def run_after_hours_rank(
     global _BUSY, _LAST_DONE_DAY
 
     if _BUSY:
-        _log("busy, skip")
+        _log("忙碌中，跳过")
         return False
 
     # 默认不加载 xtdata（避免误触 miniQMT RPC）
@@ -773,27 +774,27 @@ def run_after_hours_rank(
 
     if not force and (day == _LAST_DONE_DAY or _detail_ready(day)):
         _LAST_DONE_DAY = day
-        _log("already done for %s (disk or memory)" % day)
+        _log("已完成: %s（磁盘或内存）" % day)
         return True
 
     if not _is_tradeday(day_d, ContextInfo=ContextInfo, xtdata=xtdata):
-        _log("skip non-trading day %s" % day)
+        _log("非交易日: %s" % day)
         _LAST_DONE_DAY = day
         return True
 
     # 交易日未到 15:30 不跑（手动 force 除外）
     if (not force) and day_d == now.date() and now.time() < dt_time(15, 30):
-        _log("before 15:30, skip")
+        _log("未到15:30，跳过")
         return False
 
     # 默认等全 A tick 落盘完成后再读盘；force 可跳过等待
     if (not force) and not _tick_full_sync_ready(day):
-        _log("wait tick_full_sync for %s" % day)
+        _log("等待分笔同步完成: %s" % day)
         return False
 
     codes = _load_universe(xtdata, limit=limit, ContextInfo=ContextInfo)
     if not codes:
-        _log("empty universe")
+        _log("股票池为空")
         return False
 
     _BUSY = True
@@ -807,17 +808,26 @@ def run_after_hours_rank(
         # 尽早建目录 + 写进度日志，避免跑到一半失败时目录都不存在
         out = _out_dir(day)
         start_msg = (
-            "start version=%s day=%s n=%s batch=%s read_cache=1 xtdata_dl=%s"
+            "开始 day=%s 股票池=%s 版本=%s batch=%s 读缓存=1 xtdata_dl=%s"
             % (
-                AFTER_HOURS_RANK_VERSION,
                 day,
                 len(codes),
+                AFTER_HOURS_RANK_VERSION,
                 batch_size,
                 "on" if ENABLE_XTDATA_TICK_DOWNLOAD else "off",
             )
         )
         _log(start_msg)
-        _append_run_log(day, start_msg)
+        _append_run_log(
+            day,
+            "START n=%s batch=%s read_cache=1 xtdata_dl=%s version=%s"
+            % (
+                len(codes),
+                batch_size,
+                "on" if ENABLE_XTDATA_TICK_DOWNLOAD else "off",
+                AFTER_HOURS_RANK_VERSION,
+            ),
+        )
         for i in range(0, len(codes), batch_size):
             batch = codes[i : i + batch_size]
             t0 = time.time()
@@ -895,13 +905,16 @@ def run_after_hours_rank(
                 )
             del data
             gc.collect()
-            progress = "batch %s/%s %.1fs cache_hit=%s miss=%s purged_files=%s" % (
-                min(i + batch_size, len(codes)),
-                len(codes),
-                time.time() - t0,
-                cache_hits,
-                cache_miss,
-                purged_files,
+            progress = (
+                "进度 %s/%s %.1fs 缓存命中=%s 缺失=%s 已清理文件=%s"
+                % (
+                    min(i + batch_size, len(codes)),
+                    len(codes),
+                    time.time() - t0,
+                    cache_hits,
+                    cache_miss,
+                    purged_files,
+                )
             )
             _log(progress)
             # 每 5 批写一次盘，减轻 IO
@@ -989,18 +1002,18 @@ def run_after_hours_rank(
         n_day = sum(1 for r in rows if float(r.get("day_vol") or 0) > 0)
         n_after = sum(1 for r in rows if float(r.get("after_vol") or 0) > 0)
         _log(
-            "coverage day_vol>0=%s/%s after_vol>0=%s"
+            "覆盖 day_vol>0=%s/%s after_vol>0=%s"
             % (n_day, len(rows), n_after)
         )
         # 覆盖过低多半是异步下载未等完；不标记 done，便于盘后再手动 force 补跑
         low = n_day < max(200, int(len(rows) * 0.15))
         if low:
             _log(
-                "LOW COVERAGE — refuse to mark done; check local ticks / builtin download"
+                "覆盖过低 LOW COVERAGE — 拒绝标记完成；请检查本地ticks / 内置下载"
             )
             _append_run_log(
                 day,
-                "LOW COVERAGE day_vol>0=%s/%s — not marked done"
+                "LOW COVERAGE day_vol>0=%s/%s — 未标记完成"
                 % (n_day, len(rows)),
             )
             try:
@@ -1020,7 +1033,7 @@ def run_after_hours_rank(
         else:
             _LAST_DONE_DAY = day
         done_msg = (
-            "done %.0fs out=%s cache_hit=%s miss=%s purged~%.1fMB"
+            "完成 耗时=%.0fs 输出=%s 缓存命中=%s 缺失=%s 已清理~%.1fMB"
             % (
                 time.time() - t_all,
                 out,
@@ -1033,7 +1046,7 @@ def run_after_hours_rank(
         _append_run_log(day, done_msg)
         return not low
     except Exception as e:
-        _log("FAILED: %s: %s" % (type(e).__name__, e))
+        _log("失败: %s: %s" % (type(e).__name__, e))
         _append_run_log(day, "FAILED: %s: %s" % (type(e).__name__, e))
         try:
             try:
@@ -1101,13 +1114,13 @@ def process_manual_request(ContextInfo=None) -> Optional[bool]:
         with open(path, "r", encoding="utf-8") as f:
             req = json.load(f) or {}
     except Exception as e:
-        _log("manual_request read failed: %s" % e)
+        _log("手动请求读取失败: %s" % e)
         return False
     if not isinstance(req, dict):
         return False
     days = _normalize_manual_days(req)
     if not days:
-        _log("manual_request bad day: %s" % (req.get("days") or req.get("day")))
+        _log("手动请求日期无效: %s" % (req.get("days") or req.get("day")))
         try:
             os.remove(path)
         except Exception:
@@ -1117,7 +1130,7 @@ def process_manual_request(ContextInfo=None) -> Optional[bool]:
     day_s = days[0]
     remaining = days[1:]
     _log(
-        "manual_request day=%s remain=%d force=%s src=%s"
+        "手动请求 day=%s 剩余=%d force=%s src=%s"
         % (day_s, len(remaining), force, str(req.get("source") or "")[:40])
     )
     _append_run_log(
@@ -1147,7 +1160,7 @@ def process_manual_request(ContextInfo=None) -> Optional[bool]:
                 indent=2,
             )
     except Exception as e:
-        _log("manual_request archive failed: %s" % e)
+        _log("手动请求归档失败: %s" % e)
         return False
 
     ok = run_after_hours_rank(ContextInfo, day=day_s, force=force)
@@ -1166,7 +1179,7 @@ def process_manual_request(ContextInfo=None) -> Optional[bool]:
             if os.path.isfile(path):
                 os.remove(path)
     except Exception as e:
-        _log("manual_request queue update failed: %s" % e)
+        _log("手动请求队列更新失败: %s" % e)
         return False
     return bool(ok)
 
@@ -1185,6 +1198,13 @@ def maybe_catch_up_after_hours_rank(ContextInfo=None) -> bool:
     day = now.strftime("%Y%m%d")
     if now.time() < dt_time(RANK_HOUR, RANK_MINUTE):
         return False
+    # 周末/节假日勿用「今天」去等分笔（空 ticks 目录曾导致假交易日死等）
+    try:
+        day_d = datetime.strptime(day, "%Y%m%d").date()
+    except Exception:
+        day_d = now.date()
+    if not _is_tradeday(day_d, ContextInfo=ContextInfo):
+        return False
     if is_rank_done(day):
         return True
     if not _tick_full_sync_ready(day):
@@ -1195,7 +1215,7 @@ def maybe_catch_up_after_hours_rank(ContextInfo=None) -> bool:
     if ts - _CATCHUP_LOG_TS >= 120.0:
         _CATCHUP_LOG_TS = ts
         _log(
-            "catch-up needed for %s (tick sync ready, no detail)"
+            "需补跑: %s（分笔已就绪，尚无detail）"
             % day
         )
 
@@ -1205,6 +1225,6 @@ def maybe_catch_up_after_hours_rank(ContextInfo=None) -> bool:
 def register_after_hours_rank_timer(ContextInfo) -> None:
     """不再单独注册定时：由 daily→tick 流水线串行触发。"""
     _log(
-        "timer skipped (chained after tick_full_sync) version=%s"
+        "定时器跳过（由分笔同步串行触发）版本=%s"
         % AFTER_HOURS_RANK_VERSION
     )

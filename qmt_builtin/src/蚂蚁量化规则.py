@@ -8,7 +8,7 @@ import os
 import sys
 import time
 
-ENTRY_VERSION = "20260731.21"
+ENTRY_VERSION = "20260801.01"
 _shadow = None
 _ACCOUNT_SNAPSHOT_MOD = None
 _ENTRY_ACCOUNT_SKIP = ""
@@ -477,7 +477,7 @@ def _reload_after_hours_rank_runner():
         import qmt_builtin.ant_after_hours_rank_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[盘后排名] timer entry version=%s"
+        "[盘后排名] 定时入口 版本=%s"
         % getattr(runner, "AFTER_HOURS_RANK_VERSION", "?")
     )
     return runner

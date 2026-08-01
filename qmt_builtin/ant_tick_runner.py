@@ -1,5 +1,5 @@
 #coding:gbk
-"""Shadow ÕæÍ»ÆÆ tick ×´Ì¬»ú¡£"""
+"""Shadow ï¿½ï¿½Í»ï¿½ï¿½ tick ×´Ì¬ï¿½ï¿½ï¿½ï¿½"""
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -138,7 +138,7 @@ class ShadowTickRunner:
         self._best_buy: Dict[str, Dict[str, Any]] = {}
         self._cage: Dict[str, Dict[str, Any]] = {}
         self._early: Dict[str, Dict[str, Any]] = {}
-        # code -> (limit_up, pre_close)£¬¹©½ü°åËõÐ¡µ¯ÐÔ£»tick È±×Ö¶ÎÊ±ÑØÓÃ
+        # code -> (limit_up, pre_close)ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½Ô£ï¿½tick È±ï¿½Ö¶ï¿½Ê±ï¿½ï¿½ï¿½ï¿½
         self._limit_cache: Dict[str, Tuple[float, float]] = {}
         self.early_order_enabled = bool(rules.get("early_order_enabled"))
         for t in self.tasks:
@@ -195,7 +195,7 @@ class ShadowTickRunner:
         new_sig = self._tasks_signature()
         tasks_changed = new_sig != old_sig
         codes_changed = old_codes != new_codes
-        # ÇåÀíÒÑ²»´æÔÚµÄµ¯ÐÔÈÎÎñ×´Ì¬
+        # ï¿½ï¿½ï¿½ï¿½ï¿½Ñ²ï¿½ï¿½ï¿½ï¿½ÚµÄµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×´Ì¬
         live_ids = {str(t.get("task_id") or "") for t in self.tasks}
         for tid in list(self._best_sell.keys()):
             if tid and tid not in live_ids:
@@ -210,7 +210,7 @@ class ShadowTickRunner:
             base = str(ekey).split("@g")[0]
             if base and base not in live_ids:
                 self._early.pop(ekey, None)
-        # ´ÓÎä×°ÈÎÎñ»ØÌî cage_entered
+        # ï¿½ï¿½ï¿½ï¿½×°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ cage_entered
         for t in self.tasks:
             tid = str(t.get("task_id") or "")
             if not tid or str(t.get("rule_type") or "") not in ("cage_buy", "cage_sell"):
@@ -426,7 +426,7 @@ class ShadowTickRunner:
         grid_index: Optional[int] = None,
         early_enabled: Optional[bool] = None,
     ) -> Tuple[List[Dict[str, Any]], bool]:
-        """ÌáÇ°¹Òµ¥ FSM¡£·µ»Ø (events, skip_normal_hit)¡£"""
+        """ï¿½ï¿½Ç°ï¿½Òµï¿½ FSMï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (events, skip_normal_hit)ï¿½ï¿½"""
         events: List[Dict[str, Any]] = []
         use_early = (
             self.early_order_enabled if early_enabled is None else bool(early_enabled)
@@ -436,7 +436,7 @@ class ShadowTickRunner:
         ekey = self._early_key(tid, grid_index)
         est = self._early.get(ekey) or {}
         active = bool(est.get("active"))
-        # Î´¿ªÌáÇ°ÇÒÎÞ¹Òµ¥£ºÌø¹ý£»ÈôÒÑ¹Ò£¨active£©ÈÔ´¦Àí³·/È·ÈÏ
+        # Î´ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½Þ¹Òµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¹Ò£ï¿½activeï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½/È·ï¿½ï¿½
         if not use_early and not active:
             return events, False
         is_buy = rule_type in ("single_buy", "grid_buy")
@@ -444,7 +444,7 @@ class ShadowTickRunner:
         direction_ok = (target < lp) if is_buy else (target > lp)
 
         if active:
-            # ¼Û²î¹ý´ó£º³·µ¥
+            # ï¿½Û²ï¿½ï¿½ï¿½ó£º³ï¿½ï¿½ï¿½
             if diff_pct > 1.0:
                 events.append(
                     self._event(
@@ -462,7 +462,7 @@ class ShadowTickRunner:
                 )
                 self.clear_early_state(ekey)
                 return events, True
-            # ¼Û¸ñµ½´ï£ºÈ·ÈÏ£¨²»ÔÙ·¢×·¼Ûµ¥£©
+            # ï¿½Û¸ñµ½´ï£ºÈ·ï¿½Ï£ï¿½ï¿½ï¿½ï¿½Ù·ï¿½×·ï¿½Ûµï¿½ï¿½ï¿½
             reached = (lp <= target) if is_buy else (lp >= target)
             if reached:
                 events.append(
@@ -481,10 +481,10 @@ class ShadowTickRunner:
                 )
                 self.clear_early_state(ekey)
                 return events, True
-            # ¹Òµ¥ÖÐ£¬Ìø¹ý³£¹æ´¥·¢
+            # ï¿½Òµï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ´¥ï¿½ï¿½
             return events, True
 
-        # Î´¹Òµ¥£º¿¿½üÇÒ·½ÏòÕýÈ·ÔòÌáÇ°¹Ò£¨½öµ±Ç°ÈÎÎñÔÊÐíÌáÇ°Ê±£©
+        # Î´ï¿½Òµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò·ï¿½ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½Ç°ï¿½Ò£ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç°Ê±ï¿½ï¿½
         if use_early and diff_pct < 0.5 and direction_ok:
             uid = tid.replace(":", "_")
             if grid_index is not None:
@@ -634,7 +634,7 @@ class ShadowTickRunner:
 
     @staticmethod
     def _grid_point_price(rule_type: str, start_price: float, end_price: float, num_grids: int, index: int) -> float:
-        """ÓëÍ¼±íÒ»ÖÂµÄÍø¸ñµã¼Û¸ñ¡£"""
+        """ï¿½ï¿½Í¼ï¿½ï¿½Ò»ï¿½Âµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Û¸ï¿½"""
         n = int(num_grids or 0)
         i = int(index or 0)
         if n < 1:
@@ -643,7 +643,7 @@ class ShadowTickRunner:
             return float(start_price or 0)
         if i >= n:
             return float(end_price or 0)
-        # ÖÐ¼äµãÏßÐÔ²åÖµ£»¾«¶ÈÓÉµ÷ÓÃ·½ÔÙ round
+        # ï¿½Ð¼ï¿½ï¿½ï¿½ï¿½ï¿½Ô²ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Éµï¿½ï¿½Ã·ï¿½ï¿½ï¿½ round
         try:
             px = float(start_price) + (float(end_price) - float(start_price)) * float(i) / float(n)
         except Exception:
@@ -677,7 +677,7 @@ class ShadowTickRunner:
             tid = str(task.get("task_id") or "")
             rule_type = str(task.get("rule_type") or "breakthrough_buy").strip()
 
-            # ¶¨Ê±Çå²Ö£ºµ½µãºóÊ×±ÊÓÐÐ§ tick Ò»´ÎÐÔÅÐ¶¨£¨ÏÖ¼Û < ´¥·¢¼ÛÔòÂô£¬·ñÔòÌø¹ý£©
+            # ï¿½ï¿½Ê±ï¿½ï¿½Ö£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×±ï¿½ï¿½ï¿½Ð§ tick Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½ï¿½ï¿½ï¿½Ö¼ï¿½ < ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             if rule_type == "scheduled_clear":
                 if not tid:
                     continue
@@ -756,7 +756,7 @@ class ShadowTickRunner:
                 st.done_task_ids.add(tid)
                 continue
 
-            # Íø¸ñ£ºÃ¿ tick ×î¶à´¥·¢Ò»¸öÎ´Ö´ÐÐµãÎ»£¨ÓëÍ¼±íÒ»ÖÂ£©
+            # ï¿½ï¿½ï¿½ï¿½Ã¿ tick ï¿½ï¿½à´¥ï¿½ï¿½Ò»ï¿½ï¿½Î´Ö´ï¿½Ðµï¿½Î»ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½Ò»ï¿½Â£ï¿½
             if rule_type in ("grid_buy", "grid_sell"):
                 if not tid:
                     continue
@@ -772,7 +772,7 @@ class ShadowTickRunner:
                         executed.add(int(x))
                     except (TypeError, ValueError):
                         pass
-                # ÄÚ´æÀïÒÑ´¥·¢µÄµãÎ»Ò²ÅÅ³ý
+                # ï¿½Ú´ï¿½ï¿½ï¿½ï¿½Ñ´ï¿½ï¿½ï¿½ï¿½Äµï¿½Î»Ò²ï¿½Å³ï¿½
                 for i in range(num_grids + 1):
                     if ("%s@g%d" % (tid, i)) in st.done_task_ids:
                         executed.add(i)
@@ -833,7 +833,7 @@ class ShadowTickRunner:
                     break
                 continue
 
-            # Áý×Ó£ºÏÈ½øÄÚÇø¼ä£¬ÔÙÆÆ¶Ëµã´¥·¢£¨ÓëÍ¼±íÒ»ÖÂ£©
+            # ï¿½ï¿½ï¿½Ó£ï¿½ï¿½È½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ä£¬ï¿½ï¿½ï¿½Æ¶Ëµã´¥ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½Ò»ï¿½Â£ï¿½
             if rule_type in ("cage_buy", "cage_sell"):
                 if not tid:
                     continue
@@ -849,7 +849,7 @@ class ShadowTickRunner:
                 cst["kind"] = rule_type
                 entered = bool(cst.get("entered")) or bool(task.get("cage_entered"))
 
-                # ¿ªÅÌ¼ÛÔÚÄÚÇø¼äÄÚ£ºÊÓÎªÒÑ½øÈë£¨Óë»Ø²âÒ»ÖÂ£©
+                # ï¿½ï¿½ï¿½Ì¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú£ï¿½ï¿½ï¿½Îªï¿½Ñ½ï¿½ï¿½ë£¨ï¿½ï¿½Ø²ï¿½Ò»ï¿½Â£ï¿½
                 if not entered:
                     open_px = float(
                         row.get("open")
@@ -929,8 +929,8 @@ class ShadowTickRunner:
             if trig <= 0:
                 continue
 
-            # µ¥µãÂòÈë£ºÏÖ¼Û <= ´¥·¢¼Û£¨ÓëÖ÷³ÌÐòÍ¼±íÒ»ÖÂ£©
-            # ¿ªÅÌÂòÈëÀ©Õ¹£ºwait_unseal=ÕÇÍ£¿ªÅÌµÈ¿ª°åºó´¥·¢
+            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë£ºï¿½Ö¼ï¿½ <= ï¿½ï¿½ï¿½ï¿½ï¿½Û£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½Ò»ï¿½Â£ï¿½
+            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¹ï¿½ï¿½wait_unseal=ï¿½ï¿½Í£ï¿½ï¿½ï¿½ÌµÈ¿ï¿½ï¿½ï¿½ó´¥·ï¿½
             if rule_type == "single_buy":
                 vol = int(task.get("max_volume") or 0)
                 wait_unseal = bool(task.get("wait_unseal"))
@@ -973,7 +973,7 @@ class ShadowTickRunner:
                             "single_buy_hit",
                             tick_time,
                             order_px,
-                            msg="¿ªÅÌÂòÈë-ÕÇÍ£µÈ¿ª°å",
+                            msg="ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Í£ï¿½È¿ï¿½ï¿½ï¿½",
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
@@ -1002,7 +1002,7 @@ class ShadowTickRunner:
                     continue
                 if lp <= trig:
                     msg = (
-                        "¿ªÅÌÂòÈë-ÂôÒ»"
+                        "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ò»"
                         if task.get("open_buy_ask")
                         else "\u5355\u70b9\u4e70\u5165\u89e6\u53d1"
                     )
@@ -1022,7 +1022,7 @@ class ShadowTickRunner:
                         st.done_task_ids.add(tid)
                 continue
 
-            # µ¥µãÂô³ö£ºÏÖ¼Û >= ´¥·¢¼Û£¨ÓëÖ÷³ÌÐòÍ¼±íÒ»ÖÂ£©
+            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¼ï¿½ >= ï¿½ï¿½ï¿½ï¿½ï¿½Û£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½Ò»ï¿½Â£ï¿½
             if rule_type == "single_sell":
                 vol = int(task.get("max_volume") or 0)
                 early_ev, skip_hit = self._early_eval(
@@ -1059,7 +1059,7 @@ class ShadowTickRunner:
                         st.done_task_ids.add(tid)
                 continue
 
-            # Í»ÆÆÂô³ö£ºÓëÍ¼±íÒ»ÖÂ ¡ª¡ª ÏÖ¼Û < ´¥·¢¼Û¼´Âô£¨²»ÒªÇóÏÈÉÏÆÆ£©
+            # Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½Ò»ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½Ö¼ï¿½ < ï¿½ï¿½ï¿½ï¿½ï¿½Û¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ£ï¿½
             if rule_type == "breakthrough_sell":
                 r_lp = round_price_like_display(_code6(code), lp)
                 r_trig = round_price_like_display(_code6(code), trig)
@@ -1080,7 +1080,7 @@ class ShadowTickRunner:
                         st.done_task_ids.add(tid)
                 continue
 
-            # µ¯ÐÔÂòÈë£ºµøÆÆ´¥·¢¼Û ¡ú ¸ú×Ù×îµÍ¼Û ¡ú ·´µ¯È·ÈÏÂòÈë
+            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë£ºï¿½ï¿½ï¿½Æ´ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             if rule_type == "best_buy":
                 if compute_best_buy_rebound_from_rule is None:
                     continue
@@ -1118,7 +1118,7 @@ class ShadowTickRunner:
                 except (TypeError, ValueError):
                     lowest_price = None
 
-                # Í¼±í£ºÑÏ¸ñ < ´¥·¢¼Û¿ªÊ¼×·×Ù
+                # Í¼ï¿½ï¿½ï¿½ï¿½ï¿½Ï¸ï¿½ < ï¿½ï¿½ï¿½ï¿½ï¿½Û¿ï¿½Ê¼×·ï¿½ï¿½
                 if lp < trig:
                     if not triggered:
                         bbt["triggered"] = True
@@ -1186,7 +1186,7 @@ class ShadowTickRunner:
                             bbt["rebound_hit_count"] = 0
                 continue
 
-            # µ¯ÐÔÂô³ö£ºÉÏÆÆ´¥·¢¼Û ¡ú ¸ú×Ù×î¸ß¼Û ¡ú »ØÂäÈ·ÈÏÂô³ö
+            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ´ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¼ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             if rule_type == "best_sell":
                 if compute_best_sell_fallback_from_rule is None:
                     continue
@@ -1314,18 +1314,18 @@ class ShadowTickRunner:
                         )
                         if tid:
                             st.done_task_ids.add(tid)
-                        # ÃüÖÐºóÇå×´Ì¬£¬±ÜÃâÖØ¸´
+                        # ï¿½ï¿½ï¿½Ðºï¿½ï¿½ï¿½×´Ì¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø¸ï¿½
                         self._best_sell.pop(tid, None)
                     else:
                         if bst.get("pullback_hit_count"):
                             bst["pullback_hit_count"] = 0
                 continue
 
-            # Í»ÆÆÂòÈë£¨Ä¬ÈÏ£©£ºµøÆÆ ¡ú ÉÏ´© ¡ú ÕæÍ»ÆÆ
+            # Í»ï¿½ï¿½ï¿½ï¿½ï¿½ë£¨Ä¬ï¿½Ï£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½Ï´ï¿½ ï¿½ï¿½ ï¿½ï¿½Í»ï¿½ï¿½
             if rule_type not in ("breakthrough_buy", ""):
                 continue
 
-            # ¼Û¸ñ´øÓ²pass£º¼à¿Ø´øÄÚÕæÍ»ÆÆ£»ÉîÎ»»òÂòÈë²Î¿¼¼Û>MA5×÷·Ï£¨²»¸ÄÆÕÍ¨Í»ÆÆÂ·¾¶£©
+            # ï¿½Û¸ï¿½ï¿½Ó²passï¿½ï¿½ï¿½ï¿½Ø´ï¿½ï¿½ï¿½ï¿½ï¿½Í»ï¿½Æ£ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¿ï¿½ï¿½ï¿½>MA5ï¿½ï¿½ï¿½Ï£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¨Í»ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½
             try:
                 band_lo = float(task.get("band_low") or 0)
                 band_hi = float(task.get("band_high") or 0)
@@ -1361,7 +1361,7 @@ class ShadowTickRunner:
                     lookback_prior=lookback_prior,
                 )
                 if not ok:
-                    # ´øÄÚÎ´¹ýÕæÍ»ÆÆ£º¼ÌÐø¶¢
+                    # ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ï¿½ï¿½Í»ï¿½Æ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
                     continue
                 try:
                     accept_lo = task.get("band_accept_low")
@@ -1370,7 +1370,7 @@ class ShadowTickRunner:
                     accept_lo = float(accept_lo) if accept_lo is not None and str(accept_lo).strip() != "" else None
                 except (TypeError, ValueError):
                     accept_lo = None
-                # ÂòÈë²Î¿¼¼Û£ºÂôÒ»(+1Ìø)£¬Óë»Ø²â³É½»Ô¤¹ÀÒ»ÖÂ£»ËÀ¿¨Ó²ÉÏÑØ=band_high(MA5)
+                # ï¿½ï¿½ï¿½ï¿½Î¿ï¿½ï¿½Û£ï¿½ï¿½ï¿½Ò»(+1ï¿½ï¿½)ï¿½ï¿½ï¿½ï¿½Ø²ï¿½É½ï¿½Ô¤ï¿½ï¿½Ò»ï¿½Â£ï¿½ï¿½ï¿½ï¿½ï¿½Ó²ï¿½ï¿½ï¿½ï¿½=band_high(MA5)
                 buy_ref = float(lp)
                 try:
                     ask_raw = row.get("askPrice") if isinstance(row, dict) else None
@@ -1388,13 +1388,13 @@ class ShadowTickRunner:
                 hp_detail = None
                 if accept_lo is not None and float(lp) + 1e-12 < float(accept_lo):
                     hp_detail = (
-                        f"Ê×´ÎÕæÍ»ÆÆ·ÅÆú: ÏÖ¼Û={float(lp):.2f}<ÓÐÐ§ÏÂÑØ={float(accept_lo):.2f}"
-                        f"£¨¼à¿Ø´ø[{band_lo:.2f},{band_hi:.2f}]£©; {detail}"
+                        f"ï¿½×´ï¿½ï¿½ï¿½Í»ï¿½Æ·ï¿½ï¿½ï¿½: ï¿½Ö¼ï¿½={float(lp):.2f}<ï¿½ï¿½Ð§ï¿½ï¿½ï¿½ï¿½={float(accept_lo):.2f}"
+                        f"ï¿½ï¿½ï¿½ï¿½Ø´ï¿½[{band_lo:.2f},{band_hi:.2f}]ï¿½ï¿½; {detail}"
                     )
                 elif band_hi > 0 and float(buy_ref) > float(band_hi) + 1e-12:
                     hp_detail = (
-                        f"Ê×´ÎÕæÍ»ÆÆ·ÅÆú: ÂòÈë²Î¿¼¼Û={float(buy_ref):.2f}>Ó²ÉÏÑØMA5={float(band_hi):.2f}"
-                        f"£¨ÏÖ¼Û={float(lp):.2f}£¬¼à¿Ø´ø[{band_lo:.2f},{band_hi:.2f}]£©; {detail}"
+                        f"ï¿½×´ï¿½ï¿½ï¿½Í»ï¿½Æ·ï¿½ï¿½ï¿½: ï¿½ï¿½ï¿½ï¿½Î¿ï¿½ï¿½ï¿½={float(buy_ref):.2f}>Ó²ï¿½ï¿½ï¿½ï¿½MA5={float(band_hi):.2f}"
+                        f"ï¿½ï¿½ï¿½Ö¼ï¿½={float(lp):.2f}ï¿½ï¿½ï¿½ï¿½Ø´ï¿½[{band_lo:.2f},{band_hi:.2f}]ï¿½ï¿½; {detail}"
                     )
                 if hp_detail:
                     events.append(
@@ -1422,8 +1422,8 @@ class ShadowTickRunner:
                         trig,
                         msg=msg,
                         detail=(
-                            f"¼Û¸ñ´øÁ¿¼ÛÂòÈë: ÏÖ¼Û={float(lp):.2f} "
-                            f"´ø=[{band_lo:.2f},{band_hi:.2f}]; {detail}"
+                            f"ï¿½Û¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: ï¿½Ö¼ï¿½={float(lp):.2f} "
+                            f"ï¿½ï¿½=[{band_lo:.2f},{band_hi:.2f}]; {detail}"
                         ),
                         metrics=metrics,
                         task_id=tid,
@@ -1469,7 +1469,7 @@ class ShadowTickRunner:
                         )
                     )
                 else:
-                    # Î´ÒªÇóÕæÍ»ÆÆ£ºÉÏ´©¼´Âò£¨ÓëÍ¼±í require_tb=False Ò»ÖÂ£©
+                    # Î´Òªï¿½ï¿½ï¿½ï¿½Í»ï¿½Æ£ï¿½ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½ require_tb=False Ò»ï¿½Â£ï¿½
                     require_tb = True
                     if "require_true_breakthrough" in task:
                         require_tb = bool(task.get("require_true_breakthrough"))

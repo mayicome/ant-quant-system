@@ -8,7 +8,7 @@ import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Tuple
 
-DAILY_SYNC_VERSION = "20260731.27"
+DAILY_SYNC_VERSION = "20260801.02"
 INTRADAY_PRIORITY_DAILY_LIMIT = 1
 INTRADAY_PRIORITY_DAILY_LIMIT_MAX = 8
 POOL_SLICE_SLEEP_SEC = 0.5
@@ -152,8 +152,8 @@ def _daily_sync_verbose() -> bool:
 def _is_quote_rpc_error(exc_or_msg: Any) -> bool:
     s = str(exc_or_msg or "")
     return (
-        "无法连接行情服务" in s
-        or "行情服务连接断开" in s
+        "????????" in s
+        or "????????" in s
         or "Unable to connect" in s
     )
 
@@ -1753,7 +1753,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 ch
                 for ch in str(
                     row.get("stock_code")
-                    or row.get("证券代码")
+                    or row.get("????")
                     or row.get("code")
                     or ""
                 )
@@ -1765,7 +1765,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 continue
             d = None
             for key in (
-                "上市日期",
+                "????",
                 "OpenDate",
                 "open_date",
                 "list_date",
@@ -5154,23 +5154,34 @@ def _chain_tick_pipeline(ContextInfo) -> None:
 
 
 def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
-    """?????????????????????????????? tick ?? ?????"""
+    """????????????? tick ? ?? ? ???"""
     now = datetime.now()
     if (now.hour, now.minute) < (SYNC_HOUR, SYNC_MINUTE):
         return False
     if _SYNC_RUNNING:
         return False
 
+    # ??????????????????? tick ??? manual_request ???
+    try:
+        xtdata = _load_xtdata()
+    except Exception:
+        xtdata = None
+    try:
+        if not _is_tradeday(xtdata, now.date()):
+            return False
+    except Exception:
+        if now.weekday() >= 5:
+            return False
+
     # Completed gate can hide codes unblocked after false-delisted miss clear.
     # Reopen once/day for today-incremental (never arms FORCE).
     try:
-        xtdata = _load_xtdata()
         end_d = _resolve_sync_end_date(xtdata, now)
         _maybe_reopen_completed_for_stale_bars(end_d)
     except Exception:
         pass
 
-    # ?????????????????????? periodic ?????? tick ???
+    # ??? tick/??/?????????? pipeline
     try:
         day = now.strftime("%Y%m%d")
         tick_full = _load_tick_full_sync_runner()
@@ -5182,7 +5193,7 @@ def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
         tick_done = False
         if hasattr(tick_full, "_day_already_done"):
             tick_done = bool(tick_full._day_already_done(day))
-        # tick ABORT ?????????? chain?????? miss_cache ????
+        # tick ABORT ?????? chain??? miss_cache ???
         if (not tick_done) and hasattr(tick_full, "_abort_hold_active"):
             try:
                 held, _reason = tick_full._abort_hold_active(day)
@@ -5207,13 +5218,13 @@ def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
     if not _daily_gate_open_for_tick():
         run_catch_up_sync(ContextInfo, source="pipeline_catchup")
         if _daily_gate_open_for_tick():
-            # ??????????????????? tick
+            # ???????? tick ?
             _schedule_tick_pipeline()
 
     if not _daily_gate_open_for_tick():
         return False
 
-    # ?????????????????????????
+    # ????????????????????
     if not _tick_chain_delay_ready():
         return False
 
@@ -5540,7 +5551,7 @@ def _run_on_demand_batch(
                 mark_tick_failed,
             )
         except ImportError as e:
-            print("[日线同步] on_demand import failed: %s" % e)
+            print("[按需同步] on_demand import failed: %s" % e)
             return 0
 
     _, cache_dir, _, _ = _data_paths()
@@ -5569,7 +5580,7 @@ def _run_on_demand_batch(
 
     if daily_cache_hit or tick_cache_hit:
         print(
-            "[日线同步] on_demand cache_hit daily=%d tick=%d"
+            "[按需同步] on_demand cache_hit daily=%d tick=%d"
             % (daily_cache_hit, tick_cache_hit)
         )
 
@@ -5579,7 +5590,7 @@ def _run_on_demand_batch(
     try:
         xtdata = _load_xtdata()
     except Exception as e:
-        print("[日线同步] on_demand xtdata unavailable: %s" % e)
+        print("[按需同步] on_demand xtdata unavailable: %s" % e)
         return handled
 
     synced_ok = 0
@@ -5595,14 +5606,14 @@ def _run_on_demand_batch(
                 if last_d is not None and (through_d - last_d).days <= 15:
                     _miss_cache_clear(code, cache_dir)
                     print(
-                        "[日线同步] on_demand cleared false delisted %s last_bar=%s"
+                        "[按需同步] on_demand cleared false delisted %s last_bar=%s"
                         % (code, last_d.isoformat())
                     )
                 else:
                     reason = "miss_cache_%s" % miss_reason
                     mark_daily_failed(code, through_d, reason)
                     synced_fail += 1
-                    print("[日线同步] on_demand miss_skip %s: %s" % (code, reason))
+                    print("[按需同步] on_demand miss_skip %s: %s" % (code, reason))
                     continue
             if miss_reason in ("today_halt", "suspended"):
                 csv_p = os.path.join(cache_dir, code + ".csv")
@@ -5610,7 +5621,7 @@ def _run_on_demand_batch(
                     reason = "miss_cache_%s" % miss_reason
                     mark_daily_failed(code, through_d, reason)
                     synced_fail += 1
-                    print("[日线同步] on_demand miss_skip %s: %s" % (code, reason))
+                    print("[按需同步] on_demand miss_skip %s: %s" % (code, reason))
                     continue
             # empty_history / local_miss / invalid_0 / no_ctx??????? miss ???????????
             if miss_reason in (
@@ -5621,7 +5632,7 @@ def _run_on_demand_batch(
             ):
                 _miss_cache_clear(code, cache_dir)
                 print(
-                    "[日线同步] on_demand ignore soft miss %s reason=%s ?? retry daily"
+                    "[按需同步] on_demand ignore soft miss %s reason=%s ?? retry daily"
                     % (code, miss_reason)
                 )
         sync_fn = (
@@ -5652,7 +5663,7 @@ def _run_on_demand_batch(
             mark_daily_failed(code, through_d, reason or status)
             synced_fail += 1
             print(
-                "[日线同步] on_demand fail %s: %s" % (code, reason or status)
+                "[按需同步] on_demand fail %s: %s" % (code, reason or status)
             )
     _miss_cache_save(cache_dir)
 
@@ -5665,20 +5676,20 @@ def _run_on_demand_batch(
             handled += 1
             synced_ok += 1
             print(
-                "[日线同步] on_demand tick ok %s %s"
+                "[按需同步] on_demand tick ok %s %s"
                 % (code_6, trade_d.strftime("%Y%m%d"))
             )
         else:
             mark_tick_failed(code_6, trade_d, reason or status)
             synced_fail += 1
             print(
-                "[日线同步] on_demand tick fail %s %s: %s"
+                "[按需同步] on_demand tick fail %s %s: %s"
                 % (code_6, trade_d.strftime("%Y%m%d"), reason or status)
             )
 
     if synced_ok or synced_fail:
         print(
-            "[日线同步] on_demand synced ok=%d fail=%d"
+            "[按需同步] on_demand synced ok=%d fail=%d"
             % (synced_ok, synced_fail)
         )
     return handled
@@ -5709,7 +5720,7 @@ def process_on_demand_sync_requests(
         if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
             reason = "sync_running" if _SYNC_RUNNING else "busy"
             print(
-                "[日线同步] on_demand skip (%s); retry when idle"
+                "[按需同步] on_demand skip (%s); retry when idle"
                 % reason
             )
             _ON_DEMAND_SKIP_LOG_TS = now_skip
@@ -5727,7 +5738,7 @@ def process_on_demand_sync_requests(
         else:
             if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
                 print(
-                    "[日线同步] on_demand skip (FORCE idle remain=%.0fs)"
+                    "[按需同步] on_demand skip (FORCE idle remain=%.0fs)"
                     % max(0.0, remain_idle)
                 )
                 _ON_DEMAND_SKIP_LOG_TS = now_skip
@@ -5741,7 +5752,7 @@ def process_on_demand_sync_requests(
     ):
         if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
             print(
-                "[日线同步] on_demand skip (FORCE/partial active; quotes first)"
+                "[按需同步] on_demand skip (FORCE/partial active; quotes first)"
             )
             _ON_DEMAND_SKIP_LOG_TS = now_skip
         return 0
@@ -5771,7 +5782,7 @@ def process_on_demand_sync_requests(
                 list_pending_ticks,
             )
         except Exception as e:
-            print("[日线同步] on_demand import failed: %s" % e)
+            print("[按需同步] on_demand import failed: %s" % e)
             return 0
 
     all_pending_daily = list_pending_daily(limit=50)
@@ -5797,7 +5808,7 @@ def process_on_demand_sync_requests(
             deferred = [c for c, _, _ in all_pending_daily if c not in priority]
             if deferred:
                 print(
-                    "[日线同步] on_demand defer non-pool daily during intraday "
+                    "[按需同步] on_demand defer non-pool daily during intraday "
                     "(pool=%d codes; resume after 15:05)"
                     % len(priority)
                 )
@@ -5824,7 +5835,7 @@ def process_on_demand_sync_requests(
         return 0
 
     print(
-        "[日线同步] on_demand start daily=%d tick=%d (queue daily=%d)"
+        "[按需同步] on_demand start daily=%d tick=%d (queue daily=%d)"
         % (
             len(pending_daily),
             len(pending_tick),

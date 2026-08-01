@@ -49,13 +49,21 @@ MARKET_SECTOR_EXACT = frozenset(
 )
 
 _UNIVERSE_SECTOR = "沪深A股"
-UNCLASSIFIED_SECTOR = "未归属板块"
+# 虚拟板块：不在任何 SW/GN 等 UI 板块成分中的 A 股（展示名；旧名「未归属板块」仍识别）
+UNCLASSIFIED_SECTOR = "不属于任何板块的股票"
+_UNCLASSIFIED_ALIASES = frozenset(
+    {
+        UNCLASSIFIED_SECTOR,
+        "未归属板块",
+    }
+)
 _CACHE_FILENAME = "qmt_sector_index.json"
+_UNIVERSE_FILENAME = "a_share_universe.json"
 CACHE_MAX_AGE_DAYS = 7
 
 
 def is_virtual_sector(name: str) -> bool:
-    return str(name or "").strip() == UNCLASSIFIED_SECTOR
+    return str(name or "").strip() in _UNCLASSIFIED_ALIASES
 
 
 def _qmt_sectors_only(sectors: List[str]) -> List[str]:
@@ -63,8 +71,9 @@ def _qmt_sectors_only(sectors: List[str]) -> List[str]:
 
 
 def _with_virtual_sector(sectors: List[str]) -> List[str]:
+    """虚拟板块放列表首项，便于在选股 UI 中找到。"""
     qmt = _qmt_sectors_only(sectors)
-    return qmt + [UNCLASSIFIED_SECTOR]
+    return [UNCLASSIFIED_SECTOR] + qmt
 
 
 def _project_data_dir() -> str:
@@ -156,11 +165,28 @@ class QmtSectorStore:
             self._xtdata = _load_xtdata()
         return self._xtdata
 
+    def _universe_from_file(self) -> Set[str]:
+        path = os.path.join(_project_data_dir(), _UNIVERSE_FILENAME)
+        if not os.path.isfile(path):
+            return set()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f) or {}
+            raw = list(payload.get("codes") or [])
+            codes = {code_to_6(c) for c in raw if code_to_6(c)}
+            if codes:
+                logger.info("沪深A股 universe(文件 %s): %d", _UNIVERSE_FILENAME, len(codes))
+            return codes
+        except Exception as e:
+            logger.warning("读取 %s 失败: %s", _UNIVERSE_FILENAME, e)
+            return set()
+
     def get_universe(self) -> Set[str]:
         """沪深 A 股全集。
 
-        优先 xtdata「沪深A股」；QMT 未连或返回空时，回退到板块反查索引
-        （data/qmt_sector_index.json）中的股票键，避免全选板块时列表为 0。
+        优先 xtdata「沪深A股」；其次 data/a_share_universe.json（日线同步写入）；
+        再回退板块反查索引键。勿把「仅有板块标签的子集」当成全集，
+        否则「不属于任何板块」虚拟板块成员会变成 0，全选也只剩 ~4755。
         """
         if self._universe:
             return self._universe
@@ -175,19 +201,27 @@ class QmtSectorStore:
             logger.info("沪深A股 universe: %d", len(self._universe))
             return self._universe
 
-        # QMT 不可用：从已加载的反查索引回退（勿把空集永久缓存，否则全选永远为 0）
-        if self._code_sectors is None:
+        uni = self._universe_from_file()
+        if uni:
+            self._universe = uni
+            return self._universe
+
+        # 最后回退：索引键（可能缺少无板块归属的股票）
+        if not self._code_sectors:
             try:
                 self._load_disk_cache([])
             except Exception:
                 pass
         if self._code_sectors:
             self._universe = set(self._code_sectors.keys())
-            logger.info("沪深A股 universe(索引缓存回退): %d", len(self._universe))
+            logger.info(
+                "沪深A股 universe(索引缓存回退): %d（无 a_share_universe.json 时可能偏少）",
+                len(self._universe),
+            )
             return self._universe
 
         self._universe = set()
-        logger.warning("沪深A股 universe 为空（QMT 未连且无板块索引缓存）")
+        logger.warning("沪深A股 universe 为空（QMT 未连且无 universe/板块索引）")
         return self._universe
 
     def list_ui_sectors(self, force_refresh: bool = False) -> List[str]:
@@ -203,9 +237,11 @@ class QmtSectorStore:
         sectors = sorted({s for s in raw if is_ui_sector(s)})
         self._ui_sectors = _with_virtual_sector(sectors)
         gn = sum(1 for s in sectors if s.startswith("GN"))
-        uncls = max(0, len(self.get_universe()) - len(self._code_sectors)) if self._code_sectors else 0
+        uni_n = len(self.get_universe())
+        idx_n = len(self._code_sectors or {})
+        uncls = max(0, uni_n - idx_n) if idx_n else 0
         logger.info(
-            "QMT 可选板块: %d + 虚拟1 (SW1=%d GN=%d 未归属=%d)",
+            "QMT 可选板块: %d + 虚拟1 (SW1=%d GN=%d 无板块归属≈%d)",
             len(sectors),
             sum(1 for s in sectors if s.startswith("SW1")),
             gn,
@@ -215,7 +251,7 @@ class QmtSectorStore:
             logger.warning(
                 "未检测到 GN 概念板块；内置策略会在 07:30/启动时同步板块，或在 QMT 下载中心勾选「全部板块」"
             )
-        return sectors
+        return self._ui_sectors
 
     def unclassified_codes(self) -> Set[str]:
         self.ensure_inverted_index()

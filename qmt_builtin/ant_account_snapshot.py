@@ -2,12 +2,14 @@
 """大 QMT 模型交易内：从 get_trade_detail_data / 回调缓存拉取资金/持仓写入 results.json。"""
 import os
 import time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time as dt_time
 
 try:
     from ant_qmt_paths import PROJECT_ROOT
 except Exception:
     PROJECT_ROOT = ""
+
+ACCOUNT_SNAPSHOT_VERSION = "20260801.01"
 
 _CACHED_ACCOUNT = None
 _CACHED_POSITIONS = {}
@@ -17,7 +19,8 @@ _DIAG_DONE = False
 # 持仓空但股票市值明显偏高 → 可疑（真空仓：市值≈0，不告警）
 _POSITION_ALERT_MV_THRESHOLD = 5000.0
 _POSITION_ALERT_LOG_INTERVAL_SEC = 300.0  # 日志节流：约每 5 分钟
-_POSITION_ALERT_NOTIFY_COOLDOWN_SEC = 3600.0  # Server酱：同类告警约 1 小时一次
+_POSITION_ALERT_NOTIFY_COOLDOWN_SEC = 3600.0  # 交易时段 Server酱：约 1 小时一次
+_POSITION_ALERT_NOTIFY_COOLDOWN_OFFHOURS_SEC = 28800.0  # 非交易时段：约 8 小时一次（夜间/周末不刷屏）
 _LAST_POSITION_ALERT_LOG_TS = 0.0
 _POSITION_ALERT_ACTIVE = False
 
@@ -1390,29 +1393,84 @@ def _is_suspicious_empty_positions(account, positions_parsed):
     return True, "empty_pos_high_mv_low_cash"
 
 
+def _in_cn_equity_session(now=None):
+    """A 股常规交易时段：工作日 09:00–15:30（含午休；非交易日/夜盘不算）。"""
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return dt_time(9, 0) <= t <= dt_time(15, 30)
+
+
+def _position_alert_notify_cooldown_sec(now=None):
+    if _in_cn_equity_session(now):
+        return float(_POSITION_ALERT_NOTIFY_COOLDOWN_SEC)
+    return float(_POSITION_ALERT_NOTIFY_COOLDOWN_OFFHOURS_SEC)
+
+
+def _parse_iso_ts(raw):
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        if "T" in s:
+            return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
+        if " " in s:
+            return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+        return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        return None
+
+
+def _prev_notify_sent_at(results):
+    """从 results.position_alert 取上次成功推送时间（进程重载后仍可节流）。"""
+    if not isinstance(results, dict):
+        return None
+    prev = results.get("position_alert")
+    if not isinstance(prev, dict):
+        return None
+    return _parse_iso_ts(prev.get("notify_sent_at"))
+
+
 def _clear_position_alert(results):
     global _POSITION_ALERT_ACTIVE
     _POSITION_ALERT_ACTIVE = False
     if not isinstance(results, dict):
         return
     prev = results.get("position_alert")
+    keep_sent = None
+    if isinstance(prev, dict):
+        keep_sent = prev.get("notify_sent_at")
     if isinstance(prev, dict) and prev.get("active"):
-        results["position_alert"] = {
+        cleared = {
             "active": False,
             "cleared_at": _now_iso(),
             "reason": "positions_ok_or_flat",
         }
+        if keep_sent:
+            cleared["notify_sent_at"] = keep_sent
+        results["position_alert"] = cleared
     elif "position_alert" in results and not (
         isinstance(prev, dict) and prev.get("active") is False
     ):
-        results["position_alert"] = {
+        cleared = {
             "active": False,
             "cleared_at": _now_iso(),
             "reason": "positions_ok_or_flat",
         }
+        if keep_sent:
+            cleared["notify_sent_at"] = keep_sent
+        results["position_alert"] = cleared
 
 
-def _notify_position_alert_once(title, body):
+def _notify_position_alert_once(title, body, results=None):
+    cool = _position_alert_notify_cooldown_sec()
+    # results 落盘戳：策略重载会清空 ant_server_chan 内存冷却，夜间勿因此连发
+    last_dt = _prev_notify_sent_at(results)
+    if last_dt is not None and cool > 0:
+        age = (datetime.now() - last_dt).total_seconds()
+        if age < cool:
+            return "cooldown"
     try:
         try:
             import ant_server_chan as sct
@@ -1422,7 +1480,7 @@ def _notify_position_alert_once(title, body):
             title,
             body,
             alert_key="qmt_position_empty_high_mv",
-            cooldown_sec=_POSITION_ALERT_NOTIFY_COOLDOWN_SEC,
+            cooldown_sec=cool,
         )
         if r.get("skipped"):
             return "cooldown"
@@ -1464,6 +1522,8 @@ def _update_position_alert(results, positions_parsed, extra=None):
         return
 
     now = time.time()
+    prev_alert = results.get("position_alert") if isinstance(results.get("position_alert"), dict) else {}
+    keep_sent = prev_alert.get("notify_sent_at") if isinstance(prev_alert, dict) else None
     alert = {
         "active": True,
         "reason": reason,
@@ -1478,6 +1538,8 @@ def _update_position_alert(results, positions_parsed, extra=None):
         ),
         "updated_at": _now_iso(),
     }
+    if keep_sent:
+        alert["notify_sent_at"] = keep_sent
     for k, v in extra.items():
         if v is not None:
             alert[k] = v
@@ -1499,8 +1561,11 @@ def _update_position_alert(results, positions_parsed, extra=None):
             "持仓为空但股票市值=%.2f（阈值>=%.0f）\n现金=%.2f 总资产=%.2f\n"
             "请检查 QMT 持仓面板或重启模型交易。\n原因=%s"
             % (mv, _POSITION_ALERT_MV_THRESHOLD, cash, total, reason),
+            results=results,
         )
         alert["notify"] = notify_r
+        if notify_r == "sent":
+            alert["notify_sent_at"] = _now_iso()
         results["position_alert"] = alert
 
 

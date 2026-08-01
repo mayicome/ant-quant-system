@@ -8,7 +8,9 @@
   3) 再 get_market_data_ex(subscribe=False)
   4) 可选 subscribe=True（订阅语义，不是历史 supply）
 默认关闭 xtdata.download_history_*（同日线 ENABLE_XTDATA_DOWNLOAD），避免 miniQMT RPC 刷屏。
-可断点续跑；已有完整 parquet/pkl 则跳过。
+可断点续跑；本地已有可用 tick（parquet 或旧 pkl）则跳过。
+注意：有 pkl 也算「可跳过/有数据」，不等于已全部是 parquet；
+勿删 pkl，除非同代码已有校验通过的 parquet。本地迁移见 tools/convert_tick_pkl_to_parquet.py。
 落盘成功（或已完成）后串行触发盘后量能（量能读本地落盘）。
 结束后按磁盘剩余空间清理最旧日目录（空间够不删，可存超过三个月）。
 兼容大 QMT 内置 Python 3.6（禁止 from __future__ import annotations）。
@@ -20,7 +22,7 @@ import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-TICK_FULL_SYNC_VERSION = "20260801.05"
+TICK_FULL_SYNC_VERSION = "20260801.06"
 # 与日线同点：仅作 catch-up 判断；正式启动由 daily_sync 串行触发
 SYNC_HOUR = 15
 SYNC_MINUTE = 35
@@ -161,10 +163,15 @@ def _project_root():
             return os.path.dirname(_data_dir())
 
 
-def _ticks_day_dir(day):
-    # type: (str) -> str
+def _ticks_day_dir(day, ensure=False):
+    # type: (str, bool) -> str
+    """ticks 日目录路径。ensure=True 时才创建（写 progress/done 用）。
+
+    探测是否完成 / abort-hold 时勿 mkdir：否则非交易日 catch-up 会留下空目录，
+    盘后量能把「有目录」误判成交易日，一直「等待分笔同步」。
+    """
     path = os.path.join(_project_root(), "data", "ticks", day)
-    if not os.path.isdir(path):
+    if ensure and (not os.path.isdir(path)):
         try:
             os.makedirs(path)
         except Exception:
@@ -174,12 +181,12 @@ def _ticks_day_dir(day):
 
 def _progress_path(day):
     # type: (str) -> str
-    return os.path.join(_ticks_day_dir(day), _PROGRESS_NAME)
+    return os.path.join(_ticks_day_dir(day, ensure=False), _PROGRESS_NAME)
 
 
 def _done_path(day):
     # type: (str) -> str
-    return os.path.join(_ticks_day_dir(day), _DONE_MARKER)
+    return os.path.join(_ticks_day_dir(day, ensure=False), _DONE_MARKER)
 
 
 def _append_run_log(day, msg):
@@ -433,6 +440,9 @@ def _save_progress(day, data):
     data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     tmp = path + ".tmp"
     try:
+        parent = os.path.dirname(path)
+        if parent and (not os.path.isdir(parent)):
+            os.makedirs(parent)
         with open(tmp, "w") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         if os.path.exists(path):
@@ -557,7 +567,7 @@ def _day_already_done(day):
 
 def _abort_hold_path(day):
     # type: (str) -> str
-    return os.path.join(_ticks_day_dir(day), _ABORT_HOLD_NAME)
+    return os.path.join(_ticks_day_dir(day, ensure=False), _ABORT_HOLD_NAME)
 
 
 def _clear_abort_hold(day_s):
@@ -1893,6 +1903,11 @@ def run_post_daily_pipeline(ContextInfo=None):
     """日线之后：tick 落盘 → 盘后量能 → 板块同步。"""
     now = datetime.now()
     day = now.strftime("%Y%m%d")
+    # 非交易日（周末/节假日）默认流水线不跑「今天」；历史补数走 manual_request
+    if not _today_is_tradeday(ContextInfo):
+        _log("非交易日跳过默认分笔流水线: %s" % day)
+        _chain_sector_after_pipeline(ContextInfo)
+        return False
     # 日线未完成则不抢下载（兜底；正常已由 daily 闸门挡住）
     if not _daily_gate_open():
         _log("等待日线同步完成后再跑分笔")
@@ -1902,6 +1917,25 @@ def run_post_daily_pipeline(ContextInfo=None):
         _run_after_rank_after_sync(ContextInfo, day)
     _chain_sector_after_pipeline(ContextInfo)
     return ok
+
+
+def _today_is_tradeday(ContextInfo=None):
+    # type: (Any) -> bool
+    """今日是否交易日；供默认盘后流水线早退（不建空 ticks 目录）。"""
+    today = date.today()
+    xtdata = _load_xtdata()
+    if xtdata is not None:
+        return bool(_is_tradeday(xtdata, today))
+    if ContextInfo is not None:
+        fn = getattr(ContextInfo, "get_trading_dates", None)
+        if callable(fn):
+            try:
+                ds = today.strftime("%Y%m%d")
+                arr = fn("SH", ds, ds) or []
+                return bool(arr)
+            except Exception:
+                pass
+    return today.weekday() < 5
 
 
 def _daily_gate_open():
@@ -1961,6 +1995,8 @@ def maybe_catch_up_tick_full_sync(ContextInfo=None):
     now = datetime.now()
     day = now.strftime("%Y%m%d")
     if now.time() < dt_time(SYNC_HOUR, SYNC_MINUTE):
+        return False
+    if not _today_is_tradeday(ContextInfo):
         return False
     if not _daily_gate_open():
         return False

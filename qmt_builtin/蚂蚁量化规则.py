@@ -8,19 +8,19 @@ import os
 import sys
 import time
 
-ENTRY_VERSION = "20260731.21"
+ENTRY_VERSION = "20260801.01"
 _shadow = None
 _ACCOUNT_SNAPSHOT_MOD = None
 _ENTRY_ACCOUNT_SKIP = ""
 _LAST_ENTRY_ACCOUNT_SYNC = 0.0
 _ENTRY_ACCOUNT_INTERVAL_SEC = 2.0
-# ÄÚÖÃ download_history_data£ºÃ¿½ø³ÌÖ» bind/log Ò»´Î£¨ÎðÔÚ handlebar ÈÈÂ·¾¶Ë¢ÆÁ£©
+# ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½Ã¿ï¿½ï¿½ï¿½ï¿½Ö» bind/log Ò»ï¿½Î£ï¿½ï¿½ï¿½ï¿½ï¿½ handlebar ï¿½ï¿½Â·ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½ï¿½
 _DOWNLOAD_HISTORY_BOUND = False
 _DOWNLOAD_HISTORY_MISS_LOGGED = False
 
 
 def _plog(msg):
-    """QMT ÄÚÖÃ Python ³£·Ç TTY£¬print È«»º³å£»Æô¶¯ÈÕÖ¾±ØÐë flush ²ÅÄÜÁ¢¿Ì¿´¼û¡£"""
+    """QMT ï¿½ï¿½ï¿½ï¿½ Python ï¿½ï¿½ï¿½ï¿½ TTYï¿½ï¿½print È«ï¿½ï¿½ï¿½å£»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ flush ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¿ï¿½ï¿½ï¿½ï¿½ï¿½"""
     try:
         print(msg, flush=True)
     except Exception:
@@ -30,7 +30,7 @@ def _plog(msg):
             pass
 
 
-_plog("[ÂìÒÏÈë¿Ú] module load ENTRY_VERSION=%s" % ENTRY_VERSION)
+_plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] module load ENTRY_VERSION=%s" % ENTRY_VERSION)
 
 
 def _qmt_python_dir():
@@ -69,7 +69,7 @@ def _load_shadow():
     global _shadow
     path = _shadow_py_path()
     if not path:
-        _plog("[ÂìÒÏÈë¿Ú] FATAL: ant_shadow_strategy.py not found")
+        _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] FATAL: ant_shadow_strategy.py not found")
         _shadow = None
         return None
     for key in list(sys.modules.keys()):
@@ -78,7 +78,7 @@ def _load_shadow():
     mod_name = "ant_shadow_%d" % int(os.path.getmtime(path))
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
-        _plog("[ÂìÒÏÈë¿Ú] FATAL: cannot load " + path)
+        _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] FATAL: cannot load " + path)
         _shadow = None
         return None
     mod = importlib.util.module_from_spec(spec)
@@ -86,7 +86,7 @@ def _load_shadow():
     spec.loader.exec_module(mod)
     _shadow = mod
     ver = getattr(mod, "SHADOW_VERSION", "?")
-    _plog("[ÂìÒÏÈë¿Ú] shadow loaded version=%s file=%s" % (ver, path))
+    _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] shadow loaded version=%s file=%s" % (ver, path))
     return mod
 
 
@@ -146,7 +146,7 @@ def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, accoun
     for val in (data_type, str(data_type).upper(), str(data_type).lower()):
         if val and val not in dtypes:
             dtypes.append(val)
-    # ²¿·Ö°æ±¾³Ö²Ö dtype ±ðÃû
+    # ï¿½ï¿½ï¿½Ö°æ±¾ï¿½Ö²ï¿½ dtype ï¿½ï¿½ï¿½ï¿½
     if str(data_type).lower() in ("position", "positions", "pos"):
         for extra in ("POSITION", "position", "Position"):
             if extra not in dtypes:
@@ -245,14 +245,14 @@ def _entry_sync_account_snapshot(ContextInfo):
         if snap is None:
             if _ENTRY_ACCOUNT_SKIP != "snapshot_mod_missing":
                 _ENTRY_ACCOUNT_SKIP = "snapshot_mod_missing"
-                print("[½»Ò×ºËÐÄ] account snapshot skip: ant_account_snapshot missing")
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot skip: ant_account_snapshot missing")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
         aid = snap.resolve_account_id(ContextInfo)
         if not aid:
             if _ENTRY_ACCOUNT_SKIP != "no_account_id":
                 _ENTRY_ACCOUNT_SKIP = "no_account_id"
-                print("[½»Ò×ºËÐÄ] account snapshot skip: no_account_id")
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot skip: no_account_id")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
         try:
@@ -260,11 +260,11 @@ def _entry_sync_account_snapshot(ContextInfo):
         except NameError:
             if _ENTRY_ACCOUNT_SKIP != "no_gtd":
                 _ENTRY_ACCOUNT_SKIP = "no_gtd"
-                print("[½»Ò×ºËÐÄ] account snapshot skip: get_trade_detail_data not in entry scope")
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot skip: get_trade_detail_data not in entry scope")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
 
-        # Ã¿´Î²éÑ¯Ç°ÖØÐÂ°ó¶¨ÕËºÅ + account_type£¬±ÜÃâ³Ö²Ö²éÑ¯¿ÕÁÐ±í
+        # Ã¿ï¿½Î²ï¿½Ñ¯Ç°ï¿½ï¿½ï¿½Â°ï¿½ï¿½Ëºï¿½ + account_typeï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö²Ö²ï¿½Ñ¯ï¿½ï¿½ï¿½Ð±ï¿½
         try:
             snap.bind_trading_account(ContextInfo, aid)
         except Exception:
@@ -300,7 +300,7 @@ def _entry_sync_account_snapshot(ContextInfo):
             order_raw=order_raw,
             deal_raw=deal_raw,
         )
-        # ¸½¼Ó³Ö²Ö²éÑ¯ÊÔÌ½ÈÕÖ¾£¬±ãÓÚ¶ÔÕÕ¡¸ÕË»§ÓÐÊÐÖµµ«³Ö²Ö¿Õ¡¹
+        # ï¿½ï¿½ï¿½Ó³Ö²Ö²ï¿½Ñ¯ï¿½ï¿½Ì½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½Ú¶ï¿½ï¿½Õ¡ï¿½ï¿½Ë»ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½Ö²Ö¿Õ¡ï¿½
         try:
             pq = results.get("position_query")
             if isinstance(pq, dict):
@@ -319,13 +319,13 @@ def _entry_sync_account_snapshot(ContextInfo):
                 pass
         elif reason != _ENTRY_ACCOUNT_SKIP:
             _ENTRY_ACCOUNT_SKIP = reason
-            print("[½»Ò×ºËÐÄ] account snapshot skip: %s" % reason)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot skip: %s" % reason)
     except Exception as e:
         _LAST_ENTRY_ACCOUNT_SYNC = time.time()
         msg = "%s: %s" % (type(e).__name__, e)
         if msg != _ENTRY_ACCOUNT_SKIP:
             _ENTRY_ACCOUNT_SKIP = msg
-            print("[½»Ò×ºËÐÄ] account snapshot error: %s" % msg)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot error: %s" % msg)
 
 
 def _reload_daily_sync_runner():
@@ -337,7 +337,7 @@ def _reload_daily_sync_runner():
         import qmt_builtin.ant_daily_sync_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[ÈÕÏßÍ¬²½] timer entry version=%s"
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] timer entry version=%s"
         % getattr(runner, "DAILY_SYNC_VERSION", "?")
     )
     return runner
@@ -349,7 +349,7 @@ def _ensure_passorder_bound():
         root = _qmt_python_dir()
         path = os.path.join(root, "ant_passorder.py") if root else ""
         if not (path and os.path.isfile(path)):
-            print("[ÂìÒÏÈë¿Ú] ant_passorder.py missing")
+            print("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] ant_passorder.py missing")
             return False
         mod_name = "ant_passorder_%d" % int(os.path.getmtime(path))
         po = sys.modules.get(mod_name)
@@ -364,15 +364,15 @@ def _ensure_passorder_bound():
             return bool(po.bind_runtime_globals(globals()))
         return False
     except Exception as e:
-        print("[ÂìÒÏÈë¿Ú] bind passorder error: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] bind passorder error: %s: %s" % (type(e).__name__, e))
         return False
 
 
 def _ensure_download_history_bound():
-    """Bind ÄÚÖÃ download_history_data£¨´ó QMT Ä£ÐÍ½»Ò×È«¾Öº¯Êý£¬·Ç xtdata£©¡£
+    """Bind ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½ï¿½ï¿½ QMT Ä£ï¿½Í½ï¿½ï¿½ï¿½È«ï¿½Öºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ xtdataï¿½ï¿½ï¿½ï¿½
 
-    ³É¹¦ºóÉè _DOWNLOAD_HISTORY_BOUND£¬ºóÐø handlebar/periodic Ö±½ÓÌø¹ý£¬±ÜÃâË¢ÆÁ¡£
-    miss Ö»´òÒ»´ÎÈÕÖ¾£¬ÈÔÔÊÐíºóÐø¾²Ä¬ÖØÊÔ£¨globals ¿ÉÄÜÍíÓÚÊ×Ö¡¾ÍÐ÷£©¡£
+    ï¿½É¹ï¿½ï¿½ï¿½ï¿½ï¿½ _DOWNLOAD_HISTORY_BOUNDï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ handlebar/periodic Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½ï¿½
+    miss Ö»ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½ï¿½ï¿½Ô£ï¿½globals ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     """
     global _DOWNLOAD_HISTORY_BOUND, _DOWNLOAD_HISTORY_MISS_LOGGED
     if _DOWNLOAD_HISTORY_BOUND:
@@ -396,24 +396,24 @@ def _ensure_download_history_bound():
             ok = bool(fn(globals()))
             if ok:
                 _DOWNLOAD_HISTORY_BOUND = True
-                _plog("[ÂìÒÏÈë¿Ú] bind download_history_data ok")
+                _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] bind download_history_data ok")
             elif not _DOWNLOAD_HISTORY_MISS_LOGGED:
                 _DOWNLOAD_HISTORY_MISS_LOGGED = True
-                _plog("[ÂìÒÏÈë¿Ú] bind download_history_data miss (not in strategy globals)")
+                _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] bind download_history_data miss (not in strategy globals)")
             return ok
         return False
     except Exception as e:
         if not _DOWNLOAD_HISTORY_MISS_LOGGED:
             _DOWNLOAD_HISTORY_MISS_LOGGED = True
             _plog(
-                "[ÂìÒÏÈë¿Ú] bind download_history_data error: %s: %s"
+                "[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] bind download_history_data error: %s: %s"
                 % (type(e).__name__, e)
             )
         return False
 
 
 def init(ContextInfo):
-    _plog("[ÂìÒÏÈë¿Ú] init begin entry version=%s" % ENTRY_VERSION)
+    _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] init begin entry version=%s" % ENTRY_VERSION)
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
@@ -423,10 +423,10 @@ def init(ContextInfo):
     _ensure_download_history_bound()
     shadow = _load_shadow()
     if shadow is None:
-        _plog("[ÂìÒÏÈë¿Ú] init aborted: shadow is None")
+        _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] init aborted: shadow is None")
         return
     ret = shadow.init(ContextInfo)
-    _plog("[ÂìÒÏÈë¿Ú] init returned")
+    _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] init returned")
     return ret
 
 
@@ -477,7 +477,7 @@ def _reload_after_hours_rank_runner():
         import qmt_builtin.ant_after_hours_rank_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[ÅÌºóÅÅÃû] timer entry version=%s"
+        "[ï¿½Ìºï¿½ï¿½ï¿½ï¿½ï¿½] ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ ï¿½æ±¾=%s"
         % getattr(runner, "AFTER_HOURS_RANK_VERSION", "?")
     )
     return runner
@@ -497,7 +497,7 @@ def _reload_tick_full_sync_runner():
         import qmt_builtin.ant_tick_full_sync_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[·Ö±ÊÍ¬²½] ¶¨Ê±Èë¿Ú °æ±¾=%s"
+        "[ï¿½Ö±ï¿½Í¬ï¿½ï¿½] ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ ï¿½æ±¾=%s"
         % getattr(runner, "TICK_FULL_SYNC_VERSION", "?")
     )
     return runner
@@ -509,12 +509,12 @@ def tick_full_sync(ContextInfo):
 
 
 def tick_probe(ContextInfo):
-    """Ò»´ÎÐÔÌ½²â£ºÄÚÖÃ download_history_data + ContextInfo tick ±äÌå£¨Ä¬ÈÏ 20260730£©¡£"""
+    """Ò»ï¿½ï¿½ï¿½ï¿½Ì½ï¿½â£ºï¿½ï¿½ï¿½ï¿½ download_history_data + ContextInfo tick ï¿½ï¿½ï¿½å£¨Ä¬ï¿½ï¿½ 20260730ï¿½ï¿½ï¿½ï¿½"""
     _ensure_download_history_bound()
     runner = _reload_tick_full_sync_runner()
     fn = getattr(runner, "tick_probe", None)
     if not callable(fn):
-        _plog("[ÂìÒÏÈë¿Ú] tick_probe missing on runner")
+        _plog("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] tick_probe missing on runner")
         return None
     return fn(ContextInfo, day="20260730")
 
@@ -528,11 +528,11 @@ def sector_data_sync(ContextInfo):
         try:
             import qmt_builtin.ant_sector_sync_runner as runner
         except ImportError:
-            print("[ÂìÒÏÈë¿Ú] sector_data_sync: ant_sector_sync_runner not found")
+            print("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] sector_data_sync: ant_sector_sync_runner not found")
             return
     runner = importlib.reload(runner)
     print(
-        "[°å¿éÍ¬²½] timer entry version=%s"
+        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] timer entry version=%s"
         % getattr(runner, "SECTOR_SYNC_VERSION", "?")
     )
     return runner.sector_data_sync(ContextInfo)
@@ -547,7 +547,7 @@ def _dispatch_account_snapshot_callback(callback_name, ContextInfo, payload):
         if callable(fn):
             fn(ContextInfo, payload)
     except Exception as e:
-        print("[ÂìÒÏÈë¿Ú] %s error: %s" % (callback_name, e))
+        print("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] %s error: %s" % (callback_name, e))
 
 
 def account_callback(ContextInfo, accountInfo):
@@ -589,9 +589,9 @@ def order_callback(ContextInfo, orderInfo):
                 st = str(getattr(orderInfo, "m_nOrderStatus", "") or "")
             except Exception:
                 pass
-            print("[½»Ò×ºËÐÄ] order_callback status=%s" % st)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order_callback status=%s" % st)
     except Exception as e:
-        print("[ÂìÒÏÈë¿Ú] order_callback error: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] order_callback error: %s: %s" % (type(e).__name__, e))
 
 
 
@@ -617,9 +617,9 @@ def deal_callback(ContextInfo, dealInfo):
                 _shadow.flush_results(ContextInfo)
             except Exception:
                 pass
-            print("[½»Ò×ºËÐÄ] deal_callback")
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] deal_callback")
     except Exception as e:
-        print("[ÂìÒÏÈë¿Ú] deal_callback error: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] deal_callback error: %s: %s" % (type(e).__name__, e))
 
 
 def startup_sector_sync(ContextInfo):
@@ -631,11 +631,11 @@ def startup_sector_sync(ContextInfo):
         try:
             import qmt_builtin.ant_sector_sync_runner as runner
         except ImportError:
-            print("[ÂìÒÏÈë¿Ú] startup_sector_sync: ant_sector_sync_runner not found")
+            print("[ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½] startup_sector_sync: ant_sector_sync_runner not found")
             return
     runner = importlib.reload(runner)
     print(
-        "[°å¿éÍ¬²½] startup entry version=%s"
+        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] startup entry version=%s"
         % getattr(runner, "SECTOR_SYNC_VERSION", "?")
     )
     return runner.startup_sector_sync(ContextInfo)

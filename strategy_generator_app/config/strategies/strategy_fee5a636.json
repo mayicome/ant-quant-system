@@ -2,19 +2,7 @@
   "id": "strategy_fee5a636",
   "name": "MA5价格带真突破买入",
   "enabled": true,
-  "stock_codes": [
-    "000566",
-    "000779",
-    "002083",
-    "002141",
-    "002211",
-    "002440",
-    "002568",
-    "003001",
-    "003032",
-    "603221",
-    "603580"
-  ],
+  "stock_codes": [],
   "strategy_params": {
     "buy_amount_per_stock": 20000.0,
     "min_order_amount": 5000.0

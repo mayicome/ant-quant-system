@@ -8,7 +8,7 @@ import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Tuple
 
-DAILY_SYNC_VERSION = "20260731.27"
+DAILY_SYNC_VERSION = "20260801.02"
 INTRADAY_PRIORITY_DAILY_LIMIT = 1
 INTRADAY_PRIORITY_DAILY_LIMIT_MAX = 8
 POOL_SLICE_SLEEP_SEC = 0.5
@@ -152,8 +152,8 @@ def _daily_sync_verbose() -> bool:
 def _is_quote_rpc_error(exc_or_msg: Any) -> bool:
     s = str(exc_or_msg or "")
     return (
-        "ÎÞ·¨Á¬½ÓÐÐÇé·þÎñ" in s
-        or "ÐÐÇé·þÎñÁ¬½Ó¶Ï¿ª" in s
+        "????????" in s
+        or "????????" in s
         or "Unable to connect" in s
     )
 
@@ -257,13 +257,13 @@ def _consume_reset_force_progress(
         if manifest_path:
             _save_manifest(manifest_path, cleared)
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] RESET_FORCE_PROGRESS save fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] RESET_FORCE_PROGRESS save fail: %s" % e)
     try:
         os.remove(path)
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] RESET_FORCE_PROGRESS clear fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] RESET_FORCE_PROGRESS clear fail: %s" % e)
     print(
-        "[ÈÕÏßÍ¬²½] RESET_FORCE_PROGRESS: cleared checkpoint prev_progress=%d -> 0"
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] RESET_FORCE_PROGRESS: cleared checkpoint prev_progress=%d -> 0"
         % prev
     )
     return cleared
@@ -274,9 +274,9 @@ def _clear_force_backfill_flag(cache_dir: Optional[str] = None) -> None:
     try:
         if os.path.isfile(path):
             os.remove(path)
-            print("[ÈÕÏßÍ¬²½] cleared force flag %s" % path)
+            print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] cleared force flag %s" % path)
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] clear force flag fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] clear force flag fail: %s" % e)
     _clear_force_ordered_cache(cache_dir)
 
 
@@ -332,7 +332,7 @@ def _load_force_ordered_codes(
         _FORCE_ORDERED_END = end_s
         return list(out)
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] FORCE ordered cache load fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE ordered cache load fail: %s" % e)
         return None
 
 
@@ -361,7 +361,7 @@ def _save_force_ordered_codes(
     try:
         save_json_atomic(_force_ordered_cache_path(cache_dir), payload)
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] FORCE ordered cache save fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE ordered cache save fail: %s" % e)
 
 
 def _apply_force_ordered_cache(
@@ -403,7 +403,7 @@ def _clear_halt_miss_for_force(cache_dir: Optional[str] = None) -> int:
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cache_dir, force=True)
         print(
-            "[ÈÕÏßÍ¬²½] cleared %d today_halt/suspended miss entries for FORCE"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] cleared %d today_halt/suspended miss entries for FORCE"
             % len(drop)
         )
     return len(drop)
@@ -428,7 +428,7 @@ def _clear_soft_short_miss_for_main_chain(cache_dir: Optional[str] = None) -> in
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cache_dir, force=True)
         print(
-            "[ÈÕÏßÍ¬²½] cleared %d short_history miss entries for main-chain"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] cleared %d short_history miss entries for main-chain"
             % len(drop)
         )
     return len(drop)
@@ -472,7 +472,7 @@ def _clear_false_delisted_miss_with_recent_csv(
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cdir, force=True)
         print(
-            "[ÈÕÏßÍ¬²½] cleared %d false delisted miss (CSV last bar within %dd)"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] cleared %d false delisted miss (CSV last bar within %dd)"
             % (len(drop), int(max_age_days))
         )
     return len(drop)
@@ -536,11 +536,11 @@ def _maybe_reopen_completed_for_stale_bars(end_d: date) -> bool:
     try:
         _save_manifest(manifest_path, reopened)
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] stale reopen save fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] stale reopen save fail: %s" % e)
         return False
     _SYNC_DONE_END_DATE = ""
     print(
-        "[ÈÕÏßÍ¬²½] reopen completed?incremental stale_csv=%d cleared_miss=%d "
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] reopen completed?incremental stale_csv=%d cleared_miss=%d "
         "miss_skip_was=%d end=%s (no FORCE)"
         % (stale_n, cleared, miss_skip, end_s)
     )
@@ -584,11 +584,11 @@ def _abandon_stale_force_partial(
         if manifest_path:
             _save_manifest(manifest_path, cleared)
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] abandon stale FORCE partial save fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] abandon stale FORCE partial save fail: %s" % e)
     _clear_force_ordered_cache(cache_dir)
     _clear_soft_short_miss_for_main_chain(cache_dir)
     print(
-        "[ÈÕÏßÍ¬²½] abandoned stale FORCE partial status=%s trigger=%s "
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] abandoned stale FORCE partial status=%s trigger=%s "
         "(FORCE flag absent)"
         % (status, trigger or "-")
     )
@@ -635,7 +635,7 @@ def _miss_cache_save(cache_dir: Optional[str] = None, force: bool = False) -> No
         save_json_atomic(path, payload)
         _MISS_CACHE_DIRTY = False
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] miss_cache save fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] miss_cache save fail: %s" % e)
 
 
 def _miss_until_date(reason: str, fail_day: date) -> date:
@@ -713,7 +713,7 @@ def _miss_cache_put(
     if _daily_sync_verbose() and _MISS_LOG_COUNT < 8:
         _MISS_LOG_COUNT += 1
         print(
-            "[ÈÕÏßÍ¬²½] miss_cache +%s reason=%s until=%s fail_count=%d"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] miss_cache +%s reason=%s until=%s fail_count=%d"
             % (full, reason_s, until_d.isoformat(), fail_count)
         )
 
@@ -901,7 +901,7 @@ def _fetch_universe(xtdata, ContextInfo=None) -> List[str]:
         if got:
             raw = got
             if _daily_sync_verbose():
-                print("[ÈÕÏßÍ¬²½] universe source=%s n_raw=%d" % (owner_label, len(raw)))
+                print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] universe source=%s n_raw=%d" % (owner_label, len(raw)))
             break
     if not raw:
         # ???????????????????????????
@@ -913,9 +913,9 @@ def _fetch_universe(xtdata, ContextInfo=None) -> List[str]:
                 payload = json.load(f) or {}
             raw = list(payload.get("codes") or [])
             if _daily_sync_verbose():
-                print("[ÈÕÏßÍ¬²½] universe fallback file n=%d" % len(raw))
+                print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] universe fallback file n=%d" % len(raw))
         except Exception as e:
-            print("[ÈÕÏßÍ¬²½] universe fallback fail: %s" % e)
+            print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] universe fallback fail: %s" % e)
             raw = []
     out = []
     seen = set()
@@ -984,7 +984,7 @@ def _log_fetch_fail(code: str, start_s: str, end_s: str, reason: str) -> None:
         return
     _FAIL_LOG_COUNT += 1
     print(
-        "[ÈÕÏßÍ¬²½] fetch empty %s range=%s..%s reason=%s"
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] fetch empty %s range=%s..%s reason=%s"
         % (code, start_s, end_s, reason)
     )
 
@@ -1241,7 +1241,7 @@ def _ensure_builtin_download_bound() -> bool:
         if not _BUILTIN_DL_BIND_LOGGED:
             _BUILTIN_DL_BIND_LOGGED = True
             print(
-                "[ÈÕÏßÍ¬²½] builtin download_history_data bound=%s"
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] builtin download_history_data bound=%s"
                 % ("yes" if ready else "no")
             )
         return ready
@@ -1249,7 +1249,7 @@ def _ensure_builtin_download_bound() -> bool:
         if not _BUILTIN_DL_BIND_LOGGED:
             _BUILTIN_DL_BIND_LOGGED = True
             print(
-                "[ÈÕÏßÍ¬²½] builtin download_history_data bind err: %s: %s"
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] builtin download_history_data bind err: %s: %s"
                 % (type(e).__name__, e)
             )
         return False
@@ -1716,7 +1716,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 if d is not None:
                     out[code6] = d
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] list_date csv load fail: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] list_date csv load fail: %s" % e)
     # Optional JSON overlays (OpenDate / list_date / ????).
     for name in ("all_a_stock_info.json", "all_a_stock_info_em_boards.json"):
         jpath = os.path.join(base, "data", name)
@@ -1753,7 +1753,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 ch
                 for ch in str(
                     row.get("stock_code")
-                    or row.get("Ö¤È¯´úÂë")
+                    or row.get("????")
                     or row.get("code")
                     or ""
                 )
@@ -1765,7 +1765,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 continue
             d = None
             for key in (
-                "ÉÏÊÐÈÕÆÚ",
+                "????",
                 "OpenDate",
                 "open_date",
                 "list_date",
@@ -1778,7 +1778,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 out[code6] = d
     _LIST_DATE_BY_CODE = out
     if _daily_sync_verbose():
-        print("[ÈÕÏßÍ¬²½] list_date map loaded n=%d" % len(out))
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] list_date map loaded n=%d" % len(out))
     return out
 
 
@@ -2041,7 +2041,7 @@ def _fetch_today_bars_from_full_tick(
             if isinstance(tick_map, dict) and tick_map:
                 source = "ctx"
         except Exception as e:
-            print("[ÈÕÏßÍ¬²½] ContextInfo.get_full_tick fail: %s" % e)
+            print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ContextInfo.get_full_tick fail: %s" % e)
             tick_map = None
     # get_full_tick ?????????????? download_history???????? xtdata download ??????
     if (not isinstance(tick_map, dict) or not tick_map) and xtdata is not None:
@@ -2057,7 +2057,7 @@ def _fetch_today_bars_from_full_tick(
                     if ENABLE_XTDATA_DOWNLOAD:
                         _mark_xtdata_rpc_dead(str(e))
                 else:
-                    print("[ÈÕÏßÍ¬²½] xtdata.get_full_tick fail: %s" % e)
+                    print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] xtdata.get_full_tick fail: %s" % e)
                 tick_map = None
     if not isinstance(tick_map, dict) or not tick_map:
         return out
@@ -2068,7 +2068,7 @@ def _fetch_today_bars_from_full_tick(
             out[code] = bar
     if out and source and _daily_sync_verbose():
         print(
-            "[ÈÕÏßÍ¬²½] full_tick bars source=%s hit=%d/%d day=%s"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] full_tick bars source=%s hit=%d/%d day=%s"
             % (source, len(out), len(code_list), end_d.isoformat())
         )
     return out
@@ -2444,7 +2444,7 @@ def _download_slice(
         if _FAIL_LOG_COUNT < 8:
             _FAIL_LOG_COUNT += 1
             print(
-                "[ÈÕÏßÍ¬²½] download err %s %s-%s | %s"
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] download err %s %s-%s | %s"
                 % (code, s_short, e_short, last_err)
             )
     return False
@@ -2478,7 +2478,7 @@ def _download_batch(
                 continue
             except Exception as e:
                 print(
-                    "[ÈÕÏßÍ¬²½] %s fail n=%d %s-%s | %s: %s"
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] %s fail n=%d %s-%s | %s: %s"
                     % (label, len(codes), s_short, e_short, type(e).__name__, e)
                 )
                 if _is_quote_rpc_error(e):
@@ -2831,7 +2831,7 @@ def _download_one_code(
             _mark_xtdata_rpc_dead(str(e))
             return "rpc_dead"
         print(
-            "[ÈÕÏßÍ¬²½] nodate download fail %s | %s: %s"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] nodate download fail %s | %s: %s"
             % (code, type(e).__name__, e)
         )
         return "none"
@@ -3754,7 +3754,7 @@ def _arm_force_defer_after_hours() -> None:
     _FORCE_SLICE_IDLE_UNTIL = time.time() + 5.0
     remain = max(0.0, (target - now).total_seconds()) if now < target else 0.0
     print(
-        "[ÈÕÏßÍ¬²½] FORCE defer soft_short dig until after-hours "
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE defer soft_short dig until after-hours "
         "remain=%.0fs target=%02d:%02d (slice_idle=5s only)"
         % (remain, int(SYNC_HOUR), int(SYNC_MINUTE))
     )
@@ -3807,7 +3807,7 @@ def schedule_failed_manifest_recovery_on_init() -> None:
     delay = float(FORCE_INIT_DELAY_SEC if force else FAILED_RECOVERY_DELAY_SEC)
     _FAILED_RECOVERY_DUE_AT = time.time() + delay
     print(
-        "[ÈÕÏßÍ¬²½] catch-up scheduled in %ds (init; quality=%d force=%s "
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] catch-up scheduled in %ds (init; quality=%d force=%s "
         "slice=%s idle=%.0fs)"
         % (
             int(delay),
@@ -3828,11 +3828,11 @@ def maybe_run_failed_manifest_recovery(ContextInfo=None) -> bool:
     _FAILED_RECOVERY_ATTEMPTED = True
     _FAILED_RECOVERY_DUE_AT = 0.0
     if not _should_schedule_failed_manifest_recovery():
-        print("[ÈÕÏßÍ¬²½] init catch-up skipped (no longer needed)")
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] init catch-up skipped (no longer needed)")
         if _daily_gate_open_for_tick():
             _schedule_tick_pipeline()
         return False
-    print("[ÈÕÏßÍ¬²½] init catch-up start")
+    print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] init catch-up start")
     ok = run_catch_up_sync(ContextInfo, source="init_catchup")
     # ???? FORCE ??????????? tick???????????????
     if ok and _past_daily_sync_cutoff():
@@ -3875,7 +3875,7 @@ def maybe_run_force_year_backfill(ContextInfo=None) -> bool:
         remain_ah = max(0.0, (target - now).total_seconds())
         if now_ts - _FORCE_IDLE_LOG_TS >= 60.0:
             print(
-                "[ÈÕÏßÍ¬²½] FORCE defer_after_hours (soft_short); "
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE defer_after_hours (soft_short); "
                 "dig after %02d:%02d remain=%.0fs"
                 % (int(SYNC_HOUR), int(SYNC_MINUTE), remain_ah)
             )
@@ -3889,13 +3889,13 @@ def maybe_run_force_year_backfill(ContextInfo=None) -> bool:
         else:
             if now_ts - _FORCE_IDLE_LOG_TS >= 60.0:
                 print(
-                    "[ÈÕÏßÍ¬²½] FORCE idle gap remain=%.0fs (quotes catch-up)"
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE idle gap remain=%.0fs (quotes catch-up)"
                     % max(0.0, remain_idle)
                 )
                 _FORCE_IDLE_LOG_TS = now_ts
             return False
     print(
-        "[ÈÕÏßÍ¬²½] force/partial arm force=%s partial=%s progress=%s/%s "
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] force/partial arm force=%s partial=%s progress=%s/%s "
         "slice=%s quantum=%.0fs idle=%.0fs"
         % (
             "yes" if force else "no",
@@ -3918,7 +3918,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     global _SYNC_DONE_END_DATE, _SYNC_RUNNING, _FAIL_LOG_COUNT, _XTDATA_RPC_OK
     global _MISS_LOG_COUNT
     if _SYNC_RUNNING:
-        print("[ÈÕÏßÍ¬²½] skip: already running (source=%s)" % source)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] skip: already running (source=%s)" % source)
         return False
 
     # Skip while tick full sync owns ContextInfo.
@@ -3928,7 +3928,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
         except ImportError:
             import qmt_builtin.ant_tick_full_sync_runner as tick_full
         if bool(getattr(tick_full, "_BUSY", False)):
-            print("[ÈÕÏßÍ¬²½] skip: tick_full busy (source=%s)" % source)
+            print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] skip: tick_full busy (source=%s)" % source)
             return False
     except Exception:
         pass
@@ -3952,7 +3952,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     try:
         xtdata = _load_xtdata()
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] FAIL load xtdata: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FAIL load xtdata: %s" % e)
         return False
 
     end_d = _resolve_sync_end_date(xtdata, now)
@@ -3960,12 +3960,12 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
 
     # Skip done unless FORCE / partial resume.
     if _SYNC_DONE_END_DATE == end_s and not force_year and not partial_running:
-        print("[ÈÕÏßÍ¬²½] skip: in-memory done end=%s source=%s" % (end_s, source))
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] skip: in-memory done end=%s source=%s" % (end_s, source))
         return False
     if _already_synced_to_end(old_manifest, end_d):
         _SYNC_DONE_END_DATE = end_s
         print(
-            "[ÈÕÏßÍ¬²½] skip: manifest completed end=%s source=%s"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] skip: manifest completed end=%s source=%s"
             % (end_s, source)
         )
         return False
@@ -3976,20 +3976,20 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     verbose = _daily_sync_verbose()
     if verbose:
         print(
-            "[ÈÕÏßÍ¬²½] primary=ContextInfo.get_market_data_ex(1d) "
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] primary=ContextInfo.get_market_data_ex(1d) "
             "builtin_dl=%s xtdata_dl=off"
             % ("on" if builtin_dl_ready else "miss")
         )
     if ContextInfo is None:
         print(
-            "[ÈÕÏßÍ¬²½] WARN: ContextInfo is None; "
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] WARN: ContextInfo is None; "
             "ContextInfo path unavailable"
         )
     if verbose and (
         force_year or int(old_manifest.get("quality_version") or 0) < QUALITY_VERSION
     ):
         print(
-            "[ÈÕÏßÍ¬²½] backfill armed start=%s min_bars~%d quality=%d->%d "
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] backfill armed start=%s min_bars~%d quality=%d->%d "
             "force=%s slice=%s quantum=%.0fs batch=%d"
             % (
                 BACKFILL_START_YMD,
@@ -4032,13 +4032,13 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     try:
         universe = _fetch_universe(xtdata, ContextInfo=ContextInfo)
         if not universe:
-            print("[ÈÕÏßÍ¬²½] FAIL: empty universe")
+            print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FAIL: empty universe")
             return False
 
         os.makedirs(cache_dir, exist_ok=True)
         _save_universe(universe_path, universe, end_s)
         print(
-            "[ÈÕÏßÍ¬²½] catch-up begin version=%s source=%s end=%s count=%d"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] catch-up begin version=%s source=%s end=%s count=%d"
             % (DAILY_SYNC_VERSION, source, end_s, len(universe))
         )
         if force_year:
@@ -4099,7 +4099,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             filtered.append(code)
         if miss_skip_count:
             print(
-                "[ÈÕÏßÍ¬²½] miss_cache skip=%d remain=%d path=%s"
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] miss_cache skip=%d remain=%d path=%s"
                 % (miss_skip_count, len(filtered), _miss_cache_path(cache_dir))
             )
         # FORCE: truncated-first order. Cache after first scan; reuse on slices.
@@ -4109,7 +4109,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 filtered = _apply_force_ordered_cache(filtered, cached_ord)
                 if verbose:
                     print(
-                        "[ÈÕÏßÍ¬²½] FORCE reuse ordered cache n=%d (skip CSV rescan)"
+                        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE reuse ordered cache n=%d (skip CSV rescan)"
                         % len(cached_ord)
                     )
             else:
@@ -4124,7 +4124,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 if cold:
                     if verbose:
                         print(
-                            "[ÈÕÏßÍ¬²½] FORCE prioritize truncated=%d warm=%d"
+                            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE prioritize truncated=%d warm=%d"
                             % (len(cold), len(warm))
                         )
                     filtered = cold + warm
@@ -4153,7 +4153,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 failed_codes = [str(c) for c in prev_failed[:200]]
             if verbose:
                 print(
-                    "[ÈÕÏßÍ¬²½] resume from progress=%d/%d ok=%d skip=%d fail=%d soft_short=%d"
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] resume from progress=%d/%d ok=%d skip=%d fail=%d soft_short=%d"
                     % (
                         resume_from,
                         total,
@@ -4175,7 +4175,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             # Mid-walk disarm: FORCE flag cleared => stop incomplete loop now.
             if force_year and (not _force_backfill_requested(cache_dir)):
                 print(
-                    "[ÈÕÏßÍ¬²½] FORCE flag cleared mid-run; abort at %d/%d "
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE flag cleared mid-run; abort at %d/%d "
                     "(source=%s)" % (max(0, pos - 1), total, source)
                 )
                 try:
@@ -4235,7 +4235,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     pass
                 _arm_force_slice_idle()
                 print(
-                    "[ÈÕÏßÍ¬²½] yield time_slice before code after %.1fs "
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] yield time_slice before code after %.1fs "
                     "progress=%d/%d idle=%.0fs"
                     % (
                         time.time() - t_slice_start,
@@ -4289,7 +4289,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         pass
                     _arm_force_slice_idle()
                     print(
-                        "[ÈÕÏßÍ¬²½] yield time_slice before ContextInfo "
+                        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] yield time_slice before ContextInfo "
                         "after %.1fs progress=%d/%d idle=%.0fs"
                         % (
                             time.time() - t_slice_start,
@@ -4307,7 +4307,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 batch_tried = False
                 if verbose:
                     print(
-                        "[ÈÕÏßÍ¬²½] batch %d-%d/%d begin (ContextInfo 1d size=%d)"
+                        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] batch %d-%d/%d begin (ContextInfo 1d size=%d)"
                         % (pos, batch_end, total, batch_sz)
                     )
                 fetch_start = end_d - timedelta(days=CTX_INCREMENTAL_LOOKBACK_DAYS)
@@ -4336,7 +4336,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     batch_tried = True
                     if verbose:
                         print(
-                            "[ÈÕÏßÍ¬²½] batch ctx 1d source=%s hit=%d/%d "
+                            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] batch ctx 1d source=%s hit=%d/%d "
                             "range=%s..%s cold=%d"
                             % (
                                 primary_source,
@@ -4349,7 +4349,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         )
                 except Exception as e:
                     print(
-                        "[ÈÕÏßÍ¬²½] batch ctx 1d error: %s: %s"
+                        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] batch ctx 1d error: %s: %s"
                         % (type(e).__name__, e)
                     )
                     bars_prefetch = {}
@@ -4412,7 +4412,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                     pass
                                 _arm_force_slice_idle()
                                 print(
-                                    "[ÈÕÏßÍ¬²½] yield time_slice before "
+                                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] yield time_slice before "
                                     "builtin_dl after %.1fs progress=%d/%d "
                                     "dl=%d/%d idle=%.0fs"
                                     % (
@@ -4435,7 +4435,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 dl_ok += 1
                             elif detail and dl_tried <= 3:
                                 print(
-                                    "[ÈÕÏßÍ¬²½] builtin_dl miss %s %s..%s | %s"
+                                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] builtin_dl miss %s %s..%s | %s"
                                     % (
                                         bc,
                                         eff.strftime("%Y%m%d"),
@@ -4445,7 +4445,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                         if verbose:
                             print(
-                                "[ÈÕÏßÍ¬²½] builtin_dl 1d ok=%d/%d cold_short=%d "
+                                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] builtin_dl 1d ok=%d/%d cold_short=%d "
                                 "range_floor=%s"
                                 % (
                                     dl_ok,
@@ -4495,13 +4495,13 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                                 if verbose:
                                     print(
-                                        "[ÈÕÏßÍ¬²½] after builtin_dl re-get "
+                                        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] after builtin_dl re-get "
                                         "improved=%d/%d source=%s"
                                         % (improved, len(short_need), src2)
                                     )
                             except Exception as e:
                                 print(
-                                    "[ÈÕÏßÍ¬²½] after builtin_dl re-get "
+                                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] after builtin_dl re-get "
                                     "error: %s: %s"
                                     % (type(e).__name__, e)
                                 )
@@ -4526,7 +4526,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                             ContextInfo=ContextInfo,
                         )
                     except Exception as e:
-                        print("[ÈÕÏßÍ¬²½] batch full_tick error: %s" % e)
+                        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] batch full_tick error: %s" % e)
                         tick_prefetch = {}
 
                 # Optional xtdata download: after hours only.
@@ -4544,7 +4544,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                             end_d,
                         )
                         print(
-                            "[ÈÕÏßÍ¬²½] optional batch download %s n=%d "
+                            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] optional batch download %s n=%d "
                             "(ctx hit low)"
                             % (pre_tag, len(batch_codes))
                         )
@@ -4572,7 +4572,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                     except Exception as e:
                         print(
-                            "[ÈÕÏßÍ¬²½] optional download error: %s: %s"
+                            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] optional download error: %s: %s"
                             % (type(e).__name__, e)
                         )
                         if _is_quote_rpc_error(e):
@@ -4586,7 +4586,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     time.sleep(CTX_BATCH_SLEEP_SEC)
 
             if verbose:
-                print("[ÈÕÏßÍ¬²½] %d/%d syncing %s" % (pos, total, code))
+                print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] %d/%d syncing %s" % (pos, total, code))
 
             # Instrument status / halt classification.
             inst_reason = _classify_instrument_status(
@@ -4599,7 +4599,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 if last_d is not None and (end_d - last_d).days <= 15:
                     if verbose:
                         print(
-                            "[ÈÕÏßÍ¬²½] ignore false delisted %s last_bar=%s"
+                            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ignore false delisted %s last_bar=%s"
                             % (code, last_d.isoformat())
                         )
                     inst_reason = None
@@ -4632,7 +4632,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 ok_count += 1
                 if verbose:
                     print(
-                        "[ÈÕÏßÍ¬²½] ok %s valid_rows=%d"
+                        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ok %s valid_rows=%d"
                         % (code, row_count)
                     )
             elif status == "skip":
@@ -4649,7 +4649,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         pass
                 # Default quiet: fail reasons only in summary counts / VERBOSE.
                 if verbose and reason:
-                    print("[ÈÕÏßÍ¬²½] fail %s: %s" % (code, reason))
+                    print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] fail %s: %s" % (code, reason))
 
             do_progress = (
                 pos % PROGRESS_EVERY == 0
@@ -4659,7 +4659,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             if do_progress:
                 t_progress_log = time.time()
                 print(
-                    "[ÈÕÏßÍ¬²½] progress %d/%d ok=%d skip=%d fail=%d "
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] progress %d/%d ok=%d skip=%d fail=%d "
                     "soft_short=%d miss_skip=%d primary=%s"
                     % (
                         pos,
@@ -4743,7 +4743,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     pass
                 _arm_force_slice_idle()
                 print(
-                    "[ÈÕÏßÍ¬²½] yield time_slice after %.1fs progress=%d/%d "
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] yield time_slice after %.1fs progress=%d/%d "
                     "remain~%d idle=%.0fs"
                     % (
                         time.time() - t_slice_start,
@@ -4786,7 +4786,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     continue
                 truncated_left += 1
         except Exception as e:
-            print("[ÈÕÏßÍ¬²½] coverage scan error: %s" % e)
+            print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] coverage scan error: %s" % e)
             truncated_left = max(truncated_left, 1)
         coverage_ok_ratio = (
             float(sample_n - truncated_left) / float(sample_n) if sample_n else 0.0
@@ -4820,9 +4820,9 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         _miss_cache_put(code, "short_history", end_d, cache_dir)
                 _miss_cache_save(cache_dir, force=True)
             except Exception as e:
-                print("[ÈÕÏßÍ¬²½] soft_short seed miss_cache fail: %s" % e)
+                print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] soft_short seed miss_cache fail: %s" % e)
             print(
-                "[ÈÕÏßÍ¬²½] FORCE incomplete coverage_ok=%.1f%% truncated=%d/%d "
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] FORCE incomplete coverage_ok=%.1f%% truncated=%d/%d "
                 "soft_short=%d soft_deferred=%d; keep flag, reset progress for retry"
                 % (
                     100.0 * coverage_ok_ratio,
@@ -4911,7 +4911,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
         _SYNC_DONE_END_DATE = end_s
         _clear_force_backfill_flag(cache_dir)
         print(
-            "[ÈÕÏßÍ¬²½] done end=%s ok=%d skip=%d fail=%d soft_short=%d "
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] done end=%s ok=%d skip=%d fail=%d soft_short=%d "
             "miss_skip=%d primary=%s start=%s min_bars~%d"
             % (
                 end_s,
@@ -4952,7 +4952,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             pass
         return True
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] ERROR: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ERROR: %s" % e)
         try:
             _save_manifest(
                 manifest_path,
@@ -5000,7 +5000,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
 
 def startup_catch_up(ContextInfo=None) -> bool:
     """????? QMT ?????????????????????????????? 15:35 + on-demand??"""
-    print("[ÈÕÏßÍ¬²½] startup catch-up disabled (15:35 timer + on-demand only)")
+    print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] startup catch-up disabled (15:35 timer + on-demand only)")
     return False
 
 
@@ -5053,7 +5053,7 @@ def _schedule_tick_pipeline() -> None:
         return
     due = datetime.fromtimestamp(_TICK_CHAIN_DUE_AT).strftime("%H:%M:%S")
     print(
-        "[ÈÕÏßÍ¬²½] tick pipeline scheduled in %ds (due ~%s, version=%s)"
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] tick pipeline scheduled in %ds (due ~%s, version=%s)"
         % (delay, due, DAILY_SYNC_VERSION)
     )
 
@@ -5070,7 +5070,7 @@ def _tick_chain_delay_ready() -> bool:
     if now - float(_TICK_CHAIN_WAIT_LOG_TS) >= 60.0:
         _TICK_CHAIN_WAIT_LOG_TS = now
         left = int(float(_TICK_CHAIN_DUE_AT) - now)
-        print("[ÈÕÏßÍ¬²½] tick pipeline waiting %ds more (delay after daily)" % left)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] tick pipeline waiting %ds more (delay after daily)" % left)
     return False
 
 
@@ -5103,7 +5103,7 @@ def _load_tick_full_sync_runner():
         tick_full = importlib.reload(tick_full)
         _TICK_FULL_SYNC_MTIME = mtime
         print(
-            "[ÈÕÏßÍ¬²½] tick module reloaded version=%s"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] tick module reloaded version=%s"
             % getattr(tick_full, "TICK_FULL_SYNC_VERSION", "?")
         )
     return tick_full
@@ -5134,7 +5134,7 @@ def _load_sector_sync_runner():
         sector = importlib.reload(sector)
         _SECTOR_SYNC_MTIME = mtime
         print(
-            "[ÈÕÏßÍ¬²½] sector module reloaded version=%s"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] sector module reloaded version=%s"
             % getattr(sector, "SECTOR_SYNC_VERSION", "?")
         )
     return sector
@@ -5144,33 +5144,44 @@ def _chain_tick_pipeline(ContextInfo) -> None:
     """?????????tick ???? ?? ?????tick ????????????????"""
     try:
         tick_full = _load_tick_full_sync_runner()
-        print("[ÈÕÏßÍ¬²½] chain tick_full_sync + after_rank")
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] chain tick_full_sync + after_rank")
         if hasattr(tick_full, "run_post_daily_pipeline"):
             tick_full.run_post_daily_pipeline(ContextInfo)
         else:
             tick_full.tick_full_sync(ContextInfo)
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] chain tick pipeline failed: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] chain tick pipeline failed: %s" % e)
 
 
 def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
-    """?????????????????????????????? tick ?? ?????"""
+    """????????????? tick ? ?? ? ???"""
     now = datetime.now()
     if (now.hour, now.minute) < (SYNC_HOUR, SYNC_MINUTE):
         return False
     if _SYNC_RUNNING:
         return False
 
+    # ??????????????????? tick ??? manual_request ???
+    try:
+        xtdata = _load_xtdata()
+    except Exception:
+        xtdata = None
+    try:
+        if not _is_tradeday(xtdata, now.date()):
+            return False
+    except Exception:
+        if now.weekday() >= 5:
+            return False
+
     # Completed gate can hide codes unblocked after false-delisted miss clear.
     # Reopen once/day for today-incremental (never arms FORCE).
     try:
-        xtdata = _load_xtdata()
         end_d = _resolve_sync_end_date(xtdata, now)
         _maybe_reopen_completed_for_stale_bars(end_d)
     except Exception:
         pass
 
-    # ?????????????????????? periodic ?????? tick ???
+    # ??? tick/??/?????????? pipeline
     try:
         day = now.strftime("%Y%m%d")
         tick_full = _load_tick_full_sync_runner()
@@ -5182,7 +5193,7 @@ def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
         tick_done = False
         if hasattr(tick_full, "_day_already_done"):
             tick_done = bool(tick_full._day_already_done(day))
-        # tick ABORT ?????????? chain?????? miss_cache ????
+        # tick ABORT ?????? chain??? miss_cache ???
         if (not tick_done) and hasattr(tick_full, "_abort_hold_active"):
             try:
                 held, _reason = tick_full._abort_hold_active(day)
@@ -5207,13 +5218,13 @@ def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
     if not _daily_gate_open_for_tick():
         run_catch_up_sync(ContextInfo, source="pipeline_catchup")
         if _daily_gate_open_for_tick():
-            # ??????????????????? tick
+            # ???????? tick ?
             _schedule_tick_pipeline()
 
     if not _daily_gate_open_for_tick():
         return False
 
-    # ?????????????????????????
+    # ????????????????????
     if not _tick_chain_delay_ready():
         return False
 
@@ -5230,12 +5241,12 @@ def register_daily_sync_timer(ContextInfo) -> None:
             "SH",
         )
         print(
-            "[ÈÕÏßÍ¬²½] timer registered %02d:%02d "
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] timer registered %02d:%02d "
             "(then chain tick -> after_rank -> sector)"
             % (SYNC_HOUR, SYNC_MINUTE)
         )
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] run_time register failed: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] run_time register failed: %s" % e)
 
 
 _ON_DEMAND_BUSY = False
@@ -5269,10 +5280,10 @@ def _purge_bad_pool_csv(code: str, cache_dir: str, end_d: date) -> bool:
         return False
     try:
         os.remove(csv_path)
-        print("[ÈÕÏßÍ¬²½] purge bad pool csv %s" % code)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] purge bad pool csv %s" % code)
         return True
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] purge bad pool csv fail %s: %s" % (code, e))
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] purge bad pool csv fail %s: %s" % (code, e))
         return False
 
 
@@ -5337,7 +5348,7 @@ def audit_pool_daily_cache(
     if fixed:
         save_requests(data)
         print(
-            "[ÈÕÏßÍ¬²½] audit pool daily: requeue %d codes (through=%s)"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] audit pool daily: requeue %d codes (through=%s)"
             % (fixed, end_s)
         )
     return fixed
@@ -5421,7 +5432,7 @@ def requeue_priority_daily_requests(
     if requeued:
         save_requests(data)
         print(
-            "[ÈÕÏßÍ¬²½] requeue pool daily: %d codes (through=%s)"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] requeue pool daily: %d codes (through=%s)"
             % (requeued, end_s)
         )
     return requeued
@@ -5540,7 +5551,7 @@ def _run_on_demand_batch(
                 mark_tick_failed,
             )
         except ImportError as e:
-            print("[ÈÕÏßÍ¬²½] on_demand import failed: %s" % e)
+            print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand import failed: %s" % e)
             return 0
 
     _, cache_dir, _, _ = _data_paths()
@@ -5569,7 +5580,7 @@ def _run_on_demand_batch(
 
     if daily_cache_hit or tick_cache_hit:
         print(
-            "[ÈÕÏßÍ¬²½] on_demand cache_hit daily=%d tick=%d"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand cache_hit daily=%d tick=%d"
             % (daily_cache_hit, tick_cache_hit)
         )
 
@@ -5579,7 +5590,7 @@ def _run_on_demand_batch(
     try:
         xtdata = _load_xtdata()
     except Exception as e:
-        print("[ÈÕÏßÍ¬²½] on_demand xtdata unavailable: %s" % e)
+        print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand xtdata unavailable: %s" % e)
         return handled
 
     synced_ok = 0
@@ -5595,14 +5606,14 @@ def _run_on_demand_batch(
                 if last_d is not None and (through_d - last_d).days <= 15:
                     _miss_cache_clear(code, cache_dir)
                     print(
-                        "[ÈÕÏßÍ¬²½] on_demand cleared false delisted %s last_bar=%s"
+                        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand cleared false delisted %s last_bar=%s"
                         % (code, last_d.isoformat())
                     )
                 else:
                     reason = "miss_cache_%s" % miss_reason
                     mark_daily_failed(code, through_d, reason)
                     synced_fail += 1
-                    print("[ÈÕÏßÍ¬²½] on_demand miss_skip %s: %s" % (code, reason))
+                    print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand miss_skip %s: %s" % (code, reason))
                     continue
             if miss_reason in ("today_halt", "suspended"):
                 csv_p = os.path.join(cache_dir, code + ".csv")
@@ -5610,7 +5621,7 @@ def _run_on_demand_batch(
                     reason = "miss_cache_%s" % miss_reason
                     mark_daily_failed(code, through_d, reason)
                     synced_fail += 1
-                    print("[ÈÕÏßÍ¬²½] on_demand miss_skip %s: %s" % (code, reason))
+                    print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand miss_skip %s: %s" % (code, reason))
                     continue
             # empty_history / local_miss / invalid_0 / no_ctx??????? miss ???????????
             if miss_reason in (
@@ -5621,7 +5632,7 @@ def _run_on_demand_batch(
             ):
                 _miss_cache_clear(code, cache_dir)
                 print(
-                    "[ÈÕÏßÍ¬²½] on_demand ignore soft miss %s reason=%s ?? retry daily"
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand ignore soft miss %s reason=%s ?? retry daily"
                     % (code, miss_reason)
                 )
         sync_fn = (
@@ -5652,7 +5663,7 @@ def _run_on_demand_batch(
             mark_daily_failed(code, through_d, reason or status)
             synced_fail += 1
             print(
-                "[ÈÕÏßÍ¬²½] on_demand fail %s: %s" % (code, reason or status)
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand fail %s: %s" % (code, reason or status)
             )
     _miss_cache_save(cache_dir)
 
@@ -5665,20 +5676,20 @@ def _run_on_demand_batch(
             handled += 1
             synced_ok += 1
             print(
-                "[ÈÕÏßÍ¬²½] on_demand tick ok %s %s"
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand tick ok %s %s"
                 % (code_6, trade_d.strftime("%Y%m%d"))
             )
         else:
             mark_tick_failed(code_6, trade_d, reason or status)
             synced_fail += 1
             print(
-                "[ÈÕÏßÍ¬²½] on_demand tick fail %s %s: %s"
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand tick fail %s %s: %s"
                 % (code_6, trade_d.strftime("%Y%m%d"), reason or status)
             )
 
     if synced_ok or synced_fail:
         print(
-            "[ÈÕÏßÍ¬²½] on_demand synced ok=%d fail=%d"
+            "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand synced ok=%d fail=%d"
             % (synced_ok, synced_fail)
         )
     return handled
@@ -5709,7 +5720,7 @@ def process_on_demand_sync_requests(
         if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
             reason = "sync_running" if _SYNC_RUNNING else "busy"
             print(
-                "[ÈÕÏßÍ¬²½] on_demand skip (%s); retry when idle"
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand skip (%s); retry when idle"
                 % reason
             )
             _ON_DEMAND_SKIP_LOG_TS = now_skip
@@ -5727,7 +5738,7 @@ def process_on_demand_sync_requests(
         else:
             if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
                 print(
-                    "[ÈÕÏßÍ¬²½] on_demand skip (FORCE idle remain=%.0fs)"
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand skip (FORCE idle remain=%.0fs)"
                     % max(0.0, remain_idle)
                 )
                 _ON_DEMAND_SKIP_LOG_TS = now_skip
@@ -5741,7 +5752,7 @@ def process_on_demand_sync_requests(
     ):
         if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
             print(
-                "[ÈÕÏßÍ¬²½] on_demand skip (FORCE/partial active; quotes first)"
+                "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand skip (FORCE/partial active; quotes first)"
             )
             _ON_DEMAND_SKIP_LOG_TS = now_skip
         return 0
@@ -5771,7 +5782,7 @@ def process_on_demand_sync_requests(
                 list_pending_ticks,
             )
         except Exception as e:
-            print("[ÈÕÏßÍ¬²½] on_demand import failed: %s" % e)
+            print("[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand import failed: %s" % e)
             return 0
 
     all_pending_daily = list_pending_daily(limit=50)
@@ -5797,7 +5808,7 @@ def process_on_demand_sync_requests(
             deferred = [c for c, _, _ in all_pending_daily if c not in priority]
             if deferred:
                 print(
-                    "[ÈÕÏßÍ¬²½] on_demand defer non-pool daily during intraday "
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand defer non-pool daily during intraday "
                     "(pool=%d codes; resume after 15:05)"
                     % len(priority)
                 )
@@ -5810,7 +5821,7 @@ def process_on_demand_sync_requests(
             ]
             if missing:
                 print(
-                    "[ÈÕÏßÍ¬²½] pool daily still missing %d codes "
+                    "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] pool daily still missing %d codes "
                     "(waiting on_demand queue): %s"
                     % (
                         len(missing),
@@ -5824,7 +5835,7 @@ def process_on_demand_sync_requests(
         return 0
 
     print(
-        "[ÈÕÏßÍ¬²½] on_demand start daily=%d tick=%d (queue daily=%d)"
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] on_demand start daily=%d tick=%d (queue daily=%d)"
         % (
             len(pending_daily),
             len(pending_tick),

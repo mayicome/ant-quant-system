@@ -1,5 +1,5 @@
 #coding:gbk
-"""Shadow Áªµ÷£ºtick Çý¶¯£¬¶Á rules_armed.json£¬Ð´ results.json¡£"""
+"""Shadow ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½tick ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ rules_armed.jsonï¿½ï¿½Ð´ results.jsonï¿½ï¿½"""
 import os
 import sys
 import time
@@ -32,7 +32,7 @@ if QMT_BUILTIN_DIR not in sys.path:
 
 
 def _load_py_module(module_key, filename):
-    """´Ó QMT python Ä¿Â¼°´ mtime ÈÈ¼ÓÔØ£»Í¬ mtime ¸´ÓÃ sys.modules£¬±ÜÃâ·´¸´ exec Çå¿Õ°ó¶¨¡£"""
+    """ï¿½ï¿½ QMT python Ä¿Â¼ï¿½ï¿½ mtime ï¿½È¼ï¿½ï¿½Ø£ï¿½Í¬ mtime ï¿½ï¿½ï¿½ï¿½ sys.modulesï¿½ï¿½ï¿½ï¿½ï¿½â·´ï¿½ï¿½ exec ï¿½ï¿½Õ°ó¶¨¡ï¿½"""
     import importlib.util
 
     path = os.path.join(QMT_BUILTIN_DIR, filename)
@@ -52,7 +52,7 @@ def _load_py_module(module_key, filename):
 
 
 def _import_rules_io_module():
-    """QMT Í£Æô²ßÂÔ²»Ð¶ÔØ sys.modules£»±ØÐë´Ó´ÅÅÌÈÈ¼ÓÔØ ant_rules_io¡£"""
+    """QMT Í£ï¿½ï¿½ï¿½ï¿½ï¿½Ô²ï¿½Ð¶ï¿½ï¿½ sys.modulesï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó´ï¿½ï¿½ï¿½ï¿½È¼ï¿½ï¿½ï¿½ ant_rules_ioï¿½ï¿½"""
     mod = _load_py_module("ant_rules_io", "ant_rules_io.py")
     if mod is not None:
         return mod
@@ -68,7 +68,7 @@ def _import_rules_io_module():
 
 _rio = _import_rules_io_module()
 print(
-    "[½»Ò×ºËÐÄ] rules_io loaded prune=%s file=%s"
+    "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] rules_io loaded prune=%s file=%s"
     % (
         hasattr(_rio, "prune_results_stocks"),
         os.path.join(QMT_BUILTIN_DIR, "ant_rules_io.py"),
@@ -116,7 +116,7 @@ except ImportError:
 
 
 def _ensure_tick_runner_module() -> bool:
-    """°´ mtime ÈÈ¼ÓÔØ ant_tick_runner£¬±ÜÃâ QMT Í¬½ø³Ì»º´æ¾É°æ£¨ÎÞ single_buy£©¡£"""
+    """ï¿½ï¿½ mtime ï¿½È¼ï¿½ï¿½ï¿½ ant_tick_runnerï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ QMT Í¬ï¿½ï¿½ï¿½Ì»ï¿½ï¿½ï¿½É°æ£¨ï¿½ï¿½ single_buyï¿½ï¿½ï¿½ï¿½"""
     global _TICK_RUNNER_MTIME, _TICK_RUNNER_MOD, ShadowTickRunner, _light_row
     path = os.path.join(QMT_BUILTIN_DIR, "ant_tick_runner.py")
     mtime = os.path.getmtime(path) if os.path.isfile(path) else 0.0
@@ -169,7 +169,7 @@ def _ensure_tick_runner_module() -> bool:
         src_sc = False
         src_early = False
     print(
-        "[½»Ò×ºËÐÄ] tick_runner hot-loaded mtime=%s single_buy=%s single_sell=%s breakthrough_sell=%s best_sell=%s best_buy=%s cage=%s grid=%s clear=%s early=%s file=%s"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] tick_runner hot-loaded mtime=%s single_buy=%s single_sell=%s breakthrough_sell=%s best_sell=%s best_buy=%s cage=%s grid=%s clear=%s early=%s file=%s"
         % (
             int(mtime),
             src_ok,
@@ -215,7 +215,7 @@ _SECTOR_SYNC_MOD = None
 
 
 def _get_daily_sync_runner():
-    """QMT Í¬½ø³ÌÄÚÍ£Æô²ßÂÔ²»»áÐ¶ÔØÄ£¿é£»°´ÎÄ¼þ mtime ÈÈÖØÔØ daily_sync¡£"""
+    """QMT Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í£ï¿½ï¿½ï¿½ï¿½ï¿½Ô²ï¿½ï¿½ï¿½Ð¶ï¿½ï¿½Ä£ï¿½é£»ï¿½ï¿½ï¿½Ä¼ï¿½ mtime ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ daily_syncï¿½ï¿½"""
     global _DAILY_SYNC_MTIME, _DAILY_SYNC_MOD
     import importlib
 
@@ -236,14 +236,14 @@ def _get_daily_sync_runner():
     _DAILY_SYNC_MOD = mod
     _DAILY_SYNC_MTIME = mtime
     print(
-        "[ÈÕÏßÍ¬²½] module loaded version=%s file=%s"
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] module loaded version=%s file=%s"
         % (getattr(mod, "DAILY_SYNC_VERSION", "?"), path)
     )
     return mod
 
 
 def _get_after_hours_rank_runner():
-    """°´ mtime ÈÈÖØÔØ after_hours_rank£¬±ÜÃâÍ£Æô²ßÂÔÈÔÓÃ»º´æ¾É°æ¡£"""
+    """ï¿½ï¿½ mtime ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ after_hours_rankï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½É°æ¡£"""
     global _AFTER_RANK_MTIME, _AFTER_RANK_MOD
     import importlib
 
@@ -259,14 +259,14 @@ def _get_after_hours_rank_runner():
     _AFTER_RANK_MOD = mod
     _AFTER_RANK_MTIME = mtime
     print(
-        "[ÅÌºóÅÅÃû] module loaded version=%s file=%s"
+        "[ï¿½Ìºï¿½ï¿½ï¿½ï¿½ï¿½] Ä£ï¿½ï¿½ï¿½Ñ¼ï¿½ï¿½ï¿½ ï¿½æ±¾=%s ï¿½Ä¼ï¿½=%s"
         % (getattr(mod, "AFTER_HOURS_RANK_VERSION", "?"), path)
     )
     return mod
 
 
 def _get_tick_full_sync_runner():
-    """°´ mtime ÈÈÖØÔØ tick_full_sync¡£"""
+    """ï¿½ï¿½ mtime ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tick_full_syncï¿½ï¿½"""
     global _TICK_FULL_SYNC_MTIME, _TICK_FULL_SYNC_MOD
     import importlib
 
@@ -282,14 +282,14 @@ def _get_tick_full_sync_runner():
     _TICK_FULL_SYNC_MOD = mod
     _TICK_FULL_SYNC_MTIME = mtime
     print(
-        "[·Ö±ÊÍ¬²½] Ä£¿éÒÑ¼ÓÔØ °æ±¾=%s ÎÄ¼þ=%s"
+        "[ï¿½Ö±ï¿½Í¬ï¿½ï¿½] Ä£ï¿½ï¿½ï¿½Ñ¼ï¿½ï¿½ï¿½ ï¿½æ±¾=%s ï¿½Ä¼ï¿½=%s"
         % (getattr(mod, "TICK_FULL_SYNC_VERSION", "?"), path)
     )
     return mod
 
 
 def _get_sector_sync_runner():
-    """°´ mtime ÈÈÖØÔØ sector_sync£¬±ÜÃâ½ø³ÌÄÚÈÔÊÇ 20260728.2¡£"""
+    """ï¿½ï¿½ mtime ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ sector_syncï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 20260728.2ï¿½ï¿½"""
     global _SECTOR_SYNC_MTIME, _SECTOR_SYNC_MOD
     import importlib
 
@@ -305,14 +305,14 @@ def _get_sector_sync_runner():
     _SECTOR_SYNC_MOD = mod
     _SECTOR_SYNC_MTIME = mtime
     print(
-        "[°å¿éÍ¬²½] module loaded version=%s file=%s"
+        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] module loaded version=%s file=%s"
         % (getattr(mod, "SECTOR_SYNC_VERSION", "?"), path)
     )
     return mod
 
 
 def peek_results():
-    """¹©Èë¿ÚÎÄ¼þÔÚ´ó QMT ×÷ÓÃÓòÄÚÀ­È¡×Ê½ðºóÐ´Èë results¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½ï¿½Ú´ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½Ê½ï¿½ï¿½Ð´ï¿½ï¿½ resultsï¿½ï¿½"""
     return _RESULTS
 
 
@@ -321,7 +321,7 @@ def _get_passorder_mod():
     mod = _load_py_module("ant_passorder", "ant_passorder.py")
     if mod is not None:
         _PASSORDER_MOD = mod
-        # ÈÈ¼ÓÔØÐÂÄ£¿éºó´Ó builtins »Ø¹à°ó¶¨
+        # ï¿½È¼ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ builtins ï¿½Ø¹ï¿½ï¿½
         if hasattr(mod, "bind_runtime_globals") and not getattr(mod, "is_bound", lambda: False)():
             try:
                 mod.bind_runtime_globals(None)
@@ -331,7 +331,7 @@ def _get_passorder_mod():
 
 
 def _disarm_task_in_rules_armed(task_id: str) -> None:
-    """passorder ³É¹¦ºóÁ¢¿Ì°Ñ rules_armed ¶ÔÓ¦ÈÎÎñÖÃ enabled=False£¬·ÀÖ÷³ÌÐò»ØÐ´ÑÓ³Ùµ¼ÖÂÁ¬»·µ¥¡£"""
+    """passorder ï¿½É¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì°ï¿½ rules_armed ï¿½ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ enabled=Falseï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½Ó³Ùµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     tid = str(task_id or "").strip()
     if not tid or not _RULES_PATH or not os.path.isfile(_RULES_PATH):
         return
@@ -376,14 +376,14 @@ def _disarm_task_in_rules_armed(task_id: str) -> None:
                 import json as _json
 
                 _json.dump(data, f, ensure_ascii=False, indent=2)
-        print("[½»Ò×ºËÐÄ] disarmed task in rules_armed: %s" % tid)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] disarmed task in rules_armed: %s" % tid)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] disarm rules_armed error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] disarm rules_armed error: %s" % e)
 
 
 
 def _mark_grid_point_in_rules_armed(task_id: str, grid_index: int, all_done: bool = False) -> None:
-    """Íø¸ñµãÎ»Íê³ÉºóÐ´Èë executed_grids£»È«²¿Íê³É²Å enabled=False¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½Éºï¿½Ð´ï¿½ï¿½ executed_gridsï¿½ï¿½È«ï¿½ï¿½ï¿½ï¿½É²ï¿½ enabled=Falseï¿½ï¿½"""
     tid = str(task_id or "").strip()
     if not tid or not _RULES_PATH or not os.path.isfile(_RULES_PATH):
         return
@@ -436,13 +436,13 @@ def _mark_grid_point_in_rules_armed(task_id: str, grid_index: int, all_done: boo
         except Exception:
             from qmt_builtin.ant_rules_io import save_json_atomic
         save_json_atomic(_RULES_PATH, data)
-        print("[½»Ò×ºËÐÄ] grid mark rules_armed: %s g=%s all=%s" % (tid, gi, all_done))
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] grid mark rules_armed: %s g=%s all=%s" % (tid, gi, all_done))
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] grid mark rules_armed error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] grid mark rules_armed error: %s" % e)
 
 
 def _seed_done_from_results_orders() -> None:
-    """ÓÃÒÑ³É¹¦ÏÂ¹ýµÄ±¾µØ orders Ìî³ä done_task_ids£¬±ÜÃâÖØÅÜ²ßÂÔºó¸´´ò¡£"""
+    """ï¿½ï¿½ï¿½Ñ³É¹ï¿½ï¿½Â¹ï¿½ï¿½Ä±ï¿½ï¿½ï¿½ orders ï¿½ï¿½ï¿½ done_task_idsï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü²ï¿½ï¿½Ôºó¸´´ï¿½"""
     global _RESULTS, _RUNNER
     if _RUNNER is None or not isinstance(_RESULTS, dict):
         return
@@ -457,15 +457,15 @@ def _seed_done_from_results_orders() -> None:
         st = str(o.get("status") or "").lower()
         ev = str(o.get("event_type") or "")
         if msg == "passorder_called" or st in ("submitted", "filled", "error", "skipped"):
-            # ÌáÇ°¹Òµ¥²»Ëã done£¬È·ÈÏ/³É½»²ÅËø¶¨
+            # ï¿½ï¿½Ç°ï¿½Òµï¿½ï¿½ï¿½ï¿½ï¿½ doneï¿½ï¿½È·ï¿½ï¿½/ï¿½É½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             if bool(o.get("early_order")) and st != "filled" and ev != "early_confirm":
                 continue
-            # Ò¹ÊÐ/¶¨Ê±Çå²Ö£ºÐë¹ñÌ¨ÒÑ±¨ºó²ÅËø¶¨£¬·Ïµ¥ÔÊÐíÖØÊÔ
+            # Ò¹ï¿½ï¿½/ï¿½ï¿½Ê±ï¿½ï¿½Ö£ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½Ñ±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ïµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             if ev in (
                 "night_buy_hit",
                 "night_sell_hit",
                 "scheduled_clear_hit",
-            ) or "Ò¹ÊÐ" in str(o.get("strategy_name") or "") or "¶¨Ê±Çå²Ö" in str(
+            ) or "Ò¹ï¿½ï¿½" in str(o.get("strategy_name") or "") or "ï¿½ï¿½Ê±ï¿½ï¿½ï¿½" in str(
                 o.get("strategy_name") or ""
             ):
                 try:
@@ -492,7 +492,7 @@ def _seed_done_from_results_orders() -> None:
         _RUNNER.hydrate_done_task_ids(ids)
         _RESULTS["done_task_ids"] = _RUNNER.dump_done_task_ids()
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] seed done_task_ids error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] seed done_task_ids error: %s" % e)
 
 
 def _is_trading_day_local(d):
@@ -517,12 +517,12 @@ def _next_trading_day_915(after_date=None):
 
 
 def _night_market_window_active():
-    """ÓëÍ¼±íÒ¹ÊÐ¶¨Ê±Æ÷Ò»ÖÂ£º·Ç½»Ò×ÈÕ / 9:15 Ç° / 19:29:59.9 ºó ¡ú ¿É¹Ò£¬Ö±ÖÁÏÂÒ»½»Ò×ÈÕ 9:15¡£"""
+    """ï¿½ï¿½Í¼ï¿½ï¿½Ò¹ï¿½Ð¶ï¿½Ê±ï¿½ï¿½Ò»ï¿½Â£ï¿½ï¿½Ç½ï¿½ï¿½ï¿½ï¿½ï¿½ / 9:15 Ç° / 19:29:59.9 ï¿½ï¿½ ï¿½ï¿½ ï¿½É¹Ò£ï¿½Ö±ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 9:15ï¿½ï¿½"""
     from datetime import datetime, time as dtime, timedelta
 
     now = datetime.now()
     end_at = _next_trading_day_915(now.date() + timedelta(days=1))
-    # Èôµ±ÌìÊÇ½»Ò×ÈÕÇÒÉÐÎ´µ½ 9:15£¬½áÊøµãÎªµ±Ìì 9:15
+    # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ 9:15ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ 9:15
     if _is_trading_day_local(now.date()) and now.time() < dtime(9, 15):
         end_at = datetime.combine(now.date(), dtime(9, 15))
     if now >= end_at:
@@ -563,7 +563,7 @@ def _mark_night_task_done(code: str, tid: str) -> None:
         if _RUNNER is not None:
             st = (_RUNNER._states or {}).get(code)
             if st is None and code:
-                # ÈÔÐ´ÈëÈÎÒâ state µÄ done ¼¯ºÏ£ºÈ¡µÚÒ»¸ö
+                # ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ state ï¿½ï¿½ done ï¿½ï¿½ï¿½Ï£ï¿½È¡ï¿½ï¿½Ò»ï¿½ï¿½
                 for _c, st2 in (_RUNNER._states or {}).items():
                     st = st2
                     break
@@ -593,7 +593,7 @@ def _parse_order_at_ts(o) -> float:
 
 
 def _night_is_pending(tid: str) -> bool:
-    """ÒÑ passorder ÇÒÎ´·Ïµ¥¡¢Î´ÒÑ±¨ ¡ú pending£¨³¬Ê±ºóÔÊÐíÖØÊÔ£©¡£"""
+    """ï¿½ï¿½ passorder ï¿½ï¿½Î´ï¿½Ïµï¿½ï¿½ï¿½Î´ï¿½Ñ±ï¿½ ï¿½ï¿½ pendingï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô£ï¿½ï¿½ï¿½"""
     tid = str(tid or "").strip()
     if not tid or not isinstance(_RESULTS, dict):
         return False
@@ -628,7 +628,7 @@ def _night_is_pending(tid: str) -> bool:
 
 
 def _finalize_night_market_orders() -> bool:
-    """¹ñÌ¨ÒÑ±¨ºó disarm + ¼Ç done£¬¹©Í¼±í°´ÒÑ±¨»ØÐ´¡£"""
+    """ï¿½ï¿½Ì¨ï¿½Ñ±ï¿½ï¿½ï¿½ disarm + ï¿½ï¿½ doneï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½ï¿½Ñ±ï¿½ï¿½ï¿½Ð´ï¿½ï¿½"""
     if not isinstance(_RESULTS, dict):
         return False
     changed = False
@@ -653,14 +653,14 @@ def _finalize_night_market_orders() -> bool:
         o["night_confirmed"] = True
         changed = True
         print(
-            "[½»Ò×ºËÐÄ] night confirmed %s tid=%s bst=%s sysid=%s"
+            "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] night confirmed %s tid=%s bst=%s sysid=%s"
             % (code, tid, bst, o.get("order_sysid"))
         )
     return changed
 
 
 def _poll_night_market_events():
-    """Ê±¼ä´°ÄÚ¶ÔÒÑÎä×°Ò¹ÊÐ¹æÔò·¢³ö¹Òµ¥ÊÂ¼þ£¨²»ÒÀÀµ tick£©¡£"""
+    """Ê±ï¿½ä´°ï¿½Ú¶ï¿½ï¿½ï¿½ï¿½ï¿½×°Ò¹ï¿½Ð¹ï¿½ï¿½ò·¢³ï¿½ï¿½Òµï¿½ï¿½Â¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tickï¿½ï¿½ï¿½ï¿½"""
     global _NIGHT_LAST_ATTEMPT
     if not _ORDERS_ENABLED or _RUNNER is None:
         return []
@@ -705,16 +705,16 @@ def _poll_night_market_events():
 
 
 def _clear_done_task(stock_code: str, task_id: str) -> None:
-    """ÏÂµ¥Ê§°Ü£¨ÈçÎ´°ó¶¨£©Ê±½âËø£¬±ãÓÚÐÞ¸´ºóÍ¬¼ÛÖØÊÔ¡£"""
+    """ï¿½Âµï¿½Ê§ï¿½Ü£ï¿½ï¿½ï¿½Î´ï¿½ó¶¨£ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½Ô¡ï¿½"""
     if _RUNNER is None or not task_id:
         return
     try:
         st = _RUNNER._states.get(str(stock_code or "").strip().upper())
         if st is not None and hasattr(st, "done_task_ids"):
             st.done_task_ids.discard(str(task_id))
-            print("[½»Ò×ºËÐÄ] unlock task for retry: %s" % task_id)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] unlock task for retry: %s" % task_id)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] unlock task error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] unlock task error: %s" % e)
 
 
 def _refresh_orders_enabled(rules: Optional[dict] = None) -> None:
@@ -734,7 +734,7 @@ def _refresh_orders_enabled(rules: Optional[dict] = None) -> None:
 
 
 def _refresh_min_buy_amount(rules: Optional[dict] = None) -> None:
-    """´Ó rules_armed Ë¢ÐÂÈ«¾Ö×îÐ¡ÂòÈë½ð¶î¡£"""
+    """ï¿½ï¿½ rules_armed Ë¢ï¿½ï¿½È«ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½î¡£"""
     global _MIN_BUY_AMOUNT
     data = rules
     if data is None and _RULES_PATH and os.path.isfile(_RULES_PATH):
@@ -746,7 +746,7 @@ def _refresh_min_buy_amount(rules: Optional[dict] = None) -> None:
         _MIN_BUY_AMOUNT = max(0.0, float((data or {}).get("min_buy_amount") or 0))
     except (TypeError, ValueError):
         _MIN_BUY_AMOUNT = 0.0
-    print("[½»Ò×ºËÐÄ] min_buy_amount=%.2f" % _MIN_BUY_AMOUNT)
+    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] min_buy_amount=%.2f" % _MIN_BUY_AMOUNT)
 
 
 def _parse_hms_to_seconds(raw: str) -> int:
@@ -761,7 +761,7 @@ def _parse_hms_to_seconds(raw: str) -> int:
 
 
 def _refresh_buy_block_window(rules: Optional[dict] = None) -> None:
-    """´Ó rules_armed Ë¢ÐÂ¿ªÅÌ½ûÂòÊ±¼ä´°¡£"""
+    """ï¿½ï¿½ rules_armed Ë¢ï¿½Â¿ï¿½ï¿½Ì½ï¿½ï¿½ï¿½Ê±ï¿½ä´°ï¿½ï¿½"""
     global _BUY_BLOCK_ENABLED, _BUY_BLOCK_START, _BUY_BLOCK_END
     data = rules
     if data is None and _RULES_PATH and os.path.isfile(_RULES_PATH):
@@ -774,13 +774,13 @@ def _refresh_buy_block_window(rules: Optional[dict] = None) -> None:
     _BUY_BLOCK_START = str(data.get("buy_block_start") or "09:30:00").strip()
     _BUY_BLOCK_END = str(data.get("buy_block_end") or "09:31:30").strip()
     print(
-        "[½»Ò×ºËÐÄ] buy_block enabled=%s %s-%s"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] buy_block enabled=%s %s-%s"
         % (_BUY_BLOCK_ENABLED, _BUY_BLOCK_START, _BUY_BLOCK_END)
     )
 
 
 def _is_in_buy_block_window() -> bool:
-    """ÓëÍ¼±íÒ»ÖÂ£ºÆôÓÃÇÒµ±Ç°Ê±µãÂäÔÚ [start, end]£¨º¬¶Ëµã£©¡£"""
+    """ï¿½ï¿½Í¼ï¿½ï¿½Ò»ï¿½Â£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òµï¿½Ç°Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [start, end]ï¿½ï¿½ï¿½ï¿½ï¿½Ëµã£©ï¿½ï¿½"""
     if not _BUY_BLOCK_ENABLED:
         return False
     from datetime import datetime as _dt
@@ -795,7 +795,7 @@ def _is_in_buy_block_window() -> bool:
 
 
 def _attach_event_context_to_order(record: dict, ev: dict) -> None:
-    """°ÑÊÂ¼þÀïµÄÕæÍ»ÆÆÃ÷Ï¸/Ö¸±ê´øµ½¶©µ¥¼ÇÂ¼£¬¹©Ö´ÐÐ¼ÇÂ¼ÏêÇéÕ¹Ê¾¡£"""
+    """ï¿½ï¿½ï¿½Â¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í»ï¿½ï¿½ï¿½ï¿½Ï¸/Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â¼ï¿½ï¿½ï¿½ï¿½Ö´ï¿½Ð¼ï¿½Â¼ï¿½ï¿½ï¿½ï¿½Õ¹Ê¾ï¿½ï¿½"""
     if not isinstance(record, dict) or not isinstance(ev, dict):
         return
     detail = str(ev.get("detail") or "").strip()
@@ -830,10 +830,10 @@ def _finalize_buy_block_skip(
     strategy_name: str,
     ev: dict,
 ) -> None:
-    """ÃüÖÐ½ûÂò´°£ºÓëÍ¼±íÒ»ÖÂ ¡ª Ìø¹ýÏÂµ¥²¢½áÊøÈÎÎñ£¨²»ÖØÊÔµ½´°Íâ£©¡£"""
+    """ï¿½ï¿½ï¿½Ð½ï¿½ï¿½ò´°£ï¿½ï¿½ï¿½Í¼ï¿½ï¿½Ò»ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½Âµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ñ£¨²ï¿½ï¿½ï¿½ï¿½Ôµï¿½ï¿½ï¿½ï¿½â£©ï¿½ï¿½"""
     from datetime import datetime as _dt
 
-    msg = "ÃüÖÐ¿ªÅÌ½ûÂòÊ±¼ä´°£¬Î´ÏÂµ¥£¨%s-%s£©" % (_BUY_BLOCK_START, _BUY_BLOCK_END)
+    msg = "ï¿½ï¿½ï¿½Ð¿ï¿½ï¿½Ì½ï¿½ï¿½ï¿½Ê±ï¿½ä´°ï¿½ï¿½Î´ï¿½Âµï¿½ï¿½ï¿½%s-%sï¿½ï¿½" % (_BUY_BLOCK_START, _BUY_BLOCK_END)
     record = {
         "stock_code": code,
         "side": "buy",
@@ -864,7 +864,7 @@ def _finalize_buy_block_skip(
         "msg": msg,
     }
     print(
-        "[½»Ò×ºËÐÄ] order buy_block skip %s tid=%s px=%s vol=%s msg=%s"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order buy_block skip %s tid=%s px=%s vol=%s msg=%s"
         % (code, tid, px, vol, msg)
     )
     if tid:
@@ -895,7 +895,7 @@ def _finalize_band_hard_pass_skip(
     vol: int,
     ev: dict,
 ) -> None:
-    """¼Û¸ñ´øÓ²pass£º²»Ð´ÊµÅÌµ¥£¬Ð´Èë skipped ¶©µ¥¹©Í¼±í/½»Ò×¼ÇÂ¼»ØÐ´¡£"""
+    """ï¿½Û¸ï¿½ï¿½Ó²passï¿½ï¿½ï¿½ï¿½Ð´Êµï¿½Ìµï¿½ï¿½ï¿½Ð´ï¿½ï¿½ skipped ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½/ï¿½ï¿½ï¿½×¼ï¿½Â¼ï¿½ï¿½Ð´ï¿½ï¿½"""
     from datetime import datetime as _dt
 
     detail = str(ev.get("detail") or "").strip()
@@ -910,7 +910,7 @@ def _finalize_band_hard_pass_skip(
         "detail": detail,
         "true_breakthrough_detail": detail,
         "true_breakthrough_passed": True,
-        "strategy_name": str(ev.get("strategy_name") or "ÂìÒÏ-Í»ÆÆÂòÈë"),
+        "strategy_name": str(ev.get("strategy_name") or "ï¿½ï¿½ï¿½ï¿½-Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"),
         "task_id": tid,
         "event_type": "tb_fail",
         "user_order_id": uid,
@@ -929,7 +929,7 @@ def _finalize_band_hard_pass_skip(
         "msg": msg,
     }
     print(
-        "[½»Ò×ºËÐÄ] order band_hard_pass skip %s tid=%s px=%s detail=%s"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order band_hard_pass skip %s tid=%s px=%s detail=%s"
         % (code, tid, px, (detail[:80] + "...") if len(detail) > 80 else detail)
     )
     if tid:
@@ -937,7 +937,7 @@ def _finalize_band_hard_pass_skip(
 
 
 def _mark_buy_task_done(code: str, tid: str, gi_raw=None) -> None:
-    """±¾±ÊÖÕ½á£ºÐ´Èë done£¬±ÜÃâ tick ¼ÌÐø´¥·¢¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½Õ½á£ºÐ´ï¿½ï¿½ doneï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tick ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     tid = str(tid or "").strip()
     code = str(code or "").strip().upper()
     if not tid or _RUNNER is None:
@@ -959,7 +959,7 @@ def _mark_buy_task_done(code: str, tid: str, gi_raw=None) -> None:
         if hasattr(_RUNNER, "dump_done_task_ids") and _RESULTS is not None:
             _RESULTS["done_task_ids"] = _RUNNER.dump_done_task_ids()
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] mark buy done error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] mark buy done error: %s" % e)
 
 
 def _finalize_order_below_min_skip(
@@ -977,7 +977,7 @@ def _finalize_order_below_min_skip(
     cash_msg: str,
     early_order: bool = False,
 ) -> None:
-    """±¾±ÊÂòÈë½ð¶îµÍÓÚ×îÐ¡ÏÂÏÞ£ºÌø¹ý²¢½áÊøÈÎÎñ£¨²»Ã¿ tick ÖØÊÔ£©¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½Þ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ñ£¨²ï¿½Ã¿ tick ï¿½ï¿½ï¿½Ô£ï¿½ï¿½ï¿½"""
     from datetime import datetime as _dt
 
     record = {
@@ -1012,7 +1012,7 @@ def _finalize_order_below_min_skip(
         "msg": cash_msg,
     }
     print(
-        "[½»Ò×ºËÐÄ] order below_min end %s tid=%s px=%s vol=%s msg=%s"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order below_min end %s tid=%s px=%s vol=%s msg=%s"
         % (code, tid, px, vol, cash_msg)
     )
     if early_order:
@@ -1045,25 +1045,25 @@ def _available_cash() -> float:
 
 
 def _assess_buy_volume(price: float, volume: int):
-    """ÂòÈëÃÅ¿Ø£¨ÓëÍ¼±í _assess_buy_cash_requirements ¶ÔÆë£©¡£
+    """ï¿½ï¿½ï¿½ï¿½ï¿½Å¿Ø£ï¿½ï¿½ï¿½Í¼ï¿½ï¿½ _assess_buy_cash_requirements ï¿½ï¿½ï¿½ë£©ï¿½ï¿½
 
-    ×îÐ¡ÂòÈëÖ»¿¨±¾±Ê¼Û¡ÁÁ¿£¨Óë¿ÉÓÃÏÖ½ðÎÞ¹Ø£©¡£
-    ·µ»Ø (ok, adjusted_volume, reason_code, message)¡£
+    ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½Ê¼Û¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö½ï¿½ï¿½Þ¹Ø£ï¿½ï¿½ï¿½
+    ï¿½ï¿½ï¿½ï¿½ (ok, adjusted_volume, reason_code, message)ï¿½ï¿½
     """
     px = float(price or 0)
     vol = int(volume or 0)
     min_buy = float(_MIN_BUY_AMOUNT or 0)
     if px <= 0 or vol <= 0:
-        return False, 0, "bad_params", "¼Û¸ñ»òÊýÁ¿ÎÞÐ§£¬Î´ÏÂµ¥"
+        return False, 0, "bad_params", "ï¿½Û¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð§ï¿½ï¿½Î´ï¿½Âµï¿½"
     cash = _available_cash()
     required = px * vol
-    # ×îÐ¡ÂòÈë£ºÖ»¿´±¾±ÊÎ¯ÍÐ½ð¶î£¬Óë¿ÉÓÃÏÖ½ðÎÞ¹Ø ¡ú ½áÊøÈÎÎñ
+    # ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ë£ºÖ»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¯ï¿½Ð½ï¿½î£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö½ï¿½ï¿½Þ¹ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if min_buy > 0 and required < min_buy:
         return (
             False,
             0,
             "order_below_min",
-            "ÂòÈë½ð¶îµÍÓÚ×îÐ¡ÂòÈë½ð¶î£¬Î´ÏÂµ¥£¨Ô¼%.2fÔª < ×îÐ¡%.2fÔª£©"
+            "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½î£¬Î´ï¿½Âµï¿½ï¿½ï¿½Ô¼%.2fÔª < ï¿½ï¿½Ð¡%.2fÔªï¿½ï¿½"
             % (required, min_buy),
         )
     if cash <= 0:
@@ -1071,7 +1071,7 @@ def _assess_buy_volume(price: float, volume: int):
             False,
             0,
             "no_cash",
-            "ÎÞ¿ÉÓÃ×Ê½ð£¬Î´ÏÂµ¥£¨ÐèÒªÔ¼%.2fÔª£¬¿ÉÓÃ%.2fÔª£©" % (required, cash),
+            "ï¿½Þ¿ï¿½ï¿½ï¿½ï¿½Ê½ï¿½Î´ï¿½Âµï¿½ï¿½ï¿½ï¿½ï¿½ÒªÔ¼%.2fÔªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½%.2fÔªï¿½ï¿½" % (required, cash),
         )
     if required > cash:
         max_vol = int(cash / px / 100) * 100
@@ -1080,20 +1080,20 @@ def _assess_buy_volume(price: float, volume: int):
                 False,
                 0,
                 "no_cash",
-                "¿ÉÓÃ×Ê½ð²»×ã100¹É£¬Î´ÏÂµ¥£¨ÐèÒªÔ¼%.2fÔª£¬¿ÉÓÃ%.2fÔª£©"
+                "ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½100ï¿½É£ï¿½Î´ï¿½Âµï¿½ï¿½ï¿½ï¿½ï¿½ÒªÔ¼%.2fÔªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½%.2fÔªï¿½ï¿½"
                 % (required, cash),
             )
         adj_amt = px * max_vol
-        # ËõÁ¿ºó±ä³ÉÐ¡µ¥£ºÔÝ»º£¨µÈ×Ê½ð¹»£©£¬²»°´×îÐ¡ÂòÈë½áÊø´óµ¥ÈÎÎñ
+        # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½Ý»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ð¹»£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         if min_buy > 0 and adj_amt < min_buy:
             return (
                 False,
                 0,
                 "no_cash",
-                "ÏÖ½ð²»×ãÇÒËõÁ¿ºóµÍÓÚ×îÐ¡ÂòÈë£¬ÔÝ²»ÏÂµ¥£¨Ô¼%.2fÔª < ×îÐ¡%.2fÔª£¬±ÜÃâÐ¡µ¥£©"
+                "ï¿½Ö½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ë£¬ï¿½Ý²ï¿½ï¿½Âµï¿½ï¿½ï¿½Ô¼%.2fÔª < ï¿½ï¿½Ð¡%.2fÔªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½"
                 % (adj_amt, min_buy),
             )
-        return True, max_vol, "shrunk", "ÏÖ½ð²»×ã£¬ËõÁ¿ÖÁ%d¹É" % max_vol
+        return True, max_vol, "shrunk", "ï¿½Ö½ï¿½ï¿½ã£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½%dï¿½ï¿½" % max_vol
     return True, vol, "ok", ""
 
 
@@ -1117,7 +1117,7 @@ def _early_key_from_ev(tid: str, gi_raw) -> str:
 
 
 def _find_early_order_sysid(tid: str, gi_raw=None) -> str:
-    """´Ó results.orders ÕÒÌáÇ°µ¥µÄ¹ñÌ¨ºÏÍ¬ºÅ¡£"""
+    """ï¿½ï¿½ results.orders ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½Ä¹ï¿½Ì¨ï¿½ï¿½Í¬ï¿½Å¡ï¿½"""
     if not isinstance(_RESULTS, dict):
         return ""
     ekey = _early_key_from_ev(tid, gi_raw)
@@ -1158,7 +1158,7 @@ def _find_early_order_sysid(tid: str, gi_raw=None) -> str:
 
 
 def _handle_order_events(ContextInfo, events, datas) -> bool:
-    """¶Ô single_buy/sell ÓëÕæÍ»ÆÆ tb_pass µ÷ passorder£»·µ»ØÊÇ·ñÐ´ÈëÁË¶©µ¥¼ÇÂ¼¡£"""
+    """ï¿½ï¿½ single_buy/sell ï¿½ï¿½ï¿½ï¿½Í»ï¿½ï¿½ tb_pass ï¿½ï¿½ passorderï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½Ð´ï¿½ï¿½ï¿½Ë¶ï¿½ï¿½ï¿½ï¿½ï¿½Â¼ï¿½ï¿½"""
     global _RESULTS
     if not events or _RESULTS is None:
         return False
@@ -1166,7 +1166,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
         return False
     po = _get_passorder_mod()
     if po is None:
-        print("[½»Ò×ºËÐÄ] passorder module missing")
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] passorder module missing")
         return False
     changed = False
     for ev in events:
@@ -1195,13 +1195,13 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
         code = str(ev.get("stock_code") or "").strip().upper()
         if not code:
             continue
-        # ¼Û¸ñ´øÓ²pass£ºÕæÍ»ÆÆÒÑ¹ýµ«ÉîÎ»/ÉÏÑØ×÷·Ï ¡ú skipped ¶©µ¥£¬²» passorder
+        # ï¿½Û¸ï¿½ï¿½Ó²passï¿½ï¿½ï¿½ï¿½Í»ï¿½ï¿½ï¿½Ñ¹ï¿½ï¿½ï¿½ï¿½ï¿½Î»/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ skipped ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ passorder
         if ev_type == "tb_fail":
             msg = str(ev.get("msg") or "").strip()
             detail = str(ev.get("detail") or "")
             is_band_hp = msg == "band_hard_pass" or (
-                ("Ó²pass" in detail or "ÕæÍ»ÆÆ·ÅÆú" in detail or "Ê×´ÎÕæÍ»ÆÆ·ÅÆú" in detail)
-                and ("ÓÐÐ§ÏÂÑØ" in detail or "Ó²ÉÏÑØ" in detail or "ÂòÈë²Î¿¼¼Û" in detail)
+                ("Ó²pass" in detail or "ï¿½ï¿½Í»ï¿½Æ·ï¿½ï¿½ï¿½" in detail or "ï¿½×´ï¿½ï¿½ï¿½Í»ï¿½Æ·ï¿½ï¿½ï¿½" in detail)
+                and ("ï¿½ï¿½Ð§ï¿½ï¿½ï¿½ï¿½" in detail or "Ó²ï¿½ï¿½ï¿½ï¿½" in detail or "ï¿½ï¿½ï¿½ï¿½Î¿ï¿½ï¿½ï¿½" in detail)
             )
             if not is_band_hp:
                 continue
@@ -1244,7 +1244,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 pass
         tick_dict = tick_row if isinstance(tick_row, dict) else None
 
-        # ---- Ò¹ÊÐÎ¯ÍÐ£º¹æÔò¼ÛÏÞ¼Û£¬³É¹¦ºó´ý¹ñÌ¨ÒÑ±¨ÔÙ disarm ----
+        # ---- Ò¹ï¿½ï¿½Î¯ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¼Û£ï¿½ï¿½É¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½Ñ±ï¿½ï¿½ï¿½ disarm ----
         if ev_type in ("night_buy_hit", "night_sell_hit"):
             px = float(trig or 0)
             if px <= 0:
@@ -1260,7 +1260,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                         uid=uid,
                         px=px,
                         vol=vol,
-                        strategy_name="ÂìÒÏ-Ò¹ÊÐÂòÈë",
+                        strategy_name="ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
                         ev=ev,
                     )
                     changed = True
@@ -1277,7 +1277,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                             uid=uid,
                             px=px,
                             vol=vol,
-                            strategy_name="ÂìÒÏ-Ò¹ÊÐÂòÈë",
+                            strategy_name="ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
                             ev=ev,
                             cash_msg=cash_msg,
                             early_order=False,
@@ -1293,7 +1293,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                         "volume": int(vol or 0),
                         "status": "skipped",
                         "msg": cash_msg,
-                        "strategy_name": "ÂìÒÏ-Ò¹ÊÐÂòÈë",
+                        "strategy_name": "ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
                         "task_id": tid,
                         "event_type": ev_type,
                         "user_order_id": uid,
@@ -1309,7 +1309,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                         "msg": cash_msg,
                     }
                     print(
-                        "[½»Ò×ºËÐÄ] order night_buy skip %s px=%s vol=%s msg=%s"
+                        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order night_buy skip %s px=%s vol=%s msg=%s"
                         % (code, px, vol, cash_msg)
                     )
                     changed = True
@@ -1320,7 +1320,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     code,
                     px,
                     vol,
-                    strategy_name="ÂìÒÏ-Ò¹ÊÐÂòÈë",
+                    strategy_name="ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
                     user_order_id=uid,
                 )
                 side_tag = "night_buy"
@@ -1330,7 +1330,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     code,
                     px,
                     vol,
-                    strategy_name="ÂìÒÏ-Ò¹ÊÐÂô³ö",
+                    strategy_name="ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
                     user_order_id=uid,
                 )
                 side_tag = "night_sell"
@@ -1345,14 +1345,14 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 "msg": record.get("msg") or reason,
             }
             print(
-                "[½»Ò×ºËÐÄ] order %s %s ok=%s px=%s vol=%s msg=%s"
+                "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order %s %s ok=%s px=%s vol=%s msg=%s"
                 % (side_tag, code, ok, record.get("price"), record.get("volume"), record.get("msg"))
             )
-            # ²» disarm / ²»¼Ç done£»·Ïµ¥»òÊ§°ÜÓÉÂÖÑ¯ÖØÊÔ
+            # ï¿½ï¿½ disarm / ï¿½ï¿½ï¿½ï¿½ doneï¿½ï¿½ï¿½Ïµï¿½ï¿½ï¿½Ê§ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¯ï¿½ï¿½ï¿½ï¿½
             changed = True
             continue
 
-        # ---- ÌáÇ°ÏÂµ¥£º¹Ò / ³· / È·ÈÏ ----
+        # ---- ï¿½ï¿½Ç°ï¿½Âµï¿½ï¿½ï¿½ï¿½ï¿½ / ï¿½ï¿½ / È·ï¿½ï¿½ ----
         if ev_type == "early_place":
             is_buy = True
             try:
@@ -1368,7 +1368,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 elif kind in ("single_buy", "grid_buy"):
                     is_buy = True
                 else:
-                    # ÎÞ×´Ì¬Ê±°´¼ÛÁ¿·½Ïò£ºÂòÈëÄ¿±êµÍÓÚÏÖ¼Û
+                    # ï¿½ï¿½×´Ì¬Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¼ï¿½
                     is_buy = float(trig or 0) < float(last_px or 0) or float(trig) <= 0
             except Exception:
                 is_buy = True
@@ -1388,7 +1388,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                             uid=uid,
                             px=px,
                             vol=vol,
-                            strategy_name="ÂìÒÏ-ÌáÇ°ÂòÈë",
+                            strategy_name="ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½",
                             ev=ev,
                             cash_msg=cash_msg,
                             early_order=True,
@@ -1404,7 +1404,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                         "volume": int(vol or 0),
                         "status": "skipped",
                         "msg": cash_msg,
-                        "strategy_name": "ÂìÒÏ-ÌáÇ°ÂòÈë",
+                        "strategy_name": "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½",
                         "task_id": tid,
                         "event_type": ev_type,
                         "early_order": True,
@@ -1432,7 +1432,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     except Exception:
                         pass
                     print(
-                        "[½»Ò×ºËÐÄ] order early_buy skip %s px=%s vol=%s msg=%s"
+                        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order early_buy skip %s px=%s vol=%s msg=%s"
                         % (code, px, vol, cash_msg)
                     )
                     changed = True
@@ -1443,7 +1443,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     code,
                     px,
                     vol,
-                    strategy_name="ÂìÒÏ-ÌáÇ°ÂòÈë",
+                    strategy_name="ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½",
                     user_order_id=uid,
                 )
                 side_tag = "early_buy"
@@ -1453,7 +1453,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     code,
                     px,
                     vol,
-                    strategy_name="ÂìÒÏ-ÌáÇ°Âô³ö",
+                    strategy_name="ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½",
                     user_order_id=uid,
                 )
                 side_tag = "early_sell"
@@ -1474,7 +1474,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 "msg": record.get("msg") or reason,
             }
             print(
-                "[½»Ò×ºËÐÄ] order %s %s ok=%s px=%s vol=%s msg=%s"
+                "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order %s %s ok=%s px=%s vol=%s msg=%s"
                 % (side_tag, code, ok, record.get("price"), record.get("volume"), record.get("msg"))
             )
             if not ok:
@@ -1501,7 +1501,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 "volume": int(vol or 0),
                 "status": "cancel_sent" if ok else "error",
                 "msg": str(reason or crec.get("msg") or ""),
-                "strategy_name": "ÂìÒÏ-ÌáÇ°³·µ¥",
+                "strategy_name": "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½",
                 "task_id": tid,
                 "event_type": ev_type,
                 "early_order": True,
@@ -1516,7 +1516,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     pass
             po.append_order_record(_RESULTS, record)
             print(
-                "[½»Ò×ºËÐÄ] early_cancel %s sysid=%s ok=%s msg=%s"
+                "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] early_cancel %s sysid=%s ok=%s msg=%s"
                 % (code, sysid, ok, record.get("msg"))
             )
             changed = True
@@ -1542,7 +1542,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 side = str(o.get("side") or "buy").lower()
                 break
             else:
-                # ÎÞ¹Òµ¥¼ÇÂ¼Ê±£ºÏÖ¼ÛÏà¶Ô´¥·¢¼Û
+                # ï¿½Þ¹Òµï¿½ï¿½ï¿½Â¼Ê±ï¿½ï¿½ï¿½Ö¼ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½
                 side = "buy" if float(last_px or 0) <= float(trig or 0) else "sell"
             is_buy = side != "sell"
             record = {
@@ -1552,7 +1552,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 "volume": int(vol or 0),
                 "status": "filled",
                 "msg": "early_confirm",
-                "strategy_name": "ÂìÒÏ-ÌáÇ°È·ÈÏ",
+                "strategy_name": "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°È·ï¿½ï¿½",
                 "task_id": tid,
                 "event_type": ev_type,
                 "early_order": True,
@@ -1564,7 +1564,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     record["grid_index"] = int(gi_raw)
                 except (TypeError, ValueError):
                     pass
-            # »ØÌîºÏÍ¬ºÅ±ãÓÚÁÐ±í¶ÔÆë
+            # ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½Å±ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½
             sysid = _find_early_order_sysid(tid, gi_raw)
             if sysid:
                 record["order_sysid"] = sysid
@@ -1585,13 +1585,13 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             elif tid:
                 _disarm_task_in_rules_armed(tid)
             print(
-                "[½»Ò×ºËÐÄ] early_confirm %s tid=%s px=%s vol=%s"
+                "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] early_confirm %s tid=%s px=%s vol=%s"
                 % (code, tid, record.get("price"), record.get("volume"))
             )
             changed = True
             continue
 
-        # ¶¨Ê±Çå²ÖÌø¹ý£ºÖ»»ØÐ´×´Ì¬£¬²»ÏÂµ¥
+        # ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½Ð´×´Ì¬ï¿½ï¿½ï¿½ï¿½ï¿½Âµï¿½
         if ev_type == "scheduled_clear_skip":
             from datetime import datetime as _dt
 
@@ -1602,7 +1602,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 "volume": int(vol or 0),
                 "status": "skipped",
                 "msg": str(ev.get("detail") or ev.get("msg") or "skipped"),
-                "strategy_name": "ÂìÒÏ-¶¨Ê±Çå²Ö",
+                "strategy_name": "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ê±ï¿½ï¿½ï¿½",
                 "task_id": tid,
                 "event_type": ev_type,
                 "user_order_id": uid,
@@ -1619,13 +1619,13 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             if tid:
                 _disarm_task_in_rules_armed(tid)
             print(
-                "[½»Ò×ºËÐÄ] order scheduled_clear skip %s px=%s vol=%s msg=%s"
+                "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order scheduled_clear skip %s px=%s vol=%s msg=%s"
                 % (code, record.get("price"), record.get("volume"), record.get("msg"))
             )
             changed = True
             continue
         if ev_type == "best_sell_hit" and vol <= 0:
-            # volume=0 ±íÊ¾Çå²Ö£ºÓÃ results ³Ö²Ö¿ÉÂôÁ¿
+            # volume=0 ï¿½ï¿½Ê¾ï¿½ï¿½Ö£ï¿½ï¿½ï¿½ results ï¿½Ö²Ö¿ï¿½ï¿½ï¿½ï¿½ï¿½
             pos_map = (_RESULTS or {}).get("positions") or {}
             prow = None
             if isinstance(pos_map, dict):
@@ -1637,11 +1637,11 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     vol = 0
             vol = (vol // 100) * 100
             if vol <= 0:
-                print("[½»Ò×ºËÐÄ] best_sell skip no position %s" % code)
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] best_sell skip no position %s" % code)
                 continue
         if ev_type == "scheduled_clear_hit":
-            # Éú³ÉÊ± max_volume ³£ÎªÈ«²Ö£»ÅÌÖÐµ¯ÐÔ/Í»ÆÆÒÑÂôºóÐë°´¿ÉÂôÁ¿½Ø¶Ï£¬·ñÔò¹ñÌ¨·Ïµ¥¡£
-            # ÏÈÇ¿ÖÆË¢³Ö²Ö£»Èô¿ìÕÕ¿Õ£¬ÔòÓÃ¡¸ÈÎÎñÁ¿ - µ±ÈÕÒÑÂô³É½»¡¹¶µµ×¡£
+            # ï¿½ï¿½ï¿½ï¿½Ê± max_volume ï¿½ï¿½ÎªÈ«ï¿½Ö£ï¿½ï¿½ï¿½ï¿½Ðµï¿½ï¿½ï¿½/Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë°´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø¶Ï£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½Ïµï¿½ï¿½ï¿½
+            # ï¿½ï¿½Ç¿ï¿½ï¿½Ë¢ï¿½Ö²Ö£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¿Õ£ï¿½ï¿½ï¿½ï¿½Ã¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ - ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×¡ï¿½
             try:
                 snap = _load_py_module(
                     "ant_account_snapshot", "ant_account_snapshot.py"
@@ -1653,7 +1653,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 ):
                     snap.sync_account_snapshot_to_results(ContextInfo, _RESULTS)
             except Exception as e:
-                print("[½»Ò×ºËÐÄ] scheduled_clear position sync fail: %s" % e)
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] scheduled_clear position sync fail: %s" % e)
             pos_map = (_RESULTS or {}).get("positions") or {}
             prow = None
             if isinstance(pos_map, dict):
@@ -1681,8 +1681,8 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     except (TypeError, ValueError):
                         tv = 0
                     if tv <= 0 and str(o.get("broker_status_text") or "") in (
-                        "ÒÑ³É",
-                        "²¿³É",
+                        "ï¿½Ñ³ï¿½",
+                        "ï¿½ï¿½ï¿½ï¿½",
                     ):
                         try:
                             tv = int(float(o.get("volume") or 0))
@@ -1693,18 +1693,18 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 clipped = ((max(0, int(vol) - sold)) // 100) * 100
                 if clipped > 0:
                     print(
-                        "[½»Ò×ºËÐÄ] scheduled_clear clip by filled %s req=%s sold=%s -> %s"
+                        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] scheduled_clear clip by filled %s req=%s sold=%s -> %s"
                         % (code, vol, sold, clipped)
                     )
                     avail = clipped
             if avail <= 0:
-                print("[½»Ò×ºËÐÄ] scheduled_clear skip no position %s" % code)
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] scheduled_clear skip no position %s" % code)
                 if tid:
                     _disarm_task_in_rules_armed(tid)
                 continue
             if vol <= 0 or vol > avail:
                 print(
-                    "[½»Ò×ºËÐÄ] scheduled_clear clip vol %s %s -> %s"
+                    "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] scheduled_clear clip vol %s %s -> %s"
                     % (code, vol, avail)
                 )
                 vol = avail
@@ -1724,22 +1724,22 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 tick_row=tick_dict,
             )
             if ev_type == "best_sell_hit":
-                strategy_name = "ÂìÒÏ-µ¯ÐÔÂô³ö"
+                strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
                 side_tag = "best_sell"
             elif ev_type == "breakthrough_sell_hit":
-                strategy_name = "ÂìÒÏ-Í»ÆÆÂô³ö"
+                strategy_name = "ï¿½ï¿½ï¿½ï¿½-Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
                 side_tag = "breakthrough_sell"
             elif ev_type == "cage_sell_hit":
-                strategy_name = "ÂìÒÏ-Áý×ÓÂô³ö"
+                strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
                 side_tag = "cage_sell"
             elif ev_type == "grid_sell_hit":
-                strategy_name = "ÂìÒÏ-Íø¸ñÂô³ö"
+                strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
                 side_tag = "grid_sell"
             elif ev_type == "scheduled_clear_hit":
-                strategy_name = "ÂìÒÏ-¶¨Ê±Çå²Ö"
+                strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ê±ï¿½ï¿½ï¿½"
                 side_tag = "scheduled_clear"
             else:
-                strategy_name = "ÂìÒÏ-µ¥µãÂô³ö"
+                strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
                 side_tag = "single_sell"
             ok, reason, record = po.place_limit_sell(
                 ContextInfo,
@@ -1756,7 +1756,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 trigger_price=trig,
                 tick_row=tick_dict,
             )
-            strategy_name = "ÂìÒÏ-Í»ÆÆÂòÈë"
+            strategy_name = "ï¿½ï¿½ï¿½ï¿½-Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
             side_tag = "breakthrough_buy"
             is_buy_order = True
         elif ev_type == "best_buy_hit":
@@ -1766,7 +1766,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 trigger_price=trig,
                 tick_row=tick_dict,
             )
-            strategy_name = "ÂìÒÏ-µ¯ÐÔÂòÈë"
+            strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
             side_tag = "best_buy"
             is_buy_order = True
         elif ev_type == "cage_buy_hit":
@@ -1776,7 +1776,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 trigger_price=trig,
                 tick_row=tick_dict,
             )
-            strategy_name = "ÂìÒÏ-Áý×ÓÂòÈë"
+            strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
             side_tag = "cage_buy"
             is_buy_order = True
         elif ev_type == "grid_buy_hit":
@@ -1786,7 +1786,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 trigger_price=trig,
                 tick_row=tick_dict,
             )
-            strategy_name = "ÂìÒÏ-Íø¸ñÂòÈë"
+            strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
             side_tag = "grid_buy"
             is_buy_order = True
         else:
@@ -1796,7 +1796,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 trigger_price=trig,
                 tick_row=tick_dict,
             )
-            strategy_name = "ÂìÒÏ-µ¥µãÂòÈë"
+            strategy_name = "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
             side_tag = "single_buy"
             is_buy_order = True
 
@@ -1866,7 +1866,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     "msg": cash_msg,
                 }
                 print(
-                    "[½»Ò×ºËÐÄ] order %s skip %s px=%s vol=%s msg=%s"
+                    "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order %s skip %s px=%s vol=%s msg=%s"
                     % (side_tag, code, buy_px, vol, cash_msg)
                 )
                 _unlock_order_task(code, tid, gi_raw, ev_type)
@@ -1901,7 +1901,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             "msg": record.get("msg") or reason,
         }
         print(
-            "[½»Ò×ºËÐÄ] order %s %s ok=%s px=%s vol=%s msg=%s"
+            "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order %s %s ok=%s px=%s vol=%s msg=%s"
             % (side_tag, code, ok, record.get("price"), record.get("volume"), record.get("msg"))
         )
         if not ok and str(reason or record.get("msg") or "") in (
@@ -1918,8 +1918,8 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     import qmt_builtin.ant_server_chan as sct
                 why = str(reason or record.get("msg") or "")
                 sct.notify_alert(
-                    "´óQMTÏÂµ¥Í¨µÀÒì³£",
-                    "Ô­Òò=%s\n´úÂë=%s side=%s\nÇë¼ì²é passorder °ó¶¨Óë×Ê½ðÕËºÅ¡£"
+                    "ï¿½ï¿½QMTï¿½Âµï¿½Í¨ï¿½ï¿½ï¿½ì³£",
+                    "Ô­ï¿½ï¿½=%s\nï¿½ï¿½ï¿½ï¿½=%s side=%s\nï¿½ï¿½ï¿½ï¿½ passorder ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ËºÅ¡ï¿½"
                     % (why, code, side_tag),
                     alert_key="shadow_order_bind_%s" % datetime.now().strftime("%Y%m%d"),
                     cooldown_sec=3600,
@@ -1934,7 +1934,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     gi = -1
                 all_done = False
                 try:
-                    # ¿´ÄÚ´æ done£ºÍ¬Ò» task ÊÇ·ñÒÑ°ÑÈ«²¿µãÎ»ÓëÕûµ¥ tid ¼ÇÈë
+                    # ï¿½ï¿½ï¿½Ú´ï¿½ doneï¿½ï¿½Í¬Ò» task ï¿½Ç·ï¿½ï¿½Ñ°ï¿½È«ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tid ï¿½ï¿½ï¿½ï¿½
                     st = None
                     if _RUNNER is not None:
                         st = _RUNNER._states.get(code)
@@ -1951,10 +1951,10 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
 
 def _log_armed_tasks(rules: Optional[dict]) -> None:
     tasks = (rules or {}).get("tasks") or []
-    print("[½»Ò×ºËÐÄ] armed tasks=%d" % len(tasks))
+    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] armed tasks=%d" % len(tasks))
     for t in tasks:
         print(
-            "[½»Ò×ºËÐÄ] task %s %s type=%s trig=%s vol=%s enabled=%s"
+            "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] task %s %s type=%s trig=%s vol=%s enabled=%s"
             % (
                 t.get("task_id"),
                 t.get("stock_code"),
@@ -1967,12 +1967,12 @@ def _log_armed_tasks(rules: Optional[dict]) -> None:
 
 
 def init(ContextInfo):
-    print("[½»Ò×ºËÐÄ] init begin version=%s" % SHADOW_VERSION, flush=True)
+    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] init begin version=%s" % SHADOW_VERSION, flush=True)
     global _RUNNER, _SUB_ID, _RESULTS, _RULES_PATH, _RESULTS_PATH, _RULES_SIG, _TICK_COUNT, _CONTEXT, _SUBSCRIBED_CODES
     _CONTEXT = ContextInfo
     _ensure_tick_runner_module()
     _RULES_PATH, _RESULTS_PATH = default_paths(PROJECT_ROOT)
-    print("[½»Ò×ºËÐÄ] rules_file_exists=%s" % os.path.isfile(_RULES_PATH), flush=True)
+    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] rules_file_exists=%s" % os.path.isfile(_RULES_PATH), flush=True)
     rules = load_rules_armed(_RULES_PATH)
     _refresh_orders_enabled(rules)
     _RULES_SIG = rules_file_signature(_RULES_PATH)
@@ -2013,10 +2013,10 @@ def init(ContextInfo):
     _subscribe_codes(ContextInfo, subscribe_codes)
     removed = prune_results_stocks(_RESULTS, subscribe_codes)
     if removed:
-        print("[½»Ò×ºËÐÄ] pruned results.stocks removed=%d keep=%d" % (removed, len(subscribe_codes)))
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] pruned results.stocks removed=%d keep=%d" % (removed, len(subscribe_codes)))
         _flush_results_to_disk(force=True)
     print(
-        "[½»Ò×ºËÐÄ] init trade_date=%s tasks=%d watch=%d pool_watch=%d subscribe=%d orders_enabled=%s"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] init trade_date=%s tasks=%d watch=%d pool_watch=%d subscribe=%d orders_enabled=%s"
         % (
             rules.get("trade_date"),
             len(_RUNNER.stock_codes()),
@@ -2026,20 +2026,20 @@ def init(ContextInfo):
             _ORDERS_ENABLED,
         )
     )
-    print("[½»Ò×ºËÐÄ] rules reload=%ss results flush=%ss" % (RULES_RELOAD_INTERVAL_SEC, RESULTS_FLUSH_INTERVAL_SEC))
+    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] rules reload=%ss results flush=%ss" % (RULES_RELOAD_INTERVAL_SEC, RESULTS_FLUSH_INTERVAL_SEC))
 
     try:
         snap = _load_py_module("ant_account_snapshot", "ant_account_snapshot.py")
         if snap is None or not hasattr(snap, "bind_trading_account"):
-            print("[½»Ò×ºËÐÄ] set_account skip: ant_account_snapshot missing")
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] set_account skip: ant_account_snapshot missing")
         else:
             ok_acc, acc_info = snap.bind_trading_account(ContextInfo)
             if ok_acc:
-                print("[½»Ò×ºËÐÄ] set_account ok account=%s" % acc_info)
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] set_account ok account=%s" % acc_info)
             else:
-                print("[½»Ò×ºËÐÄ] set_account skip: %s" % acc_info)
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] set_account skip: %s" % acc_info)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] set_account error: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] set_account error: %s: %s" % (type(e).__name__, e))
 
     #   1      rules_armed     +   results
     try:
@@ -2050,19 +2050,19 @@ def init(ContextInfo):
             "SH",
         )
     except Exception as e:
-        print(f"[½»Ò×ºËÐÄ] run_time not available: {e}")
+        print(f"[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] run_time not available: {e}")
 
     try:
         sector = _get_sector_sync_runner()
         sector.register_startup_sector_timer(ContextInfo)
         sector.register_sector_sync_timer(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] sector_sync timer register failed: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] sector_sync timer register failed: %s" % e)
         try:
             register_startup_sector_timer(ContextInfo)
             register_sector_sync_timer(ContextInfo)
         except Exception as e2:
-            print("[½»Ò×ºËÐÄ] sector_sync fallback failed: %s" % e2)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] sector_sync fallback failed: %s" % e2)
     daily_sync = _get_daily_sync_runner()
     daily_sync.register_daily_sync_timer(ContextInfo)
     daily_sync.schedule_failed_manifest_recovery_on_init()
@@ -2070,27 +2070,27 @@ def init(ContextInfo):
         after_rank = _get_after_hours_rank_runner()
         after_rank.register_after_hours_rank_timer(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] after_hours_rank timer register failed: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] after_hours_rank timer register failed: %s" % e)
     try:
         tick_full = _get_tick_full_sync_runner()
         tick_full.register_tick_full_sync_timer(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] tick_full_sync timer register failed: %s" % e)
-    print("[½»Ò×ºËÐÄ] init done", flush=True)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] tick_full_sync timer register failed: %s" % e)
+    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] init done", flush=True)
 
 
 def handlebar(ContextInfo):
-    """Ö÷Ïß³Ì£ºrun_time µÄ²¹³ä£¨ÊµÅÌÏÂÔ¼Ã¿ 3s ´¥·¢£©¡£"""
+    """ï¿½ï¿½ï¿½ß³Ì£ï¿½run_time ï¿½Ä²ï¿½ï¿½ä£¨Êµï¿½ï¿½ï¿½ï¿½Ô¼Ã¿ 3s ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     global _CONTEXT
     _CONTEXT = ContextInfo
     try:
         periodic_sync(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] handlebar periodic error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] handlebar periodic error: %s" % e)
 
 
 def periodic_sync(ContextInfo):
-    """Ö÷Ïß³ÌÈë¿Ú£º½ûÖ¹ÔÚ tick »Øµ÷»òºóÌ¨Ïß³Ìµ÷ÓÃ¡£"""
+    """ï¿½ï¿½ï¿½ß³ï¿½ï¿½ï¿½Ú£ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ tick ï¿½Øµï¿½ï¿½ï¿½ï¿½Ì¨ï¿½ß³Ìµï¿½ï¿½Ã¡ï¿½"""
     global _CONTEXT, _LAST_PERIODIC_TS
     _CONTEXT = ContextInfo
     now = time.time()
@@ -2107,7 +2107,7 @@ def periodic_sync(ContextInfo):
         if night_ev:
             for nev in night_ev:
                 print(
-                    "[½»Ò×ºËÐÄ] %s %s %s trig=%s"
+                    "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] %s %s %s trig=%s"
                     % (
                         nev.get("stock_code"),
                         nev.get("type"),
@@ -2119,22 +2119,22 @@ def periodic_sync(ContextInfo):
         if night_fin or night_ord:
             _flush_results_to_disk(force=True)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] night market poll error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] night market poll error: %s" % e)
     _flush_results_to_disk(force=True)
     daily_sync = _get_daily_sync_runner()
     try:
         daily_sync.maybe_run_failed_manifest_recovery(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] failed recovery sync error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] failed recovery sync error: %s" % e)
     try:
         if hasattr(daily_sync, "maybe_run_force_year_backfill"):
             daily_sync.maybe_run_force_year_backfill(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] force year backfill error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] force year backfill error: %s" % e)
     try:
         daily_sync.process_on_demand_sync_requests(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] on_demand sync error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] on_demand sync error: %s" % e)
     try:
         import ant_cancel_request as _cancel_req
 
@@ -2142,30 +2142,30 @@ def periodic_sync(ContextInfo):
         if n:
             _flush_results_to_disk(force=True)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] cancel_request error: %s" % e)
-    # ÊÖ¶¯Ö¸¶¨ÈÕ tick È«Á¿ÐøÅÜ£¨data/tick_full_sync/manual_request.json£©
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] cancel_request error: %s" % e)
+    # ï¿½Ö¶ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ tick È«ï¿½ï¿½ï¿½ï¿½ï¿½Ü£ï¿½data/tick_full_sync/manual_request.jsonï¿½ï¿½
     try:
         tick_full = _get_tick_full_sync_runner()
         if hasattr(tick_full, "process_manual_request"):
             tick_full.process_manual_request(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] tick_full manual_request error: %s" % e)
-    # ÊÖ¶¯Ö¸¶¨ÈÕÅÌºóÁ¿ÄÜÖØÅÜ£¨data/after_hours_rank/manual_request.json£©
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] tick_full manual_request error: %s" % e)
+    # ï¿½Ö¶ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü£ï¿½data/after_hours_rank/manual_request.jsonï¿½ï¿½
     try:
         after_rank = _get_after_hours_rank_runner()
         if hasattr(after_rank, "process_manual_request"):
             after_rank.process_manual_request(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] after_hours_rank manual_request error: %s" % e)
-    # ÅÌºóÁ÷Ë®Ïß²¹ÅÜ£ºÈÕÏß ¡ú tick ÂäÅÌ ¡ú Á¿ÄÜ£¨»¥Ïà´®ÐÐ£¬²»ÇÀÏÂÔØ£©
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] after_hours_rank manual_request error: %s" % e)
+    # ï¿½Ìºï¿½ï¿½ï¿½Ë®ï¿½ß²ï¿½ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ tick ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½ï¿½à´®ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½
     try:
         daily_sync.maybe_catch_up_after_hours_pipeline(ContextInfo)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] after_hours pipeline catch-up error: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] after_hours pipeline catch-up error: %s" % e)
 
 
 def _maybe_sync_account_snapshot(ContextInfo) -> None:
-    """ÖÜÆÚÐÔ½«Ä£ÐÍ½»Ò×ÕË»§×Ê½ð/³Ö²ÖÐ´Èë results.json¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½Ô½ï¿½Ä£ï¿½Í½ï¿½ï¿½ï¿½ï¿½Ë»ï¿½ï¿½Ê½ï¿½/ï¿½Ö²ï¿½Ð´ï¿½ï¿½ results.jsonï¿½ï¿½"""
     global _RESULTS, _LAST_ACCOUNT_SYNC_TS, _ACCOUNT_SNAPSHOT_IMPORT_ERR, _ACCOUNT_SNAPSHOT_SKIP_REASON
     if _RESULTS is None:
         return
@@ -2179,7 +2179,7 @@ def _maybe_sync_account_snapshot(ContextInfo) -> None:
             msg = "ant_account_snapshot missing"
             if msg != _ACCOUNT_SNAPSHOT_IMPORT_ERR:
                 _ACCOUNT_SNAPSHOT_IMPORT_ERR = msg
-                print("[½»Ò×ºËÐÄ] account snapshot import error: %s" % msg)
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot import error: %s" % msg)
             return
         sync_fn = snap.sync_account_snapshot_to_results
         _ACCOUNT_SNAPSHOT_IMPORT_ERR = ""
@@ -2188,20 +2188,20 @@ def _maybe_sync_account_snapshot(ContextInfo) -> None:
         msg = "%s: %s" % (type(e).__name__, e)
         if msg != _ACCOUNT_SNAPSHOT_IMPORT_ERR:
             _ACCOUNT_SNAPSHOT_IMPORT_ERR = msg
-            print("[½»Ò×ºËÐÄ] account snapshot import error: %s" % msg)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot import error: %s" % msg)
         return
     try:
         ok, reason = sync_fn(ContextInfo, _RESULTS)
     except Exception as e:
         _LAST_ACCOUNT_SYNC_TS = now
-        print("[½»Ò×ºËÐÄ] account snapshot error: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot error: %s: %s" % (type(e).__name__, e))
         return
     _LAST_ACCOUNT_SYNC_TS = now
     if ok:
         _ACCOUNT_SNAPSHOT_SKIP_REASON = ""
     elif reason != _ACCOUNT_SNAPSHOT_SKIP_REASON:
         _ACCOUNT_SNAPSHOT_SKIP_REASON = reason
-        print("[½»Ò×ºËÐÄ] account snapshot skip: %s" % reason)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account snapshot skip: %s" % reason)
 
 
 def _process_pending_resubscribe(ContextInfo) -> None:
@@ -2212,7 +2212,7 @@ def _process_pending_resubscribe(ContextInfo) -> None:
     _PENDING_RESUBSCRIBE = None
     _SUBSCRIBED_CODES = list(pending)
     _subscribe_codes(ContextInfo, pending)
-    print("[½»Ò×ºËÐÄ] resubscribe done (deferred) codes=%d" % len(pending))
+    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] resubscribe done (deferred) codes=%d" % len(pending))
 
 
 # QMT run_time may resolve the first timer name; keep alias on strategy module.
@@ -2245,7 +2245,7 @@ def reload_rules_if_changed(ContextInfo, *, allow_resubscribe: bool = True):
         except Exception:
             pass
         tasks_changed, codes_changed = True, True
-        print("[½»Ò×ºËÐÄ] runner recreated after tick_runner hot-load")
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] runner recreated after tick_runner hot-load")
     else:
         tasks_changed, codes_changed = _RUNNER.reload_rules(rules)
     _RULES_SIG = sig
@@ -2260,7 +2260,7 @@ def reload_rules_if_changed(ContextInfo, *, allow_resubscribe: bool = True):
     n_tasks = len(rules.get("tasks") or [])
     n_pool = len(rules.get("strategy_pool_watch") or [])
     print(
-        "[½»Ò×ºËÐÄ] rules reload: tasks=%d pool_watch=%d subscribe=%d"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] rules reload: tasks=%d pool_watch=%d subscribe=%d"
         % (n_tasks, n_pool, len(subscribe_codes))
     )
     _log_armed_tasks(rules)
@@ -2271,16 +2271,16 @@ def reload_rules_if_changed(ContextInfo, *, allow_resubscribe: bool = True):
             if _RESULTS is not None:
                 removed = prune_results_stocks(_RESULTS, subscribe_codes)
                 if removed:
-                    print("[½»Ò×ºËÐÄ] rules reload: pruned stocks removed=%d" % removed)
-            print("[½»Ò×ºËÐÄ] rules reload: resubscribe done")
+                    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] rules reload: pruned stocks removed=%d" % removed)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] rules reload: resubscribe done")
         else:
             _PENDING_RESUBSCRIBE = list(subscribe_codes)
             print(
-                "[½»Ò×ºËÐÄ] rules reload: resubscribe deferred codes=%d"
+                "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] rules reload: resubscribe deferred codes=%d"
                 % len(subscribe_codes)
             )
     elif tasks_changed:
-        print("[½»Ò×ºËÐÄ] rules reload: tasks updated (trigger/params)")
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] rules reload: tasks updated (trigger/params)")
 
 
 def _subscribe_codes(ContextInfo, codes):
@@ -2288,18 +2288,18 @@ def _subscribe_codes(ContextInfo, codes):
     if _SUB_ID:
         try:
             ContextInfo.unsubscribe_quote(_SUB_ID)
-            print("[½»Ò×ºËÐÄ] unsubscribe ok sub_id=%s" % _SUB_ID)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] unsubscribe ok sub_id=%s" % _SUB_ID)
         except Exception as e:
-            print("[½»Ò×ºËÐÄ] unsubscribe failed: %s" % e)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] unsubscribe failed: %s" % e)
         _SUB_ID = None
     if not codes:
-        print("[½»Ò×ºËÐÄ] subscribe skipped: no codes (unsubscribed)")
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] subscribe skipped: no codes (unsubscribed)")
         return
     try:
         _CONTEXT = ContextInfo
         _SUB_ID = ContextInfo.subscribe_whole_quote(list(codes), callback=_on_tick)
-        print(f"[½»Ò×ºËÐÄ] subscribe_whole_quote codes={len(codes)} sub_id={_SUB_ID}")
-        # È«ÍÆ½ø±¾µØ»º´æÐèÒªÒ»Ë²£»¾º¼Û½×¶ÎÔÙ seed Ò»´ÎÌá¸ß 9:25 ÃüÖÐÂÊ£¨²»À­³¤Éú³ÉÆ÷µÈ´ý£©
+        print(f"[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] subscribe_whole_quote codes={len(codes)} sub_id={_SUB_ID}")
+        # È«ï¿½Æ½ï¿½ï¿½ï¿½ï¿½Ø»ï¿½ï¿½ï¿½ï¿½ï¿½ÒªÒ»Ë²ï¿½ï¿½ï¿½ï¿½ï¿½Û½×¶ï¿½ï¿½ï¿½ seed Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ 9:25 ï¿½ï¿½ï¿½ï¿½ï¿½Ê£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È´ï¿½ï¿½ï¿½
         _maybe_seed_snapshots(force=True)
         try:
             time.sleep(0.35)
@@ -2307,7 +2307,7 @@ def _subscribe_codes(ContextInfo, codes):
             pass
         _maybe_seed_snapshots(force=True)
     except Exception as e:
-        print(f"[½»Ò×ºËÐÄ] subscribe failed: {e}")
+        print(f"[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] subscribe failed: {e}")
 
 
 def _codes_need_seed() -> bool:
@@ -2325,7 +2325,7 @@ def _codes_need_seed() -> bool:
 
 
 def _maybe_seed_snapshots(force: bool = False) -> None:
-    """9:25¨C9:30 µÈÊ±¶Î tick »Øµ÷¿ÉÄÜÎª¿Õ£¬ÓÃ get_full_tick ²¹ results.json¡£"""
+    """9:25ï¿½C9:30 ï¿½ï¿½Ê±ï¿½ï¿½ tick ï¿½Øµï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½Õ£ï¿½ï¿½ï¿½ get_full_tick ï¿½ï¿½ results.jsonï¿½ï¿½"""
     global _LAST_SEED_TS, _SUBSCRIBED_CODES
     import time
     from datetime import datetime
@@ -2334,7 +2334,7 @@ def _maybe_seed_snapshots(force: bool = False) -> None:
         return
     now = time.time()
     if not force:
-        # ¼¯ºÏ¾º¼Û´°¿Ú¸üÇÚ¿ìµØ seed£¨Á¬Ðø tick Ï¡ÉÙ£©
+        # ï¿½ï¿½ï¿½Ï¾ï¿½ï¿½Û´ï¿½ï¿½Ú¸ï¿½ï¿½Ú¿ï¿½ï¿½ seedï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tick Ï¡ï¿½Ù£ï¿½
         interval = float(SEED_INTERVAL_SEC)
         try:
             t = datetime.now().time()
@@ -2353,10 +2353,10 @@ def _maybe_seed_snapshots(force: bool = False) -> None:
 
 
 def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
-    """ÓÃÈ«ÍÆ»º´æ¹à results.stocks¡£
+    """ï¿½ï¿½È«ï¿½Æ»ï¿½ï¿½ï¿½ï¿½ results.stocksï¿½ï¿½
 
-    ÓÅÏÈ ContextInfo.get_full_tick£¨Óë subscribe_whole_quote Í¬Ò»Â·»º´æ£©£»
-    xtdata.get_full_tick Ö»ÊÇÅÔÂ·£¬9:25 Ç°³£Îª¿Õ¡ª¡ªÕâÊÇÒÔÇ°¡¸9:30 ²ÅÓÐ¼Û¡¹µÄÖ÷ÒòÖ®Ò»¡£
+    ï¿½ï¿½ï¿½ï¿½ ContextInfo.get_full_tickï¿½ï¿½ï¿½ï¿½ subscribe_whole_quote Í¬Ò»Â·ï¿½ï¿½ï¿½æ£©ï¿½ï¿½
+    xtdata.get_full_tick Ö»ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½9:25 Ç°ï¿½ï¿½Îªï¿½Õ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½9:30 ï¿½ï¿½ï¿½Ð¼Û¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö®Ò»ï¿½ï¿½
     """
     global _RESULTS, _CONTEXT
     if _RESULTS is None or not codes:
@@ -2375,7 +2375,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
             if isinstance(tick_map, dict) and tick_map:
                 source = "ContextInfo"
         except Exception as e:
-            print("[½»Ò×ºËÐÄ] seed ContextInfo.get_full_tick failed: %s" % e)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] seed ContextInfo.get_full_tick failed: %s" % e)
             tick_map = None
 
     if not isinstance(tick_map, dict) or not tick_map:
@@ -2389,7 +2389,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
             tick_map = xtdata.get_full_tick(list(code_list))
             source = "xtdata"
         except Exception as e:
-            print("[½»Ò×ºËÐÄ] seed xtdata.get_full_tick failed: %s" % e)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] seed xtdata.get_full_tick failed: %s" % e)
             return False
 
     if not isinstance(tick_map, dict) or not tick_map:
@@ -2400,7 +2400,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
     for stock_code in code_list:
         row = _light_row(tick_map.get(stock_code))
         if not row:
-            # ÓÐµÄ°æ±¾ key ´óÐ¡Ð´²»Ò»ÖÂ
+            # ï¿½ÐµÄ°æ±¾ key ï¿½ï¿½Ð¡Ð´ï¿½ï¿½Ò»ï¿½ï¿½
             row = _light_row(tick_map.get(stock_code.lower()) or tick_map.get(stock_code.upper()))
         if not row:
             continue
@@ -2413,7 +2413,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
             seeded += 1
     if seeded:
         print(
-            "[½»Ò×ºËÐÄ] seeded %d/%d codes from full_tick via %s"
+            "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] seeded %d/%d codes from full_tick via %s"
             % (seeded, len(code_list), source or "?")
         )
     return changed
@@ -2444,28 +2444,28 @@ def _on_tick(datas):
     try:
         events = _RUNNER.on_quote_dict(datas)
     except Exception as e:
-        print(f"[½»Ò×ºËÐÄ] on_tick error: {e}")
+        print(f"[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] on_tick error: {e}")
         return
 
     _TICK_COUNT += 1
     if _TICK_COUNT == 1:
-        print("[½»Ò×ºËÐÄ] first tick received")
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] first tick received")
 
     for ev in events:
         code = str(ev.get("stock_code") or "")
         print(
-            f"[½»Ò×ºËÐÄ] {code} {ev.get('type')} {ev.get('tick_time')} "
+            f"[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] {code} {ev.get('type')} {ev.get('tick_time')} "
             f"trig={ev.get('trigger_price')} {ev.get('msg')}"
         )
         if ev.get("detail"):
-            print(f"[½»Ò×ºËÐÄ] detail: {ev.get('detail')}")
+            print(f"[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] detail: {ev.get('detail')}")
         price_changed = True
 
     order_changed = False
     try:
         order_changed = _handle_order_events(_CONTEXT, events, datas)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] order handle error: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order handle error: %s: %s" % (type(e).__name__, e))
 
     elastic_changed = False
     try:
@@ -2518,4 +2518,4 @@ def _flush_results_to_disk(force: bool = False):
         save_json_atomic(_RESULTS_PATH, _RESULTS)
         _LAST_FLUSH_TS = now
     except Exception as e:
-        print(f"[½»Ò×ºËÐÄ] write results failed: {e}")
+        print(f"[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] write results failed: {e}")
