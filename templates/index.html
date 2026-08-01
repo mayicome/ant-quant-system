@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>关键价格计算器</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+        
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .input-group {
+            margin-bottom: 30px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .input-group label {
+            font-weight: 600;
+            color: #333;
+            font-size: 1.1em;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        
+        .input-group input {
+            flex: 1;
+            padding: 15px 20px;
+            border: 2px solid #e1e5e9;
+            border-radius: 10px;
+            font-size: 1.1em;
+            transition: all 0.3s ease;
+        }
+        
+        .input-group input:focus {
+            outline: none;
+            border-color: #4facfe;
+            box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.1);
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(79, 172, 254, 0.3);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #4facfe;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .result {
+            display: none;
+            margin-top: 30px;
+        }
+        
+        .stock-info {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .stock-info h3 {
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .stock-info p {
+            color: #666;
+            font-size: 1.1em;
+        }
+        
+        .key-points {
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .key-points h3 {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            margin: 0;
+            font-weight: 300;
+        }
+        
+        .point-item {
+            padding: 20px;
+            border-bottom: 1px solid #e1e5e9;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background-color 0.3s ease;
+        }
+        
+        .point-item:hover {
+            background-color: #f8f9fa;
+        }
+        
+        .point-item:last-child {
+            border-bottom: none;
+        }
+        
+        .point-name {
+            font-weight: 600;
+            color: #333;
+            font-size: 1.1em;
+        }
+        
+        .point-price {
+            font-size: 1.2em;
+            font-weight: 700;
+            color: #4facfe;
+        }
+        
+        .point-price.current {
+            color: #0078d4;
+            font-weight: 800;
+        }
+        
+        .point-price.limit-up {
+            color: #dc3545;
+            font-weight: 800;
+        }
+        
+        .point-price.limit-down {
+            color: #28a745;
+            font-weight: 800;
+        }
+        
+        .point-price.above-limit,
+        .point-price.below-limit {
+            text-decoration: line-through;
+            opacity: 0.7;
+        }
+        
+        .point-ratio {
+            font-size: 0.9em;
+            color: #666;
+            margin-left: 10px;
+        }
+        
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            border-left: 4px solid #c33;
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 0.9em;
+        }
+        
+        /* 分析结果样式 */
+        .analysis-section {
+            margin-top: 20px;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .analysis-tabs {
+            display: flex;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e1e5e9;
+        }
+        
+        .tab-btn {
+            flex: 1;
+            padding: 15px 10px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 600;
+            color: #666;
+            transition: all 0.3s ease;
+            border-bottom: 3px solid transparent;
+        }
+        
+        .tab-btn:hover {
+            background: #e9ecef;
+            color: #333;
+        }
+        
+        .tab-btn.active {
+            color: #4facfe;
+            border-bottom-color: #4facfe;
+            background: white;
+        }
+        
+        .tab-content {
+            padding: 20px;
+        }
+        
+        .tab-content h3 {
+            margin-bottom: 15px;
+            color: #333;
+            font-size: 1.2em;
+        }
+        
+        .analysis-item {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 4px solid #4facfe;
+        }
+        
+        .analysis-item.limit-up {
+            border-left-color: #dc3545;
+            background: #fff5f5;
+        }
+        
+        .analysis-item.limit-down {
+            border-left-color: #28a745;
+            background: #f0fff4;
+        }
+        
+        .analysis-item.normal {
+            border-left-color: #6c757d;
+            background: #f8f9fa;
+        }
+        
+        .analysis-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        
+        .analysis-item-time {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .analysis-item-status {
+            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        
+        .analysis-item-status.limit-up {
+            color: #dc3545;
+            background: #f8d7da;
+        }
+        
+        .analysis-item-status.limit-down {
+            color: #28a745;
+            background: #d4edda;
+        }
+        
+        .analysis-item-status.normal {
+            color: #6c757d;
+            background: #e2e3e5;
+        }
+        
+        .analysis-item-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .analysis-item-detail {
+            text-align: center;
+        }
+        
+        .analysis-item-detail-label {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 2px;
+        }
+        
+        .analysis-item-detail-value {
+            color: #666;
+        }
+        
+        .analysis-item-detail-value.increase {
+            color: #dc3545;
+            font-weight: 600;
+        }
+        
+        .analysis-item-detail-value.decrease {
+            color: #28a745;
+            font-weight: 600;
+        }
+        
+        .behavior-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .behavior-stat {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            border-left: 4px solid #4facfe;
+        }
+        
+        .behavior-stat-label {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .behavior-stat-value {
+            font-size: 1.5em;
+            font-weight: 700;
+            color: #4facfe;
+        }
+        
+        .behavior-stat-value.limit-up-add {
+            color: #dc3545;
+        }
+        
+        .behavior-stat-value.limit-up-withdraw {
+            color: #28a745;
+        }
+        
+        .behavior-stat-value.limit-down-add {
+            color: #dc3545;
+        }
+        
+        .behavior-stat-value.limit-down-withdraw {
+            color: #28a745;
+        }
+        
+        @media (max-width: 600px) {
+            .container {
+                margin: 10px;
+                border-radius: 15px;
+            }
+            
+            .header {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .content {
+                padding: 20px;
+            }
+            
+            .input-group {
+                gap: 10px;
+            }
+            
+            .input-group label {
+                font-size: 1.0em;
+            }
+            
+            .input-group input {
+                font-size: 1.0em;
+                padding: 12px 15px;
+                width: 120px;
+                flex: none;
+            }
+            
+            .point-item {
+                padding: 15px;
+                flex-direction: row;
+                justify-content: space-between;
+                align-items: center;
+            }
+            
+            .point-name {
+                font-size: 0.95em;
+                flex: 1;
+                margin-right: 10px;
+            }
+            
+            .point-price {
+                font-size: 1.0em;
+                flex-shrink: 0;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .input-group input {
+                width: 100px;
+                padding: 10px 12px;
+                font-size: 0.95em;
+            }
+            
+            .point-item {
+                padding: 12px;
+            }
+            
+            .point-name {
+                font-size: 0.9em;
+            }
+            
+            .point-price {
+                font-size: 0.95em;
+            }
+        }
+        
+        @media (max-width: 360px) {
+            .input-group input {
+                width: 90px;
+                padding: 8px 10px;
+                font-size: 0.9em;
+            }
+            
+            .point-item {
+                padding: 10px;
+            }
+            
+            .point-name {
+                font-size: 0.85em;
+            }
+            
+            .point-price {
+                font-size: 0.9em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>关键价格计算器</h1>
+        </div>
+        
+        <div class="content">
+            <div class="input-group">
+                <label for="stockCode">股票代码</label>
+                <input type="text" id="stockCode" placeholder="000001" maxlength="10">
+            </div>
+            
+            <div class="input-group">
+                <label for="analysisDate">分析日期</label>
+                <input type="date" id="analysisDate">
+            </div>
+            
+            <button class="btn" id="calculateBtn" onclick="calculateKeyPoints()">
+                开始全面分析
+            </button>
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>正在计算中，请稍候...</p>
+            </div>
+            
+            <div class="result" id="result">
+                <div class="stock-info" id="stockInfo">
+                    <h3 id="stockName">股票名称</h3>
+                    <p id="stockCodeDisplay">股票代码</p>
+                </div>
+                
+                <!-- 单股全面分析结果 -->
+                <div class="analysis-section" id="analysisSection" style="display: none;">
+                    <div class="analysis-tabs">
+                        <button class="tab-btn active" onclick="showTab('limitDetails')">涨跌停板详情</button>
+                        <button class="tab-btn" onclick="showTab('abnormalChanges')">异常变化</button>
+                        <button class="tab-btn" onclick="showTab('mainForce')">主力行为</button>
+                        <button class="tab-btn" onclick="showTab('keyPoints')">关键价格点</button>
+                    </div>
+                    
+                    <div class="tab-content" id="limitDetailsTab">
+                        <h3>📈 涨跌停板详情</h3>
+                        <div id="limitDetailsList"></div>
+                    </div>
+                    
+                    <div class="tab-content" id="abnormalChangesTab" style="display: none;">
+                        <h3>⚠️ 异常变化</h3>
+                        <div id="abnormalChangesList"></div>
+                    </div>
+                    
+                    <div class="tab-content" id="mainForceTab" style="display: none;">
+                        <h3>🎯 主力行为分析</h3>
+                        <div id="mainForceList"></div>
+                    </div>
+                    
+                    <div class="tab-content" id="keyPointsTab" style="display: none;">
+                        <h3>💰 关键价格点</h3>
+                    <div id="keyPointsList"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="error" id="error" style="display: none;"></div>
+        </div>
+        
+        <div class="footer">
+            <p>© 2025 关键价格计算器 - 蚂蚁量化乐园（公众号）</p>
+        </div>
+    </div>
+
+    <script>
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            const stockCodeInput = document.getElementById('stockCode');
+            const analysisDateInput = document.getElementById('analysisDate');
+            
+            // 设置默认分析日期为今天
+            const today = new Date().toISOString().split('T')[0];
+            analysisDateInput.value = today;
+            
+            // 输入框回车事件
+            stockCodeInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    calculateKeyPoints();
+                }
+            });
+            
+            // 输入框变化时清除结果
+            stockCodeInput.addEventListener('input', function() {
+                hideResult();
+                hideError();
+            });
+        });
+        
+        function showLoading() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('calculateBtn').disabled = true;
+            hideResult();
+            hideError();
+        }
+        
+        function hideLoading() {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('calculateBtn').disabled = false;
+        }
+        
+        function showResult() {
+            document.getElementById('result').style.display = 'block';
+        }
+        
+        function hideResult() {
+            document.getElementById('result').style.display = 'none';
+            // 恢复股票代码显示
+            document.getElementById('stockCodeDisplay').style.display = 'block';
+        }
+        
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+        
+        function hideError() {
+            document.getElementById('error').style.display = 'none';
+        }
+        
+        function calculateKeyPoints() {
+            const stockCode = document.getElementById('stockCode').value.trim();
+            const analysisDate = document.getElementById('analysisDate').value;
+            
+            if (!stockCode) {
+                showError('请输入股票代码');
+                return;
+            }
+            
+            showLoading();
+            
+            // 先进行单股全面分析
+            fetch('/api/stock_analysis', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    stock_code: stockCode,
+                    analysis_date: analysisDate
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // 显示分析结果
+                    displayAnalysisResult(data);
+                    
+                    // 然后获取关键价格点
+                    return fetch('/api/calculate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    stock_code: stockCode
+                })
+                    });
+                } else {
+                    throw new Error(data.error || '分析失败');
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                hideLoading();
+                
+                if (data.success) {
+                    // 显示关键价格点
+                    displayKeyPoints(data);
+                } else {
+                    showError(data.error || '关键价格计算失败');
+                }
+            })
+            .catch(error => {
+                hideLoading();
+                showError('网络错误，请检查网络连接');
+                console.error('Error:', error);
+            });
+        }
+        
+        function displayAnalysisResult(data) {
+            // 显示股票信息
+            document.getElementById('stockName').textContent = `${data.stock_name} (${data.stock_code})`;
+            document.getElementById('stockCodeDisplay').style.display = 'none';
+            
+            // 显示分析结果区域
+            document.getElementById('analysisSection').style.display = 'block';
+            
+            // 显示涨跌停板详情
+            displayLimitDetails(data.analysis_result.limit_up_analysis);
+            
+            // 显示异常变化
+            displayAbnormalChanges(data.analysis_result.abnormal_changes);
+            
+            // 显示主力行为
+            displayMainForce(data.analysis_result.main_force_analysis);
+            
+            showResult();
+        }
+        
+        function displayKeyPoints(data) {
+            // 显示关键价格点
+            const keyPointsList = document.getElementById('keyPointsList');
+            keyPointsList.innerHTML = '';
+            
+            if (data.key_points && data.key_points.length > 0) {
+                data.key_points.forEach(point => {
+                    const pointDiv = document.createElement('div');
+                    pointDiv.className = 'point-item';
+                    
+                    const nameSpan = document.createElement('span');
+                    nameSpan.className = 'point-name';
+                    nameSpan.textContent = point.name;
+                    
+                    const priceSpan = document.createElement('span');
+                    priceSpan.className = 'point-price';
+                    
+                    // 根据价格点类型添加相应的CSS类
+                    if (point.type === 'current') {
+                        priceSpan.classList.add('current');
+                    } else if (point.type === 'limit_up') {
+                        priceSpan.classList.add('limit-up');
+                    } else if (point.type === 'limit_down') {
+                        priceSpan.classList.add('limit-down');
+                    } else if (point.type === 'above_limit' || point.type === 'below_limit') {
+                        priceSpan.classList.add(point.type.replace('_', '-'));
+                    }
+                    
+                    priceSpan.textContent = `¥${point.price.toFixed(2)}`;
+                    
+                    if (point.cost_ratio) {
+                        const ratioSpan = document.createElement('span');
+                        ratioSpan.className = 'point-ratio';
+                        ratioSpan.textContent = point.cost_ratio;
+                        priceSpan.appendChild(ratioSpan);
+                    }
+                    
+                    pointDiv.appendChild(nameSpan);
+                    pointDiv.appendChild(priceSpan);
+                    keyPointsList.appendChild(pointDiv);
+                });
+            } else {
+                const noDataDiv = document.createElement('div');
+                noDataDiv.className = 'point-item';
+                noDataDiv.innerHTML = '<span style="color: #666;">暂无关键价格点数据</span>';
+                keyPointsList.appendChild(noDataDiv);
+            }
+        }
+        
+        function displayLimitDetails(limitAnalysis) {
+            const limitDetailsList = document.getElementById('limitDetailsList');
+            limitDetailsList.innerHTML = '';
+            
+            if (limitAnalysis && limitAnalysis.limit_details && limitAnalysis.limit_details.length > 0) {
+                limitAnalysis.limit_details.forEach(detail => {
+                    const itemDiv = document.createElement('div');
+                    itemDiv.className = 'analysis-item';
+                    
+                    // 根据状态设置样式
+                    if (detail.status.includes('涨停') && !detail.status.includes('开板')) {
+                        itemDiv.classList.add('limit-up');
+                    } else if (detail.status.includes('跌停') && !detail.status.includes('开板')) {
+                        itemDiv.classList.add('limit-down');
+                    } else {
+                        itemDiv.classList.add('normal');
+                    }
+                    
+                    const headerDiv = document.createElement('div');
+                    headerDiv.className = 'analysis-item-header';
+                    
+                    const timeSpan = document.createElement('span');
+                    timeSpan.className = 'analysis-item-time';
+                    timeSpan.textContent = detail.time;
+                    
+                    const statusSpan = document.createElement('span');
+                    statusSpan.className = 'analysis-item-status';
+                    statusSpan.textContent = detail.status;
+                    
+                    if (detail.status.includes('涨停') && !detail.status.includes('开板')) {
+                        statusSpan.classList.add('limit-up');
+                    } else if (detail.status.includes('跌停') && !detail.status.includes('开板')) {
+                        statusSpan.classList.add('limit-down');
+                    } else {
+                        statusSpan.classList.add('normal');
+                    }
+                    
+                    headerDiv.appendChild(timeSpan);
+                    headerDiv.appendChild(statusSpan);
+                    
+                    const detailsDiv = document.createElement('div');
+                    detailsDiv.className = 'analysis-item-details';
+                    
+                    detailsDiv.innerHTML = `
+                        <div class="analysis-item-detail">
+                            <div class="analysis-item-detail-label">价格</div>
+                            <div class="analysis-item-detail-value">¥${detail.price.toFixed(2)}</div>
+                        </div>
+                        <div class="analysis-item-detail">
+                            <div class="analysis-item-detail-label">成交量</div>
+                            <div class="analysis-item-detail-value">${detail.volume}</div>
+                        </div>
+                        <div class="analysis-item-detail">
+                            <div class="analysis-item-detail-label">盘口量</div>
+                            <div class="analysis-item-detail-value">${detail.bid_vol || detail.ask_vol || 0}</div>
+                        </div>
+                    `;
+                    
+                    itemDiv.appendChild(headerDiv);
+                    itemDiv.appendChild(detailsDiv);
+                    limitDetailsList.appendChild(itemDiv);
+                });
+            } else {
+                const noDataDiv = document.createElement('div');
+                noDataDiv.className = 'analysis-item';
+                noDataDiv.innerHTML = '<span style="color: #666;">暂无涨跌停板数据</span>';
+                limitDetailsList.appendChild(noDataDiv);
+            }
+        }
+        
+        function displayAbnormalChanges(abnormalChanges) {
+            const abnormalChangesList = document.getElementById('abnormalChangesList');
+            abnormalChangesList.innerHTML = '';
+            
+            if (abnormalChanges && abnormalChanges.length > 0) {
+                abnormalChanges.forEach(change => {
+                    const itemDiv = document.createElement('div');
+                    itemDiv.className = 'analysis-item';
+                    
+                    // 根据涨跌停状态设置样式
+                    if (change.is_limit_up) {
+                        itemDiv.classList.add('limit-up');
+                    } else if (change.is_limit_down) {
+                        itemDiv.classList.add('limit-down');
+                    } else {
+                        itemDiv.classList.add('normal');
+                    }
+                    
+                    const headerDiv = document.createElement('div');
+                    headerDiv.className = 'analysis-item-header';
+                    
+                    const timeSpan = document.createElement('span');
+                    timeSpan.className = 'analysis-item-time';
+                    timeSpan.textContent = change.time;
+                    
+                    const reasonSpan = document.createElement('span');
+                    reasonSpan.className = 'analysis-item-status';
+                    reasonSpan.textContent = change.reason || '异常情况';
+                    reasonSpan.classList.add('normal');
+                    
+                    headerDiv.appendChild(timeSpan);
+                    headerDiv.appendChild(reasonSpan);
+                    
+                    const detailsDiv = document.createElement('div');
+                    detailsDiv.className = 'analysis-item-details';
+                    
+                    detailsDiv.innerHTML = `
+                        <div class="analysis-item-detail">
+                            <div class="analysis-item-detail-label">成交量变化</div>
+                            <div class="analysis-item-detail-value ${change.volume_change > 0 ? 'increase' : change.volume_change < 0 ? 'decrease' : ''}">${change.volume_change}</div>
+                        </div>
+                        <div class="analysis-item-detail">
+                            <div class="analysis-item-detail-label">买一量变化</div>
+                            <div class="analysis-item-detail-value ${change.bid_vol_change > 0 ? 'increase' : change.bid_vol_change < 0 ? 'decrease' : ''}">${change.bid_vol_change}</div>
+                        </div>
+                        <div class="analysis-item-detail">
+                            <div class="analysis-item-detail-label">卖一量变化</div>
+                            <div class="analysis-item-detail-value ${change.ask_vol_change > 0 ? 'increase' : change.ask_vol_change < 0 ? 'decrease' : ''}">${change.ask_vol_change}</div>
+                        </div>
+                        <div class="analysis-item-detail">
+                            <div class="analysis-item-detail-label">涨跌停行为</div>
+                            <div class="analysis-item-detail-value">${change.limit_up_add || change.limit_up_withdraw || change.limit_down_add || change.limit_down_withdraw || '-'}</div>
+                        </div>
+                        <div class="analysis-item-detail">
+                            <div class="analysis-item-detail-label">最新价</div>
+                            <div class="analysis-item-detail-value">¥${change.latest_price.toFixed(2)}</div>
+                        </div>
+                    `;
+                    
+                    itemDiv.appendChild(headerDiv);
+                    itemDiv.appendChild(detailsDiv);
+                    abnormalChangesList.appendChild(itemDiv);
+                });
+            } else {
+                const noDataDiv = document.createElement('div');
+                noDataDiv.className = 'analysis-item';
+                noDataDiv.innerHTML = '<span style="color: #666;">暂无异常变化数据</span>';
+                abnormalChangesList.appendChild(noDataDiv);
+            }
+        }
+        
+        function displayMainForce(mainForceAnalysis) {
+            const mainForceList = document.getElementById('mainForceList');
+            mainForceList.innerHTML = '';
+            
+            if (mainForceAnalysis && mainForceAnalysis.behavior_counts) {
+                const behaviorCounts = mainForceAnalysis.behavior_counts;
+                
+                // 显示行为统计
+                const statsDiv = document.createElement('div');
+                statsDiv.className = 'behavior-stats';
+                
+                const behaviors = [
+                    { key: 'limit_up_add', label: '涨停加单', class: 'limit-up-add' },
+                    { key: 'limit_up_withdraw', label: '涨停撤单', class: 'limit-up-withdraw' },
+                    { key: 'limit_down_add', label: '跌停加单', class: 'limit-down-add' },
+                    { key: 'limit_down_withdraw', label: '跌停撤单', class: 'limit-down-withdraw' }
+                ];
+                
+                behaviors.forEach(behavior => {
+                    const statDiv = document.createElement('div');
+                    statDiv.className = 'behavior-stat';
+                    
+                    const labelDiv = document.createElement('div');
+                    labelDiv.className = 'behavior-stat-label';
+                    labelDiv.textContent = behavior.label;
+                    
+                    const valueDiv = document.createElement('div');
+                    valueDiv.className = `behavior-stat-value ${behavior.class}`;
+                    valueDiv.textContent = behaviorCounts[behavior.key] || 0;
+                    
+                    statDiv.appendChild(labelDiv);
+                    statDiv.appendChild(valueDiv);
+                    statsDiv.appendChild(statDiv);
+                });
+                
+                mainForceList.appendChild(statsDiv);
+            } else {
+                const noDataDiv = document.createElement('div');
+                noDataDiv.className = 'analysis-item';
+                noDataDiv.innerHTML = '<span style="color: #666;">暂无主力行为数据</span>';
+                mainForceList.appendChild(noDataDiv);
+            }
+        }
+        
+        function showTab(tabName) {
+            // 隐藏所有标签内容
+            const tabs = ['limitDetails', 'abnormalChanges', 'mainForce', 'keyPoints'];
+            tabs.forEach(tab => {
+                document.getElementById(tab + 'Tab').style.display = 'none';
+                document.querySelector(`[onclick="showTab('${tab}')"]`).classList.remove('active');
+            });
+            
+            // 显示选中的标签内容
+            document.getElementById(tabName + 'Tab').style.display = 'block';
+            document.querySelector(`[onclick="showTab('${tabName}')"]`).classList.add('active');
+        }
+    </script>
+</body>
+</html>

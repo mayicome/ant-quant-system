@@ -1,0 +1,1544 @@
+{
+  "version": 2,
+  "kind": "batch_backtest",
+  "exported_at": "2026-06-17T16:06:10",
+  "source_strategy_id": "strategy_508e9237",
+  "source_strategy_name": "买：突破5日线-真突破",
+  "batch_rule": "T+1，持有1个交易日",
+  "segments": [
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:52:30",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-03",
+        "end": "2026-03-03",
+        "last_equity_date": "2026-03-03"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-02",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:53:00",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-04",
+        "end": "2026-03-04",
+        "last_equity_date": "2026-03-04"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 964359.311,
+      "positions": {
+        "000890": {
+          "volume": 700,
+          "cost": 8.08
+        },
+        "002182": {
+          "volume": 1400,
+          "cost": 21.41
+        }
+      },
+      "last_mark_prices": {
+        "000890": 8.870000000000001,
+        "002182": 20.57
+      },
+      "batch_selection_date": "2026-03-03",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:53:17",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-05",
+        "end": "2026-03-05",
+        "last_equity_date": "2026-03-05"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-04",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:53:31",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-06",
+        "end": "2026-03-06",
+        "last_equity_date": "2026-03-06"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 969687.9090999999,
+      "positions": {
+        "600313": {
+          "volume": 3500,
+          "cost": 8.66
+        }
+      },
+      "last_mark_prices": {
+        "600313": 8.65
+      },
+      "batch_selection_date": "2026-03-05",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:53:46",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-09",
+        "end": "2026-03-09",
+        "last_equity_date": "2026-03-09"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-06",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:54:01",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-10",
+        "end": "2026-03-10",
+        "last_equity_date": "2026-03-10"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-09",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:54:25",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-11",
+        "end": "2026-03-11",
+        "last_equity_date": "2026-03-11"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 941063.3243000001,
+      "positions": {
+        "002648": {
+          "volume": 1100,
+          "cost": 26.33
+        },
+        "600075": {
+          "volume": 4300,
+          "cost": 6.97
+        }
+      },
+      "last_mark_prices": {
+        "002648": 27.930000000000003,
+        "600075": 7.470000000000001
+      },
+      "batch_selection_date": "2026-03-10",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:54:36",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-12",
+        "end": "2026-03-12",
+        "last_equity_date": "2026-03-12"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 988828.6496,
+      "positions": {
+        "002930": {
+          "volume": 800,
+          "cost": 13.96
+        }
+      },
+      "last_mark_prices": {
+        "002930": 14.32
+      },
+      "batch_selection_date": "2026-03-11",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:54:54",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-13",
+        "end": "2026-03-13",
+        "last_equity_date": "2026-03-13"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-12",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:55:11",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-16",
+        "end": "2026-03-16",
+        "last_equity_date": "2026-03-16"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-13",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:55:35",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-17",
+        "end": "2026-03-17",
+        "last_equity_date": "2026-03-17"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 970487.1488000001,
+      "positions": {
+        "603693": {
+          "volume": 2000,
+          "cost": 14.75
+        }
+      },
+      "last_mark_prices": {
+        "603693": 15.879999999999999
+      },
+      "batch_selection_date": "2026-03-16",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:55:53",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-18",
+        "end": "2026-03-18",
+        "last_equity_date": "2026-03-18"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-17",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:56:12",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-19",
+        "end": "2026-03-19",
+        "last_equity_date": "2026-03-19"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-18",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:56:22",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-20",
+        "end": "2026-03-20",
+        "last_equity_date": "2026-03-20"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 970336.1035,
+      "positions": {
+        "002150": {
+          "volume": 900,
+          "cost": 32.95
+        }
+      },
+      "last_mark_prices": {
+        "002150": 34.88
+      },
+      "batch_selection_date": "2026-03-19",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:56:35",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-23",
+        "end": "2026-03-23",
+        "last_equity_date": "2026-03-23"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-20",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:56:45",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-24",
+        "end": "2026-03-24",
+        "last_equity_date": "2026-03-24"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 971983.5976,
+      "positions": {
+        "002902": {
+          "volume": 1200,
+          "cost": 23.34
+        }
+      },
+      "last_mark_prices": {
+        "002902": 23.59
+      },
+      "batch_selection_date": "2026-03-23",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:56:49",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-25",
+        "end": "2026-03-25",
+        "last_equity_date": "2026-03-25"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-24",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:56:53",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-26",
+        "end": "2026-03-26",
+        "last_equity_date": "2026-03-26"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-25",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:57:06",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-27",
+        "end": "2026-03-27",
+        "last_equity_date": "2026-03-27"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-26",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:57:18",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-30",
+        "end": "2026-03-30",
+        "last_equity_date": "2026-03-30"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-27",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:57:28",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-03-31",
+        "end": "2026-03-31",
+        "last_equity_date": "2026-03-31"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 968628.5914,
+      "positions": {
+        "601908": {
+          "volume": 6300,
+          "cost": 4.98
+        }
+      },
+      "last_mark_prices": {
+        "601908": 5.010000000000001
+      },
+      "batch_selection_date": "2026-03-30",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:57:47",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-01",
+        "end": "2026-04-01",
+        "last_equity_date": "2026-04-01"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-03-31",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:57:58",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-02",
+        "end": "2026-04-02",
+        "last_equity_date": "2026-04-02"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-01",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:58:10",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-03",
+        "end": "2026-04-03",
+        "last_equity_date": "2026-04-03"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-02",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:58:20",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-07",
+        "end": "2026-04-07",
+        "last_equity_date": "2026-04-07"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 969978.9964,
+      "positions": {
+        "002408": {
+          "volume": 4800,
+          "cost": 6.25
+        }
+      },
+      "last_mark_prices": {
+        "002408": 6.62
+      },
+      "batch_selection_date": "2026-04-03",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:58:25",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-08",
+        "end": "2026-04-08",
+        "last_equity_date": "2026-04-08"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-07",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:58:39",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-09",
+        "end": "2026-04-09",
+        "last_equity_date": "2026-04-09"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-08",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:58:46",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-10",
+        "end": "2026-04-10",
+        "last_equity_date": "2026-04-10"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-09",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:59:07",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-13",
+        "end": "2026-04-13",
+        "last_equity_date": "2026-04-13"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 972265.6822,
+      "positions": {
+        "301181": {
+          "volume": 600,
+          "cost": 46.21
+        }
+      },
+      "last_mark_prices": {
+        "301181": 46.99
+      },
+      "batch_selection_date": "2026-04-10",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:59:34",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-14",
+        "end": "2026-04-14",
+        "last_equity_date": "2026-04-14"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 965843.7562000001,
+      "positions": {
+        "002107": {
+          "volume": 800,
+          "cost": 7.34
+        },
+        "605056": {
+          "volume": 1000,
+          "cost": 28.27
+        }
+      },
+      "last_mark_prices": {
+        "002107": 7.830000000000001,
+        "605056": 28.05
+      },
+      "batch_selection_date": "2026-04-13",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:59:40",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-15",
+        "end": "2026-04-15",
+        "last_equity_date": "2026-04-15"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-14",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:59:51",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-16",
+        "end": "2026-04-16",
+        "last_equity_date": "2026-04-16"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 912183.663,
+      "positions": {
+        "600166": {
+          "volume": 8600,
+          "cost": 3.5
+        },
+        "002213": {
+          "volume": 800,
+          "cost": 35.46
+        },
+        "002876": {
+          "volume": 1000,
+          "cost": 29.32
+        }
+      },
+      "last_mark_prices": {
+        "600166": 3.4099999999999997,
+        "002213": 38.339999999999996,
+        "002876": 29.56
+      },
+      "batch_selection_date": "2026-04-15",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T15:59:59",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-17",
+        "end": "2026-04-17",
+        "last_equity_date": "2026-04-17"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-16",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:00:15",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-20",
+        "end": "2026-04-20",
+        "last_equity_date": "2026-04-20"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-17",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:00:32",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-21",
+        "end": "2026-04-21",
+        "last_equity_date": "2026-04-21"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 971938.5841,
+      "positions": {
+        "002975": {
+          "volume": 300,
+          "cost": 93.51
+        }
+      },
+      "last_mark_prices": {
+        "002975": 98.83000000000001
+      },
+      "batch_selection_date": "2026-04-20",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:00:43",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-22",
+        "end": "2026-04-22",
+        "last_equity_date": "2026-04-22"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 988879.6649,
+      "positions": {
+        "600552": {
+          "volume": 400,
+          "cost": 14.63
+        },
+        "001896": {
+          "volume": 300,
+          "cost": 17.55
+        }
+      },
+      "last_mark_prices": {
+        "600552": 15.7,
+        "001896": 17.5
+      },
+      "batch_selection_date": "2026-04-21",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:01:20",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-23",
+        "end": "2026-04-23",
+        "last_equity_date": "2026-04-23"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 969872.9646,
+      "positions": {
+        "002242": {
+          "volume": 2800,
+          "cost": 10.76
+        }
+      },
+      "last_mark_prices": {
+        "002242": 11.41
+      },
+      "batch_selection_date": "2026-04-22",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:01:44",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-24",
+        "end": "2026-04-24",
+        "last_equity_date": "2026-04-24"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 970675.2052,
+      "positions": {
+        "003027": {
+          "volume": 1200,
+          "cost": 24.43
+        }
+      },
+      "last_mark_prices": {
+        "003027": 24.45
+      },
+      "batch_selection_date": "2026-04-23",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:01:59",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-27",
+        "end": "2026-04-27",
+        "last_equity_date": "2026-04-27"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 908656.6052,
+      "positions": {
+        "603709": {
+          "volume": 300,
+          "cost": 17.94
+        },
+        "000715": {
+          "volume": 4700,
+          "cost": 6.46
+        },
+        "002636": {
+          "volume": 600,
+          "cost": 43.29
+        },
+        "600869": {
+          "volume": 1800,
+          "cost": 16.44
+        }
+      },
+      "last_mark_prices": {
+        "603709": 18.310000000000002,
+        "000715": 6.3500000000000005,
+        "002636": 44.1,
+        "600869": 17.24
+      },
+      "batch_selection_date": "2026-04-24",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:02:13",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-28",
+        "end": "2026-04-28",
+        "last_equity_date": "2026-04-28"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-27",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:02:23",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-29",
+        "end": "2026-04-29",
+        "last_equity_date": "2026-04-29"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-28",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:02:28",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-04-30",
+        "end": "2026-04-30",
+        "last_equity_date": "2026-04-30"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-04-29",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:02:39",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-06",
+        "end": "2026-05-06",
+        "last_equity_date": "2026-05-06"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 970621.189,
+      "positions": {
+        "001358": {
+          "volume": 1000,
+          "cost": 29.37
+        }
+      },
+      "last_mark_prices": {
+        "001358": 29.32
+      },
+      "batch_selection_date": "2026-04-30",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:02:46",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-07",
+        "end": "2026-05-07",
+        "last_equity_date": "2026-05-07"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-05-06",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:02:51",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-08",
+        "end": "2026-05-08",
+        "last_equity_date": "2026-05-08"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-05-07",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:02:58",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-11",
+        "end": "2026-05-11",
+        "last_equity_date": "2026-05-11"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 994125.2381,
+      "positions": {
+        "605158": {
+          "volume": 700,
+          "cost": 8.39
+        }
+      },
+      "last_mark_prices": {
+        "605158": 7.970000000000001
+      },
+      "batch_selection_date": "2026-05-08",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:03:42",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-12",
+        "end": "2026-05-12",
+        "last_equity_date": "2026-05-12"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 994878.464,
+      "positions": {
+        "605055": {
+          "volume": 400,
+          "cost": 12.8
+        }
+      },
+      "last_mark_prices": {
+        "605055": 13.65
+      },
+      "batch_selection_date": "2026-05-11",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:04:02",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-13",
+        "end": "2026-05-13",
+        "last_equity_date": "2026-05-13"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 975689.7091,
+      "positions": {
+        "603400": {
+          "volume": 300,
+          "cost": 81.01
+        }
+      },
+      "last_mark_prices": {
+        "603400": 80.31
+      },
+      "batch_selection_date": "2026-05-12",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:04:09",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-14",
+        "end": "2026-05-14",
+        "last_equity_date": "2026-05-14"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 971191.36,
+      "positions": {
+        "301197": {
+          "volume": 800,
+          "cost": 36.0
+        }
+      },
+      "last_mark_prices": {
+        "301197": 40.28
+      },
+      "batch_selection_date": "2026-05-13",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:04:28",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-15",
+        "end": "2026-05-15",
+        "last_equity_date": "2026-05-15"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 935979.7997000001,
+      "positions": {
+        "603688": {
+          "volume": 400,
+          "cost": 72.5
+        },
+        "601126": {
+          "volume": 400,
+          "cost": 74.89
+        },
+        "000006": {
+          "volume": 500,
+          "cost": 10.09
+        }
+      },
+      "last_mark_prices": {
+        "603688": 69.53,
+        "601126": 76.51,
+        "000006": 9.72
+      },
+      "batch_selection_date": "2026-05-14",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:04:46",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-18",
+        "end": "2026-05-18",
+        "last_equity_date": "2026-05-18"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 904645.4022000001,
+      "positions": {
+        "003031": {
+          "volume": 100,
+          "cost": 158.01
+        },
+        "600707": {
+          "volume": 2800,
+          "cost": 10.45
+        },
+        "600183": {
+          "volume": 300,
+          "cost": 90.84
+        },
+        "601126": {
+          "volume": 300,
+          "cost": 76.75
+        }
+      },
+      "last_mark_prices": {
+        "003031": 171.32999999999998,
+        "600707": 10.87,
+        "600183": 98.95,
+        "601126": 84.16000000000001
+      },
+      "batch_selection_date": "2026-05-15",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:04:56",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-19",
+        "end": "2026-05-19",
+        "last_equity_date": "2026-05-19"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 960107.0356999999,
+      "positions": {
+        "002617": {
+          "volume": 3200,
+          "cost": 9.33
+        },
+        "300715": {
+          "volume": 600,
+          "cost": 16.7
+        }
+      },
+      "last_mark_prices": {
+        "002617": 9.450000000000001,
+        "300715": 16.8
+      },
+      "batch_selection_date": "2026-05-18",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:05:04",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-20",
+        "end": "2026-05-20",
+        "last_equity_date": "2026-05-20"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-05-19",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:05:11",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-21",
+        "end": "2026-05-21",
+        "last_equity_date": "2026-05-21"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 971443.4356,
+      "positions": {
+        "002888": {
+          "volume": 1200,
+          "cost": 23.79
+        }
+      },
+      "last_mark_prices": {
+        "002888": 25.740000000000002
+      },
+      "batch_selection_date": "2026-05-20",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:05:28",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-22",
+        "end": "2026-05-22",
+        "last_equity_date": "2026-05-22"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 943191.9626999999,
+      "positions": {
+        "301379": {
+          "volume": 800,
+          "cost": 34.41
+        },
+        "600353": {
+          "volume": 1300,
+          "cost": 22.51
+        }
+      },
+      "last_mark_prices": {
+        "301379": 32.93,
+        "600353": 23.53
+      },
+      "batch_selection_date": "2026-05-21",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:05:32",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-25",
+        "end": "2026-05-25",
+        "last_equity_date": "2026-05-25"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 994720.4166,
+      "positions": {
+        "600962": {
+          "volume": 200,
+          "cost": 26.39
+        }
+      },
+      "last_mark_prices": {
+        "600962": 26.74
+      },
+      "batch_selection_date": "2026-05-22",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:05:37",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-26",
+        "end": "2026-05-26",
+        "last_equity_date": "2026-05-26"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 1000000.0,
+      "positions": {},
+      "last_mark_prices": {},
+      "batch_selection_date": "2026-05-25",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:05:45",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-27",
+        "end": "2026-05-27",
+        "last_equity_date": "2026-05-27"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 961265.3831,
+      "positions": {
+        "600563": {
+          "volume": 100,
+          "cost": 167.21
+        },
+        "603115": {
+          "volume": 200,
+          "cost": 110.01
+        }
+      },
+      "last_mark_prices": {
+        "600563": 170.37,
+        "603115": 113.08
+      },
+      "batch_selection_date": "2026-05-26",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:05:52",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-28",
+        "end": "2026-05-28",
+        "last_equity_date": "2026-05-28"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 970164.0519,
+      "positions": {
+        "603005": {
+          "volume": 700,
+          "cost": 42.61
+        }
+      },
+      "last_mark_prices": {
+        "603005": 45.6
+      },
+      "batch_selection_date": "2026-05-27",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:05:57",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-05-29",
+        "end": "2026-05-29",
+        "last_equity_date": "2026-05-29"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 940972.297,
+      "positions": {
+        "603578": {
+          "volume": 1800,
+          "cost": 16.08
+        },
+        "002886": {
+          "volume": 1000,
+          "cost": 30.07
+        }
+      },
+      "last_mark_prices": {
+        "603578": 15.120000000000001,
+        "002886": 28.63
+      },
+      "batch_selection_date": "2026-05-28",
+      "batch_mode": true
+    },
+    {
+      "version": 1,
+      "exported_at": "2026-06-17T16:06:10",
+      "source_strategy_id": "strategy_508e9237",
+      "source_strategy_name": "买：突破5日线-真突破",
+      "backtest_range": {
+        "start": "2026-06-01",
+        "end": "2026-06-01",
+        "last_equity_date": "2026-06-01"
+      },
+      "initial_cash_used": 1000000.0,
+      "skipped_initial_positions_not_in_pool": 0,
+      "dual_segment": false,
+      "seg2_strategy_name": null,
+      "final_cash": 980892.2694,
+      "positions": {
+        "603256": {
+          "volume": 100,
+          "cost": 191.02
+        }
+      },
+      "last_mark_prices": {
+        "603256": 181.94
+      },
+      "batch_selection_date": "2026-05-29",
+      "batch_mode": true
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{
+    "anthropic.claude.timeout": 300000,
+    "anthropic.claude.keepAlive": true
+}

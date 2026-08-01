@@ -1,0 +1,74 @@
+# ===== 行情 / 缓存 / 历史数据（体积大，不备份）=====
+data/
+history_data/
+cache/
+*.pkl
+*.feather
+*.parquet
+*.h5
+*.hdf5
+
+# ===== 日志 / 构建产物 / 临时 =====
+logs/
+*.log
+build_tmp/
+dist_tmp/
+临时*/
+tmp/
+temp/
+*.tmp
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ===== 密钥与本地配置 =====
+.env
+.env.*
+!.env.example
+credentials.txt
+**/credentials.txt
+**/credentials.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.*
+*secret*
+settings.json
+sound_settings.json
+truth_monitor_seen_ids.json
+
+# ===== 可执行文件 / 大二进制 =====
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+
+# ===== IDE / Agent 本地 =====
+.cursor/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===== 其他本地/无用 =====
+query
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.bak
+*.old
+*.orig

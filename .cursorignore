@@ -1,0 +1,5 @@
+﻿# 减轻 IDE 索引/读盘：tick 缓存约 1.6 万文件、18GB+
+data/ticks/
+data/daily_cache/
+**/__pycache__/
+**/*.pkl

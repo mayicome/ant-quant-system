@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "exported_at": "2026-07-31T15:23:34",
+  "source_strategy_id": "strategy_9042777d",
+  "source_strategy_name": "开盘买入",
+  "backtest_range": {
+    "start": "2026-07-30",
+    "end": "2026-07-30",
+    "last_equity_date": "2026-07-30"
+  },
+  "initial_cash_used": 1000000.0,
+  "skipped_initial_positions_not_in_pool": 0,
+  "dual_segment": false,
+  "seg2_strategy_name": null,
+  "final_cash": 950065.024,
+  "positions": {
+    "002141": {
+      "volume": 7800,
+      "cost": 6.4
+    }
+  },
+  "last_mark_prices": {
+    "002141": 5.67
+  }
+}
