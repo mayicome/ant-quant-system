@@ -67,6 +67,10 @@ class StrategyConfig:
 # 策略参数中供界面编辑的键（客户可配置，无需改代码）；仅保留这些
 PARAM_BUY_AMOUNT_PER_STOCK = "buy_amount_per_stock"   # 单股拟买入金额(元)
 PARAM_MIN_ORDER_AMOUNT = "min_order_amount"           # 每笔最小交易金额(元)
+PARAM_GENERATE_TOP_N = "generate_top_n"               # 只生成前 N 个（按股票池顺序；0=不限制）
+PARAM_SIZING_MODE = "sizing_mode"                     # fixed | clip_equity
+PARAM_CLIP_L = "clip_L"                               # clip(S,L,U) 下限
+PARAM_CLIP_U = "clip_U"                               # clip(S,L,U) 上限（兼当日最多买入只数）
 ALLOWED_PARAM_KEYS = (PARAM_BUY_AMOUNT_PER_STOCK, PARAM_MIN_ORDER_AMOUNT)
 # 可选扩展键：仅当 JSON/导入里显式出现时保留；不写进默认表，避免影响未配置策略的回测行为
 OPTIONAL_STRATEGY_PARAM_KEYS = (
@@ -85,7 +89,29 @@ OPTIONAL_STRATEGY_PARAM_KEYS = (
     "scheduled_clear_on_sell_day",
     "scheduled_clear_time",
     "sell_hold_trading_days",
+    PARAM_GENERATE_TOP_N,
+    PARAM_SIZING_MODE,
+    PARAM_CLIP_L,
+    PARAM_CLIP_U,
 )
+
+
+def normalize_generate_top_n(raw: Any) -> int:
+    """只生成前 N 个：<=0 表示不限制。"""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def apply_generate_top_n(codes: List[str], top_n: Any) -> List[str]:
+    """按股票池顺序截断；top_n<=0 或不少于池长时原样返回。"""
+    n = normalize_generate_top_n(top_n)
+    if n <= 0 or not codes or n >= len(codes):
+        return list(codes or [])
+    return list(codes)[:n]
+
 
 
 def normalize_strategy_label(name: str) -> str:

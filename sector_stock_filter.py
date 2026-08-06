@@ -12,18 +12,8 @@
 import sys
 import argparse
 import os
-import pandas as pd
-from datetime import datetime, date, timedelta
-from typing import List, Dict, Optional, Tuple
-import time
-import logging
 import warnings
-import json
-import csv
-import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-import traceback
-import re
+
 # 抑制Qt和log4cplus的警告/错误信息（必须在导入任何Qt或xtquant模块之前设置）
 # 设置环境变量抑制Qt Windows版本警告
 os.environ.setdefault('QT_LOGGING_RULES', '*.debug=false')
@@ -65,6 +55,69 @@ sys.stderr = FilteredStderr(_original_stderr)
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# 作为脚本启动时：在 pandas/xtdata 等重依赖之前弹出“正在加载”，否则提示出现太晚无意义。
+# 作为模块被 import 时不弹。
+_EARLY_APP = None
+_EARLY_SPLASH = None
+_EARLY_SINGLETON_SERVER = None
+_SINGLETON_SERVER_NAME = "AntStockFilterSingletonV2"
+
+if __name__ == "__main__":
+    try:
+        from PyQt5.QtWidgets import QApplication, QLabel
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtNetwork import QLocalServer, QLocalSocket
+
+        _EARLY_APP = QApplication.instance() or QApplication(sys.argv)
+
+        # 单例：第二实例只激活已有窗口并立即退出，不加载重依赖、不弹 splash
+        _sock = QLocalSocket()
+        _sock.connectToServer(_SINGLETON_SERVER_NAME)
+        if _sock.waitForConnected(200):
+            try:
+                _sock.write(b"activate")
+                _sock.flush()
+                _sock.waitForBytesWritten(200)
+            except Exception:
+                pass
+            _sock.disconnectFromServer()
+            sys.exit(0)
+        _sock.abort()
+
+        _EARLY_SINGLETON_SERVER = QLocalServer()
+        try:
+            QLocalServer.removeServer(_SINGLETON_SERVER_NAME)
+        except Exception:
+            pass
+        _EARLY_SINGLETON_SERVER.listen(_SINGLETON_SERVER_NAME)
+
+        _EARLY_SPLASH = QLabel("正在加载选股系统")
+        _EARLY_SPLASH.setWindowTitle("蚂蚁量化选股系统")
+        _EARLY_SPLASH.setAlignment(Qt.AlignCenter)
+        _EARLY_SPLASH.setFixedSize(360, 80)
+        _EARLY_SPLASH.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.SplashScreen)
+        _EARLY_SPLASH.setStyleSheet(
+            "background:#FFF8E1; color:#333; font-size:12pt; border:1px solid #FFCC80;"
+        )
+        _EARLY_SPLASH.show()
+        _EARLY_APP.processEvents()
+    except Exception:
+        _EARLY_APP = None
+        _EARLY_SPLASH = None
+        _EARLY_SINGLETON_SERVER = None
+
+import pandas as pd
+from datetime import datetime, date, timedelta
+from typing import List, Dict, Optional, Tuple, Set
+import time
+import logging
+import json
+import csv
+import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import traceback
+import re
+
 # 尽早导入 xtdata 并关闭连接成功提示（必须在首次建立连接前设置，否则会打印“设置xtdata.enable_hello = False可隐藏此消息”）
 try:
     import xtquant.xtdata as _xtdata_early
@@ -88,6 +141,7 @@ except ImportError as e:
     print(f"导入模块失败: {e}")
 
 from utils.daily_cache_reader import get_cache_dir, get_sync_trade_date, load_daily_dataframe
+from utils.limit_ratio import is_st_stock, normalize_stock_code
 from utils.qmt_sector_store import (
     get_qmt_sector_store,
     load_all_sectors,
@@ -130,6 +184,7 @@ except ImportError:
 _RULES_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 _RULES_DIR = os.path.join(_RULES_BASE_DIR, "sector_rules")
 _LEGACY_RULES_PATH = os.path.join(_RULES_BASE_DIR, "sector_stock_rules.json")
+_UI_PREFS_PATH = os.path.join(_RULES_BASE_DIR, "sector_filter_ui.json")
 
 _RULE_CODE_UNSAVED_BANNER_STYLE = (
     "QLabel { background-color: #fff3cd; color: #856404; border: 2px solid #ffc107; "
@@ -623,6 +678,221 @@ def _normalize_import_stock_code(raw) -> Optional[str]:
     if code == "000000":
         return None
     return code
+
+
+def _stock_code6(stock_code: object) -> str:
+    """选股列表代码 → 6 位；失败返回空串。"""
+    c = _normalize_import_stock_code(stock_code)
+    return c or ""
+
+
+def _enabled_rules_ctx_needs(enabled_rules: List[Dict[str, object]]) -> Dict[str, object]:
+    """根据启用规则代码推断本轮需要哪些 ctx / 东财臂 / Elig 收窄。
+
+    选股阶段只加载规则判断所需上下文；净流入展示等在命中后再补。
+    """
+    need_inflow = False
+    need_hot_theme = False
+    need_em = False
+    arms: Set[str] = set()
+    elig_bands: List[Tuple[int, int]] = []
+    em_top_ns: List[int] = []
+    em_rs_top_ks: List[int] = []
+    em_min_members: List[int] = []
+    for r in enabled_rules or []:
+        code = str(r.get("code") or "")
+        if "inflow_rank" in code:
+            need_inflow = True
+        if "hot_theme" in code:
+            need_hot_theme = True
+        if "em_board_hot" not in code:
+            continue
+        need_em = True
+        if (
+            "today_pool_codes" in code
+            or "today_code_hits" in code
+            or "合格榜内序位" in code
+        ):
+            arms.add("today")
+        if "new_only_pool" in code or "new_only_code_hits" in code:
+            arms.add("new_only")
+        # 连续臂：用裸 pool_codes / 裸 code_hits（非 today_/new_only_ 前缀）
+        if re.search(
+            r"(?<![\\w])pool_codes(?![\\w])|(?<![\\w])code_hits(?![\\w])",
+            code,
+        ):
+            # 排除 today_pool_codes / today_code_hits / new_only_* 已覆盖的情况：
+            # 若仅出现带前缀字段则不算连续臂
+            has_bare_pool = bool(
+                re.search(r"(?<![a-z_])pool_codes(?![a-z_])", code, flags=re.I)
+            )
+            has_bare_hits = bool(
+                re.search(r"(?<![a-z_])code_hits(?![a-z_])", code, flags=re.I)
+            )
+            if has_bare_pool or has_bare_hits:
+                arms.add("continuous")
+        m_lo = re.search(r"ELIG_LO\s*=\s*(\d+)", code)
+        m_hi = re.search(r"ELIG_HI\s*=\s*(\d+)", code)
+        if m_lo and m_hi:
+            lo, hi = int(m_lo.group(1)), int(m_hi.group(1))
+            if lo >= 1 and hi >= lo:
+                elig_bands.append((lo, hi))
+        m_top = re.search(r"TOP_N\s*=\s*(\d+)", code)
+        if m_top:
+            em_top_ns.append(int(m_top.group(1)))
+        m_rs = re.search(r"RS_TOP_K\s*=\s*(\d+)", code)
+        if m_rs:
+            em_rs_top_ks.append(int(m_rs.group(1)))
+        m_rs_hi = re.search(r"RS_HI\s*=\s*(\d+)", code)
+        if m_rs_hi:
+            em_rs_top_ks.append(int(m_rs_hi.group(1)))
+        m_mm = re.search(r"MIN_MEMBERS\s*=\s*(\d+)", code)
+        if m_mm:
+            em_min_members.append(int(m_mm.group(1)))
+    if need_em and not arms:
+        arms = {"continuous", "new_only", "today"}
+    # 多规则并存：取最宽覆盖（更大 TopN/RS；更低成分门槛），避免漏掉任一规则所需池
+    return {
+        "inflow": need_inflow,
+        "hot_theme": need_hot_theme,
+        "em": need_em,
+        "em_arms": arms,
+        "elig_bands": elig_bands,
+        "em_top_n": max(em_top_ns) if em_top_ns else 50,
+        "em_rs_top_k": max(em_rs_top_ks) if em_rs_top_ks else 20,
+        "em_min_members": min(em_min_members) if em_min_members else 30,
+    }
+
+
+def _em_candidate_codes6(
+    emh: Dict[str, object],
+    *,
+    arms: Set[str],
+    elig_bands: List[Tuple[int, int]],
+) -> Set[str]:
+    """从已加载的东财热门 ctx 取出本轮候选 code6。"""
+    out: Set[str] = set()
+    if not isinstance(emh, dict) or str(emh.get("error") or "").strip():
+        return out
+    if "continuous" in arms:
+        out |= {str(c).zfill(6) for c in (emh.get("pool_codes") or set()) if c}
+    if "new_only" in arms:
+        out |= {str(c).zfill(6) for c in (emh.get("new_only_pool_codes") or set()) if c}
+    if "today" in arms:
+        hits = emh.get("today_code_hits") or {}
+        pool = emh.get("today_pool_codes") or set()
+        if elig_bands and isinstance(hits, dict) and hits:
+            for c6, hit in hits.items():
+                if not isinstance(hit, dict):
+                    continue
+                try:
+                    elig = int(hit.get("合格榜内序位") or 0)
+                except (TypeError, ValueError):
+                    elig = 0
+                if any(lo <= elig <= hi for lo, hi in elig_bands):
+                    out.add(str(c6).zfill(6))
+        else:
+            out |= {str(c).zfill(6) for c in pool if c}
+    return out
+
+
+def _safe_rank_int(v: object, default: int = 10**9) -> int:
+    try:
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+# 导出综合分：score = Elig * 权重 + 标签内RS（越小越靠前）
+# 权重=8：约「差 1 档 Elig ≈ 差 8 名 RS」；若希望 Elig 几乎不被 RS 反超，可调到 50+
+EXPORT_ELIG_WEIGHT = 8
+
+
+def reorder_selection_rows_for_export(
+    rows: List[Dict[str, object]],
+    *,
+    max_per_tag: int = 2,
+    elig_weight: int = EXPORT_ELIG_WEIGHT,
+) -> List[Dict[str, object]]:
+    """导出前按选股日重排，便于策略生成器按池顺序做 clip 截断。
+
+    每个选股日内：
+    1) 按综合分 score=Elig*elig_weight+标签内RS 升序（再 Elig、RS、代码 tie-break）；
+    2) 同「合格榜对应标签」优先最多保留 max_per_tag 只排在前面，多出的同标签票放到该日末尾。
+    无 Elig 字段的规则：保持该日内相对顺序不变。
+    """
+    if not rows:
+        return []
+    max_per_tag = max(0, int(max_per_tag))
+    try:
+        w = max(0, int(elig_weight))
+    except (TypeError, ValueError):
+        w = int(EXPORT_ELIG_WEIGHT)
+
+    def _as_of(r: Dict[str, object]) -> str:
+        return str(r.get("as_of") or r.get("选股日") or "").strip()
+
+    def _code(r: Dict[str, object]) -> str:
+        c = str(r.get("code") or r.get("股票代码") or "").strip()
+        if c.isdigit():
+            return c.zfill(6)
+        return c
+
+    def _tag(r: Dict[str, object]) -> str:
+        t = str(r.get("合格榜对应标签") or "").strip()
+        return t if t else "_none_"
+
+    def _has_elig(r: Dict[str, object]) -> bool:
+        return ("合格榜内序位" in r) and r.get("合格榜内序位") not in (None, "")
+
+    def _score(r: Dict[str, object]) -> int:
+        elig = _safe_rank_int(r.get("合格榜内序位"))
+        rs = _safe_rank_int(r.get("合格榜标签内RS排名"))
+        return elig * w + rs
+
+    by_day: Dict[str, List[Dict[str, object]]] = {}
+    day_order: List[str] = []
+    for r in rows:
+        d = _as_of(r) or "_nodate_"
+        if d not in by_day:
+            by_day[d] = []
+            day_order.append(d)
+        by_day[d].append(r)
+
+    out: List[Dict[str, object]] = []
+    for d in day_order:
+        day_rows = by_day[d]
+        if not any(_has_elig(r) for r in day_rows):
+            out.extend(day_rows)
+            continue
+        ranked = sorted(
+            day_rows,
+            key=lambda r: (
+                _score(r),
+                _safe_rank_int(r.get("合格榜内序位")),
+                _safe_rank_int(r.get("合格榜标签内RS排名")),
+                _code(r),
+            ),
+        )
+        if max_per_tag <= 0:
+            out.extend(ranked)
+            continue
+        head: List[Dict[str, object]] = []
+        tail: List[Dict[str, object]] = []
+        tag_n: Dict[str, int] = {}
+        for r in ranked:
+            tag = _tag(r)
+            n = int(tag_n.get(tag) or 0)
+            if n < max_per_tag:
+                head.append(r)
+                tag_n[tag] = n + 1
+            else:
+                tail.append(r)
+        out.extend(head)
+        out.extend(tail)
+    return out
 
 
 def save_excel_with_text_code(excel_file_path: str, df: pd.DataFrame):
@@ -2065,12 +2335,36 @@ class SectorStockFilterThread(QThread):
                 stock_dict[stock_code]['sectors'].append(sector)
             
             unique_stocks = list(stock_dict.keys())
-            total_stocks = len(unique_stocks)
+            total_stocks_universe = len(unique_stocks)
             n_days = len(screen_as_of_list)
-            total_units = total_stocks * n_days
-            
-            self.debug_info.emit(f"开始筛选：{total_stocks} 只股票 × {n_days} 个选股日 = {total_units} 步，{len(enabled_rules)} 条规则")
-            
+
+            ctx_needs = _enabled_rules_ctx_needs(enabled_rules)
+            need_inflow = bool(ctx_needs.get("inflow"))
+            need_hot_theme = bool(ctx_needs.get("hot_theme"))
+            need_em = bool(ctx_needs.get("em"))
+            em_arms: Set[str] = set(ctx_needs.get("em_arms") or [])
+            elig_bands: List[Tuple[int, int]] = list(ctx_needs.get("elig_bands") or [])
+            em_top_n = int(ctx_needs.get("em_top_n") or 50)
+            em_rs_top_k = int(ctx_needs.get("em_rs_top_k") or 20)
+            em_min_members = int(ctx_needs.get("em_min_members") or 30)
+
+            self.debug_info.emit(
+                "上下文按需加载："
+                + f"净流入={'是' if need_inflow else '否(选后补)'}"
+                + f" 热门题材={'是' if need_hot_theme else '否'}"
+                + f" 东财热门={'是(' + ','.join(sorted(em_arms)) + ')' if need_em else '否'}"
+                + (
+                    f" TopN={em_top_n} RS_K={em_rs_top_k} 成分≥{em_min_members}"
+                    if need_em
+                    else ""
+                )
+                + (
+                    f" Elig收窄={elig_bands}"
+                    if elig_bands
+                    else ""
+                )
+            )
+
             processed_units = 0
             skip_calendar = 0
             skip_no_daily = 0
@@ -2079,87 +2373,234 @@ class SectorStockFilterThread(QThread):
             inflow_rank_cache: Dict[str, Dict[str, object]] = {}
             # 按选股日缓存十大热门板块/概念成员（供近10日涨停+热门题材规则 ctx['hot_theme']）
             hot_theme_cache: Dict[str, Dict[str, object]] = {}
-            try:
-                from utils.main_force_inflow_selection_ctx import load_inflow_rank_map
-            except Exception as e:
-                load_inflow_rank_map = None  # type: ignore[assignment]
-                self.debug_info.emit(f"主力净流入排名模块不可用：{e}")
-            try:
-                from utils.hot_theme_selection_ctx import load_hot_theme_map
-            except Exception as e:
-                load_hot_theme_map = None  # type: ignore[assignment]
-                self.debug_info.emit(f"热门题材模块不可用：{e}")
+            # 按选股日缓存东财连续热门 + 组内 RS（供东财热门-连续2日Top50-组内RS前20）
+            em_board_hot_cache: Dict[str, Dict[str, object]] = {}
+            load_inflow_rank_map = None
+            load_hot_theme_map = None
+            load_em_board_hot_map = None
+            if need_inflow:
+                try:
+                    from utils.main_force_inflow_selection_ctx import load_inflow_rank_map
+                except Exception as e:
+                    load_inflow_rank_map = None  # type: ignore[assignment]
+                    self.debug_info.emit(f"主力净流入排名模块不可用：{e}")
+            if need_hot_theme:
+                try:
+                    from utils.hot_theme_selection_ctx import load_hot_theme_map
+                except Exception as e:
+                    load_hot_theme_map = None  # type: ignore[assignment]
+                    self.debug_info.emit(f"热门题材模块不可用：{e}")
+            if need_em:
+                try:
+                    from utils.eastmoney_board_rank_ctx import load_em_board_hot_map
+                except Exception as e:
+                    load_em_board_hot_map = None  # type: ignore[assignment]
+                    self.debug_info.emit(f"东财连续热门模块不可用：{e}")
             hist_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history_data")
-            for as_of_d in screen_as_of_list:
-                key = "today" if as_of_d is None else as_of_d.strftime("%Y-%m-%d")
-                if load_inflow_rank_map is None:
-                    inflow_rank_cache[key] = {}
-                else:
-                    try:
-                        mp = load_inflow_rank_map(as_of_d, history_dir=hist_dir)
-                    except Exception as e:
-                        mp = {}
-                        self.debug_info.emit(f"加载净流入排名失败 {key}: {e}")
-                    inflow_rank_cache[key] = mp
-                    if not mp:
-                        self.debug_info.emit(f"选股日 {key} 无主力净流入 CSV（A/B 档将无命中）")
-                    else:
-                        self.debug_info.emit(f"选股日 {key} 已加载净流入排名 {len(mp)} 只")
+            code6_to_stock_keys: Dict[str, List[str]] = {}
+            for sc in unique_stocks:
+                c6 = _stock_code6(sc)
+                if c6:
+                    code6_to_stock_keys.setdefault(c6, []).append(sc)
 
-                if load_hot_theme_map is None:
-                    hot_theme_cache[key] = {}
-                else:
-                    try:
-                        ht = load_hot_theme_map(as_of_d, history_dir=hist_dir, top_n=10)
-                    except Exception as e:
-                        ht = {}
-                        self.debug_info.emit(f"加载热门题材失败 {key}: {e}")
-                    hot_theme_cache[key] = ht if isinstance(ht, dict) else {}
-                    union_n = len((ht or {}).get("union_codes") or [])
-                    src = str((ht or {}).get("source_date") or "")
-                    if union_n <= 0:
-                        self.debug_info.emit(f"选股日 {key} 无十大热门板块/概念成员（热门题材规则将无命中）")
-                    else:
-                        self.debug_info.emit(
-                            f"选股日 {key} 已加载热门题材成员 {union_n} 只"
-                            + (f"（涨停日={src}）" if src else "")
-                        )
+            # 按「选股日」交错：当日热门加载完立刻筛池内票，不预加载全部日期
+            # 进度按「日」固定总量，避免边跑边加 total 导致前几天就到 99%/100%、加载下一日时假死
+            PROGRESS_PER_DAY = 1000
+            total_units = max(1, n_days) * PROGRESS_PER_DAY
+            self.debug_info.emit(
+                f"按日交错筛选：{n_days} 个选股日 × {len(enabled_rules)} 条规则"
+                f"（全市场底座 {total_stocks_universe} 只；日线按票缓存）"
+            )
+            logger.info("按日交错筛选开始…")
+            self.progress_updated.emit(0, total_units, "准备中")
 
-            logger.info(f"开始筛选：共 {total_stocks} 只股票 × {n_days} 日，请耐心等待…")
-            
-            for idx, stock_code in enumerate(unique_stocks):
+            daily_cache: Dict[str, object] = {}
+            stocks_touched: Set[str] = set()
+
+            for day_i, as_of_d in enumerate(screen_as_of_list):
                 if not self.is_running:
                     break
-                
-                stock_name = stock_dict[stock_code]['name']
-                sectors = stock_dict[stock_code]['sectors']
-                
-                if idx % 10 == 0:
-                    logger.info(
-                        f"正在筛选：股票进度 {idx}/{total_stocks} "
-                        f"（{idx * 100 // total_stocks if total_stocks > 0 else 0}%）"
-                    )
-                
-                daily_full = self._get_daily_data(
-                    stock_code, through_date=fetch_through, apply_as_of_slice=False
+                key = "today" if as_of_d is None else as_of_d.strftime("%Y-%m-%d")
+                screen_str = (
+                    date.today().strftime("%Y-%m-%d")
+                    if as_of_d is None
+                    else as_of_d.strftime("%Y-%m-%d")
                 )
-                if daily_full is None or daily_full.empty:
-                    skip_no_daily += 1
-                
-                for as_of_d in screen_as_of_list:
+                day_base = day_i * PROGRESS_PER_DAY
+                day_cands: Set[str] = set()
+                self.progress_updated.emit(
+                    day_base + 10, total_units, f"加载上下文 {key}"
+                )
+
+                if need_inflow:
+                    if load_inflow_rank_map is None:
+                        inflow_rank_cache[key] = {}
+                    else:
+                        try:
+                            mp = load_inflow_rank_map(as_of_d, history_dir=hist_dir)
+                        except Exception as e:
+                            mp = {}
+                            self.debug_info.emit(f"加载净流入排名失败 {key}: {e}")
+                        inflow_rank_cache[key] = mp
+                        if not mp:
+                            self.debug_info.emit(f"选股日 {key} 无主力净流入 CSV（A/B 档将无命中）")
+                        else:
+                            self.debug_info.emit(f"选股日 {key} 已加载净流入排名 {len(mp)} 只")
+                else:
+                    inflow_rank_cache[key] = {}
+
+                if need_hot_theme:
+                    if load_hot_theme_map is None:
+                        hot_theme_cache[key] = {}
+                    else:
+                        try:
+                            ht = load_hot_theme_map(as_of_d, history_dir=hist_dir, top_n=10)
+                        except Exception as e:
+                            ht = {}
+                            self.debug_info.emit(f"加载热门题材失败 {key}: {e}")
+                        hot_theme_cache[key] = ht if isinstance(ht, dict) else {}
+                        union_n = len((ht or {}).get("union_codes") or [])
+                        src = str((ht or {}).get("source_date") or "")
+                        if union_n <= 0:
+                            self.debug_info.emit(
+                                f"选股日 {key} 无十大热门板块/概念成员（热门题材规则将无命中）"
+                            )
+                        else:
+                            self.debug_info.emit(
+                                f"选股日 {key} 已加载热门题材成员 {union_n} 只"
+                                + (f"（涨停日={src}）" if src else "")
+                            )
+                            day_cands |= {
+                                str(c).zfill(6)
+                                for c in ((ht or {}).get("union_codes") or set())
+                                if c
+                            }
+                else:
+                    hot_theme_cache[key] = {}
+
+                if need_em:
+                    if load_em_board_hot_map is None:
+                        em_board_hot_cache[key] = {}
+                    else:
+                        try:
+                            emh = load_em_board_hot_map(
+                                as_of_d,
+                                top_n=em_top_n,
+                                rs_top_k=em_rs_top_k,
+                                min_members=em_min_members,
+                                arms=sorted(em_arms) if em_arms else None,
+                                elig_bands=elig_bands or None,
+                            )
+                        except Exception as e:
+                            emh = {"error": str(e), "pool_codes": set(), "code_hits": {}}
+                            self.debug_info.emit(f"加载东财连续热门失败 {key}: {e}")
+                        em_board_hot_cache[key] = emh if isinstance(emh, dict) else {}
+                        em_err = str((emh or {}).get("error") or "").strip()
+                        pool_n = len((emh or {}).get("pool_codes") or [])
+                        new_pool_n = len((emh or {}).get("new_only_pool_codes") or [])
+                        today_pool_n = len((emh or {}).get("today_pool_codes") or [])
+                        sec_n = len((emh or {}).get("continuous_sectors") or [])
+                        con_n = len((emh or {}).get("continuous_concepts") or [])
+                        new_sec_n = len((emh or {}).get("new_only_sectors") or [])
+                        new_con_n = len((emh or {}).get("new_only_concepts") or [])
+                        today_sec_n = len((emh or {}).get("today_sectors") or [])
+                        today_con_n = len((emh or {}).get("today_concepts") or [])
+                        mv_n = len((emh or {}).get("float_mv_yi") or {})
+                        prev_ds = str((emh or {}).get("prev_date") or "")
+                        em_day_cands = _em_candidate_codes6(
+                            emh if isinstance(emh, dict) else {},
+                            arms=em_arms,
+                            elig_bands=elig_bands,
+                        )
+                        day_cands |= em_day_cands
+                        if em_err:
+                            self.debug_info.emit(f"选股日 {key} 东财热门不可用：{em_err}")
+                        else:
+                            arm_txt = ",".join(sorted(em_arms)) if em_arms else "all"
+                            parts = [f"臂={arm_txt}"]
+                            if "continuous" in em_arms:
+                                parts.append(f"连续板块{sec_n}/概念{con_n}→RS池{pool_n}")
+                            if "new_only" in em_arms:
+                                parts.append(
+                                    f"仅今日板块{new_sec_n}/概念{new_con_n}→RS池{new_pool_n}"
+                                )
+                            if "today" in em_arms:
+                                if elig_bands:
+                                    parts.append(
+                                        f"今日Elig标签 板块{today_sec_n}/概念{today_con_n}"
+                                        f"→RS池{today_pool_n}"
+                                    )
+                                else:
+                                    parts.append(
+                                        f"今日板块{today_sec_n}/概念{today_con_n}→全RS池{today_pool_n}"
+                                    )
+                            parts.append(f"流通市值{mv_n}只")
+                            if prev_ds:
+                                parts.append(f"D-1={prev_ds}")
+                            self.debug_info.emit(f"选股日 {key} 东财热门：" + "；".join(parts))
+                else:
+                    em_board_hot_cache[key] = {}
+
+                if need_em or need_hot_theme:
+                    day_stocks: List[str] = []
+                    seen_sc: Set[str] = set()
+                    for c6 in sorted(day_cands):
+                        for sc in code6_to_stock_keys.get(c6, []):
+                            if sc not in seen_sc:
+                                seen_sc.add(sc)
+                                day_stocks.append(sc)
+                    if not day_stocks and day_cands:
+                        self.debug_info.emit(
+                            f"选股日 {key} 池内 {len(day_cands)} 只与股票列表无交集，跳过筛选"
+                        )
+                    elif not day_stocks:
+                        self.debug_info.emit(f"选股日 {key} 候选为空，跳过筛选")
+                else:
+                    day_stocks = list(unique_stocks)
+
+                day_n = len(day_stocks)
+                self.debug_info.emit(
+                    f"选股日 {key} 就绪 → 立即筛选 {day_n} 只"
+                    f"（进度日 {day_i + 1}/{n_days}）"
+                )
+                self.progress_updated.emit(
+                    day_base + 50, total_units, f"筛选 {key} · {day_n}只"
+                )
+
+                for stock_i, stock_code in enumerate(day_stocks):
                     if not self.is_running:
                         break
+                    stock_name = stock_dict[stock_code]["name"]
+                    sectors = stock_dict[stock_code]["sectors"]
+                    stocks_touched.add(stock_code)
+
+                    if stock_code not in daily_cache:
+                        daily_cache[stock_code] = self._get_daily_data(
+                            stock_code, through_date=fetch_through, apply_as_of_slice=False
+                        )
+                        df0 = daily_cache[stock_code]
+                        if df0 is None or getattr(df0, "empty", True):
+                            skip_no_daily += 1
+                    daily_full = daily_cache[stock_code]
+
                     processed_units += 1
-                    screen_str = date.today().strftime("%Y-%m-%d") if as_of_d is None else as_of_d.strftime("%Y-%m-%d")
+                    # 日进度：50–999；全日完成顶到 (day_i+1)*1000
+                    frac = int(((stock_i + 1) / max(day_n, 1)) * 949)
+                    pos = min(day_base + 50 + frac, (day_i + 1) * PROGRESS_PER_DAY - 1)
                     if (
-                        processed_units == 1
-                        or processed_units == total_units
-                        or (processed_units - self._last_progress_emit_unit) >= self._progress_emit_every
+                        stock_i == 0
+                        or stock_i + 1 == day_n
+                        or (processed_units - self._last_progress_emit_unit)
+                        >= self._progress_emit_every
                     ):
-                        self.progress_updated.emit(processed_units, total_units, f"{stock_code} [{screen_str}]")
+                        self.progress_updated.emit(
+                            pos,
+                            total_units,
+                            f"{stock_code} [{screen_str}]",
+                        )
                         self._last_progress_emit_unit = processed_units
-                    
-                    if daily_full is None or daily_full.empty:
+
+                    if daily_full is None or getattr(daily_full, "empty", True):
                         continue
                     if as_of_d is None:
                         dd = daily_full
@@ -2169,7 +2610,6 @@ class SectorStockFilterThread(QThread):
                         continue
 
                     sectors_str = ";".join(sorted(sectors))
-
                     for r in enabled_rules:
                         if not self.is_running:
                             break
@@ -2184,13 +2624,11 @@ class SectorStockFilterThread(QThread):
                         if not self._setup_calendars_for_as_of(as_of_d):
                             skip_calendar += 1
                             continue
-                        _ik = "today" if as_of_d is None else as_of_d.strftime("%Y-%m-%d")
                         ctx = {
                             "params": self._current_rule_param_ctx(),
-                            # {code6: {rank, pct, name}}；无文件时为空 dict
-                            "inflow_rank": inflow_rank_cache.get(_ik) or {},
-                            # 十大热门板块/概念成员；无文件时为空 dict
-                            "hot_theme": hot_theme_cache.get(_ik) or {},
+                            "inflow_rank": inflow_rank_cache.get(key) or {},
+                            "hot_theme": hot_theme_cache.get(key) or {},
+                            "em_board_hot": em_board_hot_cache.get(key) or {},
                         }
                         try:
                             rule_calls += 1
@@ -2198,41 +2636,42 @@ class SectorStockFilterThread(QThread):
                         except Exception as e:
                             err = str(e)
                             extra = {"_error": err}
-                            # 安全拦截：规则执行时触发 __import__（通常是代码里出现 import/from）
                             if "__import__" in err or "import" in err.lower():
                                 try:
                                     rule_code = str(r.get("code") or "")
                                     bad_lines: List[str] = []
                                     for ln in rule_code.splitlines():
                                         lnl = ln.strip()
-                                        if lnl.startswith("import ") or lnl.startswith("from ") or "__import__" in lnl:
+                                        if (
+                                            lnl.startswith("import ")
+                                            or lnl.startswith("from ")
+                                            or "__import__" in lnl
+                                        ):
                                             bad_lines.append(ln.strip())
                                             if len(bad_lines) >= 3:
                                                 break
                                     if bad_lines:
                                         extra["_rule_import_snippet"] = "; ".join(bad_lines)
                                     else:
-                                        # 兜底：即使没抓到 import/from 行，也把规则代码前几行输出出来，便于你核对运行时到底加载了哪份代码
                                         head_lines: List[str] = []
                                         for ln in rule_code.splitlines()[:5]:
                                             head_lines.append(ln.strip())
                                         head = " | ".join(head_lines)
                                         extra["_rule_code_head"] = head[:220]
                                         extra["_rule_code_has_import_like"] = (
-                                            ("import " in rule_code) or ("from " in rule_code) or ("__import__" in rule_code)
+                                            ("import " in rule_code)
+                                            or ("from " in rule_code)
+                                            or ("__import__" in rule_code)
                                         )
                                 except Exception:
                                     pass
-                            # 仅在 __import__ 异常时输出调用栈前几行：用来定位到底哪一层在触发 import
                             if "__import__" in err:
                                 try:
                                     tb_lines = traceback.format_exc().splitlines()
-                                    # 去掉非常长的部分：只取最前面若干行
                                     extra["_tb_head"] = " | ".join(tb_lines[:10]).strip()
                                 except Exception:
                                     pass
                             ok = False
-                        # 每轮摘要（命中/异常/有限示例）
                         rn = str(r.get("name", "未命名"))
                         st = "通过" if ok else "未通过"
                         if isinstance(extra, dict) and extra.get("_error"):
@@ -2265,7 +2704,10 @@ class SectorStockFilterThread(QThread):
                         if isinstance(extra, dict) and extra.get("_rule_code_head"):
                             head = str(extra.get("_rule_code_head"))
                             has_like = extra.get("_rule_code_has_import_like")
-                            emit_line = f"[安全] 规则代码头部（用于核对触发 __import__ 的实际代码）：{head}（has import/from/__import__={has_like}）"
+                            emit_line = (
+                                f"[安全] 规则代码头部（用于核对触发 __import__ 的实际代码）："
+                                f"{head}（has import/from/__import__={has_like}）"
+                            )
                             if self._round_debug_emit_count < self._round_debug_emit_limit:
                                 self.debug_info.emit(emit_line)
                                 self._diag_snippets.append(emit_line)
@@ -2294,11 +2736,19 @@ class SectorStockFilterThread(QThread):
                             }
                             self.stock_found.emit(rec)
                             rule_counts[rid] = int(rule_counts.get(rid, 0)) + 1
-                
+
                 total_found = sum(rule_counts.values()) if rule_counts else 0
                 if total_found > 0 and total_found % 10 == 0:
                     self.debug_info.emit(f"已找到 {total_found} 条（按规则累计）")
-            
+                self.progress_updated.emit(
+                    (day_i + 1) * PROGRESS_PER_DAY,
+                    total_units,
+                    f"{key} 完成",
+                )
+
+            total_stocks = len(stocks_touched) if stocks_touched else total_stocks_universe
+            self.progress_updated.emit(total_units, total_units, "完成")
+
             # 如果被停止，发送停止信息
             if not self.is_running:
                 self.debug_info.emit("筛选已停止")
@@ -2472,6 +2922,8 @@ class SectorStockFilterDialog(QDialog):
         
         # 存储股票列表的板块信息 {stock_code: [sector1, sector2, ...]}
         self._stock_sectors_map = {}
+        # 板块生成的完整备选底池（开关过滤前）[(code, name, sectors_str), ...]
+        self._stock_list_base: List[Tuple[str, str, str]] = []
 
         # 选股规则（可增删改）
         self.rules: List[Dict[str, object]] = load_sector_rules()
@@ -2593,6 +3045,21 @@ class SectorStockFilterDialog(QDialog):
         stock_export_btn = QPushButton("导出到文件")
         stock_export_btn.clicked.connect(self.export_stock_list_to_file)
         stock_search_layout.addWidget(stock_export_btn)
+
+        self.exclude_st_checkbox = QCheckBox("排除ST股")
+        self.exclude_st_checkbox.setToolTip(
+            "开关：开启时备选池不含 ST/*ST；关闭后自动加回。状态会保存，下次启动恢复。"
+        )
+        self.exclude_star_bj_checkbox = QCheckBox("排除科创板和北交所")
+        self.exclude_star_bj_checkbox.setToolTip(
+            "开关：开启时备选池不含科创板(688/689)与北交所(4/8/920)；关闭后自动加回。"
+            "状态会保存，下次启动恢复。"
+        )
+        self._load_stock_exclude_prefs()
+        self.exclude_st_checkbox.stateChanged.connect(self._on_stock_exclude_filter_changed)
+        self.exclude_star_bj_checkbox.stateChanged.connect(self._on_stock_exclude_filter_changed)
+        stock_search_layout.addWidget(self.exclude_st_checkbox)
+        stock_search_layout.addWidget(self.exclude_star_bj_checkbox)
         
         stock_list_layout.addLayout(stock_search_layout)
         
@@ -2637,8 +3104,9 @@ class SectorStockFilterDialog(QDialog):
             "True/False 为互斥条件，None 表示忽略该条件；"
             "REQUIRE_LOWER_SHADOW、REQUIRE_BOLL_BREAK、REQUIRE_MA_SUPPORT_AFTER 等为可反相开关；"
             "select(...) 接收 daily_data（截至选股日的日线）、as_of_date；"
-            "ctx 含 params（引擎读取 N/M 用于日历预取）与 inflow_rank"
-            "（当日净流入占流通% 排名 {code6:{rank,pct,name}}，供主力净流入 A/B 档）。"
+            "ctx 含 params（引擎读取 N/M 用于日历预取）、inflow_rank"
+            "（当日净流入占流通% 排名 {code6:{rank,pct,name}}，供主力净流入 A/B 档）、"
+            "hot_theme（十大热门题材）、em_board_hot（东财连续2日热门+组内RS）。"
         )
         _hint_label = QLabel("规则逻辑全部写在代码内；顶部定义 N、M 等参数（悬停查看说明）")
         _hint_label.setToolTip(_hint_full)
@@ -3563,14 +4031,20 @@ class SectorStockFilterDialog(QDialog):
             QApplication.processEvents()
 
             if not selected_sectors:
+                self._stock_list_base = []
+                self.stock_checkboxes.clear()
                 self.stock_list_group.setTitle("选中板块对应的股票列表 (0 只)")
+                self.update_stock_selected_count()
                 self._schedule_auto_run_after_stock_list(ready=False, reason="未选中任何板块")
                 return
 
             mode = "intersection" if self.intersection_mode_radio.isChecked() else "union"
             stock_dict = self._sector_store.stocks_for_sectors(selected_sectors, mode=mode)
             if stock_dict is None:
+                self._stock_list_base = []
+                self.stock_checkboxes.clear()
                 self.stock_list_group.setTitle("选中板块对应的股票列表 (0 只)")
+                self.update_stock_selected_count()
                 self._schedule_auto_run_after_stock_list(ready=False, reason="QMT 板块数据不可用")
                 return
 
@@ -3588,34 +4062,16 @@ class SectorStockFilterDialog(QDialog):
                 stock_list.append((code, str(info.get("name") or "未知"), sectors_str))
 
             stock_list.sort(key=lambda x: x[0])
-            self.stock_checkboxes.clear()
-
-            self.stock_list_table.setUpdatesEnabled(False)
-            table_batch_size = 500
-            total_stocks = len(stock_list)
-            self.stock_list_table.setRowCount(total_stocks)
-
-            for i, (code, name, sectors_str) in enumerate(stock_list):
-                checkbox = QCheckBox()
-                checkbox.setChecked(True)
-                checkbox.stateChanged.connect(self.update_stock_selected_count)
-                self.stock_list_table.setCellWidget(i, 0, checkbox)
-                self.stock_checkboxes[code] = checkbox
-                self.stock_list_table.setItem(i, 1, QTableWidgetItem(code))
-                self.stock_list_table.setItem(i, 2, QTableWidgetItem(name))
-                self.stock_list_table.setItem(i, 3, QTableWidgetItem(sectors_str))
-
-                if (i + 1) % table_batch_size == 0:
-                    self.stock_list_group.setTitle(f"选中板块对应的股票列表 (加载中... {i+1}/{total_stocks})")
-                    QApplication.processEvents()
-
-            self.stock_list_table.setUpdatesEnabled(True)
-            self.stock_list_group.setTitle(f"选中板块对应的股票列表 ({len(stock_list)} 只)")
-            self.update_stock_selected_count()
+            self._stock_list_base = stock_list
+            self._populate_stock_table_from_base(preserve_unchecked=False)
             self.filter_stock_list(self.stock_search_input.text())
 
-            logger.debug(f"更新股票列表完成，共 {len(stock_list)} 只股票")
-            self._schedule_auto_run_after_stock_list(ready=bool(stock_list))
+            logger.debug(
+                "更新股票列表完成，底池 %d 只，开关过滤后 %d 只",
+                len(self._stock_list_base),
+                self.stock_list_table.rowCount(),
+            )
+            self._schedule_auto_run_after_stock_list(ready=bool(self.stock_list_table.rowCount()))
 
         except Exception as e:
             logger.error(f"更新股票列表失败: {str(e)}", exc_info=True)
@@ -3635,6 +4091,132 @@ class SectorStockFilterDialog(QDialog):
             checkbox.blockSignals(True)
             checkbox.setChecked(visible)
             checkbox.blockSignals(False)
+        self.update_stock_selected_count()
+
+    @staticmethod
+    def _is_star_or_bj_code(stock_code: str) -> bool:
+        code = normalize_stock_code(stock_code)
+        if code.startswith(("688", "689")):
+            return True
+        if code.startswith(("8", "4", "920")):
+            return True
+        return False
+
+    def _stock_matches_exclude_filters(self, stock_code: str, stock_name: str = "") -> bool:
+        """当前排除开关下，该股票是否应从备选池剔除。"""
+        if getattr(self, "exclude_st_checkbox", None) is not None:
+            if self.exclude_st_checkbox.isChecked() and is_st_stock(stock_name):
+                return True
+        if getattr(self, "exclude_star_bj_checkbox", None) is not None:
+            if self.exclude_star_bj_checkbox.isChecked() and self._is_star_or_bj_code(stock_code):
+                return True
+        return False
+
+    def _filter_stock_list_by_exclude(
+        self, stock_list: List[Tuple[str, str, str]]
+    ) -> List[Tuple[str, str, str]]:
+        return [
+            (code, name, sectors)
+            for code, name, sectors in stock_list
+            if not self._stock_matches_exclude_filters(code, name)
+        ]
+
+    def _collect_unchecked_stock_codes(self) -> set:
+        unchecked = set()
+        for row in range(self.stock_list_table.rowCount()):
+            checkbox = self.stock_list_table.cellWidget(row, 0)
+            code_item = self.stock_list_table.item(row, 1)
+            if not code_item or not isinstance(checkbox, QCheckBox):
+                continue
+            if not checkbox.isChecked():
+                unchecked.add(code_item.text().strip().zfill(6))
+        return unchecked
+
+    def _update_stock_list_group_title(self, shown_count: int) -> None:
+        base_count = len(getattr(self, "_stock_list_base", []) or [])
+        excluded = max(0, base_count - shown_count)
+        if excluded > 0:
+            self.stock_list_group.setTitle(
+                f"选中板块对应的股票列表 ({shown_count} 只，已排除 {excluded})"
+            )
+        else:
+            self.stock_list_group.setTitle(f"选中板块对应的股票列表 ({shown_count} 只)")
+
+    def _populate_stock_table_from_base(
+        self,
+        *,
+        preserve_unchecked: bool = True,
+        force_checked_codes: Optional[set] = None,
+    ) -> None:
+        """按当前排除开关从底池生成备选表；开关关闭时被剔除标的会回到池中。"""
+        unchecked = self._collect_unchecked_stock_codes() if preserve_unchecked else set()
+        if force_checked_codes:
+            unchecked -= {str(c).strip().zfill(6) for c in force_checked_codes}
+
+        filtered = self._filter_stock_list_by_exclude(list(self._stock_list_base or []))
+        self.stock_checkboxes.clear()
+        self.stock_list_table.setUpdatesEnabled(False)
+        table_batch_size = 500
+        total_stocks = len(filtered)
+        self.stock_list_table.setRowCount(total_stocks)
+
+        for i, (code, name, sectors_str) in enumerate(filtered):
+            code6 = str(code).strip().zfill(6)
+            checkbox = QCheckBox()
+            checkbox.setChecked(code6 not in unchecked)
+            checkbox.stateChanged.connect(self._on_stock_checkbox_changed)
+            self.stock_list_table.setCellWidget(i, 0, checkbox)
+            self.stock_checkboxes[code6] = checkbox
+            self.stock_list_table.setItem(i, 1, QTableWidgetItem(code6))
+            self.stock_list_table.setItem(i, 2, QTableWidgetItem(name))
+            self.stock_list_table.setItem(i, 3, QTableWidgetItem(sectors_str))
+            if (i + 1) % table_batch_size == 0:
+                self.stock_list_group.setTitle(
+                    f"选中板块对应的股票列表 (加载中... {i+1}/{total_stocks})"
+                )
+                QApplication.processEvents()
+
+        self.stock_list_table.setUpdatesEnabled(True)
+        self._update_stock_list_group_title(total_stocks)
+        self.update_stock_selected_count()
+
+    def _load_stock_exclude_prefs(self) -> None:
+        prefs = {"exclude_st": False, "exclude_star_bj": False}
+        try:
+            if os.path.isfile(_UI_PREFS_PATH):
+                with open(_UI_PREFS_PATH, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    prefs["exclude_st"] = bool(raw.get("exclude_st", False))
+                    prefs["exclude_star_bj"] = bool(raw.get("exclude_star_bj", False))
+        except Exception:
+            logger.debug("加载选股 UI 偏好失败", exc_info=True)
+        for cb, key in (
+            (self.exclude_st_checkbox, "exclude_st"),
+            (self.exclude_star_bj_checkbox, "exclude_star_bj"),
+        ):
+            cb.blockSignals(True)
+            cb.setChecked(bool(prefs[key]))
+            cb.blockSignals(False)
+
+    def _save_stock_exclude_prefs(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(_UI_PREFS_PATH), exist_ok=True)
+            payload = {
+                "exclude_st": bool(self.exclude_st_checkbox.isChecked()),
+                "exclude_star_bj": bool(self.exclude_star_bj_checkbox.isChecked()),
+            }
+            with open(_UI_PREFS_PATH, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            logger.debug("保存选股 UI 偏好失败", exc_info=True)
+
+    def _on_stock_exclude_filter_changed(self, *_args) -> None:
+        self._save_stock_exclude_prefs()
+        self._populate_stock_table_from_base(preserve_unchecked=True)
+        self.filter_stock_list(self.stock_search_input.text())
+
+    def _on_stock_checkbox_changed(self, *_args) -> None:
         self.update_stock_selected_count()
     
     def filter_stock_list(self, text: str):
@@ -3861,95 +4443,71 @@ class SectorStockFilterDialog(QDialog):
                 QMessageBox.warning(self, "提示", msg)
                 return
             
-            existing_codes = set()
-            for row in range(self.stock_list_table.rowCount()):
-                code_item = self.stock_list_table.item(row, 1)
-                if code_item:
-                    existing_codes.add(code_item.text().strip().zfill(6))
-
             self._sector_store.ensure_inverted_index()
 
-            self.stock_list_table.setUpdatesEnabled(False)
+            existing_codes = {
+                str(code).strip().zfill(6)
+                for code, _name, _sectors in (self._stock_list_base or [])
+            }
+            force_checked = set()
             added_count = 0
-            selected_count = 0
-            
-            # 添加股票到表格
             for code, name in stocks_to_add:
-                # 如果股票已经在表格中，只选中它
-                if code in existing_codes:
-                    for row in range(self.stock_list_table.rowCount()):
-                        code_item = self.stock_list_table.item(row, 1)
-                        if code_item and code_item.text().strip().zfill(6) == code:
-                            checkbox = self.stock_list_table.cellWidget(row, 0)
-                            if checkbox and isinstance(checkbox, QCheckBox):
-                                checkbox.blockSignals(True)
-                                checkbox.setChecked(True)
-                                checkbox.blockSignals(False)
-                                selected_count += 1
-                            break
+                code6 = str(code).strip().zfill(6)
+                force_checked.add(code6)
+                if code6 not in self._stock_sectors_map:
+                    self._stock_sectors_map[code6] = self._sector_store.sectors_for_stock(code6)
+                sectors_list = self._stock_sectors_map.get(code6, [])
+                sectors_str = ";".join(sectors_list) if sectors_list else ""
+                if code6 in existing_codes:
+                    self._stock_list_base = [
+                        (code6, name, sectors_str) if str(c).strip().zfill(6) == code6 else (c, n, s)
+                        for c, n, s in self._stock_list_base
+                    ]
                 else:
-                    # 如果股票不在表格中，添加它
-                    row = self.stock_list_table.rowCount()
-                    self.stock_list_table.insertRow(row)
-                    
-                    # 添加复选框
-                    checkbox = QCheckBox()
-                    checkbox.setChecked(True)  # 默认选中
-                    checkbox.stateChanged.connect(self.update_stock_selected_count)
-                    self.stock_list_table.setCellWidget(row, 0, checkbox)
-                    
-                    # 添加股票代码
-                    code_item = QTableWidgetItem(code)
-                    self.stock_list_table.setItem(row, 1, code_item)
-                    
-                    # 添加股票名称
-                    name_item = QTableWidgetItem(name)
-                    self.stock_list_table.setItem(row, 2, name_item)
-                    
-                    if code not in self._stock_sectors_map:
-                        self._stock_sectors_map[code] = self._sector_store.sectors_for_stock(code)
-                    
-                    # 添加所属板块列
-                    sectors_list = self._stock_sectors_map.get(code, [])
-                    sectors_str = ';'.join(sectors_list) if sectors_list else ''
-                    sectors_item = QTableWidgetItem(sectors_str)
-                    self.stock_list_table.setItem(row, 3, sectors_item)
-                    
+                    self._stock_list_base.append((code6, name, sectors_str))
+                    existing_codes.add(code6)
                     added_count += 1
-                    selected_count += 1
-            
-            # 重新启用表格更新
-            self.stock_list_table.setUpdatesEnabled(True)
-            
-            # 更新标题显示股票数量
-            total_stocks = self.stock_list_table.rowCount()
-            self.stock_list_group.setTitle(f"选中板块对应的股票列表 ({total_stocks} 只)")
-            
-            # 更新选中数量
-            self.update_stock_selected_count()
+
+            self._stock_list_base.sort(key=lambda x: x[0])
+            self._populate_stock_table_from_base(
+                preserve_unchecked=True,
+                force_checked_codes=force_checked,
+            )
+            self.filter_stock_list(self.stock_search_input.text())
+
+            selected_count = sum(
+                1
+                for code in force_checked
+                if code in self.stock_checkboxes and self.stock_checkboxes[code].isChecked()
+            )
+            skipped_by_filter = len(force_checked) - selected_count
             
             # 显示结果
             msg_parts = []
             if added_count > 0:
-                msg_parts.append(f"已添加 {added_count} 只新股票")
-            if selected_count > added_count:
-                msg_parts.append(f"已选中 {selected_count - added_count} 只已有股票")
+                msg_parts.append(f"已添加 {added_count} 只新股票到备选底池")
+            if selected_count > 0:
+                msg_parts.append(f"当前备选池已选中 {selected_count} 只")
+            if skipped_by_filter > 0:
+                msg_parts.append(
+                    f"另有 {skipped_by_filter} 只因排除开关未进入当前备选池（关闭开关后会自动出现）"
+                )
             if not_found_codes:
                 msg_parts.append(f"\n\n以下股票代码不在沪深A股列表中：\n{', '.join(not_found_codes[:20])}")
                 if len(not_found_codes) > 20:
                     msg_parts.append(f"\n... 还有 {len(not_found_codes) - 20} 只")
             
             if msg_parts:
-                QMessageBox.information(self, "从文件选择完成", "".join(msg_parts))
+                QMessageBox.information(self, "从文件选择完成", "\n".join(msg_parts))
             else:
-                QMessageBox.information(self, "从文件选择完成", f"已成功处理 {selected_count} 只股票")
+                QMessageBox.information(self, "从文件选择完成", f"已成功处理 {len(force_checked)} 只股票")
             
         except Exception as e:
             QMessageBox.warning(self, "错误", f"从文件选择股票失败: {str(e)}")
             logger.error(f"从文件选择股票失败: {str(e)}", exc_info=True)
     
     def get_selected_stocks(self) -> List[str]:
-        """获取选中的股票代码列表"""
+        """获取当前备选池中勾选的股票代码列表"""
         selected = []
         for row in range(self.stock_list_table.rowCount()):
             if not self.stock_list_table.isRowHidden(row):
@@ -4099,7 +4657,7 @@ class SectorStockFilterDialog(QDialog):
                 if r is not None:
                     self._capture_rule_code_snapshot(str(r.get("code") or ""))
             
-            # 清空结果
+            # 清空结果，并复位进度/滚动（再次开始时勿沿用上次位置）
             self._result_tables_by_rule = {}
             self._result_rows_by_rule = {}
             self._rule_tab_index = {}
@@ -4108,7 +4666,8 @@ class SectorStockFilterDialog(QDialog):
                 self.result_tabs.removeTab(0)
                 if w is not None:
                     w.deleteLater()
-            
+            self._reset_filter_run_ui()
+
             qd = self.as_of_date_edit.date()
             picked = date(qd.year(), qd.month(), qd.day())
             qd_end = self.as_of_date_end_edit.date()
@@ -4195,7 +4754,41 @@ class SectorStockFilterDialog(QDialog):
         except Exception as e:
             logger.error(f"停止筛选失败: {str(e)}", exc_info=True)
             QMessageBox.warning(self, "错误", f"停止筛选失败: {str(e)}")
-    
+
+    def _reset_filter_run_ui(self) -> None:
+        """再次开始筛选时：进度条与各滚动条归零，日志清空。"""
+        try:
+            if hasattr(self, "progress_bar") and self.progress_bar is not None:
+                self.progress_bar.setMinimum(0)
+                self.progress_bar.setMaximum(100)
+                self.progress_bar.setValue(0)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "debug_output") and self.debug_output is not None:
+                self.debug_output.clear()
+                sb = self.debug_output.verticalScrollBar()
+                if sb is not None:
+                    sb.setValue(0)
+        except Exception:
+            pass
+        for attr in ("_main_scroll", "sector_scroll"):
+            try:
+                area = getattr(self, attr, None)
+                if area is not None:
+                    vsb = area.verticalScrollBar()
+                    if vsb is not None:
+                        vsb.setValue(0)
+            except Exception:
+                pass
+        try:
+            if hasattr(self, "stock_list_table") and self.stock_list_table is not None:
+                vsb = self.stock_list_table.verticalScrollBar()
+                if vsb is not None:
+                    vsb.setValue(0)
+        except Exception:
+            pass
+
     def on_progress_updated(self, current: int, total: int, stock_code: str):
         """更新进度"""
         progress = int((current / total) * 100) if total > 0 else 0
@@ -4376,6 +4969,12 @@ class SectorStockFilterDialog(QDialog):
             info_text += "。"
         
         self.status_label.setText(info_text)
+        try:
+            if hasattr(self, "progress_bar") and self.progress_bar is not None:
+                mx = max(1, int(self.progress_bar.maximum() or 1))
+                self.progress_bar.setValue(mx)
+        except Exception:
+            pass
         
         # 不再自动保存，用户可以通过各模式的保存按钮手动保存
         if self._auto_run and not self._auto_run_finished:
@@ -4503,6 +5102,7 @@ class SectorStockFilterDialog(QDialog):
         rows = self._result_rows_by_rule.get(rid, [])
         if not rows:
             return False
+        rows = reorder_selection_rows_for_export(rows, max_per_tag=2)
         r = self._get_rule_by_id(rid)
         rule_name = str(r.get("name") if r else "规则")
         is_first_board = self._is_first_board_rule_name(rule_name)
@@ -4547,6 +5147,7 @@ class SectorStockFilterDialog(QDialog):
         if not rows:
             QMessageBox.information(self, "提示", "该规则没有结果可保存")
             return
+        rows = reorder_selection_rows_for_export(rows, max_per_tag=2)
         r = self._get_rule_by_id(rid)
         rule_name = str(r.get("name") if r else "规则")
         is_first_board = self._is_first_board_rule_name(rule_name)
@@ -4721,6 +5322,7 @@ class SectorStockFilterDialog(QDialog):
                 rows = self._result_rows_by_rule.get(rid, [])
                 if not rows:
                     continue
+                rows = reorder_selection_rows_for_export(rows, max_per_tag=2)
                 rule_counts[rname] = len(rows)
                 for rr in rows:
                     stock_copy = {
@@ -4816,6 +5418,11 @@ class SectorStockFilterDialog(QDialog):
         
         if self.countdown_timer:
             self.countdown_timer.stop()
+
+        try:
+            self._save_stock_exclude_prefs()
+        except Exception:
+            pass
         
         event.accept()
 
@@ -4842,36 +5449,67 @@ def main():
             print(f"无效的 --as-of 日期: {args.as_of!r}，请使用 YYYY-MM-DD", file=sys.stderr)
             sys.exit(2)
 
-    app = QApplication(sys.argv)
+    # 优先复用启动早期创建的 QApplication / 单例服务器 / splash（覆盖重依赖加载阶段）
+    app = _EARLY_APP or QApplication.instance() or QApplication(sys.argv)
 
-    # 与备份目录（原版 AntStockFilterSingleton）并存，便于 A/B 对比
-    server_name = "AntStockFilterSingletonV2"
+    server = _EARLY_SINGLETON_SERVER
+    if server is None:
+        # 与备份目录（原版 AntStockFilterSingleton）并存，便于 A/B 对比
+        server_name = _SINGLETON_SERVER_NAME
 
-    # 先尝试作为“第二实例”：连到已有的本地服务器，若成功则发送激活请求并退出
-    socket = QLocalSocket()
-    socket.connectToServer(server_name)
-    if socket.waitForConnected(200):
+        # 先尝试作为“第二实例”：连到已有的本地服务器，若成功则发送激活请求并退出
+        socket = QLocalSocket()
+        socket.connectToServer(server_name)
+        if socket.waitForConnected(200):
+            try:
+                socket.write(b"activate")
+                socket.flush()
+                socket.waitForBytesWritten(200)
+            except Exception:
+                pass
+            socket.disconnectFromServer()
+            # 已有实例在运行，本实例直接退出
+            return
+        socket.abort()
+
+        # 没有已运行实例：创建本地服务器，供后续实例发送“activate”指令
+        server = QLocalServer()
+        # 防止残留的同名服务器阻止绑定
         try:
-            socket.write(b"activate")
-            socket.flush()
-            socket.waitForBytesWritten(200)
+            QLocalServer.removeServer(server_name)
         except Exception:
             pass
-        socket.disconnectFromServer()
-        # 已有实例在运行，本实例直接退出
-        return
-    socket.abort()
+        server.listen(server_name)
 
-    # 没有已运行实例：创建本地服务器，供后续实例发送“activate”指令
-    server = QLocalServer()
-    # 防止残留的同名服务器阻止绑定
-    try:
-        QLocalServer.removeServer(server_name)
-    except Exception:
-        pass
-    server.listen(server_name)
+    splash = _EARLY_SPLASH
+    if splash is None:
+        try:
+            splash = QLabel("正在加载选股系统")
+            splash.setWindowTitle("蚂蚁量化选股系统")
+            splash.setAlignment(Qt.AlignCenter)
+            splash.setFixedSize(360, 80)
+            splash.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.SplashScreen)
+            splash.setStyleSheet(
+                "background:#FFF8E1; color:#333; font-size:12pt; border:1px solid #FFCC80;"
+            )
+            splash.show()
+            app.processEvents()
+        except Exception:
+            splash = None
+    else:
+        try:
+            app.processEvents()
+        except Exception:
+            pass
 
     dialog = SectorStockFilterDialog(initial_as_of=initial_as_of, auto_run=bool(args.auto_run))
+
+    if splash is not None:
+        try:
+            splash.close()
+        except Exception:
+            pass
+        splash = None
 
     def handle_new_connection():
         client = server.nextPendingConnection()

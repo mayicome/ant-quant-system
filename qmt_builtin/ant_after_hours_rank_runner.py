@@ -1224,7 +1224,4 @@ def maybe_catch_up_after_hours_rank(ContextInfo=None) -> bool:
 
 def register_after_hours_rank_timer(ContextInfo) -> None:
     """不再单独注册定时：由 daily→tick 流水线串行触发。"""
-    _log(
-        "定时器跳过（由分笔同步串行触发）版本=%s"
-        % AFTER_HOURS_RANK_VERSION
-    )
+    return

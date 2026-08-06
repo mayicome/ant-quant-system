@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -25,16 +27,21 @@ TICK_POOL_TIMEOUT_MIN_SEC = 45.0
 TICK_POOL_TIMEOUT_MAX_SEC = 300.0
 TICK_POOL_SEC_PER_CODE = 3.0
 DEFAULT_POOL_DAILY_TIMEOUT_SEC = 120.0
-POOL_DAILY_SEC_PER_CODE = 4.5
+POOL_DAILY_SEC_PER_CODE = 1.5
 POOL_DAILY_TIMEOUT_MIN_SEC = 120.0
-POOL_DAILY_TIMEOUT_MAX_SEC = 900.0
+POOL_DAILY_TIMEOUT_MAX_SEC = 7200.0
 POOL_DAILY_SMALL_POOL_MAX = 5
 POOL_DAILY_SMALL_POOL_MIN_SEC = 30.0
 POOL_DAILY_STALL_SEC = 45.0
+# 大池等待：无进展容忍随缺少数放宽（盘中约 1 只/秒，避免误杀）
+POOL_DAILY_STALL_SEC_PER_MISSING = 0.9
+POOL_DAILY_STALL_MAX_SEC = 300.0
 MAX_RETRIES = 3
 MIN_DAILY_CACHE_READY = 1
 MIN_DAILY_BARS_MA120 = 120
 POOL_MAX_DATE_LAG_DAYS = 10
+# 回测引擎内逐只兜底：预热后不应再长等
+BACKTEST_ENSURE_DAILY_TIMEOUT_SEC = 8.0
 
 try:
     from utils.daily_cache_reader import (
@@ -114,19 +121,44 @@ def _parse_date(raw: Any) -> Optional[date]:
 
 
 def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
+    """原子写 JSON。用唯一临时文件，避免多进程共用 path.tmp 互相踩掉（WinError 2）。"""
     folder = os.path.dirname(path) or "."
     os.makedirs(folder, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    for attempt in range(8):
-        try:
-            os.replace(tmp, path)
-            return
-        except OSError:
-            if attempt >= 7:
-                raise
-            time.sleep(0.05 * (attempt + 1))
+    fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp", prefix=".dsr_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        last_err: Optional[BaseException] = None
+        for attempt in range(12):
+            try:
+                os.replace(tmp, path)
+                tmp = ""
+                return
+            except OSError as e:
+                last_err = e
+                # Windows 偶发占用：后半程改 copy 兜底
+                if attempt >= 7 and os.path.isfile(tmp):
+                    try:
+                        shutil.copy2(tmp, path)
+                        tmp = ""
+                        return
+                    except OSError:
+                        pass
+                time.sleep(0.05 * (attempt + 1))
+        if last_err is not None:
+            raise last_err
+        raise OSError("atomic write failed: %s" % path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _empty_requests() -> Dict[str, Any]:
@@ -153,11 +185,66 @@ def save_requests(data: Dict[str, Any]) -> None:
     _atomic_write_json(REQUESTS_PATH, data)
 
 
+_DAILY_FAILED_PRUNE_KEY = "daily_failed_pruned_on"
+
+
+def _is_daily_failed_trace(meta: Dict[str, Any]) -> bool:
+    st = str(meta.get("status") or "")
+    retries = int(meta.get("retries") or 0)
+    return st == "failed" or (st == "pending" and retries >= MAX_RETRIES)
+
+
+def _daily_meta_stamp(meta: Dict[str, Any]) -> Optional[date]:
+    for key in ("updated_at", "last_attempt_at", "requested_at", "through_date"):
+        d = _parse_date(meta.get(key))
+        if d is not None:
+            return d
+    return None
+
+
+def prune_stale_daily_failures(*, today: Optional[date] = None) -> int:
+    """跨自然日清除按需日线失败痕迹，使监控「失败」数每日归零。
+
+    仅删除 stamp < today 的 failed / 重试耗尽条目；当日失败保留。
+    每天最多写盘一次（由 daily_failed_pruned_on 标记）。
+    """
+    today = today or date.today()
+    today_s = today.isoformat()
+    data = load_requests()
+    if str(data.get(_DAILY_FAILED_PRUNE_KEY) or "") == today_s:
+        return 0
+    daily = data.get("daily")
+    if not isinstance(daily, dict):
+        daily = {}
+        data["daily"] = daily
+    removed = 0
+    for code in list(daily.keys()):
+        meta = daily.get(code)
+        if not isinstance(meta, dict):
+            continue
+        if not _is_daily_failed_trace(meta):
+            continue
+        stamp = _daily_meta_stamp(meta)
+        if stamp is None or stamp < today:
+            daily.pop(code, None)
+            removed += 1
+    data[_DAILY_FAILED_PRUNE_KEY] = today_s
+    try:
+        save_requests(data)
+    except Exception:
+        logger.exception("prune_stale_daily_failures 写盘失败")
+        return 0
+    if removed:
+        logger.info("已清除跨日按需日线失败痕迹 %d 条", removed)
+    return removed
+
+
 PoolProgressFn = Optional[Callable[[int, int, str], None]]
 
 
 def count_pending_sync() -> Tuple[int, int]:
     """返回 (pending_daily 条数, pending_tick 条数)。"""
+    prune_stale_daily_failures()
     data = load_requests()
     daily_n = 0
     daily = data.get("daily") or {}
@@ -183,8 +270,62 @@ def count_pending_sync() -> Tuple[int, int]:
     return daily_n, tick_n
 
 
+def _expected_cache_last_date(through_date: date) -> date:
+    """盘中/盘前：期望 CSV 末日为上一交易日（周末回退）；收盘同步后可为 through_date。"""
+    now = datetime.now()
+    if through_date < now.date():
+        return through_date
+    # 15:35 前不指望「今日」K 已完整落盘
+    if (now.hour, now.minute) < (15, 35):
+        d = through_date - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d
+    return through_date
+
+
+def _peek_daily_cache_last_date(code: str) -> Optional[date]:
+    """只读 CSV 末尾估末日，避免 ready 轮询反复全量 read_csv。"""
+    try:
+        path = csv_path_for_code(code)
+    except Exception:
+        return None
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        size = os.path.getsize(path)
+        if size < 8:
+            return None
+        with open(path, "rb") as f:
+            f.seek(max(0, size - 4096))
+            chunk = f.read().decode("utf-8", errors="ignore")
+        lines = [ln.strip() for ln in chunk.splitlines() if ln.strip()]
+        for ln in reversed(lines):
+            low = ln.lower()
+            if low.startswith("date") or "," not in ln:
+                continue
+            raw = ln.split(",", 1)[0].strip().strip('"')[:10]
+            try:
+                return datetime.strptime(raw, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+    except Exception:
+        return None
+    return None
+
+
 def _daily_cache_ready(code: str, through_date: Optional[date]) -> bool:
     """有可用日线缓存即可（不要求满 120 根；MA120 由策略/计算器自行处理）。"""
+    # 快路径：文件存在且末日够新 → 视为就绪（轮询用，避免反复读全表）
+    if through_date is not None:
+        last = _peek_daily_cache_last_date(code)
+        if last is not None:
+            expected = _expected_cache_last_date(through_date)
+            if last >= expected and last >= through_date - timedelta(days=POOL_MAX_DATE_LAG_DAYS):
+                return True
+            # 末日明显偏旧 → 未就绪；无需再全量读
+            if last < expected:
+                return False
     df = load_daily_from_cache(code, through_date=through_date)
     if df is None or getattr(df, "empty", True):
         return False
@@ -193,6 +334,11 @@ def _daily_cache_ready(code: str, through_date: Optional[date]) -> bool:
     if through_date is not None and "date" in df.columns:
         try:
             last = df["date"].max()
+            if hasattr(last, "date") and callable(last.date):
+                last = last.date()
+            expected = _expected_cache_last_date(through_date)
+            if last < expected:
+                return False
             if last < through_date - timedelta(days=POOL_MAX_DATE_LAG_DAYS):
                 return False
         except Exception:
@@ -215,6 +361,7 @@ def submit_daily_requests(
     through_date: Optional[date] = None,
 ) -> List[str]:
     """提交日线同步请求；返回本次新提交的完整代码列表。"""
+    prune_stale_daily_failures()
     end_d = through_date or date.today()
     end_s = end_d.isoformat()
     data = load_requests()
@@ -466,6 +613,16 @@ def wait_daily_cache_pool(
         if timeout_sec is None
         else min(float(timeout_sec), pool_daily_wait_timeout_sec(len(need)) + 60.0)
     )
+    stall_limit = float(POOL_DAILY_STALL_SEC)
+    if len(need) > 20:
+        stall_limit = max(
+            stall_limit,
+            min(
+                float(POOL_DAILY_STALL_MAX_SEC),
+                float(POOL_DAILY_STALL_SEC)
+                + len(need) * float(POOL_DAILY_STALL_SEC_PER_MISSING),
+            ),
+        )
     deadline = time.time() + max(1.0, float(wait_sec))
     ready_count = len(fulls) - len(need)
     stall_since = time.time()
@@ -483,7 +640,7 @@ def wait_daily_cache_pool(
         if len(ready) > ready_count:
             ready_count = len(ready)
             stall_since = time.time()
-        elif time.time() - stall_since >= POOL_DAILY_STALL_SEC:
+        elif time.time() - stall_since >= stall_limit:
             return ready, missing_now
         _pump_ui_events()
         time.sleep(max(0.2, float(poll_sec)))
@@ -629,6 +786,9 @@ def ensure_tick_dataframe(
         from tick_data_cache import read_tick_cache  # type: ignore[no-redef]
     if _tick_cache_ready(c6, trade_date):
         return read_tick_cache(c6, trade_date)
+    # QMT 已判失败/重试耗尽时勿再空等 timeout
+    if tick_sync_unavailable(c6, trade_date):
+        return None
     ok = wait_tick_cache(c6, trade_date, timeout_sec=timeout_sec)
     if not ok:
         logger.warning(
@@ -641,6 +801,7 @@ def ensure_tick_dataframe(
 
 
 def list_pending_daily(limit: int = 20) -> List[Tuple[str, date, Dict[str, Any]]]:
+    prune_stale_daily_failures()
     data = load_requests()
     pending: List[Tuple[str, date, Dict[str, Any], str]] = []
     daily = data.get("daily") or {}

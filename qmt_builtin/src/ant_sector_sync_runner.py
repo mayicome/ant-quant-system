@@ -12,7 +12,7 @@ import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-SECTOR_SYNC_VERSION = "20260730.13"
+SECTOR_SYNC_VERSION = "20260803.01"
 SYNC_HOUR = 15
 SYNC_MINUTE = 35
 STARTUP_DELAY_SEC = 10
@@ -134,7 +134,7 @@ def _call_first(owners, method: str, *args, log_fail: bool = True):
             continue
     if log_fail and last_err is not None and method not in _API_FAIL_LOGGED:
         _API_FAIL_LOGGED.add(method)
-        print("[板块同步] %s failed: %s" % (method, last_err))
+        print("[板块同步] %s 失败: %s" % (method, last_err))
     return None, None
 
 
@@ -210,7 +210,7 @@ def _start_sector_sync_bg(ContextInfo, source: str, *, force: bool = False) -> N
         try:
             run_sector_sync(ContextInfo, source=source, force=force)
         except Exception as e:
-            print("[板块同步] bg error (%s): %s" % (source, e))
+            print("[板块同步] 后台错误 (%s): %s" % (source, e))
 
     th = threading.Thread(
         target=_worker, daemon=True, name="sector_sync_%s" % source
@@ -229,7 +229,7 @@ def _list_ui_sectors(ContextInfo=None) -> Tuple[List[str], str]:
     gn = sum(1 for s in sectors if s.startswith("GN"))
     src = label or "none"
     print(
-        "[板块同步] ui sectors=%d sw1=%d gn=%d source=%s"
+        "[板块同步] UI板块=%d sw1=%d gn=%d source=%s"
         % (
             len(sectors),
             sum(1 for s in sectors if s.startswith("SW1")),
@@ -238,7 +238,7 @@ def _list_ui_sectors(ContextInfo=None) -> Tuple[List[str], str]:
         )
     )
     if gn == 0 and sectors:
-        print("[板块同步] WARN: no GN concept sectors in local/ContextInfo data")
+        print("[板块同步] 警告: 本地/ContextInfo 数据中无 GN 概念板块")
     return sectors, src
 
 
@@ -251,10 +251,10 @@ def _universe_from_file() -> Set[str]:
         raw = list(payload.get("codes") or [])
         codes = {_code_to_6(c) for c in raw if _code_to_6(c)}
         if codes:
-            print("[板块同步] universe fallback file=%d" % len(codes))
+            print("[板块同步] 股票池回退文件 n=%d" % len(codes))
         return codes
     except Exception as e:
-        print("[板块同步] universe file fail: %s" % e)
+        print("[板块同步] 股票池文件失败: %s" % e)
         return set()
 
 
@@ -276,7 +276,7 @@ def _universe_codes(ContextInfo=None) -> Tuple[Set[str], str]:
         codes = {_code_to_6(c) for c in raw if _code_to_6(c)}
         if codes:
             print(
-                "[板块同步] universe %s=%d source=%s"
+                "[板块同步] 股票池 %s=%d source=%s"
                 % (UNIVERSE_SECTOR, len(codes), label)
             )
             return codes, label
@@ -317,7 +317,7 @@ def _save_manifest(manifest_path: str, body: Dict[str, Any]) -> None:
     try:
         save_json_atomic(manifest_path, body)
     except Exception as e:
-        print("[板块同步] manifest save failed: %s" % e)
+        print("[板块同步] manifest 保存失败: %s" % e)
 
 
 def is_sync_running() -> bool:
@@ -336,14 +336,14 @@ def _already_attempted_today() -> bool:
 def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = False) -> bool:
     global _SYNC_RUNNING, _SOFT_FAIL_LOGGED
     if _SYNC_RUNNING:
-        print("[板块同步] skip: already running")
+        print("[板块同步] 跳过: 已在运行")
         return False
 
     _, index_path, manifest_path = _paths()
     if not force and _cache_fresh(index_path):
         age = _cache_age_days(index_path)
         print(
-            "[板块同步] skip: cache fresh (age=%sd, max=%sd)"
+            "[板块同步] 跳过: 缓存仍新 (age=%sd, max=%sd)"
             % (age if age is not None else "?", CACHE_MAX_AGE_DAYS)
         )
         return True
@@ -355,7 +355,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
         if st in ("failed", "ok_cached"):
             if not _SOFT_FAIL_LOGGED:
                 print(
-                    "[板块同步] skip: already attempted today status=%s version=%s"
+                    "[板块同步] 跳过: 今日已尝试 status=%s 版本=%s"
                     % (st, SECTOR_SYNC_VERSION)
                 )
                 _SOFT_FAIL_LOGGED = True
@@ -365,7 +365,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
     _mark_attempted()
     started = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     print(
-        "[板块同步] begin source=%s version=%s primary=ContextInfo "
+        "[板块同步] 开始 source=%s 版本=%s primary=ContextInfo "
         "xtdata_dl=%s"
         % (
             source,
@@ -396,8 +396,8 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
                 ui_sectors = sorted(set(cached_secs))
                 sector_src = "cache_names"
                 print(
-                    "[板块同步] no live get_sector_list; "
-                    "refresh members from cached names n=%d"
+                    "[板块同步] 无实时 get_sector_list; "
+                    "用缓存板块名刷新成分 n=%d"
                     % len(ui_sectors)
                 )
             else:
@@ -406,7 +406,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
                     status = "ok_cached"
                     ok = True
                     print(
-                        "[板块同步] soft-ok: no live sectors; keep cache "
+                        "[板块同步] 软成功: 无实时板块; 保留缓存 "
                         "age=%sd (no xtdata download)"
                         % age
                     )
@@ -417,7 +417,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
 
         universe, universe_src = _universe_codes(ContextInfo)
         if not universe:
-            print("[板块同步] WARN: empty universe; index members unfiltered")
+            print("[板块同步] 警告: 股票池为空; 指数成分未过滤")
 
         code_to_set: Dict[str, Set[str]] = {}
         total = len(ui_sectors)
@@ -429,7 +429,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
             except Exception:
                 member_fail += 1
             if i % PROGRESS_EVERY == 0 or i == total:
-                print("[板块同步] index progress %d/%d" % (i, total))
+                print("[板块同步] 索引进度 %d/%d" % (i, total))
             time.sleep(0.01)
 
         if not code_to_set:
@@ -438,7 +438,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
                 status = "ok_cached"
                 ok = True
                 print(
-                    "[板块同步] soft-ok: empty members; keep cache age=%sd"
+                    "[板块同步] 软成功: 成分为空; 保留缓存 age=%sd"
                     % age
                 )
                 return True
@@ -449,7 +449,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
         ok = True
         status = "ok"
         print(
-            "[板块同步] done sectors=%d stocks=%d universe=%d "
+            "[板块同步] 完成 sectors=%d stocks=%d universe=%d "
             "sector_src=%s universe_src=%s downloaded=%s member_fail=%d"
             % (
                 len(ui_sectors),
@@ -465,10 +465,10 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
     except Exception as e:
         status = "failed"
         if not _SOFT_FAIL_LOGGED:
-            print("[板块同步] ERROR: %s" % e)
+            print("[板块同步] 错误: %s" % e)
             _SOFT_FAIL_LOGGED = True
         else:
-            print("[板块同步] ERROR (suppressed detail): %s" % type(e).__name__)
+            print("[板块同步] 错误（详情已抑制）: %s" % type(e).__name__)
         return False
     finally:
         finished = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -499,23 +499,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
 
 def startup_sector_sync(ContextInfo):
     """启动不同步板块（全量扫板块较重）；由盘后流水线更新。"""
-    _, index_path, manifest_path = _paths()
-    age = _cache_age_days(index_path)
-    if age is None:
-        manifest = _read_json(manifest_path)
-        if manifest and str(manifest.get("status") or "") in ("ok", "ok_cached"):
-            try:
-                built = str(manifest.get("built_at") or "")[:10]
-                if built:
-                    age = (date.today() - date.fromisoformat(built)).days
-            except Exception:
-                pass
-    age_s = "missing" if age is None else ("%dd" % age)
-    print(
-        "[板块同步] startup disabled; cache_age=%s; "
-        "chained after daily->tick->after_rank version=%s"
-        % (age_s, SECTOR_SYNC_VERSION)
-    )
+    del ContextInfo
     return True
 
 
@@ -546,15 +530,15 @@ def is_synced_today() -> bool:
 def run_after_hours_pipeline(ContextInfo=None) -> bool:
     """盘后流水线末尾：今日未同步则后台全量更新板块。"""
     if is_sync_running():
-        print("[板块同步] pipeline skip: already running")
+        print("[板块同步] 流水线跳过: 已在运行")
         return False
     if is_synced_today():
-        print("[板块同步] pipeline skip: already synced today")
+        print("[板块同步] 流水线跳过: 今日已同步")
         return True
     if _already_attempted_today():
-        print("[板块同步] pipeline skip: already attempted today")
+        print("[板块同步] 流水线跳过: 今日已尝试")
         return False
-    print("[板块同步] pipeline: start background after after_rank")
+    print("[板块同步] 流水线: 盘后排名后后台开始")
     _start_sector_sync_bg(ContextInfo, "after_hours_pipeline", force=True)
     return True
 
@@ -571,7 +555,4 @@ def register_startup_sector_timer(ContextInfo) -> None:
 
 def register_sector_sync_timer(ContextInfo) -> None:
     """不再单独注册 00:00 定时：由盘后日线→tick→量能完成后串行触发。"""
-    print(
-        "[板块同步] timer skipped (chained after after_rank) version=%s"
-        % SECTOR_SYNC_VERSION
-    )
+    return

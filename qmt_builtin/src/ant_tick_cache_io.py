@@ -963,12 +963,12 @@ def run_tick_api_probe(ContextInfo, day="20260730", codes=None):
         log_lines.append(line)
 
     _log(
-        "begin day=%s codes=%s io=%s"
+        "开始 day=%s codes=%s io=%s"
         % (day_s, ",".join(full_codes), TICK_CACHE_IO_VERSION)
     )
     bind_ok = bind_download_history_data(None)
     dl_fn = resolve_download_history_data()
-    _log("builtin download_history_data bound=%s callable=%s" % (bind_ok, bool(callable(dl_fn))))
+    _log("内置 download_history_data 已绑定=%s callable=%s" % (bind_ok, bool(callable(dl_fn))))
 
     windows = _tick_time_windows(day_s)
     variants = []  # type: List[Tuple[str, str, bool, bool]]
@@ -1028,9 +1028,9 @@ def run_tick_api_probe(ContextInfo, day="20260730", codes=None):
     # 汇总：哪个 variant 有数据
     hit = [r for r in rows if int(r.get("nrows") or 0) > 0]
     if hit:
-        _log("HIT count=%d best=%s" % (len(hit), hit[0].get("variant")))
+        _log("命中 count=%d best=%s" % (len(hit), hit[0].get("variant")))
     else:
-        _log("ALL_EMPTY — 检查行情连接/下载中心权限；勿默认改走 miniQMT")
+        _log("全部为空 — 检查行情连接/下载中心权限；勿默认改走 miniQMT")
 
     try:
         root = PROJECT_ROOT.rstrip("\\/")
@@ -1040,9 +1040,9 @@ def run_tick_api_probe(ContextInfo, day="20260730", codes=None):
         path = os.path.join(out_dir, "tick_probe_%s.log" % day_s)
         with open(path, "w") as f:
             f.write("\n".join(log_lines) + "\n")
-        _log("wrote %s" % path)
+        _log("已写入 %s" % path)
     except Exception as e:
-        _log("write log fail: %s" % e)
+        _log("写日志失败: %s" % e)
     return rows
 
 

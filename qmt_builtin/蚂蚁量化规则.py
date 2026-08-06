@@ -8,12 +8,15 @@ import os
 import sys
 import time
 
-ENTRY_VERSION = "20260801.01"
+ENTRY_VERSION = "20260805.01"
 _shadow = None
 _ACCOUNT_SNAPSHOT_MOD = None
 _ENTRY_ACCOUNT_SKIP = ""
 _LAST_ENTRY_ACCOUNT_SYNC = 0.0
-_ENTRY_ACCOUNT_INTERVAL_SEC = 2.0
+_ENTRY_ACCOUNT_INTERVAL_SEC = 3.0
+# ί��/�ɽ���ѯ���أ����ڻ��ͬһ�߳��ϵ� tick �ص��� full_tick ����
+_LAST_ENTRY_ORDER_DEAL_SYNC = 0.0
+_ENTRY_ORDER_DEAL_INTERVAL_SEC = 12.0
 # ���� download_history_data��ÿ����ֻ bind/log һ�Σ����� handlebar ��·��ˢ����
 _DOWNLOAD_HISTORY_BOUND = False
 _DOWNLOAD_HISTORY_MISS_LOGGED = False
@@ -30,7 +33,7 @@ def _plog(msg):
             pass
 
 
-_plog("[�������] module load ENTRY_VERSION=%s" % ENTRY_VERSION)
+_plog("[���] ģ���Ѽ��� �汾=%s" % ENTRY_VERSION)
 
 
 def _qmt_python_dir():
@@ -69,24 +72,32 @@ def _load_shadow():
     global _shadow
     path = _shadow_py_path()
     if not path:
-        _plog("[�������] FATAL: ant_shadow_strategy.py not found")
+        _plog("[���] ����: δ�ҵ� ant_shadow_strategy.py")
         _shadow = None
         return None
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError:
+        mtime = 0
+    # ͬ�ļ�δ�����ã����� init ������ reload ˢ˫��������־
+    if _shadow is not None and getattr(_shadow, "_ANT_SHADOW_MTIME", None) == mtime:
+        return _shadow
     for key in list(sys.modules.keys()):
         if key == "ant_shadow_strategy" or key.startswith("ant_shadow_"):
             sys.modules.pop(key, None)
-    mod_name = "ant_shadow_%d" % int(os.path.getmtime(path))
+    mod_name = "ant_shadow_%d" % mtime
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
-        _plog("[�������] FATAL: cannot load " + path)
+        _plog("[���] ����: �޷����� " + path)
         _shadow = None
         return None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
+    mod._ANT_SHADOW_MTIME = mtime
     _shadow = mod
     ver = getattr(mod, "SHADOW_VERSION", "?")
-    _plog("[�������] shadow loaded version=%s file=%s" % (ver, path))
+    _plog("[���] ���׺����Ѽ��� �汾=%s" % ver)
     return mod
 
 
@@ -231,7 +242,7 @@ def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, accoun
 
 def _entry_sync_account_snapshot(ContextInfo):
     """?? QMT ???/????????????????? get_trade_detail_data??"""
-    global _ENTRY_ACCOUNT_SKIP, _LAST_ENTRY_ACCOUNT_SYNC
+    global _ENTRY_ACCOUNT_SKIP, _LAST_ENTRY_ACCOUNT_SYNC, _LAST_ENTRY_ORDER_DEAL_SYNC
     try:
         now = time.time()
         if now - _LAST_ENTRY_ACCOUNT_SYNC < float(_ENTRY_ACCOUNT_INTERVAL_SEC):
@@ -245,14 +256,14 @@ def _entry_sync_account_snapshot(ContextInfo):
         if snap is None:
             if _ENTRY_ACCOUNT_SKIP != "snapshot_mod_missing":
                 _ENTRY_ACCOUNT_SKIP = "snapshot_mod_missing"
-                print("[���׺���] account snapshot skip: ant_account_snapshot missing")
+                print("[���׺���] �˻���������: ȱ�� ant_account_snapshot")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
         aid = snap.resolve_account_id(ContextInfo)
         if not aid:
             if _ENTRY_ACCOUNT_SKIP != "no_account_id":
                 _ENTRY_ACCOUNT_SKIP = "no_account_id"
-                print("[���׺���] account snapshot skip: no_account_id")
+                print("[���׺���] �˻���������: no_account_id")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
         try:
@@ -260,7 +271,7 @@ def _entry_sync_account_snapshot(ContextInfo):
         except NameError:
             if _ENTRY_ACCOUNT_SKIP != "no_gtd":
                 _ENTRY_ACCOUNT_SKIP = "no_gtd"
-                print("[���׺���] account snapshot skip: get_trade_detail_data not in entry scope")
+                print("[���׺���] �˻���������: ����������� get_trade_detail_data")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
 
@@ -279,18 +290,37 @@ def _entry_sync_account_snapshot(ContextInfo):
         except Exception:
             pos_try_log = []
         # ORDER/DEAL: do NOT query with strategyName="" (filters everything out)
-        order_raw = _entry_fetch_trade_detail(
-            aid,
-            "order",
-            strategy_names=("\u8682\u8681\u002d\u5355\u70b9\u4e70\u5165", "\u8682\u8681\u002d\u5355\u70b9\u5356\u51fa", "\u8682\u8681\u002d\u7a81\u7834\u4e70\u5165", "\u8682\u8681\u002d\u7a81\u7834\u5356\u51fa", "\u8682\u8681\u002d\u5f39\u6027\u5356\u51fa", "\u8682\u8681\u002d\u5f39\u6027\u4e70\u5165", "\u8682\u8681\u002d\u7b3c\u5b50\u4e70\u5165", "\u8682\u8681\u002d\u7b3c\u5b50\u5356\u51fa", "\u8682\u8681\u002d\u7f51\u683c\u4e70\u5165", "\u8682\u8681\u002d\u7f51\u683c\u5356\u51fa", "\u8682\u8681\u002d\u5b9a\u65f6\u6e05\u4ed3", "\u8682\u8681\u002d\u5185\u7f6e\u4e0b\u5355"),
-            account_type_hint=acct_type_hint,
-        )
-        deal_raw = _entry_fetch_trade_detail(
-            aid,
-            "deal",
-            strategy_names=("\u8682\u8681\u002d\u5355\u70b9\u4e70\u5165", "\u8682\u8681\u002d\u5355\u70b9\u5356\u51fa", "\u8682\u8681\u002d\u7a81\u7834\u4e70\u5165", "\u8682\u8681\u002d\u7a81\u7834\u5356\u51fa", "\u8682\u8681\u002d\u5f39\u6027\u5356\u51fa", "\u8682\u8681\u002d\u5f39\u6027\u4e70\u5165", "\u8682\u8681\u002d\u7b3c\u5b50\u4e70\u5165", "\u8682\u8681\u002d\u7b3c\u5b50\u5356\u51fa", "\u8682\u8681\u002d\u7f51\u683c\u4e70\u5165", "\u8682\u8681\u002d\u7f51\u683c\u5356\u51fa", "\u8682\u8681\u002d\u5b9a\u65f6\u6e05\u4ed3", "\u8682\u8681\u002d\u5185\u7f6e\u4e0b\u5355"),
-            account_type_hint=acct_type_hint,
-        )
+        # ��Ƶ��None ʱ apply �����û��棬����ÿ�ֶ�· GTD ������
+        order_raw = None
+        deal_raw = None
+        if now - _LAST_ENTRY_ORDER_DEAL_SYNC >= float(_ENTRY_ORDER_DEAL_INTERVAL_SEC):
+            _strat_names = (
+                "\u8682\u8681\u002d\u5355\u70b9\u4e70\u5165",
+                "\u8682\u8681\u002d\u5355\u70b9\u5356\u51fa",
+                "\u8682\u8681\u002d\u7a81\u7834\u4e70\u5165",
+                "\u8682\u8681\u002d\u7a81\u7834\u5356\u51fa",
+                "\u8682\u8681\u002d\u5f39\u6027\u5356\u51fa",
+                "\u8682\u8681\u002d\u5f39\u6027\u4e70\u5165",
+                "\u8682\u8681\u002d\u7b3c\u5b50\u4e70\u5165",
+                "\u8682\u8681\u002d\u7b3c\u5b50\u5356\u51fa",
+                "\u8682\u8681\u002d\u7f51\u683c\u4e70\u5165",
+                "\u8682\u8681\u002d\u7f51\u683c\u5356\u51fa",
+                "\u8682\u8681\u002d\u5b9a\u65f6\u6e05\u4ed3",
+                "\u8682\u8681\u002d\u5185\u7f6e\u4e0b\u5355",
+            )
+            order_raw = _entry_fetch_trade_detail(
+                aid,
+                "order",
+                strategy_names=_strat_names,
+                account_type_hint=acct_type_hint,
+            )
+            deal_raw = _entry_fetch_trade_detail(
+                aid,
+                "deal",
+                strategy_names=_strat_names,
+                account_type_hint=acct_type_hint,
+            )
+            _LAST_ENTRY_ORDER_DEAL_SYNC = now
         ok, reason = snap.apply_trade_detail_raw(
             ContextInfo,
             results,
@@ -319,13 +349,13 @@ def _entry_sync_account_snapshot(ContextInfo):
                 pass
         elif reason != _ENTRY_ACCOUNT_SKIP:
             _ENTRY_ACCOUNT_SKIP = reason
-            print("[���׺���] account snapshot skip: %s" % reason)
+            print("[���׺���] �˻���������: %s" % reason)
     except Exception as e:
         _LAST_ENTRY_ACCOUNT_SYNC = time.time()
         msg = "%s: %s" % (type(e).__name__, e)
         if msg != _ENTRY_ACCOUNT_SKIP:
             _ENTRY_ACCOUNT_SKIP = msg
-            print("[���׺���] account snapshot error: %s" % msg)
+            print("[���׺���] �˻����մ���: %s" % msg)
 
 
 def _reload_daily_sync_runner():
@@ -337,7 +367,7 @@ def _reload_daily_sync_runner():
         import qmt_builtin.ant_daily_sync_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[����ͬ��] timer entry version=%s"
+        "[����ͬ��] ��ʱ��� �汾=%s"
         % getattr(runner, "DAILY_SYNC_VERSION", "?")
     )
     return runner
@@ -349,7 +379,7 @@ def _ensure_passorder_bound():
         root = _qmt_python_dir()
         path = os.path.join(root, "ant_passorder.py") if root else ""
         if not (path and os.path.isfile(path)):
-            print("[�������] ant_passorder.py missing")
+            print("[���] ȱ�� ant_passorder.py")
             return False
         mod_name = "ant_passorder_%d" % int(os.path.getmtime(path))
         po = sys.modules.get(mod_name)
@@ -364,7 +394,7 @@ def _ensure_passorder_bound():
             return bool(po.bind_runtime_globals(globals()))
         return False
     except Exception as e:
-        print("[�������] bind passorder error: %s: %s" % (type(e).__name__, e))
+        print("[���] �� passorder ����: %s: %s" % (type(e).__name__, e))
         return False
 
 
@@ -396,24 +426,22 @@ def _ensure_download_history_bound():
             ok = bool(fn(globals()))
             if ok:
                 _DOWNLOAD_HISTORY_BOUND = True
-                _plog("[�������] bind download_history_data ok")
             elif not _DOWNLOAD_HISTORY_MISS_LOGGED:
                 _DOWNLOAD_HISTORY_MISS_LOGGED = True
-                _plog("[�������] bind download_history_data miss (not in strategy globals)")
+                _plog("[���] �� download_history_data δ���У����� globals ���޴˺�����")
             return ok
         return False
     except Exception as e:
         if not _DOWNLOAD_HISTORY_MISS_LOGGED:
             _DOWNLOAD_HISTORY_MISS_LOGGED = True
             _plog(
-                "[�������] bind download_history_data error: %s: %s"
+                "[���] �� download_history_data ����: %s: %s"
                 % (type(e).__name__, e)
             )
         return False
 
 
 def init(ContextInfo):
-    _plog("[�������] init begin entry version=%s" % ENTRY_VERSION)
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
@@ -423,29 +451,37 @@ def init(ContextInfo):
     _ensure_download_history_bound()
     shadow = _load_shadow()
     if shadow is None:
-        _plog("[�������] init aborted: shadow is None")
+        _plog("[���] ��ʼ����ֹ: ���׺���Ϊ None")
         return
-    ret = shadow.init(ContextInfo)
-    _plog("[�������] init returned")
-    return ret
+    return shadow.init(ContextInfo)
 
 
 def handlebar(ContextInfo):
-    _ensure_passorder_bound()
-    _ensure_download_history_bound()
-    if _shadow is None:
+    try:
+        _ensure_passorder_bound()
+        _ensure_download_history_bound()
+        if _shadow is None:
+            return
+        # ���ܽ��׺��ģ��� full_tick ���֣����ٲ��˻������� GTD ������ǽ��
+        out = _shadow.handlebar(ContextInfo)
+        _entry_sync_account_snapshot(ContextInfo)
+        return out
+    except KeyboardInterrupt:
+        # ģ�ͽ����ֶ�ֹͣ���̵�������ջˢ��
         return
-    _entry_sync_account_snapshot(ContextInfo)
-    return _shadow.handlebar(ContextInfo)
 
 
 def periodic_sync(ContextInfo):
-    _ensure_passorder_bound()
-    _ensure_download_history_bound()
-    _entry_sync_account_snapshot(ContextInfo)
-    if _shadow is None:
+    try:
+        _ensure_passorder_bound()
+        _ensure_download_history_bound()
+        if _shadow is None:
+            return
+        out = _shadow.periodic_sync(ContextInfo)
+        _entry_sync_account_snapshot(ContextInfo)
+        return out
+    except KeyboardInterrupt:
         return
-    return _shadow.periodic_sync(ContextInfo)
 
 
 def shadow_sync(ContextInfo):
@@ -514,7 +550,7 @@ def tick_probe(ContextInfo):
     runner = _reload_tick_full_sync_runner()
     fn = getattr(runner, "tick_probe", None)
     if not callable(fn):
-        _plog("[�������] tick_probe missing on runner")
+        _plog("[���] runner ��ȱ�� tick_probe")
         return None
     return fn(ContextInfo, day="20260730")
 
@@ -528,11 +564,11 @@ def sector_data_sync(ContextInfo):
         try:
             import qmt_builtin.ant_sector_sync_runner as runner
         except ImportError:
-            print("[�������] sector_data_sync: ant_sector_sync_runner not found")
+            print("[���] sector_data_sync: δ�ҵ� ant_sector_sync_runner")
             return
     runner = importlib.reload(runner)
     print(
-        "[���ͬ��] timer entry version=%s"
+        "[���ͬ��] ��ʱ��� �汾=%s"
         % getattr(runner, "SECTOR_SYNC_VERSION", "?")
     )
     return runner.sector_data_sync(ContextInfo)
@@ -547,7 +583,7 @@ def _dispatch_account_snapshot_callback(callback_name, ContextInfo, payload):
         if callable(fn):
             fn(ContextInfo, payload)
     except Exception as e:
-        print("[�������] %s error: %s" % (callback_name, e))
+        print("[���] %s ����: %s" % (callback_name, e))
 
 
 def account_callback(ContextInfo, accountInfo):
@@ -589,9 +625,9 @@ def order_callback(ContextInfo, orderInfo):
                 st = str(getattr(orderInfo, "m_nOrderStatus", "") or "")
             except Exception:
                 pass
-            print("[���׺���] order_callback status=%s" % st)
+            print("[���׺���] ί�лص� status=%s" % st)
     except Exception as e:
-        print("[�������] order_callback error: %s: %s" % (type(e).__name__, e))
+        print("[���] order_callback ����: %s: %s" % (type(e).__name__, e))
 
 
 
@@ -617,9 +653,9 @@ def deal_callback(ContextInfo, dealInfo):
                 _shadow.flush_results(ContextInfo)
             except Exception:
                 pass
-            print("[���׺���] deal_callback")
+            print("[���׺���] �ɽ��ص�")
     except Exception as e:
-        print("[�������] deal_callback error: %s: %s" % (type(e).__name__, e))
+        print("[���] deal_callback ����: %s: %s" % (type(e).__name__, e))
 
 
 def startup_sector_sync(ContextInfo):
@@ -631,11 +667,11 @@ def startup_sector_sync(ContextInfo):
         try:
             import qmt_builtin.ant_sector_sync_runner as runner
         except ImportError:
-            print("[�������] startup_sector_sync: ant_sector_sync_runner not found")
+            print("[���] startup_sector_sync: δ�ҵ� ant_sector_sync_runner")
             return
     runner = importlib.reload(runner)
     print(
-        "[���ͬ��] startup entry version=%s"
+        "[���ͬ��] ������� �汾=%s"
         % getattr(runner, "SECTOR_SYNC_VERSION", "?")
     )
     return runner.startup_sector_sync(ContextInfo)

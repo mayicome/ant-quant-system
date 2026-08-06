@@ -127,6 +127,10 @@ class StockInfoManager:
             self._initialized = True
             self._runtime_qmt_cache: Dict[str, str] = {}
             self._sector_download_tried = False
+            # 自动路径上 ETF 补全只尝试一次，避免每次冷启动都卡在 QMT/akshare
+            self._etf_rebuild_attempted = False
+            # xtquant 不可用时禁用逐只实时查名（全市场列表会卡死数分钟）
+            self._qmt_lookup_disabled = False
             self._csv_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 "data",
@@ -257,7 +261,7 @@ class StockInfoManager:
 
     def _lookup_qmt_name(self, code_6: str) -> str:
         """实时向 QMT 查 InstrumentName（失败返回空串）。"""
-        if not code_6:
+        if not code_6 or self._qmt_lookup_disabled:
             return ""
         cached = self._runtime_qmt_cache.get(code_6)
         if cached:
@@ -279,12 +283,18 @@ class StockInfoManager:
                 if sym not in candidates:
                     candidates.append(sym)
 
+            connect_errors = 0
+
             def _probe():
+                nonlocal connect_errors
                 for sym in candidates:
                     try:
                         detail = xtdata.get_instrument_detail(sym)
-                    except Exception:
+                    except Exception as e:
                         detail = None
+                        msg = str(e or "")
+                        if "无法连接" in msg or "xtquant" in msg.lower():
+                            connect_errors += 1
                     name = _name_from_instrument_detail(detail)
                     if name:
                         list_date = _list_date_from_instrument_detail(detail)
@@ -295,15 +305,24 @@ class StockInfoManager:
             name = _probe()
             if name:
                 return name
+            if connect_errors:
+                self._qmt_lookup_disabled = True
+                return ""
             # 新股常因本地板块未刷新而查不到：补一次板块下载再试
             self._try_download_sector_once(xtdata)
             return _probe()
-        except Exception:
-            pass
+        except Exception as e:
+            msg = str(e or "")
+            if "无法连接" in msg or "xtquant" in msg.lower():
+                self._qmt_lookup_disabled = True
         return ""
     
     def _load_stock_info(self):
-        """加载股票信息"""
+        """加载股票信息。
+
+        自动路径（选股 GUI 启动等）优先用本地 CSV，禁止同步走 akshare 全量拉网，
+        否则 QMT 不可用时界面会卡死数分钟。完整重建请用 refresh_cache()。
+        """
         try:
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             stocks_file = os.path.join(project_root, "data", "all_a_stocks.csv")
@@ -322,11 +341,25 @@ class StockInfoManager:
                         need_regen = True
 
                 if need_regen:
-                    print(f"[!] all_a_stocks.csv 不是今天的数据（或缺失），将尝试覆盖生成: {stocks_file}")
-                    try:
-                        self._create_stock_info_file(stocks_file)
-                    except Exception as e:
-                        print(f"[!] 覆盖生成 all_a_stocks.csv 失败: {e}，将回退到尝试加载已有文件")
+                    # 已有可用 CSV：自动路径直接沿用，避免启动时同步连 QMT/akshare
+                    if os.path.exists(stocks_file):
+                        print(
+                            f"[!] all_a_stocks.csv 不是今天的数据，启动路径沿用本地文件"
+                            f"（避免阻塞 UI）: {stocks_file}"
+                        )
+                    else:
+                        print(
+                            f"[!] all_a_stocks.csv 缺失，尝试仅用 QMT 生成"
+                            f"（失败不走 akshare）: {stocks_file}"
+                        )
+                        try:
+                            self._create_stock_info_file(
+                                stocks_file, allow_akshare=False
+                            )
+                        except Exception as e:
+                            print(
+                                f"[!] 生成 all_a_stocks.csv 失败: {e}"
+                            )
 
                 if not os.path.exists(stocks_file):
                     self._stock_info_cache = {}
@@ -360,27 +393,53 @@ class StockInfoManager:
                 # 创建字典索引，提高查找效率
                 self._stock_info_cache = stocks_df.set_index('证券代码_标准化')[['证券简称', '上市日期']].to_dict('index')
                 self._cache_time = current_time
-                # 旧 CSV 仅含沪深 A 股时缺 ETF：强制按 QMT 板块重建一次
+                # 旧 CSV 仅含沪深 A 股时缺 ETF：仅用 QMT 补一次；禁止 akshare 阻塞启动
                 etf_like = sum(
                     1
                     for c in (self._stock_info_cache or {})
                     if str(c).startswith(("15", "16", "18", "50", "51", "56", "58", "159"))
                 )
-                if etf_like < 50:
-                    print(
-                        f"[!] all_a_stocks.csv 疑似缺少ETF（etf_like={etf_like}），按 QMT 板块重建..."
-                    )
+                if etf_like < 50 and not self._etf_rebuild_attempted:
+                    self._etf_rebuild_attempted = True
+                    # builtin：选股主路径不依赖 ETF 名称；同步探测 QMT 会拖死启动
+                    skip_etf_sync = False
                     try:
-                        if self._create_stock_info_file(stocks_file):
-                            stocks_df = pd.read_csv(stocks_file, encoding="utf-8")
-                            stocks_df["证券代码_标准化"] = (
-                                stocks_df["证券代码"].astype(str).str.zfill(6)
-                            )
-                            self._stock_info_cache = stocks_df.set_index("证券代码_标准化")[
-                                ["证券简称", "上市日期"]
-                            ].to_dict("index")
-                    except Exception as e:
-                        print(f"[!] ETF 补全重建失败: {e}")
+                        from utils.qmt_execution_config import get_qmt_mode
+
+                        skip_etf_sync = get_qmt_mode() in ("builtin", "standalone")
+                    except Exception:
+                        skip_etf_sync = False
+                    if skip_etf_sync:
+                        # 本机 GUI 不连 MiniQMT：禁用逐只 xtdata 查名，避免首屏再卡十几秒
+                        self._qmt_lookup_disabled = True
+                        print(
+                            f"[!] all_a_stocks.csv 疑似缺少ETF（etf_like={etf_like}）；"
+                            f"builtin 模式跳过启动时同步补全（避免卡住）。"
+                            f"需要时请手动 refresh_cache()"
+                        )
+                    else:
+                        print(
+                            f"[!] all_a_stocks.csv 疑似缺少ETF（etf_like={etf_like}），"
+                            f"尝试仅用 QMT 板块补全（失败则跳过，不拉 akshare）..."
+                        )
+                        try:
+                            if self._create_stock_info_file(
+                                stocks_file, allow_akshare=False
+                            ):
+                                stocks_df = pd.read_csv(stocks_file, encoding="utf-8")
+                                stocks_df["证券代码_标准化"] = (
+                                    stocks_df["证券代码"].astype(str).str.zfill(6)
+                                )
+                                self._stock_info_cache = stocks_df.set_index(
+                                    "证券代码_标准化"
+                                )[["证券简称", "上市日期"]].to_dict("index")
+                            else:
+                                print(
+                                    "[!] QMT 不可用，跳过 ETF 补全；"
+                                    "选股名称仍可用现有 CSV，需补全时请手动 refresh_cache()"
+                                )
+                        except Exception as e:
+                            print(f"[!] ETF 补全重建失败: {e}")
                 print(f"[OK] 全局股票信息管理器已加载，共 {len(self._stock_info_cache)} 只股票")
                     
         except Exception as e:
@@ -480,16 +539,27 @@ class StockInfoManager:
             return {}
     
     def refresh_cache(self):
-        """刷新缓存"""
+        """刷新缓存（允许 QMT 失败后走 akshare 全量重建）。"""
         self._stock_info_cache = None
         self._cache_time = None
         self._runtime_qmt_cache = {}
         self._sector_download_tried = False
+        self._etf_rebuild_attempted = False
+        self._qmt_lookup_disabled = False
+        stocks_file = self._csv_path
+        try:
+            self._create_stock_info_file(stocks_file, allow_akshare=True)
+        except Exception as e:
+            print(f"[!] refresh_cache 重建失败: {e}")
         self._load_stock_info()
         print("[OK] 股票信息缓存已刷新")
     
-    def _create_stock_info_file(self, file_path):
-        """自动创建股票信息文件"""
+    def _create_stock_info_file(self, file_path, allow_akshare: bool = True):
+        """自动创建股票信息文件。
+
+        allow_akshare=False：仅尝试 QMT；失败立即返回 False。
+        选股 GUI 等自动加载路径必须传 False，避免主线程被 akshare 拉网卡住。
+        """
         try:
             # 确保data目录存在
             data_dir = os.path.dirname(file_path)
@@ -498,7 +568,7 @@ class StockInfoManager:
             print("正在获取股票信息（优先 QMT），请稍候...")
 
             # 1) 优先：用 QMT 获取“代码+名称”，上市日期留空
-            #    获取失败则回退到 akshare。
+            #    获取失败则按 allow_akshare 决定是否回退。
             qmt_ok = False
             try:
                 import xtquant.xtdata as _xtdata
@@ -577,9 +647,14 @@ class StockInfoManager:
                             f"{len(stocks_df)} 只（有名称 {named_cnt}）"
                         )
             except Exception as e:
-                print(f"[!] QMT 生成失败，回退到 akshare: {e}")
+                if allow_akshare:
+                    print(f"[!] QMT 生成失败，回退到 akshare: {e}")
+                else:
+                    print(f"[!] QMT 生成失败（已禁用 akshare 回退）: {e}")
 
             # 2) 回退：akshare 生成（保留原逻辑：上市日期也会填）
+            if not qmt_ok and not allow_akshare:
+                return False
             if not qmt_ok:
                 print("正在获取股票信息（akshare 备份），请稍候...")
                 try:

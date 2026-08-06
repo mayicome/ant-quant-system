@@ -16,7 +16,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# tick 数据：统一走 utils.tick_data_cache（先读 data/ticks/...pkl，无则 QMT，拉完必落盘）
+# tick 数据：回测仅读本地 data/ticks；缺失不向 QMT/xtdata 按需拉取
 _TICK_DATA_CACHE = None  # 兼容旧引用；实际缓存见 utils.tick_data_cache._MEMORY_CACHE
 # 日线早盘/收盘视角按 (code6, date) 缓存，批量回测跨选股日重复命中同一标的时不再反复调 QMT。
 _DAILY_MORNING_PRICE_CACHE: Dict[tuple, Dict[str, Any]] = {}
@@ -210,6 +210,19 @@ def _allow_xtdata_fallback() -> bool:
     return allow_xtdata_daily_fallback()
 
 
+def _backtest_tick_kw() -> Dict[str, bool]:
+    """回测 tick 加载参数：本地缺失即跳过，不触发 broker/QMT 按需下载。"""
+    try:
+        from strategy_generator_app.qmt_mode_config import backtest_tick_local_only
+    except ImportError:
+        from qmt_mode_config import backtest_tick_local_only  # type: ignore
+    local_only = backtest_tick_local_only()
+    return {
+        "allow_on_demand": not local_only,
+        "allow_xtdata_fallback": not local_only,
+    }
+
+
 def _load_daily_df(code_6: str, through_date: date) -> tuple[Optional[Any], str]:
     """返回 (DataFrame|None, source) source: cache | xtdata | miss。"""
     import pandas as pd
@@ -217,12 +230,20 @@ def _load_daily_df(code_6: str, through_date: date) -> tuple[Optional[Any], str]
     _ensure_repo_root_on_sys_path()
     from utils.daily_cache_reader import cache_file_exists, load_daily_dataframe
 
+    # 回测预热后仍缺则短等，避免大批量逐只卡 180s
+    try:
+        from utils.data_sync_request import BACKTEST_ENSURE_DAILY_TIMEOUT_SEC
+        ensure_timeout = float(BACKTEST_ENSURE_DAILY_TIMEOUT_SEC)
+    except Exception:
+        ensure_timeout = 8.0
+
     had_cache = cache_file_exists(code_6)
     df = load_daily_dataframe(
         code_6,
         through_date=through_date,
         allow_xtdata_fallback=_allow_xtdata_fallback(),
         allow_on_demand=True,
+        on_demand_timeout_sec=ensure_timeout,
     )
     if df is None or (hasattr(df, "empty") and df.empty):
         return None, "miss"
@@ -283,6 +304,10 @@ def _build_eod_row_from_df(
         days_needed = period - 1
         if n >= days_needed and days_needed > 0:
             row[key] = round(float(closes.iloc[-days_needed:].mean()), 2)
+    # EOD：末根已是完整交易日，昨MA* = 近 period 日收盘均值（真均线）
+    for period in (5, 10, 20, 30, 60, 120):
+        if n >= period:
+            row[f"昨MA{period}"] = round(float(closes.iloc[-period:].mean()), 2)
     nm = (get_stock_name(code_6) if get_stock_name else "") or ""
     up_ratio, down_ratio = _limit_up_down_ratios(code_6, nm, as_of_date)
     prec = _price_precision_for_code(code_6)
@@ -344,6 +369,10 @@ def _build_morning_row_from_df(
         days_needed = period - 1
         if n_prior >= days_needed and days_needed > 0:
             row[key] = round(float(closes_prior.iloc[-days_needed:].mean()), 2)
+    # 早盘：不含当日 K；昨MA* = 上一完整交易日收盘真均线
+    for period in (5, 10, 20, 30, 60, 120):
+        if n_prior >= period:
+            row[f"昨MA{period}"] = round(float(closes_prior.iloc[-period:].mean()), 2)
     nm = (get_stock_name(code_6) if get_stock_name else "") or ""
     up_ratio, down_ratio = _limit_up_down_ratios(code_6, nm, trade_date)
     prec = _price_precision_for_code(code_6)
@@ -613,12 +642,17 @@ def load_tick_data_for_date(
 ) -> Optional[Any]:
     """
     加载单只股票在 trade_date 当日的 tick 数据（含集合竞价 9:15-9:25、连续竞价 9:30-11:30、13:00-15:00）。
-    先读 data/ticks/{YYYYMMDD}/{code}.pkl；无则 QMT；仅完整 tick 才写入 pkl。
+    回测仅读 data/ticks/{YYYYMMDD}/{code}.parquet（或旧 .pkl）；本地无则返回 None。
     """
     load_fn = _tick_cache_attr("load_tick_data")
     if callable(load_fn):
         try:
-            return load_fn(stock_code_6, trade_date, use_memory_cache=True)
+            return load_fn(
+                stock_code_6,
+                trade_date,
+                use_memory_cache=True,
+                **_backtest_tick_kw(),
+            )
         except Exception:
             return None
     return None
@@ -780,12 +814,17 @@ def load_ticks_for_codes(
 ) -> Dict[str, Any]:
     """
     批量加载多只股票在 trade_date 的 tick 数据。
-    先读本地 pkl，无则 QMT；仅完整 tick 才写入 pkl。
+    回测仅读本地 parquet/pkl；本地缺失的标的不会出现在返回 dict 中。
     """
     global _TICK_CACHE_IMPORT_ERROR
     try:
         _load_batch = _import_tick_data_cache()
-        return _load_batch(stock_codes_6, trade_date, use_memory_cache=True)
+        return _load_batch(
+            stock_codes_6,
+            trade_date,
+            use_memory_cache=True,
+            **_backtest_tick_kw(),
+        )
     except ModuleNotFoundError:
         if _TICK_CACHE_IMPORT_ERROR and not getattr(load_ticks_for_codes, "_warned", False):
             print(f"[tick_cache] load_ticks_for_codes 失败: {_TICK_CACHE_IMPORT_ERROR}")

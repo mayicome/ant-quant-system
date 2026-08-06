@@ -1,8 +1,8 @@
 #coding:gbk
-"""QMT ï¿½ï¿½ tick ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½Ì£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Python 3.6+ï¿½ï¿½ï¿½ï¿½
+"""QMT ²à tick À­È¡ÓëÂäÅÌ£¨¼æÈÝÄÚÖÃ Python 3.6+£©¡£
 
-ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½data/ticks/{YYYYMMDD}/{code}.parquetï¿½ï¿½ï¿½åµµÕ¹Æ½ï¿½ï¿½
-ï¿½É¸ï¿½Ê½ï¿½ï¿½.pkl ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½Ö»Ð´ parquetï¿½ï¿½
+Ö÷¸ñÊ½£ºdata/ticks/{YYYYMMDD}/{code}.parquet£¨ÎåµµÕ¹Æ½£©
+¾É¸ñÊ½£º.pkl ½öÓÉÖ÷³ÌÐò²à¶ÁÈ¡»ØÍË£»±¾Ä£¿éÐÂÐ´ÈëÖ»Ð´ parquet¡£
 """
 import os
 import time as time_module
@@ -219,7 +219,7 @@ def normalize_tick_dataframe(raw):
     else:
         dt = dt.dt.tz_convert("Asia/Shanghai")
     data["datetime"] = dt
-    # ï¿½ï¿½ 15:00 ï¿½ï¿½ï¿½Ì¾ï¿½ï¿½Û¼ï¿½Ô¼ 15:05ï¿½C15:30 ï¿½Ìºó£»¹ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½Ü¶ï¿½ï¿½ï¿½
+    # º¬ 15:00 ÊÕÅÌ¾º¼Û¼°Ô¼ 15:05¨C15:30 ÅÌºó£»¹©ÅÌºóÁ¿ÄÜ¶ÁÅÌ
     mask = (
         ((dt.dt.hour == 9) & (dt.dt.minute >= 15))
         | (dt.dt.hour == 10)
@@ -444,26 +444,26 @@ def write_tick_cache(code_6, trade_date, df):
         return False
 
 
-# ï¿½ï¿½ QMT-onlyï¿½ï¿½Ä¬ï¿½Ï¹Ø±ï¿½ xtdata.download_history_*ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ miniQMT 58610ï¿½ï¿½ï¿½ï¿½
-# download ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ YYYYMMDDï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ YYYYMMDDï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 091500-153100ï¿½ï¿½
+# ´ó QMT-only£ºÄ¬ÈÏ¹Ø±Õ xtdata.download_history_*£¨ÒÀÀµ miniQMT 58610£©¡£
+# download ²ÎÊýÓÃ YYYYMMDD£»¶ÁÅÌÓÅÏÈ YYYYMMDD£¬ÔÙÊÔ 091500-153100¡£
 ENABLE_XTDATA_TICK_DOWNLOAD = False
-# ï¿½Ù·ï¿½ï¿½ï¿½È·Â·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ python download_history_data(code,"tick",YYYYMMDD,YYYYMMDD)
-# ï¿½ï¿½ get_market_data_ex(subscribe=False)ï¿½ï¿½subscribeï¿½Ù²ï¿½ï¿½ï¿½Ê·ï¿½ï¿½
+# ¹Ù·½ÕýÈ·Â·¾¶£ºÄÚÖÃ python download_history_data(code,"tick",YYYYMMDD,YYYYMMDD)
+# ÔÙ get_market_data_ex(subscribe=False)¡£subscribe¡Ù²¹ÀúÊ·¡£
 ENABLE_BUILTIN_TICK_DOWNLOAD = True
-# ï¿½ï¿½ï¿½ï¿½+builtin download ï¿½Ô¿ï¿½Ê±ï¿½ï¿½ï¿½Ç·ï¿½ï¿½ï¿½ï¿½ï¿½ subscribe=Trueï¿½ï¿½Æ«ÊµÊ±/ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+# ±¾µØ+builtin download ÈÔ¿ÕÊ±£¬ÊÇ·ñÔÙÊÔ subscribe=True£¨Æ«ÊµÊ±/µ±ÈÕ£¬·ÇÀúÊ·²¹Êý£©
 ENABLE_CTX_TICK_SUBSCRIBE = True
 
-# ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ tick API Ê§ï¿½ï¿½Ô­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½ÜµÈ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ empty vs ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+# ×î½üÒ»´Î tick API Ê§°ÜÔ­Òò£¨Á¬½ÓÊ§°ÜµÈ£©£¬¹©Íâ¹ÒÌ½²âÇø·Ö empty vs Á¬²»ÉÏ
 _LAST_TICK_API_ERROR = ""  # type: str
-# Ä£ï¿½Í½ï¿½ï¿½ï¿½×¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½ï¿½ï¿½ xtdataï¿½ï¿½
+# Ä£ÐÍ½»Ò××¢ÈëµÄÄÚÖÃ download_history_data£¨·Ç xtdata£©
 _BUILTIN_DOWNLOAD_HISTORY_DATA = None  # type: Any
 
 
 def bind_download_history_data(g=None):
     # type: (Optional[Dict[str, Any]]) -> bool
-    """ï¿½Ó²ï¿½ï¿½ï¿½ globals()/builtins ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½ï¿½ï¿½ QMT Ä£ï¿½Í½ï¿½ï¿½×£ï¿½ï¿½ï¿½
+    """´Ó²ßÂÔ globals()/builtins °ó¶¨ÄÚÖÃ download_history_data£¨´ó QMT Ä£ÐÍ½»Ò×£©¡£
 
-    ï¿½Ñ°ï¿½ï¿½ï¿½Ö±ï¿½Ó·ï¿½ï¿½ï¿½ Trueï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ timer/reload ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ë¡£
+    ÒÑ°ó¶¨ÔòÖ±½Ó·µ»Ø True£¬±ÜÃâ timer/reload ÈÈÂ·¾¶·´¸´Ð´Èë¡£
     """
     global _BUILTIN_DOWNLOAD_HISTORY_DATA
     if callable(_BUILTIN_DOWNLOAD_HISTORY_DATA):
@@ -497,7 +497,7 @@ def bind_download_history_data(g=None):
 
 def resolve_download_history_data():
     # type: () -> Any
-    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ xtdata.download_history_data ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
+    """½âÎöÄÚÖÃ download_history_data£»ÎðÓë xtdata.download_history_data »ìÏý¡£"""
     global _BUILTIN_DOWNLOAD_HISTORY_DATA
     if callable(_BUILTIN_DOWNLOAD_HISTORY_DATA):
         return _BUILTIN_DOWNLOAD_HISTORY_DATA
@@ -508,7 +508,7 @@ def resolve_download_history_data():
 
 def _tick_time_window(ymd):
     # type: (str) -> Tuple[str, str]
-    # ï¿½ï¿½ï¿½Ý¾Éµï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ðµï¿½ï¿½Ìºó´°£ï¿½fetch ï¿½ï¿½Í¬Ê±ï¿½Ô´ï¿½ YYYYMMDD
+    # ¼æÈÝ¾Éµ÷ÓÃ£º·µ»ØÅÌÖÐµ½ÅÌºó´°£»fetch »áÍ¬Ê±ÊÔ´¿ YYYYMMDD
     return ymd + "091500", ymd + "153100"
 
 
@@ -517,33 +517,33 @@ def _tick_time_windows(ymd):
     day = str(ymd or "").replace("-", "").replace("/", "")[:8]
     if len(day) != 8:
         return []
-    # ï¿½Ù·ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½ï¿½Ã´ï¿½ YYYYMMDDï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¶ï¿½ï¿½ï¿½Ñ¡
+    # ¹Ù·½Ê¾Àý¶àÓÃ´¿ YYYYMMDD£»´øÊ±·ÖÃë×÷µÚ¶þºòÑ¡
     return [(day, day), (day + "091500", day + "153100")]
 
 
 def xtdata_service_status(xtdata=None):
     # type: (Any) -> Tuple[bool, str]
-    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ xtquant ï¿½Ü·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ QMTï¿½ï¿½Í¶ï¿½Ð¶ï¿½/miniQMTï¿½ï¿½ï¿½ï¿½
+    """¼ì²âÍâ¹Ò xtquant ÄÜ·ñÁ¬ÉÏÒÑÆô¶¯µÄ QMT£¨Í¶ÑÐ¶Ë/miniQMT£©¡£
 
-    ï¿½ï¿½ï¿½ï¿½ (ok, detail)ï¿½ï¿½Ê§ï¿½ï¿½Ê± detail ï¿½Ô¡ï¿½ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ñ¡¹¿ï¿½Í·ï¿½ï¿½
+    ·µ»Ø (ok, detail)¡£Ê§°ÜÊ± detail ÒÔ¡¸ÎÞ·¨Á¬½ÓÐÐÇé·þÎñ¡¹¿ªÍ·¡£
     """
     xt = xtdata
     if xt is None:
         try:
             import xtquant.xtdata as xt  # type: ignore
         except ImportError as e:
-            return False, "ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: xtdata Î´ï¿½ï¿½×° (%s)" % e
+            return False, "ÎÞ·¨Á¬½ÓÐÐÇé·þÎñ: xtdata Î´°²×° (%s)" % e
     try:
         client = xt.get_client()
     except Exception as e:
-        return False, "ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: %s" % e
+        return False, "ÎÞ·¨Á¬½ÓÐÐÇé·þÎñ: %s" % e
     if client is None:
-        return False, "ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: get_client()=Noneï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ QMT Í¶ï¿½Ð¶Ë£ï¿½"
+        return False, "ÎÞ·¨Á¬½ÓÐÐÇé·þÎñ: get_client()=None£¨ÇëÆô¶¯´ó QMT Í¶ÑÐ¶Ë£©"
     try:
         ds = date.today().strftime("%Y%m%d")
         xt.get_trading_dates("SH", ds, ds)
     except Exception as e:
-        return False, "ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: %s" % e
+        return False, "ÎÞ·¨Á¬½ÓÐÐÇé·þÎñ: %s" % e
     return True, "ok"
 
 
@@ -574,7 +574,7 @@ def _payload_nrows(payload):
 
 def _call_ctx_local_data(ContextInfo, codes, start_str, end_str):
     # type: (Any, List[str], str, str) -> Optional[Dict[str, Any]]
-    """ContextInfo.get_local_data Ç©ï¿½ï¿½ï¿½ï¿½ stock_code:strï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ stock_listï¿½ï¿½"""
+    """ContextInfo.get_local_data Ç©ÃûÊÇ stock_code:str£¬²»ÊÇ stock_list¡£"""
     fn = getattr(ContextInfo, "get_local_data", None)
     if not callable(fn):
         return None
@@ -621,7 +621,7 @@ def _call_ctx_local_data(ContextInfo, codes, start_str, end_str):
         if isinstance(raw, dict) and fc in raw:
             out[fc] = raw.get(fc)
         else:
-            # ï¿½ï¿½Æ±ï¿½ï¿½ï¿½ï¿½ {timetag: field_dict}ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ payload
+            # µ¥Æ±·µ»Ø {timetag: field_dict}£¬Õû°ü¼´ payload
             out[fc] = raw
     if last_err and not out:
         _LAST_TICK_API_ERROR = last_err
@@ -638,7 +638,7 @@ def _call_tick_api(owner, fn_name, codes, start_str, end_str, subscribe=False):
         return None
 
     if fn_name == "get_local_data":
-        # ï¿½È°ï¿½ ContextInfo Ç©ï¿½ï¿½ï¿½ï¿½stock_code:strï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ xtdata stock_list
+        # ÏÈ°´ ContextInfo Ç©Ãû£¨stock_code:str£©£»Ê§°ÜÔÙ×ß xtdata stock_list
         ctx_data = _call_ctx_local_data(owner, code_list, start_str, end_str)
         if ctx_data:
             return ctx_data
@@ -729,12 +729,12 @@ def _call_tick_api(owner, fn_name, codes, start_str, end_str, subscribe=False):
 
 def download_ticks_via_builtin(codes, ymd, download_fn=None):
     # type: (List[str], str, Any) -> Tuple[int, str]
-    """ï¿½ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ download_history_data ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tickï¿½ï¿½ï¿½ï¿½ xtdata/58610ï¿½ï¿½ï¿½ï¿½
+    """´ó QMT ÄÚÖÃ download_history_data ²¹±¾µØ tick£¨·Ç xtdata/58610£©¡£
 
-    ï¿½Ù·ï¿½ï¿½Äµï¿½ï¿½ï¿½Ñ¸Í¶ÖªÊ¶ï¿½ï¿½-ï¿½ï¿½ï¿½éº¯ï¿½ï¿½ï¿½ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½
+    ¹Ù·½ÎÄµµ£¨Ñ¸Í¶ÖªÊ¶¿â-ÐÐÇéº¯Êý£©Ê¾Àý£º
       download_history_data("000001.SZ", "tick", "20260730", "20260730")
-    ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ YYYYMMDDï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ³É¹ï¿½ï¿½ï¿½ xtdata ï¿½ï¿½ï¿½ï¿½Ò»ï¿½Â£ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ë£©ï¿½ï¿½
-    ï¿½ï¿½ï¿½ï¿½ (ï¿½É¹ï¿½ï¿½ï¿½ï¿½Ã´ï¿½ï¿½ï¿½, ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)ï¿½ï¿½
+    ²ÎÊý±ØÐëÓÃ YYYYMMDD£¨Óë×òÈÕ³É¹¦µÄ xtdata ÏÂÔØÒ»ÖÂ£»Îð´øÊ±·ÖÃë£©¡£
+    ·µ»Ø (³É¹¦µ÷ÓÃ´ÎÊý, ×îºó´íÎó´®)¡£
     """
     fn = download_fn if callable(download_fn) else resolve_download_history_data()
     if not callable(fn):
@@ -755,7 +755,7 @@ def download_ticks_via_builtin(codes, ymd, download_fn=None):
             ok += 1
         except TypeError:
             try:
-                # ï¿½ï¿½ï¿½Ö°æ±¾Ö§ï¿½ï¿½ incrementally
+                # ²¿·Ö°æ±¾Ö§³Ö incrementally
                 fn(fc, "tick", day_s, day_s, None)
                 ok += 1
             except Exception as e:
@@ -790,16 +790,16 @@ def fetch_ticks_batch(
     allow_builtin_download=None,
 ):
     # type: (List[str], TradeDateInput, Any, Any, Optional[bool], Optional[bool]) -> Dict[str, Any]
-    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tickï¿½ï¿½
+    """ÅúÁ¿¶Áµ±ÈÕ tick¡£
 
-    ï¿½Ù·ï¿½ï¿½ï¿½È·Ë³ï¿½ï¿½Ñ¸Í¶ÖªÊ¶ï¿½â£©ï¿½ï¿½
-    1) ï¿½ï¿½ï¿½ï¿½ get_local_data / get_market_data_ex(subscribe=False)
-    2) ï¿½ï¿½ï¿½ï¿½ download_history_data(code,"tick",YYYYMMDD,YYYYMMDD) ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
-    3) ï¿½ï¿½ get_market_data_ex(subscribe=False)
-    4) ï¿½ï¿½Ñ¡ subscribe=Trueï¿½ï¿½Æ«ÊµÊ±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½
-    Ä¬ï¿½Ï²ï¿½ï¿½ï¿½ xtdata.download_history_*ï¿½ï¿½ENABLE_XTDATA_TICK_DOWNLOADï¿½ï¿½ï¿½ï¿½
+    ¹Ù·½ÕýÈ·Ë³Ðò£¨Ñ¸Í¶ÖªÊ¶¿â£©£º
+    1) ±¾µØ get_local_data / get_market_data_ex(subscribe=False)
+    2) ÄÚÖÃ download_history_data(code,"tick",YYYYMMDD,YYYYMMDD) ²¹±¾µØ
+    3) ÔÙ get_market_data_ex(subscribe=False)
+    4) ¿ÉÑ¡ subscribe=True£¨Æ«ÊµÊ±£¬²»ÊÇÀúÊ·²¹ÊýÖ÷Â·¾¶£©
+    Ä¬ÈÏ²»×ß xtdata.download_history_*£¨ENABLE_XTDATA_TICK_DOWNLOAD£©¡£
 
-    ï¿½ï¿½ï¿½ï¿½ {full_code: raw_df}ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç¿Õ¡ï¿½
+    ·µ»Ø {full_code: raw_df}£»½öº¬·Ç¿Õ¡£
     """
     out = {}  # type: Dict[str, Any]
     if not codes:
@@ -857,7 +857,7 @@ def fetch_ticks_batch(
 
     remaining = _read_local(remaining)
 
-    # 2) ï¿½ï¿½ï¿½ï¿½ download_history_data ï¿½ï¿½ ï¿½Ù¶ï¿½ï¿½ï¿½ï¿½Ø£ï¿½ï¿½ï¿½ QMT ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½Ê·ï¿½ï¿½Ê½ï¿½ï¿½
+    # 2) ÄÚÖÃ download_history_data ¡ú ÔÙ¶Á±¾µØ£¨´ó QMT ÕýÈ·²¹ÀúÊ··½Ê½£©
     if do_builtin and remaining:
         n_ok, dl_err = download_ticks_via_builtin(remaining, ymd)
         if n_ok > 0:
@@ -866,7 +866,7 @@ def fetch_ticks_batch(
         elif dl_err and not _LAST_TICK_API_ERROR:
             _LAST_TICK_API_ERROR = dl_err
 
-    # 3) subscribe=True ï¿½ï¿½ï¿½×£ï¿½ï¿½Ù·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç¶ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½ supply ï¿½ï¿½Ê·ï¿½ï¿½
+    # 3) subscribe=True ¶µµ×£¨¹Ù·½º¬ÒåÊÇ¶©ÔÄ£¬²»ÊÇ supply ÀúÊ·£©
     if do_sub and remaining and ContextInfo is not None:
         for start_str, end_str in windows:
             if not remaining:
@@ -893,7 +893,7 @@ def fetch_tick_from_qmt(
     allow_builtin_download=None,
 ):
     # type: (str, TradeDateInput, Any, Any, Optional[bool], Optional[bool], Optional[bool]) -> Optional[Any]
-    """ï¿½ï¿½Æ± tickï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ download_history_data ï¿½ï¿½ ï¿½Ù¶ï¿½ï¿½ï¿½xtdata download Ä¬ï¿½Ï¹Ø¡ï¿½"""
+    """µ¥Æ± tick£º±¾µØ ¡ú ÄÚÖÃ download_history_data ¡ú ÔÙ¶Á£»xtdata download Ä¬ÈÏ¹Ø¡£"""
     c6 = norm_code6(code_6)
     if not c6:
         return None
@@ -915,7 +915,7 @@ def fetch_tick_from_qmt(
 
     if do_dl and xt is not None:
         try:
-            # ï¿½ï¿½Â·ï¿½ï¿½xtdata ï¿½ï¿½ 58610ï¿½ï¿½download ï¿½ï¿½ YYYYMMDD
+            # ÅÔÂ·£ºxtdata ×ß 58610£»download ÓÃ YYYYMMDD
             xt.download_history_data(full_code, "tick", ymd, ymd)
             time_module.sleep(0.05)
         except Exception:
@@ -937,9 +937,9 @@ def fetch_tick_from_qmt(
 
 def run_tick_api_probe(ContextInfo, day="20260730", codes=None):
     # type: (Any, str, Optional[List[str]]) -> List[Dict[str, Any]]
-    """ï¿½Ú²ï¿½ï¿½ï¿½ï¿½ï¿½Ì½ï¿½ï¿½ï¿½ï¿½ï¿½ ContextInfo tick È¡ï¿½ï¿½ï¿½ï¿½ï¿½å£¬Ð´ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½Ø½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    """ÔÚ²ßÂÔÀïÌ½²â¶àÖÖ ContextInfo tick È¡Êý±äÌå£¬Ð´ÈÕÖ¾²¢·µ»Ø½á¹û±í¡£
 
-    ï¿½Ã·ï¿½ï¿½ï¿½Ä£ï¿½Í½ï¿½ï¿½×²ï¿½ï¿½Ôºï¿½ï¿½ï¿½ tick_probe ï¿½ï¿½Ò»ï¿½Î¼ï¿½ï¿½É¡ï¿½
+    ÓÃ·¨£ºÄ£ÐÍ½»Ò×²ßÂÔº¯Êý tick_probe µ÷Ò»´Î¼´¿É¡£
     """
     day_s = str(day or "").replace("-", "").replace("/", "")[:8]
     if codes is None:
@@ -963,12 +963,12 @@ def run_tick_api_probe(ContextInfo, day="20260730", codes=None):
         log_lines.append(line)
 
     _log(
-        "begin day=%s codes=%s io=%s"
+        "¿ªÊ¼ day=%s codes=%s io=%s"
         % (day_s, ",".join(full_codes), TICK_CACHE_IO_VERSION)
     )
     bind_ok = bind_download_history_data(None)
     dl_fn = resolve_download_history_data()
-    _log("builtin download_history_data bound=%s callable=%s" % (bind_ok, bool(callable(dl_fn))))
+    _log("ÄÚÖÃ download_history_data ÒÑ°ó¶¨=%s callable=%s" % (bind_ok, bool(callable(dl_fn))))
 
     windows = _tick_time_windows(day_s)
     variants = []  # type: List[Tuple[str, str, bool, bool]]
@@ -1025,12 +1025,12 @@ def run_tick_api_probe(ContextInfo, day="20260730", codes=None):
                 % (name, fc, nrows, ms, err or "-")
             )
 
-    # ï¿½ï¿½ï¿½Ü£ï¿½ï¿½Ä¸ï¿½ variant ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    # »ã×Ü£ºÄÄ¸ö variant ÓÐÊý¾Ý
     hit = [r for r in rows if int(r.get("nrows") or 0) > 0]
     if hit:
-        _log("HIT count=%d best=%s" % (len(hit), hit[0].get("variant")))
+        _log("ÃüÖÐ count=%d best=%s" % (len(hit), hit[0].get("variant")))
     else:
-        _log("ALL_EMPTY ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¨ï¿½Þ£ï¿½ï¿½ï¿½Ä¬ï¿½Ï¸ï¿½ï¿½ï¿½ miniQMT")
+        _log("È«²¿Îª¿Õ ¡ª ¼ì²éÐÐÇéÁ¬½Ó/ÏÂÔØÖÐÐÄÈ¨ÏÞ£»ÎðÄ¬ÈÏ¸Ä×ß miniQMT")
 
     try:
         root = PROJECT_ROOT.rstrip("\\/")
@@ -1040,15 +1040,15 @@ def run_tick_api_probe(ContextInfo, day="20260730", codes=None):
         path = os.path.join(out_dir, "tick_probe_%s.log" % day_s)
         with open(path, "w") as f:
             f.write("\n".join(log_lines) + "\n")
-        _log("wrote %s" % path)
+        _log("ÒÑÐ´Èë %s" % path)
     except Exception as e:
-        _log("write log fail: %s" % e)
+        _log("Ð´ÈÕÖ¾Ê§°Ü: %s" % e)
     return rows
 
 
 def read_tick_volume_frame(code_6, trade_date):
     # type: (str, TradeDateInput) -> Optional[Any]
-    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ parquet/pklï¿½ï¿½ï¿½ï¿½ï¿½Øºï¿½ time/volume/amount ï¿½ï¿½ DataFrameï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½"""
+    """¶Á±¾µØ parquet/pkl£¬·µ»Øº¬ time/volume/amount µÄ DataFrame£¨¹©ÅÌºóÁ¿ÄÜ£©¡£"""
     try:
         import pandas as pd
     except ImportError:

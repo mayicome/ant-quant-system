@@ -17,6 +17,11 @@ from utils.ant_rules_io_ext import (
     save_json_atomic,
 )
 
+# 临时订阅超时：生成器异常退出后避免数百只长期挂在 subscribe_whole_quote 上拖垮行情
+STRATEGY_POOL_WATCH_TTL_SEC = 300
+# 超过此数量写入时打警告（仍写入；靠 TTL + 运行结束 clear 回收）
+STRATEGY_POOL_WATCH_WARN_N = 120
+
 
 def _project_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,15 +77,26 @@ def set_strategy_pool_watch(codes_6: List[str], *, root: Optional[str] = None) -
     new_watch = codes_6_to_full(codes_6)
     old_watch = normalize_watch_codes(data.get("strategy_pool_watch"))
     if old_watch == new_watch:
+        # 刷新 TTL，避免长跑等待行情时被误清
+        data["strategy_pool_watch_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        data["updated_at"] = data["strategy_pool_watch_at"]
+        save_json_atomic(rules_path, data)
         return False
+    if len(new_watch) >= int(STRATEGY_POOL_WATCH_WARN_N):
+        print(
+            "[strategy_pool_watch] 警告: 临时订阅 %d 只（≥%d），"
+            "易拖垮大 QMT 行情推送；请缩小策略股票池或确认运行结束后会释放"
+            % (len(new_watch), int(STRATEGY_POOL_WATCH_WARN_N))
+        )
     data.setdefault("version", RULES_VERSION)
     data["strategy_pool_watch"] = new_watch
+    data["strategy_pool_watch_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     data["subscribe_codes"] = collect_subscribe_codes(
         data.get("tasks") or [],
         data.get("watch_codes"),
         new_watch,
     )
-    data["updated_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    data["updated_at"] = data["strategy_pool_watch_at"]
     data.setdefault("tasks", data.get("tasks") or [])
     data.setdefault("watch_codes", normalize_watch_codes(data.get("watch_codes")))
     save_json_atomic(rules_path, data)
@@ -115,8 +131,10 @@ def clear_strategy_pool_watch(*, root: Optional[str] = None) -> int:
             None,
         )
         _prune_results_to_live(base, keep)
+        data["strategy_pool_watch_at"] = ""
         return 0
     data["strategy_pool_watch"] = []
+    data["strategy_pool_watch_at"] = ""
     keep = collect_subscribe_codes(
         data.get("tasks") or [],
         data.get("watch_codes"),
@@ -132,3 +150,34 @@ def clear_strategy_pool_watch(*, root: Optional[str] = None) -> int:
             % (removed, len(keep))
         )
     return len(prev)
+
+
+def expire_stale_strategy_pool_watch(
+    *,
+    root: Optional[str] = None,
+    ttl_sec: int = STRATEGY_POOL_WATCH_TTL_SEC,
+) -> int:
+    """超时仍未 clear 的临时订阅强制释放（防异常退出残留）。"""
+    base = root or _project_root()
+    rules_path, _ = default_paths(base)
+    data = _load_rules(rules_path)
+    prev = normalize_watch_codes(data.get("strategy_pool_watch"))
+    if not prev:
+        return 0
+    raw_at = str(data.get("strategy_pool_watch_at") or "").strip()
+    # 无时间戳的旧残留：直接视为过期
+    age = None
+    if raw_at:
+        try:
+            age = (datetime.now() - datetime.fromisoformat(raw_at)).total_seconds()
+        except ValueError:
+            age = None
+    if age is not None and age < float(ttl_sec):
+        return 0
+    n = clear_strategy_pool_watch(root=base)
+    if n > 0:
+        print(
+            "[strategy_pool_watch] TTL 到期已释放 %d 只（age=%s ttl=%ss）"
+            % (n, ("?" if age is None else int(age)), int(ttl_sec))
+        )
+    return n

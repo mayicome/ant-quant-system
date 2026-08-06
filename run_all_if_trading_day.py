@@ -4,7 +4,7 @@
 流程：
 1. 非交易日直接跳过
 2. 先 wait_daily_cache_ready；失败则中止，后续全部不跑
-3. 再顺序运行：板块监控、资金流、选股、各分析小程序、封单评级次日验证、龙虎榜溢价复盘
+3. 再顺序运行：板块监控、资金流、东财板块涨跌幅日快照、选股、各分析小程序、封单评级次日验证、龙虎榜溢价复盘
 4. 最后：东财 F10 逐只更新概念/板块并入 all_a_stock_info.json（并集合并，不删旧标签）
 5. 全部程序跑完后：只把 history_data **根目录**里「当天以前」的带日期文件移到 history_data/存档/（子目录不归档）
 """
@@ -101,6 +101,8 @@ def main() -> int:
     jobs: List[Tuple[str, Sequence[str]]] = [
         ("limit_up_sector_monitor_web.py", ("--once",)),
         ("get_capital_flow_selenium.py", ()),
+        # 选股前：东财概念+行业涨跌幅全榜日快照（失败只记错，不阻断选股）
+        ("tools/snapshot_eastmoney_board_rank.py", ("--with-fund-flow",)),
         ("sector_stock_filter.py", ("--auto-run",)),
         ("profit_index_gui.py", ("--auto-run",)),
         ("main_line_group_gui.py", ("--auto-run",)),

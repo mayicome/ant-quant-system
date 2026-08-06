@@ -308,6 +308,7 @@ def empty_results(mode: str = "shadow", trade_date: str = "") -> Dict[str, Any]:
         "version": RESULTS_VERSION,
         "trade_date": trade_date,
         "updated_at": _now_iso(),
+        "quotes_recv_at": "",
         "mode": mode,
         "stocks": {},
     }
@@ -327,6 +328,7 @@ def append_stock_event(
         {
             "last_price": 0.0,
             "last_tick_time": "",
+            "quote_recv_at": "",
             "today_open": 0.0,
             "today_high": 0.0,
             "today_low": 0.0,
@@ -460,6 +462,9 @@ def update_price_snapshot(
 ) -> bool:
     """更新现价；tick_row 存在时同步今开/当日高低（交易时段策略生成用）。
 
+    每次成功调用都会刷新 quote_recv_at / quotes_recv_at（本机收到推送墙钟），
+    即使价格与 timetag 未变——供外部健康检查判断订阅是否存活。
+
     今日高低只认「开盘后成交价」轨迹，避免 9:15–9:24 集合竞价虚拟匹配价
     （常摸到涨跌停）污染 today_low/today_high。
     """
@@ -472,6 +477,7 @@ def update_price_snapshot(
         {
             "last_price": 0.0,
             "last_tick_time": "",
+            "quote_recv_at": "",
             "today_open": 0.0,
             "today_high": 0.0,
             "today_low": 0.0,
@@ -486,6 +492,14 @@ def update_price_snapshot(
     tick_time = str(last_tick_time or "").strip()
     if tick_time and bucket.get("last_tick_time") != tick_time:
         bucket["last_tick_time"] = tick_time
+        changed = True
+    # 本机收到推送的墙钟：价格/timetag 不变也要刷新，供健康检查判断订阅是否存活
+    recv_at = _now_iso()
+    if bucket.get("quote_recv_at") != recv_at:
+        bucket["quote_recv_at"] = recv_at
+        changed = True
+    if results.get("quotes_recv_at") != recv_at:
+        results["quotes_recv_at"] = recv_at
         changed = True
 
     row = tick_row if isinstance(tick_row, dict) else {}
@@ -601,6 +615,10 @@ def load_results_prices(path: str) -> Dict[str, Dict[str, Any]]:
         out[norm] = {
             "last_price": price,
             "last_tick_time": str(bucket.get("last_tick_time") or ""),
+            "quote_recv_at": str(
+                bucket.get("quote_recv_at") or data.get("quotes_recv_at") or ""
+            ),
+            "quotes_recv_at": str(data.get("quotes_recv_at") or ""),
             "today_open": float(bucket.get("today_open") or 0),
             "today_high": float(bucket.get("today_high") or 0),
             "today_low": float(bucket.get("today_low") or 0),

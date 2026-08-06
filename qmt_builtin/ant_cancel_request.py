@@ -84,12 +84,12 @@ def process_pending_cancels(ContextInfo, po_module=None) -> int:
             try:
                 from qmt_builtin import ant_passorder as po_module
             except ImportError:
-                print("[撤单请求] ant_passorder import failed")
+                print("[撤单请求] ant_passorder 导入失败")
                 return 0
 
     cancel_fn = getattr(po_module, "cancel_order_sysid", None)
     if not callable(cancel_fn):
-        print("[撤单请求] cancel_order_sysid missing")
+        print("[撤单请求] 缺少 cancel_order_sysid")
         return 0
 
     sent = 0
@@ -111,13 +111,13 @@ def process_pending_cancels(ContextInfo, po_module=None) -> int:
             it["status"] = "sent"
             sent += 1
             print(
-                "[撤单请求] CANCEL sent sysid=%s code=%s"
+                "[撤单请求] 撤单已发 sysid=%s code=%s"
                 % (sysid, code or "-")
             )
         else:
             it["status"] = "error"
             print(
-                "[撤单请求] CANCEL fail sysid=%s code=%s msg=%s"
+                "[撤单请求] 撤单失败 sysid=%s code=%s msg=%s"
                 % (sysid, code or "-", it["msg"])
             )
         changed = True

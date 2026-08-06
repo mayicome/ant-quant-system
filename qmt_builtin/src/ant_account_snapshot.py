@@ -9,7 +9,7 @@ try:
 except Exception:
     PROJECT_ROOT = ""
 
-ACCOUNT_SNAPSHOT_VERSION = "20260801.01"
+ACCOUNT_SNAPSHOT_VERSION = "20260803.01"
 
 _CACHED_ACCOUNT = None
 _CACHED_POSITIONS = {}
@@ -317,7 +317,7 @@ def _diagnose_position_parse_miss(pos_raw, pos_rows, parsed_n):
             except Exception as e:
                 sample[a] = "err:%s" % e
     print(
-        "[交易核心] position parse miss: raw_type=%s raw_len=%s rows=%s attrs=%s sample=%s"
+        "[交易核心] 持仓解析未命中: raw_type=%s raw_len=%s rows=%s attrs=%s sample=%s"
         % (type(pos_raw).__name__, raw_n, len(pos_rows or []), names, sample)
     )
 
@@ -523,7 +523,7 @@ def _diagnose_trade_detail(ContextInfo, account_id):
     parts.append(
         "hint=模型交易请用实盘模式;大QMT交易端需已登录该资金账号(非仅副本MiniQMT)"
     )
-    print("[交易核心] account diag: %s" % "; ".join(parts))
+    print("[交易核心] 账户诊断: %s" % "; ".join(parts))
 
 
 def _parse_account_row(row, account_id):
@@ -848,29 +848,40 @@ def _resolve_order_side(row):
     )
     if _is_ipo_subscribe(order_type, offset_flag, opt, price_type):
         return "subscribe", order_type, offset_flag, direction, opt, price_type
-    # 买卖：优先 direction，再 offset / order_type；OptName 兜底
-    for cand in (direction, offset_flag, order_type):
+    # OptName 优先：手机/外部委托常见 direction=48 却实为卖出，与「限价卖出」矛盾
+    has_sell = "卖" in opt
+    has_buy = "买" in opt
+    if has_sell and not has_buy:
+        return "sell", order_type, offset_flag, direction, opt, price_type
+    if has_buy and not has_sell:
+        return "buy", order_type, offset_flag, direction, opt, price_type
+    # 数值：优先 STOCK_BUY/SELL(23/24)，再 direction / offset
+    ot = _to_int(order_type, -1)
+    if ot == 24:
+        return "sell", order_type, offset_flag, direction, opt, price_type
+    if ot == 23:
+        return "buy", order_type, offset_flag, direction, opt, price_type
+    for cand in (direction, offset_flag):
         d = _to_int(cand, -1)
         if d in (49, 24, 1):
             return "sell", order_type, offset_flag, direction, opt, price_type
         if d in (48, 23, 0):
             return "buy", order_type, offset_flag, direction, opt, price_type
-    if "卖" in opt:
-        return "sell", order_type, offset_flag, direction, opt, price_type
-    if "买" in opt:
-        return "buy", order_type, offset_flag, direction, opt, price_type
     return "buy", order_type, offset_flag, direction, opt, price_type
 
 
 def _diag_order_fields_once(parsed):
-    """首次解析委托时打印关键字段，便于区分 status86 vs type86。"""
+    """首次解析委托时可选诊断；默认静默（启动刷一笔已成单无信息量）。"""
     global _ORDER_FIELD_DIAG_DONE
     if _ORDER_FIELD_DIAG_DONE:
         return
     _ORDER_FIELD_DIAG_DONE = True
+    # 需要排查委托字段映射时设环境变量 ANT_ORDER_FIELD_DIAG=1
+    if str(os.environ.get("ANT_ORDER_FIELD_DIAG") or "").strip() not in ("1", "true", "TRUE"):
+        return
     try:
         print(
-            "[交易核心] order field diag: code=%s sysid=%s status=%s(%s) "
+            "[交易核心] 委托字段诊断: code=%s sysid=%s status=%s(%s) "
             "order_type=%s(%s) offset=%s direction=%s price_type=%s "
             "opt=%s side=%s remark=%s"
             % (
@@ -1243,7 +1254,7 @@ def on_order_callback(ContextInfo, orderInfo):
         if sysid:
             _CACHED_ORDERS[sysid] = parsed
     except Exception as e:
-        print("[交易核心] order_callback error: %s" % e)
+        print("[交易核心] order_callback 错误: %s" % e)
 
 
 def apply_order_callback_to_results(results, orderInfo, account_id=""):
@@ -1280,7 +1291,7 @@ def on_account_callback(ContextInfo, accountInfo):
             return
         _CACHED_ACCOUNT = _parse_account_row(row, aid)
     except Exception as e:
-        print("[交易核心] account_callback error: %s" % e)
+        print("[交易核心] account_callback 错误: %s" % e)
 
 
 def on_position_callback(ContextInfo, positionInfo):
@@ -1318,7 +1329,7 @@ def on_position_callback(ContextInfo, positionInfo):
         if parsed:
             _CACHED_POSITIONS.update(parsed)
     except Exception as e:
-        print("[交易核心] position_callback error: %s" % e)
+        print("[交易核心] position_callback 错误: %s" % e)
 
 
 def resolve_account_id(ContextInfo, explicit=""):
@@ -1552,8 +1563,8 @@ def _update_position_alert(results, positions_parsed, extra=None):
     if should_log:
         _LAST_POSITION_ALERT_LOG_TS = now
         print(
-            "[账户] WARN position empty but market_value=%.2f cash=%.2f "
-            "total=%.2f parsed=%d — check QMT 持仓/重启 (%s)"
+            "[账户] 警告 持仓为空但股票市值=%.2f cash=%.2f "
+            "total=%.2f parsed=%d — 请检查 QMT 持仓/重启 (%s)"
             % (mv, cash, total, pos_n, reason)
         )
         notify_r = _notify_position_alert_once(
@@ -1664,7 +1675,7 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
             "acc_len=%s" % (_raw_len(acc_raw) if acc_raw is not None else "none"),
             "pos_len=%s" % (_raw_len(pos_raw) if pos_raw is not None else "none"),
         ]
-        print("[交易核心] account diag(entry): %s" % "; ".join(parts))
+        print("[交易核心] 账户诊断(入口): %s" % "; ".join(parts))
         return False, "trade_detail_empty"
 
     # 告警依据：本次解析出的持仓（不是展示用缓存）。真空仓+市值≈0 不告警。

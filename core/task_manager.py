@@ -1639,8 +1639,17 @@ class TaskManager(QObject):
         #self.logger.info(f"任务详情 - 股票: {stock_code}, 策略: {strategy}")
         
         if task_id in self.running_tasks:
-            self.logger.warning(f"任务 {task_id} 已经在运行中")
-            return False
+            # UI/params 可能已显示「未运行」，但 running_tasks 仍挂着 → 对齐后视为已启动
+            if self._reconcile_already_running_task(task_id):
+                return True
+            # 进程已死或登记残缺：清掉后继续走正常启动
+            self.logger.warning(
+                f"任务 {task_id} 在 running_tasks 中但进程已失效，清理后重新启动"
+            )
+            try:
+                self._force_remove_running_task(task_id, send_stop=False)
+            except Exception as e:
+                self.logger.warning(f"清理失效运行记录失败: {e}")
             
         if not self.monitoring:
             self.logger.error("监控未开启，无法启动任务")
@@ -1883,206 +1892,173 @@ class TaskManager(QObject):
             self.logger.error(f"启动任务失败：{str(e)}")
             return False
 
+    def _mark_task_stopped_params(self, task_id, *, paused=True, status=None):
+        """停止后统一写回 params/status，并尽量同步 rules_armed。"""
+        task = self.tasks.get(task_id)
+        if not isinstance(task, dict):
+            return
+        stock_code = task.get("stock_code", "")
+        params = task.get("params") if isinstance(task.get("params"), dict) else {}
+        params["task_running"] = False
+        params["task_paused"] = bool(paused)
+        task["params"] = params
+        self.tasks[task_id]["params"] = params
+        self.task_params[task_id] = params
+        if status is not None:
+            task["status"] = status
+            self.tasks[task_id]["status"] = status
+            try:
+                self.update_task_ui.emit(task_id, "status", status)
+            except Exception:
+                pass
+        elif stock_code:
+            try:
+                self.update_task_ui.emit(task_id, "status", task.get("status") or "未运行")
+            except Exception:
+                pass
+        try:
+            self._sync_rules_armed_if_builtin()
+        except Exception:
+            pass
+
     def stop_task(self, task_id):
-        """停止指定任务"""
+        """停止指定任务。
+
+        进程缺失/已死时也必须清掉 running_tasks，避免「停不掉 / 退不出」。
+        不在 running_tasks 但 params/status 仍显示运行中时，做幂等对齐。
+        """
         try:
             if task_id in self.running_tasks:
-                # 获取任务信息
                 task = self.tasks.get(task_id)
-                if task:
-                    stock_code = task.get('stock_code')
-                    
-                    # 检查当前状态是否已经是"已委托"
-                    current_status = task.get('status')
-                    if current_status != '已委托':
-                        # 检查任务停止前的原始状态
-                        original_status = task.get('original_status', '未运行')
-                        
-                        # 如果是夜市任务且有委托号，但原始状态不是"已委托"，则恢复到原始状态
-                        has_order = (task.get('strategy', '').startswith('夜市') or task.get('strategy', '') in ['夜市卖出', '夜市买入']) and task.get('order_id')
-                        
-                        if has_order and original_status == '已委托':
-                            # 原本就是已委托的任务，保持已委托状态
-                            task['status'] = '已委托'
-                            self.tasks[task_id]['status'] = '已委托'
-                            self.logger.info(f"[{stock_code}] 停止原本已委托的任务，保持已委托状态，委托号：{task.get('order_id')}")
+                stock_code = None
+                if isinstance(task, dict):
+                    stock_code = task.get("stock_code")
+                    current_status = task.get("status")
+                    if current_status != "已委托":
+                        original_status = task.get("original_status", "未运行")
+                        has_order = (
+                            (
+                                str(task.get("strategy", "")).startswith("夜市")
+                                or task.get("strategy", "") in ["夜市卖出", "夜市买入"]
+                            )
+                            and task.get("order_id")
+                        )
+                        if has_order and original_status == "已委托":
+                            new_status = "已委托"
+                            self.logger.info(
+                                f"[{stock_code}] 停止原本已委托的任务，保持已委托状态，"
+                                f"委托号：{task.get('order_id')}"
+                            )
                         elif has_order:
-                            # 有委托号但没有委托回报确认，恢复到原始状态
-                            task['status'] = original_status
-                            self.tasks[task_id]['status'] = original_status
-                            #self.logger.info(f"[{stock_code}] 停止任务，状态恢复到：{original_status}（有委托号但无回报确认）")
+                            new_status = original_status
                         else:
-                            # 恢复到原始状态（未运行或其他状态）
-                            task['status'] = original_status
-                            self.tasks[task_id]['status'] = original_status
-                            #self.logger.info(f"[{stock_code}] 停止任务，状态恢复到：{original_status}")
-                        params = task.get('params') if isinstance(task.get('params'), dict) else {}
-                        params['task_running'] = False
-                        params['task_paused'] = True
-                        task['params'] = params
-                        self.tasks[task_id]['params'] = params
-                        self.task_params[task_id] = params
-                        
-                        # 保存任务状态到文件
-                        self.save_tasks(list(self.tasks.values()))
-                        
-                        # 发送UI更新信号
-                        if stock_code:
-                            self.update_task_ui.emit(task_id, 'status', task['status'])
+                            new_status = original_status
+                        self._mark_task_stopped_params(
+                            task_id, paused=True, status=new_status
+                        )
+                        try:
+                            self.save_tasks(list(self.tasks.values()))
+                        except Exception as e:
+                            self.logger.warning(f"停止任务后保存失败: {e}")
                     else:
-                        #self.logger.info(f"[{stock_code}] 任务状态已经是已委托，不重复设置")
-                        # 仍然需要保存状态到文件，以防内存和文件不同步
-                        self.save_tasks(list(self.tasks.values()))
-                
-                # 停止进程
-                task_info = self.running_tasks[task_id]
-                process = task_info['process']
-                control_pipe = task_info['control_pipe']
-                
-                # 发送停止信号
+                        try:
+                            self.save_tasks(list(self.tasks.values()))
+                        except Exception as e:
+                            self.logger.warning(f"停止任务后保存失败: {e}")
+
+                # 无论 process/pipe 是否完整，都强制清掉运行登记
                 try:
-                    control_pipe.send('stop')
-                    #self.logger.info(f"已发送停止信号到任务 {task_id}")
+                    self._force_remove_running_task(task_id, send_stop=True)
                 except Exception as e:
-                    self.logger.warning(f"发送停止信号失败：{str(e)}")
-                
-                # 减少等待时间，提高退出速度
-                try:
-                    process.join(timeout=2)  # 从5秒减少到2秒
-                except Exception as e:
-                    self.logger.warning(f"等待进程退出时出错：{str(e)}")
-                
-                # 如果进程还在运行，强制终止
-                if process.is_alive():
+                    self.logger.warning(f"强制移除运行记录失败，尝试直接删除: {e}")
                     try:
-                        process.terminate()
-                        process.join(timeout=1)  # 从2秒减少到1秒
-                        if process.is_alive():
-                            process.kill()
-                            self.logger.warning(f"强制终止任务 {task_id} 的进程")
-                    except Exception as e:
-                        self.logger.error(f"强制终止进程时出错：{str(e)}")
-                
-                # 关闭管道
-                try:
-                    if hasattr(control_pipe, 'close') and not control_pipe.closed:
-                        control_pipe.close()
-                except (OSError, ValueError, AttributeError) as e:
-                    # 管道可能已经关闭或无效，这是正常的
-                    pass
-                
-                # 关闭日志管道
-                try:
-                    log_pipe = task_info.get('log_pipe')
-                    if log_pipe and hasattr(log_pipe, 'close') and not log_pipe.closed:
-                        log_pipe.close()
-                except (OSError, ValueError, AttributeError) as e:
-                    # 管道可能已经关闭或无效，这是正常的
-                    pass
-                
-                # 从运行中的任务中移除
-                del self.running_tasks[task_id]
-                
-                # 清理task_processes中的对应条目
-                if stock_code and stock_code in self.task_processes:
-                    # 移除特定的任务，而不是整个股票的所有任务
-                    self.task_processes[stock_code] = [
-                        task_info for task_info in self.task_processes[stock_code] 
-                        if task_info[0] != task_id
-                    ]
-                    # 如果该股票没有其他任务了，完全移除
-                    if not self.task_processes[stock_code]:
-                        del self.task_processes[stock_code]
-                        self.logger.info(f"[{stock_code}] 已从task_processes中移除，停止接收行情数据")
-                    else:
-                        self.logger.info(f"[{stock_code}] 任务 {task_id} 已从task_processes中移除，该股票还有其他任务运行")
-                
-                # 清理price_displays中的阈值信息，让行情回调接管显示
+                        if task_id in self.running_tasks:
+                            del self.running_tasks[task_id]
+                    except Exception:
+                        pass
+                    if stock_code and stock_code in self.task_processes:
+                        self.task_processes[stock_code] = [
+                            item
+                            for item in self.task_processes[stock_code]
+                            if item[0] != task_id
+                        ]
+                        if not self.task_processes[stock_code]:
+                            del self.task_processes[stock_code]
+
+                # price_displays 清理（_force_remove 未必处理）
                 if stock_code and stock_code in self.price_displays:
-                    # 移除特定任务的显示信息
                     if isinstance(self.price_displays[stock_code], list):
-                        # 新格式：任务列表
                         self.price_displays[stock_code] = [
-                            (existing_task_id, task_display) 
-                            for existing_task_id, task_display in self.price_displays[stock_code]
+                            (existing_task_id, task_display)
+                            for existing_task_id, task_display in self.price_displays[
+                                stock_code
+                            ]
                             if existing_task_id != task_id
                         ]
-                        # 如果该股票没有其他任务了，完全移除
                         if not self.price_displays[stock_code]:
                             del self.price_displays[stock_code]
-                            self.logger.info(f"[{stock_code}] 任务暂停，状态栏显示已为纯价格格式")
-                        else:
-                            self.logger.info(f"[{stock_code}] 任务 {task_id} 暂停，该股票还有其他任务运行")
                     else:
-                        # 旧格式：直接字符串，转换为新格式
                         current_display = self.price_displays[stock_code]
-                        if '[' in current_display and ']' in current_display:
-                            price_part = current_display.split('[')[0].strip()
-                            self.price_displays[stock_code] = price_part
-                        self.logger.info(f"[{stock_code}] 任务暂停，状态栏显示已为纯价格格式")
-                
-                #self.logger.info(f"任务 {task_id} 已停止")
+                        if "[" in current_display and "]" in current_display:
+                            self.price_displays[stock_code] = current_display.split("[")[
+                                0
+                            ].strip()
+
+                try:
+                    self._sync_rules_armed_if_builtin()
+                except Exception:
+                    pass
                 return True
-            elif task_id in self.tasks:
-                # 处理不在运行中但存在的任务（例如"已委托"状态的任务）
+
+            if task_id in self.tasks:
+                # 不在 running_tasks：幂等对齐「看起来像在跑」的状态
                 task = self.tasks[task_id]
-                stock_code = task.get('stock_code', '')
-                current_status = task.get('status', '')
-                
-                if current_status == '已委托':
-                    # 对于已委托状态的任务，将状态改为未运行，允许用户重新启动
-                    task['status'] = '未运行'
-                    self.tasks[task_id]['status'] = '未运行'
-                    params = task.get('params') if isinstance(task.get('params'), dict) else {}
-                    params['task_running'] = False
-                    params['task_paused'] = False
-                    task['params'] = params
-                    self.tasks[task_id]['params'] = params
-                    self.task_params[task_id] = params
-                    
-                    # 保存任务状态到文件（阻止tasks_updated信号，避免触发表格完全刷新）
+                stock_code = task.get("stock_code", "")
+                current_status = task.get("status", "")
+                params = task.get("params") if isinstance(task.get("params"), dict) else {}
+                looks_running = (
+                    current_status in ("运行中", "已委托", "可能已委托")
+                    or bool(params.get("task_running"))
+                )
+
+                if current_status in ("已委托", "可能已委托") or looks_running:
+                    self._mark_task_stopped_params(
+                        task_id, paused=False, status="未运行"
+                    )
                     self._block_tasks_updated_signal = True
-                    self.save_tasks(list(self.tasks.values()))
-                    self._block_tasks_updated_signal = False
-                    
-                    # 发送UI更新信号
-                    self.update_task_ui.emit(task_id, 'status', '未运行')
-                    
-                    self.logger.info(f"[{stock_code}] 已委托任务状态改为未运行，可重新启动")
+                    try:
+                        self.save_tasks(list(self.tasks.values()))
+                    finally:
+                        self._block_tasks_updated_signal = False
+                    self.logger.info(
+                        f"[{stock_code}] 任务未在 running_tasks，已对齐为未运行（幂等停止）"
+                    )
                     return True
-                elif current_status == '可能已委托':
-                    # 对于可能已委托状态的任务，将状态改为未运行，允许用户重新启动
-                    task['status'] = '未运行'
-                    self.tasks[task_id]['status'] = '未运行'
-                    params = task.get('params') if isinstance(task.get('params'), dict) else {}
-                    params['task_running'] = False
-                    params['task_paused'] = False
-                    task['params'] = params
-                    self.tasks[task_id]['params'] = params
-                    self.task_params[task_id] = params
-                    
-                    # 保存任务状态到文件（阻止tasks_updated信号，避免触发表格完全刷新）
-                    self._block_tasks_updated_signal = True
-                    self.save_tasks(list(self.tasks.values()))
-                    self._block_tasks_updated_signal = False
-                    
-                    # 发送UI更新信号
-                    self.update_task_ui.emit(task_id, 'status', '未运行')
-                    
-                    self.logger.info(f"[{stock_code}] 可能已委托任务状态改为未运行，可重新启动")
-                    return True
-                else:
-                    self.logger.warning(f"任务 {task_id} 状态为 {current_status}，无需停止")
-                    return False
-            else:
-                self.logger.warning(f"任务 {task_id} 不存在")
-                return False
-                
+
+                self.logger.warning(
+                    f"任务 {task_id} 状态为 {current_status}，无需停止"
+                )
+                return True
+
+            self.logger.warning(f"任务 {task_id} 不存在")
+            return False
+
         except Exception as e:
             self.logger.error(f"停止任务 {task_id} 失败：{str(e)}")
             import traceback
+
             self.logger.error(f"停止任务异常堆栈：{traceback.format_exc()}")
-            return False
+            # 失败也尽量清掉脏登记，避免永久卡死退出
+            try:
+                if task_id in self.running_tasks:
+                    self._force_remove_running_task(task_id, send_stop=False)
+            except Exception:
+                self.running_tasks.pop(task_id, None)
+            try:
+                self._mark_task_stopped_params(task_id, paused=True, status="未运行")
+            except Exception:
+                pass
+            return True
 
     @staticmethod
     def _run_task_process(stock_code, task_info, control_pipe, log_pipe):
@@ -3624,18 +3600,71 @@ class TaskManager(QObject):
         for task_id in orphans:
             self._force_remove_running_task(task_id)
 
+    def _running_process_alive(self, task_info) -> bool:
+        """running_tasks 登记的进程/线程是否仍存活。"""
+        if not isinstance(task_info, dict):
+            return False
+        process = task_info.get("process")
+        if process is None:
+            return False
+        try:
+            return bool(process.is_alive())
+        except Exception:
+            return False
+
+    def _reconcile_already_running_task(self, task_id) -> bool:
+        """若 running_tasks 中进程仍活着，把 params/UI 拉回「运行中」。
+
+        解决：图表/列表显示未运行，点启动却提示已经在运行中。
+        返回 True 表示已对齐、无需重新拉起进程。
+        """
+        task_info = self.running_tasks.get(task_id)
+        if not self._running_process_alive(task_info):
+            return False
+        task = self.tasks.get(task_id)
+        if not isinstance(task, dict):
+            return False
+        stock_code = task.get("stock_code", "")
+        params = task.get("params") if isinstance(task.get("params"), dict) else {}
+        params["task_running"] = True
+        params["task_paused"] = False
+        task["params"] = params
+        task["status"] = "运行中"
+        self.tasks[task_id]["params"] = params
+        self.tasks[task_id]["status"] = "运行中"
+        self.task_params[task_id] = params
+        try:
+            self.update_task_ui.emit(task_id, "status", "运行中")
+        except Exception:
+            pass
+        try:
+            self._sync_rules_armed_if_builtin()
+        except Exception:
+            pass
+        self.logger.info(
+            f"[{stock_code}] 任务已在运行中，已同步 UI/params 为运行中（幂等启动）"
+        )
+        return True
+
     def _cleanup_dead_processes(self):
         """清理已退出的进程"""
         dead_tasks = []
         for task_id, task_info in self.running_tasks.items():
             process = task_info.get('process')
-            if process and not process.is_alive():
+            # 无 process 的残缺登记也清掉，避免永久卡在「已经在运行中」
+            if process is None or not self._running_process_alive(task_info):
                 dead_tasks.append(task_id)
         
         if dead_tasks:
-            self.logger.info(f"发现 {len(dead_tasks)} 个已退出的进程，清理中...")
+            self.logger.info(f"发现 {len(dead_tasks)} 个已退出/无效的进程，清理中...")
             for task_id in dead_tasks:
-                self._handle_process_disconnection(task_id)
+                try:
+                    self._handle_process_disconnection(task_id)
+                except Exception:
+                    try:
+                        self._force_remove_running_task(task_id, send_stop=False)
+                    except Exception as e:
+                        self.logger.warning(f"清理失效任务 {task_id} 失败: {e}")
 
         self._cleanup_orphan_running_tasks()
 

@@ -38,19 +38,19 @@ class BacktestPreflightResult:
 
 def backtest_preflight_hint_lines() -> List[str]:
     """回测 Tab 静态说明（随 qmt_mode 变化）。"""
-    if use_on_demand_daily_sync():
-        return [
-            "【builtin 回测】日线：data/daily_cache；tick：data/ticks/日期/代码.parquet（旧 .pkl 可回退）。",
-            "缺数据会写入 data/data_sync_requests.json，需大 QMT 模型交易在线处理；",
-            "预热会弹出进度条并显示 pending 队列；无进展约 30s 即继续；停牌/无 tick 标 failed 后跳过。",
-        ]
-    if allow_xtdata_daily_fallback():
-        return [
-            "【mini 回测】日线优先 daily_cache，缺失时本机 xtdata 回退；tick 优先本地 pkl，缺失时 xtdata 拉取。",
-            "请保持 MiniQMT 在线；仍建议事先缓存 tick 到 data/ticks/ 以加快批量回测。",
-        ]
+    daily_hint = (
+        "缺日线会写入 data/data_sync_requests.json，需大 QMT 模型交易在线处理"
+        "（盘中约 1 只/秒、拉至上一交易日）；"
+        if use_on_demand_daily_sync()
+        else (
+            "日线优先 daily_cache，缺失时本机 xtdata 回退；"
+            if allow_xtdata_daily_fallback()
+            else "日线仅 daily_cache；"
+        )
+    )
     return [
-        "【回测】仅使用本地 daily_cache 与 data/ticks；缺数据不会自动拉取。",
+        "【回测 tick】仅读 data/ticks/日期/代码.parquet（旧 .pkl 可回退）；本地缺失不会向 QMT/xtdata 按需拉取。",
+        f"【回测日线】data/daily_cache；{daily_hint}缺 tick 的交易日将无法 tick 级撮合。",
     ]
 
 
@@ -77,7 +77,7 @@ def _emit_progress(
 
 
 def _intraday_qmt_daily_hint() -> str:
-    """盘中大 QMT 仅优先同步策略池日线，回测池外可能需收盘后再试。"""
+    """盘中大 QMT 按需日线限速消费（含非池），供回测补数。"""
     try:
         from datetime import datetime as _dt
 
@@ -86,7 +86,7 @@ def _intraday_qmt_daily_hint() -> str:
             return ""
         t = now.time()
         if _dt.strptime("09:15", "%H:%M").time() <= t <= _dt.strptime("15:05", "%H:%M").time():
-            return "（盘中：非策略池日线由 QMT 延后，tick 仍同步；请确认模型交易已运行）"
+            return "（盘中：按需日线约 1 只/秒、拉至上一交易日；请确认模型交易已运行）"
     except Exception:
         pass
     return ""
@@ -275,8 +275,16 @@ def run_backtest_preflight(
     tick_missing_pairs: List[Tuple[str, date]] = []
     tick_skipped = 0
     if use_tick_level:
+        _emit_progress(
+            progress,
+            f"检查本地 tick（{len(codes)} 只 × {len(trade_days)} 日）…",
+            45,
+        )
         tick_need, tick_skipped = _tick_pairs_need_wait(codes, trade_days)
         stats["tick_pairs_need"] = len(tick_need)
+        stats["tick_pairs_skipped"] = tick_skipped
+        tick_missing_pairs = tick_need
+        stats["tick_pairs_missing"] = len(tick_need)
         stats["tick_pairs_skipped"] = tick_skipped
         if not tick_need and tick_skipped == 0:
             lines.append(
@@ -284,125 +292,22 @@ def run_backtest_preflight(
             )
         elif tick_skipped and not tick_need:
             lines.append(
-                f"[preflight] tick 无缓存 {tick_skipped} 项已标记不可用（如停牌），跳过等待。"
+                f"[preflight] tick 无缓存 {tick_skipped} 项已标记不可用（如停牌），跳过。"
             )
-        elif use_on_demand_daily_sync():
-            try:
-                from utils.data_sync_request import (
-                    tick_pool_wait_timeout_sec,
-                    wait_tick_cache_pool,
-                )
-            except ImportError:
-                from data_sync_request import (  # type: ignore
-                    tick_pool_wait_timeout_sec,
-                    wait_tick_cache_pool,
-                )
-
-            by_day: Dict[date, List[str]] = {}
-            for c6, d in tick_need:
-                by_day.setdefault(d, []).append(c6)
-            still: List[Tuple[str, date]] = []
-            day_keys = sorted(by_day.keys())
-            total_days = len(day_keys)
-            for di, d in enumerate(day_keys):
-                day_codes = sorted(set(by_day[d]))
-                base_pct = 45 + int(50 * di / max(1, total_days))
-
-                def _tick_pool_progress(
-                    ready_n: int,
-                    total_n: int,
-                    tag: str,
-                    _base: int = base_pct,
-                    _days: int = total_days,
-                ) -> None:
-                    span = max(1, int(50 / max(1, _days)))
-                    pct = min(95, _base + int(span * ready_n / max(1, total_n)))
-                    _emit_progress(
-                        progress,
-                        f"{tag} {ready_n}/{total_n}；{_pending_sync_hint()}",
-                        pct,
-                    )
-
-                _emit_progress(
-                    progress,
-                    f"等待 tick {d.isoformat()}（{len(day_codes)} 只）；{_pending_sync_hint()}",
-                    base_pct,
-                )
-                wait_sec = tick_pool_wait_timeout_sec(len(day_codes))
-                _, day_still = wait_tick_cache_pool(
-                    day_codes,
-                    d,
-                    timeout_sec=wait_sec,
-                    on_progress=_tick_pool_progress,
-                )
-                for c6 in day_still:
-                    still.append((c6, d))
-            tick_missing_pairs = still
-            stats["tick_pairs_missing"] = len(still)
-            if tick_skipped:
-                lines.append(
-                    f"[preflight] tick 跳过不可用 {tick_skipped} 项（QMT 已 failed/停牌）。"
-                )
-            if still:
-                sample = ", ".join(
-                    f"{c6}@{d.isoformat()}" for c6, d in still[:6]
-                )
-                if len(still) > 6:
-                    sample += f" …共{len(still)}项"
-                lines.append(
-                    f"[preflight] tick 仍缺 {len(still)} 项：{sample}；"
-                    "相关交易日可能无法 tick 撮合。"
-                )
-            elif tick_need:
-                lines.append("[preflight] tick 已全部就绪。")
-        else:
-            if allow_xtdata_daily_fallback() and tick_need:
-                _emit_progress(
-                    progress,
-                    f"mini：尝试拉取 tick {len(tick_need)} 项…",
-                    50,
-                )
-                try:
-                    from strategy_generator_app.backtest.data_provider import (
-                        load_ticks_for_codes,
-                    )
-                except ImportError:
-                    from backtest.data_provider import load_ticks_for_codes  # type: ignore
-
-                by_day: Dict[date, List[str]] = {}
-                for c6, d in tick_need:
-                    by_day.setdefault(d, []).append(c6)
-                try:
-                    from strategy_generator_app.backtest.data_provider import (
-                        clear_tick_memory_cache,
-                    )
-                except ImportError:
-                    try:
-                        from backtest.data_provider import (  # type: ignore
-                            clear_tick_memory_cache,
-                        )
-                    except ImportError:
-                        clear_tick_memory_cache = None  # type: ignore[assignment]
-                for d, day_codes in by_day.items():
-                    # 预热只保证落盘；按日加载后立刻释放内存，避免预检阶段囤满全区间 tick
-                    load_ticks_for_codes(day_codes, d)
-                    if callable(clear_tick_memory_cache):
-                        try:
-                            clear_tick_memory_cache(d)
-                        except Exception:
-                            pass
-                tick_need, tick_skipped2 = _tick_pairs_need_wait(codes, trade_days)
-                tick_skipped += tick_skipped2
-            tick_missing_pairs = tick_need
-            stats["tick_pairs_missing"] = len(tick_need)
-            stats["tick_pairs_skipped"] = tick_skipped
-            if tick_need:
-                lines.append(
-                    f"[preflight] 本地 tick 仍缺 {len(tick_need)} 项；"
-                    "缺 tick 的交易日将无法撮合。"
-                )
-            else:
-                lines.append("[preflight] tick 已齐全（含 xtdata 预热）。")
+        elif tick_need:
+            sample = ", ".join(
+                f"{c6}@{d.isoformat()}" for c6, d in tick_need[:6]
+            )
+            if len(tick_need) > 6:
+                sample += f" …共{len(tick_need)}项"
+            lines.append(
+                f"[preflight] 本地 tick 缺 {len(tick_need)} 项：{sample}；"
+                "回测不会向 QMT/xtdata 按需下载，相关交易日可能无法 tick 撮合。"
+            )
+        if tick_skipped and tick_need:
+            lines.append(
+                f"[preflight] tick 另有 {tick_skipped} 项已标记不可用（QMT failed/停牌）。"
+            )
 
     tick_missing_fmt = [
         (c6, d.isoformat()) for c6, d in (tick_missing_pairs or [])

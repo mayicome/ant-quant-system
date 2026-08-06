@@ -1,8 +1,8 @@
 #coding:gbk
-"""ï¿½ï¿½Ê± + ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â©ï¿½ï¿½ï¿½Ã´ï¿½ QMT ContextInfo ï¿½ï¿½ï¿½ï¿½é²¢Ð´ï¿½ï¿½ data/qmt_sector_index.jsonï¿½ï¿½
+"""¶¨Ê± + Æô¶¯²¹Â©£ºÓÃ´ó QMT ContextInfo ¶Á°å¿é²¢Ð´Èë data/qmt_sector_index.json¡£
 
-ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½ContextInfo.get_sector_list / get_stock_list_in_sectorï¿½ï¿½
-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ xtdata.download_sector_dataï¿½ï¿½ï¿½ï¿½ miniQMT/ï¿½ï¿½ï¿½ï¿½ RPCï¿½ï¿½ï¿½ï¿½ QMT ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ñ¡¹£ï¿½ï¿½ï¿½
+Ö÷Â·¾¶£ºContextInfo.get_sector_list / get_stock_list_in_sector¡£
+²»µ÷ÓÃ xtdata.download_sector_data£¨Ðè miniQMT/ÐÐÇé RPC£¬´ó QMT »áË¢¡¸ÎÞ·¨Á¬½ÓÐÐÇé·þÎñ¡¹£©¡£
 """
 import json
 import os
@@ -12,56 +12,56 @@ import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-SECTOR_SYNC_VERSION = "20260730.13"
+SECTOR_SYNC_VERSION = "20260803.01"
 SYNC_HOUR = 15
 SYNC_MINUTE = 35
 STARTUP_DELAY_SEC = 10
 PROGRESS_EVERY = 50
-# Ñ¡ï¿½É¶Ë¶ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½î³¤ï¿½É½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ä£»ï¿½ï¿½Ê½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½Ë®ï¿½ß´ï¿½ï¿½ï¿½
+# Ñ¡¹É¶Ë¶ÁÈ¡Ë÷ÒýµÄ×î³¤¿É½ÓÊÜÄêÁä£»ÕýÊ½Í¬²½¸ÄÓÉÅÌºóÁ÷Ë®Ïß´¥·¢
 CACHE_MAX_AGE_DAYS = 7
-# ï¿½ï¿½ QMT ï¿½ï¿½ download_sector ï¿½È¼ï¿½ APIï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ xtdata ï¿½ï¿½Ê· RPC
+# ´ó QMT ÎÞ download_sector µÈ¼Û API£»½ûÖ¹×ß xtdata ÀúÊ· RPC
 ENABLE_XTDATA_SECTOR_DOWNLOAD = False
 
 UI_SECTOR_PREFIXES = ("SW1", "GN", "SW2", "SW3")
-# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ unicode ×ªï¿½å£¬ï¿½ï¿½ï¿½ï¿½Ô´ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ð»µµï¿½ï¿½Â¿Õ¹ï¿½Æ±ï¿½ï¿½
-UNIVERSE_SECTOR = "\u6caa\u6df1A\u80a1"  # ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½
+# °å¿éÃûÓÃ unicode ×ªÒå£¬±ÜÃâÔ´ÎÄ¼þ±àÂëËð»µµ¼ÖÂ¿Õ¹ÉÆ±³Ø
+UNIVERSE_SECTOR = "\u6caa\u6df1A\u80a1"  # »¦ÉîA¹É
 UNIVERSE_SECTORS = (
-    "\u6caa\u6df1A\u80a1",  # ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½
-    "\u4e0a\u8bc1A\u80a1",  # ï¿½ï¿½Ö¤Aï¿½ï¿½
-    "\u6df1\u8bc1A\u80a1",  # ï¿½ï¿½Ö¤Aï¿½ï¿½
+    "\u6caa\u6df1A\u80a1",  # »¦ÉîA¹É
+    "\u4e0a\u8bc1A\u80a1",  # ÉÏÖ¤A¹É
+    "\u6df1\u8bc1A\u80a1",  # ÉîÖ¤A¹É
 )
 
 EXCLUDE_SUBSTR = (
-    "ï¿½ï¿½È¨",
-    "ï¿½ï¿½ï¿½ï¿½",
-    "Ö¸ï¿½ï¿½",
+    "¼ÓÈ¨",
+    "¹ýÆÚ",
+    "Ö¸Êý",
     "ETF",
     "Õ®È¯",
-    "ï¿½ï¿½ï¿½ï¿½",
-    "ï¿½ï¿½È¨",
+    "»ù½ð",
+    "ÆÚÈ¨",
     "×ªÕ®",
-    "ï¿½Ú»ï¿½",
-    "ï¿½Æ´ï¿½ï¿½ï¿½CDR",
-    "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¼",
+    "ÆÚ»õ",
+    "¿Æ´´°åCDR",
+    "Á¬ÐøºÏÔ¼",
 )
 
 MARKET_SECTOR_EXACT = frozenset(
     {
-        "ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½",
-        "ï¿½ï¿½ï¿½ï¿½Bï¿½ï¿½",
-        "ï¿½ï¿½Ö¤Aï¿½ï¿½",
-        "ï¿½ï¿½Ö¤Bï¿½ï¿½",
-        "ï¿½ï¿½Ö¤Aï¿½ï¿½",
-        "ï¿½ï¿½Ö¤Bï¿½ï¿½",
-        "ï¿½ï¿½Òµï¿½ï¿½",
-        "ï¿½Æ´ï¿½ï¿½ï¿½",
-        "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "ï¿½Ð½ï¿½ï¿½ï¿½",
-        "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "Ö£ï¿½ï¿½ï¿½ï¿½",
-        "ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½",
-        "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½",
-        "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ±",
+        "»¦ÉîA¹É",
+        "»¦ÉîB¹É",
+        "ÉÏÖ¤A¹É",
+        "ÉÏÖ¤B¹É",
+        "ÉîÖ¤A¹É",
+        "ÉîÖ¤B¹É",
+        "´´Òµ°å",
+        "¿Æ´´°å",
+        "ÉÏÆÚËù",
+        "ÖÐ½ðËù",
+        "´óÉÌËù",
+        "Ö£ÉÌËù",
+        "ÄÜÔ´ÖÐÐÄ",
+        "Ïã¸ÛÁª½»ËùÖ¸Êý",
+        "Ïã¸ÛÁª½»Ëù¹ÉÆ±",
     }
 )
 
@@ -80,7 +80,7 @@ if _BUILTIN_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_DIR)
 
 _SYNC_RUNNING = False
-# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½/ï¿½Ñ³ï¿½ï¿½Ô¹ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ catch-up ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½
+# µ±ÈÕÒÑÈíÊ§°Ü/ÒÑ³¢ÊÔ¹ý£º×èÖ¹ catch-up ÎÞÏÞÖØÊÔË¢ÆÁ
 _ATTEMPTED_DAY = ""
 _SOFT_FAIL_LOGGED = False
 _API_FAIL_LOGGED = set()  # type: Set[str]
@@ -109,7 +109,7 @@ def _load_xtdata():
 
 
 def _api_owners(ContextInfo=None):
-    """ï¿½ï¿½ï¿½ï¿½ ContextInfoï¿½ï¿½ï¿½ï¿½Ñ¡ xtdataï¿½ï¿½Ä¬ï¿½Ï¹Ø±Õ£ï¿½ï¿½ï¿½"""
+    """ÓÅÏÈ ContextInfo£¬¿ÉÑ¡ xtdata£¨Ä¬ÈÏ¹Ø±Õ£©¡£"""
     owners = []
     if ContextInfo is not None:
         owners.append(("ctx", ContextInfo))
@@ -120,7 +120,7 @@ def _api_owners(ContextInfo=None):
 
 
 def _call_first(owners, method: str, *args, log_fail: bool = True):
-    """ï¿½ï¿½ owners ï¿½ï¿½ï¿½Îµï¿½ï¿½ï¿½ methodï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (label, result)ï¿½ï¿½È«Ê§ï¿½ï¿½ï¿½ï¿½ (None, None)ï¿½ï¿½"""
+    """¶Ô owners ÒÀ´Îµ÷ÓÃ method£¬·µ»Ø (label, result)£»È«Ê§°ÜÔò (None, None)¡£"""
     global _API_FAIL_LOGGED
     last_err = None
     for label, owner in owners:
@@ -134,7 +134,7 @@ def _call_first(owners, method: str, *args, log_fail: bool = True):
             continue
     if log_fail and last_err is not None and method not in _API_FAIL_LOGGED:
         _API_FAIL_LOGGED.add(method)
-        print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] %s failed: %s" % (method, last_err))
+        print("[°å¿éÍ¬²½] %s Ê§°Ü: %s" % (method, last_err))
     return None, None
 
 
@@ -210,7 +210,7 @@ def _start_sector_sync_bg(ContextInfo, source: str, *, force: bool = False) -> N
         try:
             run_sector_sync(ContextInfo, source=source, force=force)
         except Exception as e:
-            print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] bg error (%s): %s" % (source, e))
+            print("[°å¿éÍ¬²½] ºóÌ¨´íÎó (%s): %s" % (source, e))
 
     th = threading.Thread(
         target=_worker, daemon=True, name="sector_sync_%s" % source
@@ -229,7 +229,7 @@ def _list_ui_sectors(ContextInfo=None) -> Tuple[List[str], str]:
     gn = sum(1 for s in sectors if s.startswith("GN"))
     src = label or "none"
     print(
-        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ui sectors=%d sw1=%d gn=%d source=%s"
+        "[°å¿éÍ¬²½] UI°å¿é=%d sw1=%d gn=%d source=%s"
         % (
             len(sectors),
             sum(1 for s in sectors if s.startswith("SW1")),
@@ -238,7 +238,7 @@ def _list_ui_sectors(ContextInfo=None) -> Tuple[List[str], str]:
         )
     )
     if gn == 0 and sectors:
-        print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] WARN: no GN concept sectors in local/ContextInfo data")
+        print("[°å¿éÍ¬²½] ¾¯¸æ: ±¾µØ/ContextInfo Êý¾ÝÖÐÎÞ GN ¸ÅÄî°å¿é")
     return sectors, src
 
 
@@ -251,10 +251,10 @@ def _universe_from_file() -> Set[str]:
         raw = list(payload.get("codes") or [])
         codes = {_code_to_6(c) for c in raw if _code_to_6(c)}
         if codes:
-            print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] universe fallback file=%d" % len(codes))
+            print("[°å¿éÍ¬²½] ¹ÉÆ±³Ø»ØÍËÎÄ¼þ n=%d" % len(codes))
         return codes
     except Exception as e:
-        print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] universe file fail: %s" % e)
+        print("[°å¿éÍ¬²½] ¹ÉÆ±³ØÎÄ¼þÊ§°Ü: %s" % e)
         return set()
 
 
@@ -276,7 +276,7 @@ def _universe_codes(ContextInfo=None) -> Tuple[Set[str], str]:
         codes = {_code_to_6(c) for c in raw if _code_to_6(c)}
         if codes:
             print(
-                "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] universe %s=%d source=%s"
+                "[°å¿éÍ¬²½] ¹ÉÆ±³Ø %s=%d source=%s"
                 % (UNIVERSE_SECTOR, len(codes), label)
             )
             return codes, label
@@ -317,7 +317,7 @@ def _save_manifest(manifest_path: str, body: Dict[str, Any]) -> None:
     try:
         save_json_atomic(manifest_path, body)
     except Exception as e:
-        print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] manifest save failed: %s" % e)
+        print("[°å¿éÍ¬²½] manifest ±£´æÊ§°Ü: %s" % e)
 
 
 def is_sync_running() -> bool:
@@ -336,26 +336,26 @@ def _already_attempted_today() -> bool:
 def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = False) -> bool:
     global _SYNC_RUNNING, _SOFT_FAIL_LOGGED
     if _SYNC_RUNNING:
-        print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] skip: already running")
+        print("[°å¿éÍ¬²½] Ìø¹ý: ÒÑÔÚÔËÐÐ")
         return False
 
     _, index_path, manifest_path = _paths()
     if not force and _cache_fresh(index_path):
         age = _cache_age_days(index_path)
         print(
-            "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] skip: cache fresh (age=%sd, max=%sd)"
+            "[°å¿éÍ¬²½] Ìø¹ý: »º´æÈÔÐÂ (age=%sd, max=%sd)"
             % (age if age is not None else "?", CACHE_MAX_AGE_DAYS)
         )
         return True
 
-    # ï¿½ï¿½ï¿½ï¿½ï¿½Ñ³ï¿½ï¿½Ô¹ï¿½ï¿½ï¿½Ê§ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô£ï¿½ï¿½ï¿½ï¿½ï¿½ catch-up Ë¢ï¿½ï¿½
+    # µ±ÈÕÒÑ³¢ÊÔ¹ýÇÒÊ§°Ü£º²»ÔÙÖØÊÔ£¬±ÜÃâ catch-up Ë¢ÆÁ
     if force and _already_attempted_today():
         manifest = _read_json(manifest_path) or {}
         st = str(manifest.get("status") or "")
         if st in ("failed", "ok_cached"):
             if not _SOFT_FAIL_LOGGED:
                 print(
-                    "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] skip: already attempted today status=%s version=%s"
+                    "[°å¿éÍ¬²½] Ìø¹ý: ½ñÈÕÒÑ³¢ÊÔ status=%s °æ±¾=%s"
                     % (st, SECTOR_SYNC_VERSION)
                 )
                 _SOFT_FAIL_LOGGED = True
@@ -365,7 +365,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
     _mark_attempted()
     started = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     print(
-        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] begin source=%s version=%s primary=ContextInfo "
+        "[°å¿éÍ¬²½] ¿ªÊ¼ source=%s °æ±¾=%s primary=ContextInfo "
         "xtdata_dl=%s"
         % (
             source,
@@ -380,12 +380,12 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
     universe: Set[str] = set()
     sector_src = "none"
     universe_src = "none"
-    downloaded = False  # ï¿½ï¿½ QMT ï¿½ï¿½ downloadï¿½ï¿½ï¿½ï¿½Îª False
+    downloaded = False  # ´ó QMT ÎÞ download£»ºãÎª False
 
     try:
         ui_sectors, sector_src = _list_ui_sectors(ContextInfo)
         if not ui_sectors:
-            # ContextInfo ï¿½ï¿½ get_sector_list Ê±ï¿½ï¿½ï¿½Ã±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä°ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½Â³É·ï¿½
+            # ContextInfo ÎÞ get_sector_list Ê±£ºÓÃ±¾µØË÷ÒýÀïµÄ°å¿éÃûË¢ÐÂ³É·Ö
             cached = _read_json(index_path) or {}
             cached_secs = [
                 str(s)
@@ -396,8 +396,8 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
                 ui_sectors = sorted(set(cached_secs))
                 sector_src = "cache_names"
                 print(
-                    "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] no live get_sector_list; "
-                    "refresh members from cached names n=%d"
+                    "[°å¿éÍ¬²½] ÎÞÊµÊ± get_sector_list; "
+                    "ÓÃ»º´æ°å¿éÃûË¢ÐÂ³É·Ö n=%d"
                     % len(ui_sectors)
                 )
             else:
@@ -406,7 +406,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
                     status = "ok_cached"
                     ok = True
                     print(
-                        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] soft-ok: no live sectors; keep cache "
+                        "[°å¿éÍ¬²½] Èí³É¹¦: ÎÞÊµÊ±°å¿é; ±£Áô»º´æ "
                         "age=%sd (no xtdata download)"
                         % age
                     )
@@ -417,7 +417,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
 
         universe, universe_src = _universe_codes(ContextInfo)
         if not universe:
-            print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] WARN: empty universe; index members unfiltered")
+            print("[°å¿éÍ¬²½] ¾¯¸æ: ¹ÉÆ±³ØÎª¿Õ; Ö¸Êý³É·ÖÎ´¹ýÂË")
 
         code_to_set: Dict[str, Set[str]] = {}
         total = len(ui_sectors)
@@ -429,7 +429,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
             except Exception:
                 member_fail += 1
             if i % PROGRESS_EVERY == 0 or i == total:
-                print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] index progress %d/%d" % (i, total))
+                print("[°å¿éÍ¬²½] Ë÷Òý½ø¶È %d/%d" % (i, total))
             time.sleep(0.01)
 
         if not code_to_set:
@@ -438,7 +438,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
                 status = "ok_cached"
                 ok = True
                 print(
-                    "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] soft-ok: empty members; keep cache age=%sd"
+                    "[°å¿éÍ¬²½] Èí³É¹¦: ³É·ÖÎª¿Õ; ±£Áô»º´æ age=%sd"
                     % age
                 )
                 return True
@@ -449,7 +449,7 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
         ok = True
         status = "ok"
         print(
-            "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] done sectors=%d stocks=%d universe=%d "
+            "[°å¿éÍ¬²½] Íê³É sectors=%d stocks=%d universe=%d "
             "sector_src=%s universe_src=%s downloaded=%s member_fail=%d"
             % (
                 len(ui_sectors),
@@ -465,10 +465,10 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
     except Exception as e:
         status = "failed"
         if not _SOFT_FAIL_LOGGED:
-            print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ERROR: %s" % e)
+            print("[°å¿éÍ¬²½] ´íÎó: %s" % e)
             _SOFT_FAIL_LOGGED = True
         else:
-            print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ERROR (suppressed detail): %s" % type(e).__name__)
+            print("[°å¿éÍ¬²½] ´íÎó£¨ÏêÇéÒÑÒÖÖÆ£©: %s" % type(e).__name__)
         return False
     finally:
         finished = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -498,29 +498,13 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
 
 
 def startup_sector_sync(ContextInfo):
-    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½é£¨È«ï¿½ï¿½É¨ï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½Ë®ï¿½ß¸ï¿½ï¿½Â¡ï¿½"""
-    _, index_path, manifest_path = _paths()
-    age = _cache_age_days(index_path)
-    if age is None:
-        manifest = _read_json(manifest_path)
-        if manifest and str(manifest.get("status") or "") in ("ok", "ok_cached"):
-            try:
-                built = str(manifest.get("built_at") or "")[:10]
-                if built:
-                    age = (date.today() - date.fromisoformat(built)).days
-            except Exception:
-                pass
-    age_s = "missing" if age is None else ("%dd" % age)
-    print(
-        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] startup disabled; cache_age=%s; "
-        "chained after daily->tick->after_rank version=%s"
-        % (age_s, SECTOR_SYNC_VERSION)
-    )
+    """Æô¶¯²»Í¬²½°å¿é£¨È«Á¿É¨°å¿é½ÏÖØ£©£»ÓÉÅÌºóÁ÷Ë®Ïß¸üÐÂ¡£"""
+    del ContextInfo
     return True
 
 
 def is_synced_today() -> bool:
-    """ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½Ñ³É¹ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ£©ï¿½ï¿½"""
+    """½ñÈÕÊÇ·ñÒÑ³É¹¦Ð´¹ý°å¿éË÷Òý£¨º¬Èí³É¹¦±£Áô»º´æ£©¡£"""
     _, index_path, manifest_path = _paths()
     age = _cache_age_days(index_path)
     if age == 0:
@@ -532,46 +516,43 @@ def is_synced_today() -> bool:
     built = str(manifest.get("built_at") or "")[:10]
     if built != date.today().isoformat():
         return False
-    # okï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø½ï¿½ï¿½ï¿½ok_cachedï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ³ï¿½ï¿½Ô²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½æ£»failed ï¿½ï¿½ï¿½ï¿½
+    # ok£º½ñÈÕÖØ½¨£»ok_cached£º½ñÈÕÒÑ³¢ÊÔ²¢±£Áô¿ÉÓÃ»º´æ£»failed ²»Ëã
     if st == "ok":
         return True
     if st == "ok_cached" and _cache_fresh(index_path):
         return True
-    # ï¿½ï¿½ï¿½ï¿½ï¿½Ñ³ï¿½ï¿½Ô¹ï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½Ü£ï¿½Ò²ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë®ï¿½ß´Ë²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ catch-up ï¿½ï¿½Ñ­ï¿½ï¿½
+    # µ±ÈÕÒÑ³¢ÊÔ¹ý£¨º¬Ê§°Ü£©Ò²ÊÓÎª¡¸½ñÈÕÁ÷Ë®Ïß´Ë²½½áÊø¡¹£¬±ÜÃâ catch-up ËÀÑ­»·
     if _already_attempted_today() and st == "failed":
         return True
     return False
 
 
 def run_after_hours_pipeline(ContextInfo=None) -> bool:
-    """ï¿½Ìºï¿½ï¿½ï¿½Ë®ï¿½ï¿½Ä©Î²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î´Í¬ï¿½ï¿½ï¿½ï¿½ï¿½Ì¨È«ï¿½ï¿½ï¿½ï¿½ï¿½Â°ï¿½é¡£"""
+    """ÅÌºóÁ÷Ë®ÏßÄ©Î²£º½ñÈÕÎ´Í¬²½ÔòºóÌ¨È«Á¿¸üÐÂ°å¿é¡£"""
     if is_sync_running():
-        print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] pipeline skip: already running")
+        print("[°å¿éÍ¬²½] Á÷Ë®ÏßÌø¹ý: ÒÑÔÚÔËÐÐ")
         return False
     if is_synced_today():
-        print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] pipeline skip: already synced today")
+        print("[°å¿éÍ¬²½] Á÷Ë®ÏßÌø¹ý: ½ñÈÕÒÑÍ¬²½")
         return True
     if _already_attempted_today():
-        print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] pipeline skip: already attempted today")
+        print("[°å¿éÍ¬²½] Á÷Ë®ÏßÌø¹ý: ½ñÈÕÒÑ³¢ÊÔ")
         return False
-    print("[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] pipeline: start background after after_rank")
+    print("[°å¿éÍ¬²½] Á÷Ë®Ïß: ÅÌºóÅÅÃûºóºóÌ¨¿ªÊ¼")
     _start_sector_sync_bg(ContextInfo, "after_hours_pipeline", force=True)
     return True
 
 
 def sector_data_sync(ContextInfo):
-    """ï¿½ï¿½ï¿½Ý¾ï¿½ timer ï¿½ï¿½Ú£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½Ë®ï¿½ß´ï¿½ï¿½ï¿½ï¿½ï¿½"""
+    """¼æÈÝ¾É timer Èë¿Ú£»Õý³£ÓÉÅÌºóÁ÷Ë®Ïß´¥·¢¡£"""
     return run_after_hours_pipeline(ContextInfo)
 
 
 def register_startup_sector_timer(ContextInfo) -> None:
-    """ï¿½ï¿½ï¿½ï¿½×¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¿ï¿½Î¿ï¿½ QMT É¨ï¿½ï¿½Ç§ï¿½ï¿½ï¿½é¡£"""
+    """²»ÔÙ×¢²áÆô¶¯¶¨Ê±Æ÷£¬±ÜÃâÃ¿´Î¿ª QMT É¨Á½Ç§¶à°å¿é¡£"""
     startup_sector_sync(ContextInfo)
 
 
 def register_sector_sync_timer(ContextInfo) -> None:
-    """ï¿½ï¿½ï¿½Ùµï¿½ï¿½ï¿½×¢ï¿½ï¿½ 00:00 ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½ß¡ï¿½tickï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Éºï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½"""
-    print(
-        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] timer skipped (chained after after_rank) version=%s"
-        % SECTOR_SYNC_VERSION
-    )
+    """²»ÔÙµ¥¶À×¢²á 00:00 ¶¨Ê±£ºÓÉÅÌºóÈÕÏß¡útick¡úÁ¿ÄÜÍê³Éºó´®ÐÐ´¥·¢¡£"""
+    return

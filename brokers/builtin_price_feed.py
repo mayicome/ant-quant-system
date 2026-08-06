@@ -228,6 +228,15 @@ class BuiltinPricePoller(QObject):
         t = now.time()
         return dt_time(9, 15) <= t < dt_time(9, 30)
 
+    @staticmethod
+    def _in_auction_match_quiet(now: Optional[datetime] = None) -> bool:
+        """9:25 撮合后至 9:30 连续竞价前：A 股 tick 时间戳常冻结在约 09:25，墙钟推进会伪报行情滞后。"""
+        now = now or datetime.now()
+        from datetime import time as dt_time
+
+        t = now.time()
+        return dt_time(9, 25) <= t < dt_time(9, 30)
+
     def _check_qmt_health(self, prices: Dict[str, Dict[str, Any]], file_mtime: float) -> None:
         """根据 results.json 的 tick/账户时间尽早发现大 QMT 卡顿或断连。"""
         now = datetime.now()
@@ -242,6 +251,7 @@ class BuiltinPricePoller(QObject):
             return
 
         in_auction = self._in_call_auction(now)
+        in_match_quiet = self._in_auction_match_quiet(now)
 
         # 1) 文件/策略心跳
         file_age = max(0.0, now_ts - float(file_mtime or 0))
@@ -255,39 +265,31 @@ class BuiltinPricePoller(QObject):
         if results_age is None:
             results_age = file_age
 
-        # 2) 行情滞后：多只股票 last_tick_time 同时落后
-        lags = []
-        for code, snap in (prices or {}).items():
-            if not isinstance(snap, dict):
-                continue
-            tt = str(snap.get("last_tick_time") or "")
-            lag = self._tick_time_lag_sec(tt, now)
-            if lag is None:
-                continue
-            if not in_auction and (tt.startswith("09:1") or tt.startswith("09:2")):
-                # 连续竞价后仍停在竞价时刻 → 严重滞后
-                if lag > 60:
-                    lags.append(lag)
-                continue
-            lags.append(lag)
-
+        # 2) 行情推送墙钟：quotes_recv_at（任一 tick/补种刷新），不看 sticky timetag / 价格是否变动
+        # 9:25–9:30 撮合静默段：回调可能停；有价则不报推送停（仍报无行情）
         quote_alert = ""
         if not prices:
             # 集合竞价就要有价，否则策略生成会空窗
             quote_alert = "无行情数据"
-        elif lags:
-            lags_sorted = sorted(lags)
-            # 取中位，避免一两只停牌/冷门干扰
-            mid = lags_sorted[len(lags_sorted) // 2]
-            # 竞价阶段推送较稀（约3秒），阈值略宽到 20/30 秒
-            lag_thr = 20.0 if in_auction else 30.0
-            mid_thr = 30.0 if in_auction else 45.0
-            bad = [x for x in lags if x >= lag_thr]
-            need = max(3, (len(lags) + 1) // 2)
-            if len(bad) >= need or mid >= mid_thr:
-                quote_alert = "行情滞后约%d秒" % int(max(mid, bad[0] if bad else mid))
-                if in_auction:
-                    quote_alert = "集合竞价" + quote_alert
+        elif not in_match_quiet:
+            quotes_recv = ""
+            for snap in (prices or {}).values():
+                if not isinstance(snap, dict):
+                    continue
+                quotes_recv = str(
+                    snap.get("quotes_recv_at") or snap.get("quote_recv_at") or ""
+                ).strip()
+                if quotes_recv:
+                    break
+            recv_age = self._parse_iso_age_sec(quotes_recv, now)
+            if recv_age is not None:
+                # 须晚于 QMT full_tick 补种阈值(约18s)，否则补种前先误报
+                lag_thr = 25.0 if in_auction else 50.0
+                if recv_age >= lag_thr:
+                    quote_alert = "行情推送停约%d秒" % int(recv_age)
+                    if in_auction:
+                        quote_alert = "集合竞价" + quote_alert
+            # 尚无墙钟字段（旧 results / 策略未热更）：不按 timetag 误报
 
         # 3) 账户快照停滞（交易连接卡但行情可能还在）
         account_alert = ""
@@ -985,7 +987,11 @@ class BuiltinPricePoller(QObject):
         side = str(rec.get("side") or "buy").lower()
         if self._is_subscribe_rec(rec) or side in ("subscribe", "ipo"):
             return "新股申购"
-        return "蚂蚁-单点卖出" if side == "sell" else "蚂蚁-单点买入"
+        # 无蚂蚁策略名时：优先柜台 OptName（手机委托等），勿冒充「蚂蚁-单点*」
+        opt = str(rec.get("opt_name") or "").strip()
+        if opt:
+            return opt
+        return "卖出" if side == "sell" else "买入"
 
     def _push_or_refresh_order(self, rec: dict) -> None:
         code = str(rec.get("stock_code") or "").strip().upper()

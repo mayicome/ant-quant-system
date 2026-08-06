@@ -2031,10 +2031,7 @@ def maybe_catch_up_tick_full_sync(ContextInfo=None):
 def register_tick_full_sync_timer(ContextInfo):
     # type: (Any) -> None
     """不再单独注册定时：由 daily_bar_sync(15:35) 完成后串行触发。"""
-    _log(
-        "定时器跳过（由日线同步串行触发）版本=%s"
-        % TICK_FULL_SYNC_VERSION
-    )
+    return
 
 
 def tick_probe(ContextInfo, day="20260730"):

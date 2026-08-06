@@ -99,7 +99,13 @@ from config.strategy_config import (
     parse_codes_text,
     _default_strategy_code,
     PARAM_BUY_AMOUNT_PER_STOCK,
+    PARAM_SIZING_MODE,
+    PARAM_CLIP_L,
+    PARAM_CLIP_U,
     PARAM_MIN_ORDER_AMOUNT,
+    PARAM_GENERATE_TOP_N,
+    apply_generate_top_n,
+    normalize_generate_top_n,
     strategy_uses_scheduled_clear,
     strategy_uses_positions,
     strip_unwanted_scheduled_clear_intents,
@@ -1080,12 +1086,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         self._strategies = []  # type: ignore[list[StrategyConfig]]
+        self._preview_run_busy = False
+
+        # 先清残留订阅，避免杀进程后大 QMT 仍按旧 pool_watch 狂同步
+        self._clear_stale_strategy_pool_watch_on_startup()
 
         self._init_toolbar()
         self._init_central()
 
         self._load_strategies_into_list()
-        self._clear_stale_strategy_pool_watch_on_startup()
 
     def _project_root(self) -> str:
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1112,6 +1121,20 @@ class StrategyGeneratorMainWindow(QMainWindow):
         except Exception as e:
             print("[strategy_pool_watch] startup clear failed: %s" % e)
 
+    def closeEvent(self, event) -> None:
+        """关闭窗口时释放临时订阅，避免大 QMT 继续按需同步数百只。"""
+        try:
+            if self._uses_builtin_pool_watch():
+                from utils.strategy_pool_watch import clear_strategy_pool_watch
+
+                clear_strategy_pool_watch(root=self._project_root())
+        except Exception:
+            pass
+        try:
+            super().closeEvent(event)
+        except Exception:
+            event.accept()
+
     def _release_strategy_pool_watch_after_run(self) -> None:
         """与 set_strategy_pool_watch 成对：本次「运行」结束即释放临时订阅。"""
         if not self._uses_builtin_pool_watch():
@@ -1127,11 +1150,42 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 )
         except Exception as e:
             self._append_run_log(f"[运行] 释放 strategy_pool_watch 失败: {e}")
-        # 竞价窗内释放后立刻再预热，避免下一次 9:25 运行又从冷订阅开始
+        # 注意：此处不再立刻 _maybe_prewarm。
+        # 旧逻辑在 09:14–09:30 释放后又写回当前股票池；若池已扩到数百只，
+        # 且 09:30 后无人清理，会长期拖垮行情推送。预热只由定时 tick 在窗内维护。
+
+    def _clear_strategy_pool_watch_after_prewarm_window(self) -> None:
+        """竞价预热窗结束后，清掉仍挂着的临时订阅（预热只 set 不 clear 的漏洞）。"""
+        if not self._uses_builtin_pool_watch():
+            return
+        if getattr(self, "_preview_run_busy", False):
+            return
+        now = _normalize_schedule_dt(datetime.now())
+        if now.time() < dt_time(9, 30):
+            return
+        # 每天只清一次，避免反复打盘
+        day_key = now.strftime("%Y%m%d")
+        if getattr(self, "_pool_watch_post_auction_cleared_day", "") == day_key:
+            return
         try:
-            self._maybe_prewarm_strategy_pool_watch(log=False)
-        except Exception:
-            pass
+            from utils.strategy_pool_watch import (
+                clear_strategy_pool_watch,
+                get_strategy_pool_watch,
+            )
+
+            n_before = len(get_strategy_pool_watch(root=self._project_root()) or [])
+            if n_before <= 0:
+                self._pool_watch_post_auction_cleared_day = day_key
+                return
+            n = clear_strategy_pool_watch(root=self._project_root())
+            self._pool_watch_post_auction_cleared_day = day_key
+            if n > 0:
+                print(
+                    "[strategy_pool_watch] 竞价窗结束，已清预热残留订阅 %d 只"
+                    % n
+                )
+        except Exception as e:
+            print("[strategy_pool_watch] 竞价后清理失败: %s" % e)
 
     def _maybe_prewarm_strategy_pool_watch(self, *, log: bool = True) -> None:
         """
@@ -1170,7 +1224,11 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if sid:
             cfg = self._find_strategy_by_id(sid)
             if cfg:
-                _add_pool(cfg.stock_codes)
+                pool = apply_generate_top_n(
+                    cfg.stock_codes,
+                    (cfg.strategy_params or {}).get(PARAM_GENERATE_TOP_N),
+                )
+                _add_pool(pool)
 
         for c in self._strategies or []:
             raw = (c.scheduled_generate_at or "").strip()
@@ -1185,9 +1243,29 @@ class StrategyGeneratorMainWindow(QMainWindow):
             # 今早预约生成（约 9:20–9:35）才预热
             if not (dt_time(9, 20) <= dt.time() <= dt_time(9, 35)):
                 continue
-            _add_pool(c.stock_codes)
+            pool = apply_generate_top_n(
+                c.stock_codes,
+                (c.strategy_params or {}).get(PARAM_GENERATE_TOP_N),
+            )
+            _add_pool(pool)
 
         if not codes:
+            return
+        # 股票池过大时跳过预热，避免一开盘就订阅数百只拖垮行情
+        if len(codes) >= 120:
+            msg = (
+                f"竞价预热已跳过：待订阅 {len(codes)} 只（上限 120）。\n"
+                f"请缩小「当前选中 / 今早预约」策略的股票池，"
+                f"否则开盘可能无法提前订阅、且易拖垮大 QMT 行情。"
+            )
+            self._append_run_log(f"[预热订阅] {msg}\n")
+            day_key = now.strftime("%Y%m%d")
+            if getattr(self, "_prewarm_skip_warn_day", "") != day_key:
+                self._prewarm_skip_warn_day = day_key
+                try:
+                    QMessageBox.warning(self, "预热订阅已跳过", msg)
+                except Exception:
+                    pass
             return
         try:
             from utils.strategy_pool_watch import set_strategy_pool_watch
@@ -1280,6 +1358,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         pool_tab_layout.addWidget(self.pool_list)
         pool_btn_row = QHBoxLayout()
         self.pool_import_btn = QPushButton("导入…")
+        self.pool_import_btn.setToolTip("从文件并入本策略股票池（已存在的不会重复添加，不清空现有股票）")
         self.pool_import_btn.clicked.connect(self._on_import_pool_codes)
         self.pool_import_positions_btn = QPushButton("一键导入持仓")
         self.pool_import_positions_btn.setToolTip("从 QMT 当前持仓导入到本策略股票池（已存在的不会重复添加）")
@@ -1315,14 +1394,35 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.params_logic_tab_widget = QWidget()
         params_layout = QVBoxLayout(self.params_logic_tab_widget)
         params_layout.setContentsMargins(12, 12, 12, 12)
-        params_layout.addWidget(QLabel("以下参数会传入策略，无需修改代码即可调整。策略代码中通过 params['buy_amount_per_stock'] 读取。"))
+        params_layout.addWidget(QLabel(
+            "以下参数会传入策略。仓位模式：固定金额=每只用「单股拟买入金额」；"
+            "账户clip=总权益/clip(当日股票池只数S, L, U)，且进档最多买 U 只（按股票池顺序）。"
+            "用 clip 时请勿勾选「只生成前 N」（否则 S 会被截断）。"
+        ))
         params_form = QFormLayout()
+        self.param_sizing_mode_combo = QComboBox()
+        self.param_sizing_mode_combo.addItem("固定金额（buy_amount_per_stock）", "fixed")
+        self.param_sizing_mode_combo.addItem("账户clip(S,L,U)", "clip_equity")
+        self.param_sizing_mode_combo.setToolTip(
+            "仅当策略代码支持 sizing_mode 时生效。未改代码的旧策略仍只用单股拟买入金额。"
+        )
+        params_form.addRow("仓位模式：", self.param_sizing_mode_combo)
         self.param_buy_amount_spin = QDoubleSpinBox()
         self.param_buy_amount_spin.setRange(0, 99999999)
         self.param_buy_amount_spin.setDecimals(0)
         self.param_buy_amount_spin.setSuffix(" 元")
         self.param_buy_amount_spin.setValue(50000)
         params_form.addRow("单股拟买入金额：", self.param_buy_amount_spin)
+        self.param_clip_l_spin = QSpinBox()
+        self.param_clip_l_spin.setRange(1, 100)
+        self.param_clip_l_spin.setValue(2)
+        self.param_clip_l_spin.setToolTip("clip 下限 L：S 很小时按 1/L，避免单票打满。")
+        params_form.addRow("clip 下限 L：", self.param_clip_l_spin)
+        self.param_clip_u_spin = QSpinBox()
+        self.param_clip_u_spin.setRange(1, 100)
+        self.param_clip_u_spin.setValue(4)
+        self.param_clip_u_spin.setToolTip("clip 上限 U：S 很大时按 1/U，且当日最多买 U 只。")
+        params_form.addRow("clip 上限 U：", self.param_clip_u_spin)
         self.param_min_order_amount_spin = QDoubleSpinBox()
         self.param_min_order_amount_spin.setRange(0, 99999999)
         self.param_min_order_amount_spin.setDecimals(0)
@@ -1339,7 +1439,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         api_label = QLabel(
             "编写 Python 代码，必须定义 run(codes, prices, get_name, account, params)。\n"
             "codes=股票池 6 位代码列表；prices=dict[code]->dict，每只股票含：current, pre_close, 昨收盘, 最新价, "
-            "涨停板, 跌停板, 今开盘, 今日最高, 今日最低, 5日/10日/20日/30日/60日/120日(均线重合点), 布林带上轨, 布林带下轨, 前高, 前低 等。\n"
+            "涨停板, 跌停板, 今开盘, 今日最高, 今日最低, 5日/10日/…(均线重合点), "
+            "昨MA5/昨MA10/昨MA20/…(上一完整交易日收盘真均线), 布林带上轨, 布林带下轨, 前高, 前低 等。\n"
             "get_name(code) 取名称；account={\"total_asset\": 总资金, \"cash\": 可用资金}；params 为「策略参数」Tab 中配置（如 buy_amount_per_stock、min_order_amount），无需改代码即可调整。\n"
             "返回 list[dict]，每个 dict 为一条意图：含 stock_code, stock_name, rule_type，及规则参数（如 price/volume、trigger_price/rise_percent 等）。"
         )
@@ -1356,9 +1457,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.detail_tabs.addTab(self.params_logic_tab_widget, "参数与逻辑")
 
         # 可编辑区块变更时标记未保存（用于 Tab 星号与提示条）
+        self.param_sizing_mode_combo.currentIndexChanged.connect(self._on_sizing_mode_changed)
         self.param_buy_amount_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
+        self.param_clip_l_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
+        self.param_clip_u_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
         self.param_min_order_amount_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
         self.logic_code_edit.textChanged.connect(lambda: self._mark_dirty("logic"))
+        self._on_sizing_mode_changed()
 
         # 生成策略 Tab：运行 + 输出 + 结果表格
         self.preview_tab_widget = QWidget()
@@ -1397,6 +1502,24 @@ class StrategyGeneratorMainWindow(QMainWindow):
         )
         preview_btn_row.addWidget(self.live_clear_label)
         preview_btn_row.addWidget(self.live_scheduled_clear_time)
+        self.generate_top_n_cb = QCheckBox("只生成前")
+        self.generate_top_n_cb.setToolTip(
+            "按本策略股票池从上到下的顺序，只取前 N 只参与运行/生成任务（本策略专属，保存到策略配置）。"
+            "不勾选=不限制。"
+        )
+        self.generate_top_n_spin = QSpinBox()
+        self.generate_top_n_spin.setRange(1, 9999)
+        self.generate_top_n_spin.setValue(10)
+        self.generate_top_n_spin.setEnabled(False)
+        self.generate_top_n_spin.setToolTip(self.generate_top_n_cb.toolTip())
+        self.generate_top_n_label = QLabel("个")
+        self.generate_top_n_cb.toggled.connect(self._on_generate_top_n_toggled)
+        self.generate_top_n_spin.valueChanged.connect(
+            lambda: self._persist_generate_top_n_to_current_strategy()
+        )
+        preview_btn_row.addWidget(self.generate_top_n_cb)
+        preview_btn_row.addWidget(self.generate_top_n_spin)
+        preview_btn_row.addWidget(self.generate_top_n_label)
         self.preview_btn = QPushButton("运行")
         self.preview_btn.clicked.connect(lambda: self._on_preview_tasks(quiet=False))
         self.export_tasks_btn = QPushButton("生成任务")
@@ -2182,19 +2305,134 @@ class StrategyGeneratorMainWindow(QMainWindow):
             if w is not None:
                 w.setVisible(show)
 
+    def _on_sizing_mode_changed(self, *_args):
+        mode = "fixed"
+        if getattr(self, "param_sizing_mode_combo", None) is not None:
+            mode = str(self.param_sizing_mode_combo.currentData() or "fixed")
+        is_clip = mode == "clip_equity"
+        if getattr(self, "param_clip_l_spin", None) is not None:
+            self.param_clip_l_spin.setEnabled(is_clip)
+        if getattr(self, "param_clip_u_spin", None) is not None:
+            self.param_clip_u_spin.setEnabled(is_clip)
+        if getattr(self, "param_buy_amount_spin", None) is not None:
+            # clip 按账户权益分配；固定金额仅 fixed 模式使用（避免误改造成以为仍按该金额下单）
+            self.param_buy_amount_spin.setEnabled(not is_clip)
+            self.param_buy_amount_spin.setToolTip(
+                "clip 模式下不使用本金额（按总权益/clip(S,L,U)）。"
+                if is_clip
+                else "固定金额模式：每只股票按此金额计算买入数量。"
+            )
+        # __init__ 早期也会调到这里，此时可能尚未设置 _loading_strategy
+        if not getattr(self, "_loading_strategy", True):
+            self._mark_dirty("params")
+
     def _params_from_form(self):
         """从策略参数表单读取当前值（用于保存或运行）"""
-        return {
+        mode = "fixed"
+        if getattr(self, "param_sizing_mode_combo", None) is not None:
+            mode = str(self.param_sizing_mode_combo.currentData() or "fixed")
+        out = {
             PARAM_BUY_AMOUNT_PER_STOCK: self.param_buy_amount_spin.value(),
             PARAM_MIN_ORDER_AMOUNT: self.param_min_order_amount_spin.value(),
+            PARAM_SIZING_MODE: mode,
         }
+        if mode == "clip_equity":
+            L = int(self.param_clip_l_spin.value())
+            U = int(self.param_clip_u_spin.value())
+            if U < L:
+                U = L
+            out[PARAM_CLIP_L] = L
+            out[PARAM_CLIP_U] = U
+        return out
+
+    def _merge_strategy_params_from_form(self, base: Optional[dict] = None) -> dict:
+        """合并表单参数；未勾选「只生成前 N」时清除该键。"""
+        merged = {**(base or {}), **self._params_from_form()}
+        # fixed 模式不强制清掉已存的 clip 键，便于切回；但 sizing_mode 以表单为准
+        if merged.get(PARAM_SIZING_MODE) != "clip_equity":
+            # 保留 JSON 里的 L/U 以便下次切回，不删除
+            pass
+        top_n = self._generate_top_n_from_ui()
+        if top_n > 0:
+            merged[PARAM_GENERATE_TOP_N] = top_n
+        else:
+            merged.pop(PARAM_GENERATE_TOP_N, None)
+        return merged
+
+    def _generate_top_n_from_ui(self) -> int:
+        """界面「只生成前 N 个」；未勾选或无效时返回 0（不限制）。"""
+        if not getattr(self, "generate_top_n_cb", None):
+            return 0
+        if not self.generate_top_n_cb.isChecked():
+            return 0
+        return normalize_generate_top_n(self.generate_top_n_spin.value())
+
+    def _on_generate_top_n_toggled(self, checked: bool) -> None:
+        if hasattr(self, "generate_top_n_spin"):
+            self.generate_top_n_spin.setEnabled(bool(checked))
+        self._persist_generate_top_n_to_current_strategy()
+
+    def _persist_generate_top_n_to_current_strategy(self) -> None:
+        """把「只生成前 N」写回当前策略内存配置（并落盘），切换策略互不影响。"""
+        if self._loading_strategy:
+            return
+        sid = self._get_selected_strategy_id()
+        if not sid:
+            return
+        cfg = self._find_strategy_by_id(sid)
+        if not cfg:
+            return
+        sp = dict(cfg.strategy_params or {})
+        top_n = self._generate_top_n_from_ui()
+        if top_n > 0:
+            sp[PARAM_GENERATE_TOP_N] = top_n
+        else:
+            sp.pop(PARAM_GENERATE_TOP_N, None)
+        cfg.strategy_params = sp
+        try:
+            save_strategy(cfg)
+        except Exception:
+            pass
+
+    def _load_generate_top_n_to_form(self, params: Optional[dict] = None) -> None:
+        """从策略 params 恢复「只生成前 N」控件。"""
+        if not hasattr(self, "generate_top_n_cb"):
+            return
+        n = normalize_generate_top_n((params or {}).get(PARAM_GENERATE_TOP_N))
+        self.generate_top_n_cb.blockSignals(True)
+        self.generate_top_n_spin.blockSignals(True)
+        try:
+            if n > 0:
+                self.generate_top_n_cb.setChecked(True)
+                self.generate_top_n_spin.setEnabled(True)
+                self.generate_top_n_spin.setValue(n)
+            else:
+                self.generate_top_n_cb.setChecked(False)
+                self.generate_top_n_spin.setEnabled(False)
+        finally:
+            self.generate_top_n_cb.blockSignals(False)
+            self.generate_top_n_spin.blockSignals(False)
 
     def _load_params_to_form(self, params):
         """将 strategy_params 填入策略参数表单"""
         if not params:
-            return
+            params = {}
+        mode = str(params.get(PARAM_SIZING_MODE) or "fixed").strip().lower()
+        if mode not in ("fixed", "clip_equity"):
+            mode = "fixed"
+        if getattr(self, "param_sizing_mode_combo", None) is not None:
+            self.param_sizing_mode_combo.blockSignals(True)
+            idx = self.param_sizing_mode_combo.findData(mode)
+            self.param_sizing_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.param_sizing_mode_combo.blockSignals(False)
         self.param_buy_amount_spin.setValue(float(params.get(PARAM_BUY_AMOUNT_PER_STOCK, 50000)))
+        if getattr(self, "param_clip_l_spin", None) is not None:
+            self.param_clip_l_spin.setValue(int(params.get(PARAM_CLIP_L, 2) or 2))
+        if getattr(self, "param_clip_u_spin", None) is not None:
+            self.param_clip_u_spin.setValue(int(params.get(PARAM_CLIP_U, 4) or 4))
         self.param_min_order_amount_spin.setValue(float(params.get(PARAM_MIN_ORDER_AMOUNT, 5000)))
+        self._load_generate_top_n_to_form(params)
+        self._on_sizing_mode_changed()
 
     def _take_snapshot(self):
         """当前表单状态快照，用于判断是否有未保存修改"""
@@ -2247,7 +2485,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 cfg = self._find_strategy_by_id(prev_sid)
                 if cfg:
                     cfg.stock_codes = self._get_pool_codes_from_list()
-                    cfg.strategy_params = {**(cfg.strategy_params or {}), **self._params_from_form()}
+                    cfg.strategy_params = self._merge_strategy_params_from_form(
+                        cfg.strategy_params
+                    )
                     cfg.strategy_code = self.logic_code_edit.toPlainText().strip()
                     save_strategy(cfg)
         if prev_sid:
@@ -2570,6 +2810,11 @@ class StrategyGeneratorMainWindow(QMainWindow):
             self._maybe_prewarm_strategy_pool_watch(log=True)
         except Exception:
             pass
+        # 09:30 后清掉预热残留（预热只写入、窗结束后原先不清理）
+        try:
+            self._clear_strategy_pool_watch_after_prewarm_window()
+        except Exception:
+            pass
         if self._schedule_runner_busy:
             return
         now = _normalize_schedule_dt(datetime.now())
@@ -2662,7 +2907,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 QMessageBox.warning(self, "警告", "未找到所选策略。")
             return
         cfg.stock_codes = self._get_pool_codes_from_list()
-        cfg.strategy_params = {**(cfg.strategy_params or {}), **self._params_from_form()}
+        cfg.strategy_params = self._merge_strategy_params_from_form(cfg.strategy_params)
         cfg.strategy_code = self.logic_code_edit.toPlainText().strip()
         save_strategy(cfg)
         self._load_strategies_into_list(reselect_id=sid)
@@ -2746,7 +2991,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.information(self, "粘贴", "粘贴完成：这些股票已在当前策略股票池中，无新增。")
 
     def _on_import_pool_codes(self):
-        """从 Excel/CSV/TXT 文件导入股票代码（替换当前列表）"""
+        """从 Excel/CSV/TXT 文件导入股票代码（并入现有列表，去重，不清空）"""
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择要导入的文件",
@@ -2759,9 +3004,17 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not codes:
             QMessageBox.warning(self, "导入结果", "未能从该文件中解析出有效的 6 位股票代码。")
             return
-        self._fill_pool_list(codes, set_original=True)
-        self._save_pool_codes_silent()
-        QMessageBox.information(self, "导入结果", f"已从文件导入并自动保存 {len(codes)} 只股票。")
+        added = self._merge_codes_into_pool(codes)
+        if added > 0:
+            msg = f"已从文件并入 {added} 只股票并自动保存"
+            if added < len(codes):
+                msg += f"（文件解析 {len(codes)} 只，其余已在池中或重复）"
+            msg += "。"
+            QMessageBox.information(self, "导入结果", msg)
+        else:
+            QMessageBox.information(
+                self, "导入结果", "导入完成：这些股票已在当前策略股票池中，无新增。"
+            )
 
     def _on_import_positions(self):
         """从 QMT 当前持仓一键导入到本策略股票池（已存在的不会重复添加）"""
@@ -3327,13 +3580,72 @@ class StrategyGeneratorMainWindow(QMainWindow):
             n_seg = max(1, len(segs))
             bt_progress, bt_dlg = self._backtest_progress_dialog("批量回测（下一轮）")
             try:
-                for i, seg in enumerate(segs):
+                # 全档并集一次日线预热
+                prepared_chain: List[tuple] = []
+                union_codes: List[str] = []
+                seen_c: set = set()
+                min_start = None
+                max_end = None
+                for seg in segs:
                     sel_s = seg.get("batch_selection_date", "")
+                    start_d, end_d, note = self._compute_chained_round_window(
+                        seg, from_t1, hold_n
+                    )
+                    icash = float(seg.get("final_cash") or 0)
+                    init_pos = self._initial_positions_dict_from_segment(seg)
+                    codes = self._codes_from_export_positions(seg)
+                    prepared_chain.append(
+                        (seg, sel_s, start_d, end_d, note, icash, init_pos, codes)
+                    )
+                    if start_d is None or end_d is None:
+                        continue
+                    if not codes and icash <= 0:
+                        continue
+                    if min_start is None or start_d < min_start:
+                        min_start = start_d
+                    if max_end is None or end_d > max_end:
+                        max_end = end_d
+                    for c in self._backtest_preflight_union_codes(codes, init_pos):
+                        if c not in seen_c:
+                            seen_c.add(c)
+                            union_codes.append(c)
+                if union_codes and min_start is not None and max_end is not None:
+                    self.backtest_result_text.setPlainText(
+                        f"下一轮批量预热：去重 {len(union_codes)} 只日线"
+                        f"（{min_start}～{max_end}），共 {n_seg} 档…"
+                    )
+                    QApplication.processEvents()
+                    pf_lines = self._run_backtest_preflight_ui(
+                        union_codes,
+                        min_start,
+                        max_end,
+                        status_prefix="下一轮预热(全档)",
+                        progress=self._scoped_backtest_progress(
+                            bt_progress, 0.0, 12.0, "全档预热 "
+                        ),
+                        use_tick_level=False,
+                    )
+                    if pf_lines:
+                        lines.append("全档预热 | " + " | ".join(pf_lines[:2]))
+                        lines.append("=" * 60)
+
+                for i, (
+                    seg,
+                    sel_s,
+                    start_d,
+                    end_d,
+                    note,
+                    icash,
+                    init_pos,
+                    codes,
+                ) in enumerate(prepared_chain):
+                    slot_lo = 12.0 + 88.0 * i / n_seg
+                    slot_hi = 12.0 + 88.0 * (i + 1) / n_seg
+                    tag = f"[{i + 1}/{n_seg}] "
                     self.backtest_result_text.setPlainText(
                         f"下一轮批量 {i + 1}/{len(segs)}：选股日 {sel_s}…"
                     )
                     QApplication.processEvents()
-                    start_d, end_d, note = self._compute_chained_round_window(seg, from_t1, hold_n)
                     if start_d is None or end_d is None:
                         summary_rows.append(
                             {
@@ -3344,10 +3656,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
                             }
                         )
                         lines.append(f"{sel_s} | 跳过：{note}")
+                        bt_progress(f"{tag}跳过 {sel_s}", int(round(slot_hi)))
                         continue
-                    icash = float(seg.get("final_cash") or 0)
-                    init_pos = self._initial_positions_dict_from_segment(seg)
-                    codes = self._codes_from_export_positions(seg)
                     if not codes and icash <= 0:
                         summary_rows.append(
                             {
@@ -3358,24 +3668,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
                             }
                         )
                         lines.append(f"{sel_s} | 跳过：无持仓")
+                        bt_progress(f"{tag}跳过 {sel_s}", int(round(slot_hi)))
                         continue
-                    slot_lo = 100.0 * i / n_seg
-                    slot_hi = 100.0 * (i + 1) / n_seg
-                    mid = slot_lo + 0.2 * (slot_hi - slot_lo)
-                    tag = f"[{i + 1}/{n_seg}] "
-                    pf_lines = self._run_backtest_preflight_ui(
-                        self._backtest_preflight_union_codes(codes, init_pos),
-                        start_d,
-                        end_d,
-                        status_prefix=f"预热 {sel_s}",
-                        progress=self._scoped_backtest_progress(
-                            bt_progress, slot_lo, mid, f"{tag}预热 "
-                        ),
-                    )
-                    if pf_lines:
-                        lines.append(f"{sel_s} | " + " | ".join(pf_lines[:2]))
                     bt_sub = self._scoped_backtest_progress(
-                        bt_progress, mid, slot_hi, f"{tag}回测 "
+                        bt_progress, slot_lo, slot_hi, f"{tag}回测 "
                     )
                     try:
                         if use_dual and segments_dual:
@@ -3771,7 +4067,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         cfg = self._find_strategy_by_id(sid)
         if not cfg:
             return
-        cfg.strategy_params = {**(cfg.strategy_params or {}), **self._params_from_form()}
+        cfg.strategy_params = self._merge_strategy_params_from_form(cfg.strategy_params)
         save_strategy(cfg)
         self._dirty_sections.discard("params")
         self._refresh_dirty_ui()
@@ -3816,6 +4112,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
     def _on_preview_tasks(self, quiet: bool = False):
         """执行当前策略代码（或表单逻辑），拉行情后生成任务并填充预览表格，同时收集 print 输出到运行日志框"""
+        if getattr(self, "_preview_run_busy", False):
+            if quiet:
+                self._append_run_log("[定时运行] 上一次运行尚未结束，跳过。")
+            else:
+                QMessageBox.information(self, "提示", "上一次运行尚未结束，请稍候。")
+            return
+
         # 手动点击运行时，才清空上一次日志与预览；定时触发保留历史记录，便于连续查看。
         if not quiet and hasattr(self, "run_output_edit") and self.run_output_edit is not None:
             self.run_output_edit.clear()
@@ -3844,21 +4147,40 @@ class StrategyGeneratorMainWindow(QMainWindow):
             else:
                 QMessageBox.information(self, "提示", "当前策略股票池为空，请先在「股票池」中添加代码。")
             return
+        pool_n = len(codes)
+        top_n = self._generate_top_n_from_ui()
+        if top_n <= 0:
+            top_n = normalize_generate_top_n((cfg.strategy_params or {}).get(PARAM_GENERATE_TOP_N))
+        codes = apply_generate_top_n(codes, top_n)
         get_name = _get_stock_name_fn()
+
+        self._preview_run_busy = True
+        if hasattr(self, "preview_btn") and self.preview_btn is not None:
+            self.preview_btn.setEnabled(False)
+            self.preview_btn.setText("运行中…")
 
         run_start_time = time.time()
         run_start_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._append_run_log(f"开始运行  {run_start_str}")
         self._append_run_log(f"诊断用时钟（北京时间）：{_beijing_now_diag_str()}")
-        self._append_run_log("正在拉取行情与关键价格…")
-        self._append_run_log("（builtin：等待 results.json + daily_cache，请勿重复点击）")
+        if top_n > 0 and top_n < pool_n:
+            self._append_run_log(
+                f"股票池 {pool_n} 只；已启用「只生成前 {top_n} 个」→ 本次运行 {len(codes)} 只（按池顺序）"
+            )
+        else:
+            self._append_run_log(f"股票池 {len(codes)} 只")
+        self._append_run_log(
+            "正在拉取行情与关键价格…（builtin：等待 results.json + daily_cache；进度会刷在下方，请勿强杀进程）"
+        )
 
         # 拉行情会写入 strategy_pool_watch；整次运行无论成功/失败都必须释放。
         price_map: Dict[str, Any] = {}
         try:
             # 拉行情并计算关键价格点（当前价、昨收、涨跌停、均线重合点、前高前低、布林带、今开最高最低等）
             try:
-                price_map, key_errors = get_prices_with_key_points(codes)
+                price_map, key_errors = get_prices_with_key_points(
+                    codes, on_progress=self._append_run_log
+                )
                 for err_line in key_errors:
                     self._append_run_log(err_line)
                 if not price_map and any("行情未就绪" in str(e) for e in key_errors):
@@ -4070,6 +4392,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     QMessageBox.information(self, "运行完成", msg_empty)
         finally:
             self._release_strategy_pool_watch_after_run()
+            self._preview_run_busy = False
+            if hasattr(self, "preview_btn") and self.preview_btn is not None:
+                self.preview_btn.setEnabled(True)
+                self.preview_btn.setText("运行")
 
     def _on_export_tasks(self, quiet: bool = False):
         """将当前预览的任务写入主程序任务文件（按股票合并：每只股票一条记录，含该股全部规则）"""
@@ -4282,6 +4608,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         *,
         status_prefix: str = "回测预热",
         progress=None,
+        use_tick_level: bool = True,
     ) -> List[str]:
         """批量等待 daily_cache / tick。可传入已有 progress，避免每档再弹一条进度条。"""
         try:
@@ -4308,7 +4635,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 codes_6,
                 start_date,
                 end_date,
-                use_tick_level=True,
+                use_tick_level=use_tick_level,
                 progress=_progress,
             )
         finally:
@@ -4337,17 +4664,30 @@ class StrategyGeneratorMainWindow(QMainWindow):
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
+        # 固定宽度，避免 tick/同步队列长文案把对话框撑宽导致「长度不一」
+        dlg.setMinimumWidth(520)
         dlg.setValue(0)
         dlg.show()
         QApplication.processEvents()
+        last_value = 0
 
         def _progress(msg: str, pct: Optional[int] = None) -> None:
+            nonlocal last_value
             text = str(msg or "")
             if status_prefix and not text.startswith(str(status_prefix)):
                 text = f"{status_prefix}：{text}"
-            dlg.setLabelText(text)
+            # 对话框标签截断；完整文案仍写入下方结果区
+            label_text = text if len(text) <= 96 else (text[:93] + "…")
+            dlg.setLabelText(label_text)
             if pct is not None:
-                dlg.setValue(max(0, min(100, int(pct))))
+                v = max(0, min(100, int(pct)))
+                # 批量多档映射后理论上单调递增；防止 Qt 进度条回退时视觉闪烁
+                v = max(last_value, v)
+                last_value = v
+                dlg.setValue(v)
+            if not dlg.isVisible():
+                dlg.show()
+            dlg.raise_()
             if hasattr(self, "backtest_result_text"):
                 self.backtest_result_text.setPlainText(text)
             QApplication.processEvents()
@@ -5203,7 +5543,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
             self,
             "确认批量回测",
             f"{hint}\n\n将对 {total_days} 个选股日分别回测：{mode_txt}。\n"
-            f"耗时会随选股日数量增加，是否继续？",
+            f"日线会先按全文件去重股票一次性预热（不再按日重复等待）。\n"
+            f"耗时仍取决于缺多少本地日线；是否继续？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -5248,16 +5589,57 @@ class StrategyGeneratorMainWindow(QMainWindow):
             n_day = max(1, len(day_items))
             bt_progress, bt_dlg = self._backtest_progress_dialog("批量回测")
             try:
-                for i, (d, codes) in enumerate(day_items):
-                    self.backtest_result_text.setPlainText(
-                        f"批量回测中 {i + 1}/{n_day}：选股日 {d}，{len(codes)} 只…"
-                    )
-                    QApplication.processEvents()
+                # 先算各档窗口，全文件 codes 并集一次日线预热（避免按日串行等几小时）
+                prepared: List[tuple] = []
+                union_codes: List[str] = []
+                seen_c: set = set()
+                min_start = None
+                max_end = None
+                for d, codes in day_items:
                     start_d, end_d, _w = backtest_window_from_selection_day(
                         d,
                         start_next_trading_day=from_t1,
                         hold_trading_days=hold_n,
                     )
+                    prepared.append((d, codes, start_d, end_d, _w))
+                    if start_d is None or end_d is None:
+                        continue
+                    if min_start is None or start_d < min_start:
+                        min_start = start_d
+                    if max_end is None or end_d > max_end:
+                        max_end = end_d
+                    for c in self._backtest_preflight_union_codes(codes):
+                        if c not in seen_c:
+                            seen_c.add(c)
+                            union_codes.append(c)
+                if union_codes and min_start is not None and max_end is not None:
+                    self.backtest_result_text.setPlainText(
+                        f"批量预热：全文件去重 {len(union_codes)} 只日线"
+                        f"（{min_start}～{max_end}），共 {n_day} 个选股日…"
+                    )
+                    QApplication.processEvents()
+                    pf_lines = self._run_backtest_preflight_ui(
+                        union_codes,
+                        min_start,
+                        max_end,
+                        status_prefix="批量预热(全文件)",
+                        progress=self._scoped_backtest_progress(
+                            bt_progress, 0.0, 12.0, "全文件预热 "
+                        ),
+                        use_tick_level=False,
+                    )
+                    if pf_lines:
+                        lines.append("全文件预热 | " + " | ".join(pf_lines[:2]))
+                        lines.append("=" * 60)
+
+                for i, (d, codes, start_d, end_d, _w) in enumerate(prepared):
+                    slot_lo = 12.0 + 88.0 * i / n_day
+                    slot_hi = 12.0 + 88.0 * (i + 1) / n_day
+                    tag = f"[{i + 1}/{n_day}] "
+                    self.backtest_result_text.setPlainText(
+                        f"批量回测中 {i + 1}/{n_day}：选股日 {d}，{len(codes)} 只…"
+                    )
+                    QApplication.processEvents()
                     if start_d is None or end_d is None:
                         summary_rows.append(
                             {
@@ -5272,24 +5654,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
                             }
                         )
                         lines.append(f"{d} | 跳过：{_w}")
+                        bt_progress(f"{tag}跳过 {d}", int(round(slot_hi)))
                         continue
-                    slot_lo = 100.0 * i / n_day
-                    slot_hi = 100.0 * (i + 1) / n_day
-                    mid = slot_lo + 0.2 * (slot_hi - slot_lo)
-                    tag = f"[{i + 1}/{n_day}] "
-                    pf_lines = self._run_backtest_preflight_ui(
-                        self._backtest_preflight_union_codes(codes),
-                        start_d,
-                        end_d,
-                        status_prefix=f"预热 {d}",
-                        progress=self._scoped_backtest_progress(
-                            bt_progress, slot_lo, mid, f"{tag}预热 "
-                        ),
-                    )
-                    if pf_lines and len(lines) < 80:
-                        lines.append(f"{d} | " + " | ".join(pf_lines[:1]))
                     bt_sub = self._scoped_backtest_progress(
-                        bt_progress, mid, slot_hi, f"{tag}回测 "
+                        bt_progress, slot_lo, slot_hi, f"{tag}回测 "
                     )
                     try:
                         if use_dual and segments_dual:
@@ -5711,8 +6079,30 @@ def main():
         pass
     server.listen(server_name)
 
+    splash = None
+    try:
+        splash = QLabel("正在加载策略生成系统")
+        splash.setWindowTitle("蚂蚁量化策略生成系统")
+        splash.setAlignment(Qt.AlignCenter)
+        splash.setFixedSize(360, 80)
+        splash.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.SplashScreen)
+        splash.setStyleSheet(
+            "background:#FFF8E1; color:#333; font-size:12pt; border:1px solid #FFCC80;"
+        )
+        splash.show()
+        app.processEvents()
+    except Exception:
+        splash = None
+
     window = StrategyGeneratorMainWindow()
     window.resize(1100, 700)
+
+    if splash is not None:
+        try:
+            splash.close()
+        except Exception:
+            pass
+        splash = None
 
     # 处理来自后续实例的“激活”请求：将主窗口前置显示
     def handle_new_connection():

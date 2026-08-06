@@ -1791,7 +1791,40 @@ class MainWindowExt(Ui_mainWindow):
                 start_button.setEnabled(False)  # 禁用启动按钮
                 stop_button.setEnabled(True)    # 启用停止按钮
         else:
-            self.logger.error(f"启动任务失败: {task_id}")
+            # 启动返回 False，但可能只是「已在 running_tasks」未同步 UI
+            if task_id in getattr(self.task_manager, "running_tasks", {}):
+                self.logger.info(f"任务 {task_id} 已在运行，同步列表状态为运行中")
+                self.tableWidget_2.blockSignals(True)
+                try:
+                    status_item = self.tableWidget_2.item(row, 6)
+                    if status_item:
+                        status_item.setText("运行中")
+                        status_item.setForeground(Qt.red)
+                    operation_widget = self.create_operation_buttons(row)
+                    self.tableWidget_2.setCellWidget(row, 7, operation_widget)
+                finally:
+                    self.tableWidget_2.blockSignals(False)
+                # 同步图表（若已打开）
+                try:
+                    charts_view = getattr(self, "tasks_charts_view", None) or getattr(
+                        self.window, "tasks_charts_view", None
+                    )
+                    cache = getattr(charts_view, "_chart_cache", None) or {}
+                    for cached in cache.values():
+                        if not isinstance(cached, dict):
+                            continue
+                        chart = cached.get("chart")
+                        if not chart or getattr(chart, "task_id", None) != task_id:
+                            continue
+                        chart.set_task_status(True, False)
+                        if getattr(chart, "task", None) and isinstance(chart.task, dict):
+                            chart.task.setdefault("params", {})
+                            chart.task["params"]["task_running"] = True
+                            chart.task["params"]["task_paused"] = False
+                except Exception:
+                    pass
+            else:
+                self.logger.error(f"启动任务失败: {task_id}")
 
     def _parse_task_order_id(self, task_data):
         """从任务数据解析撤单用订单号，优先 order_sysid，返回 (oid_str, has_valid_order)。"""
@@ -2020,7 +2053,16 @@ class MainWindowExt(Ui_mainWindow):
             # 检查是否有实际运行的进程
             is_actually_running = False
             if hasattr(self, 'task_manager') and self.task_manager and task_id in self.task_manager.running_tasks:
-                is_actually_running = True
+                try:
+                    self.task_manager._cleanup_dead_processes()
+                except Exception:
+                    pass
+                info = self.task_manager.running_tasks.get(task_id)
+                alive_fn = getattr(self.task_manager, "_running_process_alive", None)
+                if callable(alive_fn):
+                    is_actually_running = bool(alive_fn(info))
+                else:
+                    is_actually_running = task_id in self.task_manager.running_tasks
             
             # 如果任务实际在运行中，无论UI显示什么状态都不能删除
             if is_actually_running:
@@ -4402,24 +4444,72 @@ class MainWindowExt(Ui_mainWindow):
         return True
 
     def start_all_tasks(self):
-        """启动所有任务"""
+        """启动所有任务。
+
+        规则买入（无持仓）也必须能启动；旧逻辑要求「可用持仓>0」会把
+        纯 single_buy 等任务在定时重载后漏掉，只显示未运行。
+        """
         if not self.task_manager:
             return
-            
+
+        buy_rule_types = {
+            "single_buy",
+            "breakthrough_buy",
+            "cage_buy",
+            "best_buy",
+            "grid_buy",
+            "night_buy",
+        }
+
         for row in range(self.tableWidget_2.rowCount()):
-            stock_code = self.tableWidget_2.item(row, 0).text()
-            volume_item = self.tableWidget_2.item(row, 2)  # 数量列
-            if stock_code and volume_item:
-                # 从数量列提取实际数值
-                volume_text = volume_item.text()
-                try:
-                    volume_match = re.search(r'(\d+)', volume_text)
-                    if volume_match:
-                        volume = int(volume_match.group(1))
-                        if volume > 0:  # 确保有数量
-                            self.start_task(row)
-                except:
+            stock_code_item = self.tableWidget_2.item(row, 0)
+            if not stock_code_item:
+                continue
+            stock_code = stock_code_item.text()
+            task_id = stock_code_item.data(Qt.UserRole)
+            if not stock_code:
+                continue
+
+            # 有买入类规则：无持仓也要启动
+            should_start = False
+            task = self.task_manager.tasks.get(task_id) if task_id else None
+            if isinstance(task, dict):
+                params = task.get("params") if isinstance(task.get("params"), dict) else {}
+                rules = params.get("rules") or []
+                if isinstance(rules, list):
+                    for r in rules:
+                        if not isinstance(r, dict):
+                            continue
+                        rt = str(r.get("type") or r.get("rule_type") or "").strip()
+                        if rt in buy_rule_types:
+                            should_start = True
+                            break
+                strategy = str(task.get("strategy") or "")
+                if "夜市买入" in strategy or "买入" in strategy:
+                    should_start = True
+
+            # 无买入规则时：仍要求可用持仓>0（卖出类）
+            if not should_start:
+                volume_item = self.tableWidget_2.item(row, 2)
+                if not volume_item:
                     continue
+                volume_text = volume_item.text() or ""
+                try:
+                    volume_match = re.search(r"(\d+)", volume_text)
+                    if not volume_match or int(volume_match.group(1)) <= 0:
+                        self.logger.info(
+                            f"[启动全部] 跳过 {stock_code}：无买入规则且可用持仓为0"
+                        )
+                        continue
+                except Exception:
+                    continue
+                should_start = True
+
+            if should_start:
+                try:
+                    self.start_task(row)
+                except Exception as e:
+                    self.logger.error(f"[启动全部] 启动 {stock_code} 失败: {e}", exc_info=True)
 
     def stop_all_tasks(self):
         """暂停所有任务"""

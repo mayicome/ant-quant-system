@@ -634,6 +634,18 @@ def sync_rules_armed(
     """写入 data/rules_armed.json；有变化时返回 True。"""
     root = project_root_override or project_root()
     rules_path, _ = default_paths(root)
+    # 策略生成器临时订阅超时未释放时，先清掉，避免数百只长期拖垮行情
+    try:
+        from utils.strategy_pool_watch import expire_stale_strategy_pool_watch
+
+        expired = expire_stale_strategy_pool_watch(root=root)
+        if expired and logger is not None:
+            logger.info(
+                "[rules_armed] 已释放过期 strategy_pool_watch %d 只", expired
+            )
+    except Exception as e:
+        if logger is not None:
+            logger.debug("expire strategy_pool_watch skipped: %s", e)
     tasks = build_armed_tasks(task_manager)
     watch_codes = collect_watch_codes(task_manager, qmt_adapter)
     pool_watch: List[str] = []

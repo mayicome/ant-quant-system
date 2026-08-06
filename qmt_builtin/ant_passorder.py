@@ -10,6 +10,8 @@ try:
 except Exception:
     PROJECT_ROOT = ""
 
+PASSORDER_VERSION = "20260803.01"
+
 # QMT 注入的 passorder（由入口文件 bind_runtime_globals 绑定）
 _PASSORDER = None
 
@@ -58,10 +60,10 @@ def bind_runtime_globals(g: Optional[Dict[str, Any]] = None) -> bool:
                 pass
             break
     if bound and not getattr(bind_runtime_globals, "_logged_ok", False):
-        print("[下单] bound ok cancel=%s" % bool(callable(_CANCEL)))
+        print("[下单] 绑定成功 cancel=%s" % bool(callable(_CANCEL)))
         bind_runtime_globals._logged_ok = True  # type: ignore[attr-defined]
     if not bound:
-        print("[下单] bind failed: passorder not found in strategy globals")
+        print("[下单] 绑定失败: 策略 globals 中未找到 passorder")
     return bound
 
 
@@ -275,13 +277,13 @@ def place_limit_buy(
         record["status"] = "submitted"
         record["msg"] = "passorder_called"
         print(
-            "[下单] BUY %s px=%s vol=%s account=%s uid=%s"
+            "[下单] 买入 %s px=%s vol=%s account=%s uid=%s"
             % (code, px, vol, aid, user_order_id)
         )
         return True, "ok", record
     except Exception as e:
         record["msg"] = "%s: %s" % (type(e).__name__, e)
-        print("[下单] BUY failed %s: %s" % (code, record["msg"]))
+        print("[下单] 买入失败 %s: %s" % (code, record["msg"]))
         return False, record["msg"], record
 
 
@@ -355,13 +357,13 @@ def place_limit_sell(
         record["status"] = "submitted"
         record["msg"] = "passorder_called"
         print(
-            "[下单] SELL %s px=%s vol=%s account=%s uid=%s"
+            "[下单] 卖出 %s px=%s vol=%s account=%s uid=%s"
             % (code, px, vol, aid, user_order_id)
         )
         return True, "ok", record
     except Exception as e:
         record["msg"] = "%s: %s" % (type(e).__name__, e)
-        print("[下单] SELL failed %s: %s" % (code, record["msg"]))
+        print("[下单] 卖出失败 %s: %s" % (code, record["msg"]))
         return False, record["msg"], record
 
 
@@ -406,11 +408,11 @@ def cancel_order_sysid(
         fn(sysid, aid, str(account_type or "STOCK"), ContextInfo)
         record["status"] = "cancel_sent"
         record["msg"] = "cancel_called"
-        print("[下单] CANCEL sysid=%s account=%s" % (sysid, aid))
+        print("[下单] 撤单 sysid=%s account=%s" % (sysid, aid))
         return True, "ok", record
     except Exception as e:
         record["msg"] = "%s: %s" % (type(e).__name__, e)
-        print("[下单] CANCEL failed: %s" % record["msg"])
+        print("[下单] 撤单失败: %s" % record["msg"])
         return False, record["msg"], record
 
 

@@ -1,6 +1,7 @@
 #coding:gbk
-"""15:35 ??????????? + on-demand ??????manifest ???????? 15:35 ? init ????????"""
+"""15:35 ȫA����ͬ�� + on-demand��manifest �ſأ�15:35 / init ��ڡ�"""
 import csv
+import json
 import os
 import sys
 import threading
@@ -8,9 +9,12 @@ import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Tuple
 
-DAILY_SYNC_VERSION = "20260801.02"
+DAILY_SYNC_VERSION = "20260804.08"
 INTRADAY_PRIORITY_DAILY_LIMIT = 1
 INTRADAY_PRIORITY_DAILY_LIMIT_MAX = 8
+# ���а������ߣ�ÿ����� 1 ֻ�����ؿ�ʱ������ download_history_data(1d) �ٶ���������һ����������
+INTRADAY_ON_DEMAND_DAILY_INTERVAL_SEC = 1.0
+INTRADAY_ON_DEMAND_DAILY_BATCH = 1
 POOL_SLICE_SLEEP_SEC = 0.5
 POOL_COLD_SLICE_DAYS = 80
 POOL_COLD_SLICE_MAX = 3
@@ -48,9 +52,11 @@ BACKFILL_FIRST_DATE_SLACK_DAYS = 14
 # v7: FORCE/cold get uses date-range (BACKFILL_START..end), not count-only last-N.
 # No FORCE flag => daily/pipeline never year-backfill / never gate on first-date.
 QUALITY_VERSION = 7
-# Touch this empty file under data/daily_cache/ to force one-shot backfill from
-# BACKFILL_START_DATE. Runs during market hours via short time-slices.
-# Cleared on complete. No FORCE_PAUSE / DAILY_SYNC_PAUSE full-stop flags.
+# Touch under data/daily_cache/ to force one-shot backfill.
+# Empty file => start at BACKFILL_START_DATE; optional JSON {"start":"YYYYMMDD"}
+# or plain YYYYMMDD text overrides the floor for this FORCE run.
+# Runs during market hours via short time-slices. Cleared on complete.
+# No FORCE_PAUSE / DAILY_SYNC_PAUSE full-stop flags.
 FORCE_BACKFILL_FLAG_NAME = "FORCE_YEAR_BACKFILL"
 # Touch under daily_cache/ to discard a false mid-run checkpoint (progress/ok/fail)
 # on the next catch-up entry ?? survives live time-slice overwrites of manifest.json.
@@ -218,6 +224,57 @@ def _force_backfill_requested(cache_dir: Optional[str] = None) -> bool:
         return False
 
 
+def _parse_ymd_to_date(raw: Any) -> Optional[date]:
+    s = str(raw or "").strip().replace("-", "").replace("/", "")
+    if len(s) != 8 or not s.isdigit():
+        return None
+    try:
+        return datetime.strptime(s, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _parse_force_backfill_start(cache_dir: Optional[str] = None) -> Optional[date]:
+    """Read optional start from FORCE_YEAR_BACKFILL; empty/invalid => None."""
+    path = _force_backfill_flag_path(cache_dir)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = (f.read() or "").strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(obj, dict):
+            return _parse_ymd_to_date(obj.get("start") or obj.get("backfill_start"))
+        return None
+    return _parse_ymd_to_date(text)
+
+
+def _resolve_backfill_start(
+    end_d: date, cache_dir: Optional[str] = None
+) -> date:
+    """FORCE override start if present; else BACKFILL_START_DATE. Never after end_d."""
+    override = _parse_force_backfill_start(cache_dir)
+    floor = override if override is not None else BACKFILL_START_DATE
+    if end_d < floor:
+        return end_d
+    return floor
+
+
+def _backfill_start_ymd(
+    end_d: Optional[date] = None, cache_dir: Optional[str] = None
+) -> str:
+    d = end_d or date.today()
+    return _resolve_backfill_start(d, cache_dir).strftime("%Y%m%d")
+
+
 def _reset_force_progress_flag_path(cache_dir: Optional[str] = None) -> str:
     _, cache_dir2, _, _ = _data_paths()
     d = cache_dir or cache_dir2
@@ -257,13 +314,13 @@ def _consume_reset_force_progress(
         if manifest_path:
             _save_manifest(manifest_path, cleared)
     except Exception as e:
-        print("[����ͬ��] RESET_FORCE_PROGRESS save fail: %s" % e)
+        print("[����ͬ��] ���ǿ�Ƽ��� ����ʧ��: %s" % e)
     try:
         os.remove(path)
     except Exception as e:
-        print("[����ͬ��] RESET_FORCE_PROGRESS clear fail: %s" % e)
+        print("[����ͬ��] ���ǿ�Ƽ��� ɾ��ʧ��: %s" % e)
     print(
-        "[����ͬ��] RESET_FORCE_PROGRESS: cleared checkpoint prev_progress=%d -> 0"
+        "[����ͬ��] ���ǿ�Ƽ���: ������� prev_progress=%d -> 0"
         % prev
     )
     return cleared
@@ -274,9 +331,9 @@ def _clear_force_backfill_flag(cache_dir: Optional[str] = None) -> None:
     try:
         if os.path.isfile(path):
             os.remove(path)
-            print("[����ͬ��] cleared force flag %s" % path)
+            print("[����ͬ��] �����ǿ�Ʋ�����־ %s" % path)
     except Exception as e:
-        print("[����ͬ��] clear force flag fail: %s" % e)
+        print("[����ͬ��] ���ǿ�Ʋ�����־ʧ��: %s" % e)
     _clear_force_ordered_cache(cache_dir)
 
 
@@ -332,7 +389,7 @@ def _load_force_ordered_codes(
         _FORCE_ORDERED_END = end_s
         return list(out)
     except Exception as e:
-        print("[����ͬ��] FORCE ordered cache load fail: %s" % e)
+        print("[����ͬ��] ǿ�Ʋ��� ���򻺴����ʧ��: %s" % e)
         return None
 
 
@@ -361,7 +418,7 @@ def _save_force_ordered_codes(
     try:
         save_json_atomic(_force_ordered_cache_path(cache_dir), payload)
     except Exception as e:
-        print("[����ͬ��] FORCE ordered cache save fail: %s" % e)
+        print("[����ͬ��] ǿ�Ʋ��� ���򻺴汣��ʧ��: %s" % e)
 
 
 def _apply_force_ordered_cache(
@@ -403,7 +460,7 @@ def _clear_halt_miss_for_force(cache_dir: Optional[str] = None) -> int:
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cache_dir, force=True)
         print(
-            "[����ͬ��] cleared %d today_halt/suspended miss entries for FORCE"
+            "[����ͬ��] ����� %d ������ͣ��/��ͣ miss��ǿ�Ʋ�����"
             % len(drop)
         )
     return len(drop)
@@ -428,7 +485,7 @@ def _clear_soft_short_miss_for_main_chain(cache_dir: Optional[str] = None) -> in
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cache_dir, force=True)
         print(
-            "[����ͬ��] cleared %d short_history miss entries for main-chain"
+            "[����ͬ��] ����� %d �� short_history miss��������"
             % len(drop)
         )
     return len(drop)
@@ -472,7 +529,7 @@ def _clear_false_delisted_miss_with_recent_csv(
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cdir, force=True)
         print(
-            "[����ͬ��] cleared %d false delisted miss (CSV last bar within %dd)"
+            "[����ͬ��] ����� %d ���������� miss��CSV ĩ���� %dd �ڣ�"
             % (len(drop), int(max_age_days))
         )
     return len(drop)
@@ -536,12 +593,12 @@ def _maybe_reopen_completed_for_stale_bars(end_d: date) -> bool:
     try:
         _save_manifest(manifest_path, reopened)
     except Exception as e:
-        print("[����ͬ��] stale reopen save fail: %s" % e)
+        print("[����ͬ��] �����ؿ�����ʧ��: %s" % e)
         return False
     _SYNC_DONE_END_DATE = ""
     print(
-        "[����ͬ��] reopen completed?incremental stale_csv=%d cleared_miss=%d "
-        "miss_skip_was=%d end=%s (no FORCE)"
+        "[����ͬ��] �ؿ���������� stale_csv=%d cleared_miss=%d "
+        "miss_skip_was=%d end=%s����ǿ�Ʋ�����"
         % (stale_n, cleared, miss_skip, end_s)
     )
     return True
@@ -584,12 +641,12 @@ def _abandon_stale_force_partial(
         if manifest_path:
             _save_manifest(manifest_path, cleared)
     except Exception as e:
-        print("[����ͬ��] abandon stale FORCE partial save fail: %s" % e)
+        print("[����ͬ��] ��������ǿ�Ʋ������ֽ��ȱ���ʧ��: %s" % e)
     _clear_force_ordered_cache(cache_dir)
     _clear_soft_short_miss_for_main_chain(cache_dir)
     print(
-        "[����ͬ��] abandoned stale FORCE partial status=%s trigger=%s "
-        "(FORCE flag absent)"
+        "[����ͬ��] �ѷ�������ǿ�Ʋ������ֽ��� status=%s trigger=%s "
+        "��ǿ�Ʋ�����־�����ڣ�"
         % (status, trigger or "-")
     )
     return cleared
@@ -635,7 +692,7 @@ def _miss_cache_save(cache_dir: Optional[str] = None, force: bool = False) -> No
         save_json_atomic(path, payload)
         _MISS_CACHE_DIRTY = False
     except Exception as e:
-        print("[����ͬ��] miss_cache save fail: %s" % e)
+        print("[����ͬ��] miss���汣��ʧ��: %s" % e)
 
 
 def _miss_until_date(reason: str, fail_day: date) -> date:
@@ -713,7 +770,7 @@ def _miss_cache_put(
     if _daily_sync_verbose() and _MISS_LOG_COUNT < 8:
         _MISS_LOG_COUNT += 1
         print(
-            "[����ͬ��] miss_cache +%s reason=%s until=%s fail_count=%d"
+            "[����ͬ��] miss���� +%s reason=%s until=%s fail_count=%d"
             % (full, reason_s, until_d.isoformat(), fail_count)
         )
 
@@ -901,7 +958,7 @@ def _fetch_universe(xtdata, ContextInfo=None) -> List[str]:
         if got:
             raw = got
             if _daily_sync_verbose():
-                print("[����ͬ��] universe source=%s n_raw=%d" % (owner_label, len(raw)))
+                print("[����ͬ��] ��Ʊ����Դ=%s n_raw=%d" % (owner_label, len(raw)))
             break
     if not raw:
         # ???????????????????????????
@@ -913,9 +970,9 @@ def _fetch_universe(xtdata, ContextInfo=None) -> List[str]:
                 payload = json.load(f) or {}
             raw = list(payload.get("codes") or [])
             if _daily_sync_verbose():
-                print("[����ͬ��] universe fallback file n=%d" % len(raw))
+                print("[����ͬ��] ��Ʊ�ػ����ļ� n=%d" % len(raw))
         except Exception as e:
-            print("[����ͬ��] universe fallback fail: %s" % e)
+            print("[����ͬ��] ��Ʊ�ػ���ʧ��: %s" % e)
             raw = []
     out = []
     seen = set()
@@ -984,7 +1041,7 @@ def _log_fetch_fail(code: str, start_s: str, end_s: str, reason: str) -> None:
         return
     _FAIL_LOG_COUNT += 1
     print(
-        "[����ͬ��] fetch empty %s range=%s..%s reason=%s"
+        "[����ͬ��] ��ȡΪ�� %s range=%s..%s reason=%s"
         % (code, start_s, end_s, reason)
     )
 
@@ -1203,6 +1260,42 @@ def _last_date_in_csv(path: str) -> Optional[date]:
         return None
 
 
+def _peek_csv_last_date(path: str) -> Optional[date]:
+    """ֻ���ļ�β���ƶ�ĩ�գ����� stall ��־ȫ������ CSV��"""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 4096), os.SEEK_SET)
+            chunk = f.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+    last = None
+    for line in chunk.splitlines():
+        if not line or line.startswith("date"):
+            continue
+        d_s = line.split(",", 1)[0].strip()[:10]
+        try:
+            d = datetime.strptime(d_s, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if last is None or d > last:
+            last = d
+    return last
+
+
+def _pool_csv_tail_ready(
+    code: str, cache_dir: str, through_date: Optional[date] = None
+) -> bool:
+    """������CSV ĩ���Ƿ��ѵ���д���ֹ�գ������� stall ��ʾ����"""
+    end_d = through_date or date.today()
+    check_d = _pool_daily_write_end_date(None, end_d)
+    last = _peek_csv_last_date(os.path.join(cache_dir, code + ".csv"))
+    return last is not None and last >= check_d
+
+
 def _range_strings(start_d: date, end_d: date) -> Tuple[str, str]:
     return (
         start_d.strftime("%Y%m%d") + "000000",
@@ -1240,16 +1333,14 @@ def _ensure_builtin_download_bound() -> bool:
         ready = bool(ok and callable(fn))
         if not _BUILTIN_DL_BIND_LOGGED:
             _BUILTIN_DL_BIND_LOGGED = True
-            print(
-                "[����ͬ��] builtin download_history_data bound=%s"
-                % ("yes" if ready else "no")
-            )
+            if not ready:
+                print("[����ͬ��] ���� download_history_data �Ѱ�=no")
         return ready
     except Exception as e:
         if not _BUILTIN_DL_BIND_LOGGED:
             _BUILTIN_DL_BIND_LOGGED = True
             print(
-                "[����ͬ��] builtin download_history_data bind err: %s: %s"
+                "[����ͬ��] ���� download_history_data �󶨴���: %s: %s"
                 % (type(e).__name__, e)
             )
         return False
@@ -1495,11 +1586,15 @@ def _pool_storage_reason(
     effective = _effective_backfill_start(end_d, list_date)
     slack = timedelta(days=BACKFILL_FIRST_DATE_SLACK_DAYS)
     # Truncated mid-window vs effective start (IPO OpenDate ok).
+    # Pool gate: QMT ���س�ֻ��Լһ���������~330�������Լ����3�£���
+    # ���� FORCE ������ 380 ���ż��ѿ��� CSV �л������� requeue��
     if earliest is not None and earliest > effective + slack:
         if not _history_coverage_ok(
             earliest, end_d, list_date=list_date, bar_count=len(trade)
         ):
-            if len(trade) < MIN_BACKFILL_BARS:
+            if len(trade) < POOL_INTRADAY_MIN_BARS:
+                return "hist_%d" % len(trade)
+            if _force_backfill_requested() and len(trade) < MIN_BACKFILL_BARS:
                 return "hist_%d" % len(trade)
     if last_d is None:
         return "no_date"
@@ -1534,30 +1629,26 @@ def _count_valid_rows(rows_by_date: Dict[str, Dict[str, Any]]) -> int:
     return sum(1 for row in rows_by_date.values() if _is_valid_bar(row))
 
 
-def _backfill_start_for(end_d: date) -> date:
-    """Floor date for retain/fetch; never after end_d."""
-    if end_d < BACKFILL_START_DATE:
-        return end_d
-    return BACKFILL_START_DATE
+def _backfill_start_for(end_d: date, cache_dir: Optional[str] = None) -> date:
+    """Floor date for fetch/completeness; never after end_d. FORCE may override."""
+    return _resolve_backfill_start(end_d, cache_dir)
 
 
 def _trim_rows_for_storage(
     rows_by_date: Dict[str, Dict[str, Any]], keep_bars: int = MIN_BACKFILL_BARS
 ) -> Dict[str, Dict[str, Any]]:
-    """Keep bars on/after BACKFILL_START_DATE (date floor; keep_bars unused compat)."""
+    """Pass-through: do not drop earlier bars (incremental keeps history).
+
+    Upper bound is handled by _remove_bars_after_date elsewhere.
+    keep_bars unused (compat).
+    """
     del keep_bars
-    floor_s = BACKFILL_START_DATE.isoformat()
-    out: Dict[str, Dict[str, Any]] = {}
-    for d, row in (rows_by_date or {}).items():
-        ds = str(d or "")[:10]
-        if ds >= floor_s:
-            out[d] = row
-    return out
+    return dict(rows_by_date or {})
 
 
-def _recent_start_date(end_d: date) -> date:
-    """Cold/FORCE fetch window start = BACKFILL_START_DATE (not rolling N days)."""
-    return _backfill_start_for(end_d)
+def _recent_start_date(end_d: date, cache_dir: Optional[str] = None) -> date:
+    """Cold/FORCE fetch window start (resolved floor; not rolling N days)."""
+    return _backfill_start_for(end_d, cache_dir)
 
 
 def _bars_meet_requirement(
@@ -1716,7 +1807,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 if d is not None:
                     out[code6] = d
     except Exception as e:
-        print("[����ͬ��] list_date csv load fail: %s" % e)
+        print("[����ͬ��] ������ csv ����ʧ��: %s" % e)
     # Optional JSON overlays (OpenDate / list_date / ????).
     for name in ("all_a_stock_info.json", "all_a_stock_info_em_boards.json"):
         jpath = os.path.join(base, "data", name)
@@ -1778,7 +1869,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 out[code6] = d
     _LIST_DATE_BY_CODE = out
     if _daily_sync_verbose():
-        print("[����ͬ��] list_date map loaded n=%d" % len(out))
+        print("[����ͬ��] ������ӳ���Ѽ��� n=%d" % len(out))
     return out
 
 
@@ -2041,7 +2132,7 @@ def _fetch_today_bars_from_full_tick(
             if isinstance(tick_map, dict) and tick_map:
                 source = "ctx"
         except Exception as e:
-            print("[����ͬ��] ContextInfo.get_full_tick fail: %s" % e)
+            print("[����ͬ��] ContextInfo.get_full_tick ʧ��: %s" % e)
             tick_map = None
     # get_full_tick ?????????????? download_history???????? xtdata download ??????
     if (not isinstance(tick_map, dict) or not tick_map) and xtdata is not None:
@@ -2057,7 +2148,7 @@ def _fetch_today_bars_from_full_tick(
                     if ENABLE_XTDATA_DOWNLOAD:
                         _mark_xtdata_rpc_dead(str(e))
                 else:
-                    print("[����ͬ��] xtdata.get_full_tick fail: %s" % e)
+                    print("[����ͬ��] xtdata.get_full_tick ʧ��: %s" % e)
                 tick_map = None
     if not isinstance(tick_map, dict) or not tick_map:
         return out
@@ -2068,7 +2159,7 @@ def _fetch_today_bars_from_full_tick(
             out[code] = bar
     if out and source and _daily_sync_verbose():
         print(
-            "[����ͬ��] full_tick bars source=%s hit=%d/%d day=%s"
+            "[����ͬ��] full_tick K�� source=%s hit=%d/%d day=%s"
             % (source, len(out), len(code_list), end_d.isoformat())
         )
     return out
@@ -2444,7 +2535,7 @@ def _download_slice(
         if _FAIL_LOG_COUNT < 8:
             _FAIL_LOG_COUNT += 1
             print(
-                "[����ͬ��] download err %s %s-%s | %s"
+                "[����ͬ��] ���ش��� %s %s-%s | %s"
                 % (code, s_short, e_short, last_err)
             )
     return False
@@ -2478,7 +2569,7 @@ def _download_batch(
                 continue
             except Exception as e:
                 print(
-                    "[����ͬ��] %s fail n=%d %s-%s | %s: %s"
+                    "[����ͬ��] %s ʧ�� n=%d %s-%s | %s: %s"
                     % (label, len(codes), s_short, e_short, type(e).__name__, e)
                 )
                 if _is_quote_rpc_error(e):
@@ -2564,21 +2655,25 @@ def _download_pool_bars(
     *,
     sleep_sec: float = POOL_POST_DOWNLOAD_SLEEP_SEC,
 ) -> List[Dict[str, Any]]:
-    # ????????ContextInfo / ??? get?????? download
+    # ���� ContextInfo / ���� get�������ȱĩ��ʱ�� download
     batch_map, _src = _batch_fetch_1d_bars(
         ContextInfo, xtdata, [code], start_d, end_d
     )
     raw = batch_map.get(code) or []
-    if len(_pool_trade_bars(_filter_pool_bars(raw, end_d))) < POOL_INTRADAY_MIN_BARS:
-        if _xtdata_rpc_alive():
-            s_short, e_short = _short_range_strings(start_d, end_d)
-            _download_slice(xtdata, code, s_short, e_short)
-            time.sleep(sleep_sec)
-            raw2 = _fetch_bars_local_raw(
-                xtdata, code, start_d, end_d, ContextInfo=ContextInfo
-            )
-            if len(raw2) > len(raw):
-                raw = raw2
+    trade = _pool_trade_bars(_filter_pool_bars(raw, end_d))
+    last_d = _pool_last_bar_date(trade)
+    need_download = len(trade) < POOL_INTRADAY_MIN_BARS or (
+        last_d is not None and last_d < end_d
+    )
+    if need_download and _xtdata_rpc_alive():
+        s_short, e_short = _short_range_strings(start_d, end_d)
+        _download_slice(xtdata, code, s_short, e_short)
+        time.sleep(sleep_sec)
+        raw2 = _fetch_bars_local_raw(
+            xtdata, code, start_d, end_d, ContextInfo=ContextInfo
+        )
+        if len(raw2) > len(raw):
+            raw = raw2
     return _pool_trade_bars(_filter_pool_bars(raw, end_d))
 
 
@@ -2625,9 +2720,15 @@ def _fetch_pool_bars_optimized(
     end_d: date,
     ContextInfo=None,
 ) -> List[Dict[str, Any]]:
-    """???????????? download+local??lag ??????????????????????"""
+    """���г�ͬ�������� BACKFILL_START..end��ȱβ/ȱʷʱ����������������>=120������ǰ������"""
     merged: Dict[str, Dict[str, Any]] = {}
     recent_start = _recent_start_date(end_d)
+    list_date = _csv_list_date(code) if code else None
+
+    def _quality_ok(bars_now: List[Dict[str, Any]]) -> bool:
+        return _pool_bars_quality_ok(
+            bars_now, end_d, xtdata=xtdata, code=code
+        )
 
     _merge_pool_bar_list(
         merged,
@@ -2636,39 +2737,35 @@ def _fetch_pool_bars_optimized(
         ),
     )
     bars = _pool_bars_sorted(merged)
-    if _pool_bars_quality_ok(bars, end_d, xtdata=xtdata):
+    if _quality_ok(bars):
         return bars
 
-    q_reason = _pool_quality_reason(bars, end_d, xtdata=xtdata)
+    # ȱ��������գ����� hist/lag�����Ȳ�β�ͣ�������������дĩ�գ�
     last_d = _pool_last_bar_date(bars)
-    if (
-        q_reason
-        and str(q_reason).startswith("lag_")
-        and len(bars) >= POOL_INTRADAY_MIN_BARS
-        and last_d is not None
-    ):
+    if last_d is not None and last_d < end_d:
         tail_start = last_d + timedelta(days=1)
-        if tail_start <= end_d:
-            _merge_pool_bar_list(
-                merged,
-                _download_pool_bars(
-                    xtdata,
-                    code,
-                    tail_start,
-                    end_d,
-                    ContextInfo=ContextInfo,
-                    sleep_sec=POOL_TAIL_DOWNLOAD_SLEEP_SEC,
-                ),
-            )
-            bars = _pool_bars_sorted(merged)
-            if _pool_bars_quality_ok(bars, end_d, xtdata=xtdata):
-                return bars
+        _merge_pool_bar_list(
+            merged,
+            _download_pool_bars(
+                xtdata,
+                code,
+                tail_start,
+                end_d,
+                ContextInfo=ContextInfo,
+                sleep_sec=POOL_TAIL_DOWNLOAD_SLEEP_SEC,
+            ),
+        )
+        bars = _pool_bars_sorted(merged)
+        if _quality_ok(bars):
+            return bars
 
-    if len(bars) >= POOL_INTRADAY_MIN_BARS:
-        return bars
-
+    # ��ʷ���ضϣ�������ؽ� 270 ��������������Ƭ���ڣ���ֹ >=120 ����ǰ����
     cur = recent_start
-    for _slice_i in range(POOL_COLD_SLICE_MAX):
+    if list_date is not None and list_date > cur:
+        cur = list_date
+    for _slice_i in range(max(POOL_COLD_SLICE_MAX, 8)):
+        if _quality_ok(bars):
+            return bars
         slice_end = min(cur + timedelta(days=POOL_COLD_SLICE_DAYS), end_d)
         _merge_pool_bar_list(
             merged,
@@ -2682,12 +2779,73 @@ def _fetch_pool_bars_optimized(
             ),
         )
         bars = _pool_bars_sorted(merged)
-        if _pool_bars_quality_ok(bars, end_d, xtdata=xtdata):
-            return bars
         cur = slice_end + timedelta(days=1)
         if cur > end_d:
             break
+
+    if _quality_ok(bars):
+        return bars
+
+    # ���һ�������� dig��ContextInfo + download_history��
+    dig_bars, _src = _backfill_by_slices(
+        xtdata,
+        code,
+        recent_start,
+        end_d,
+        ContextInfo=ContextInfo,
+        fast=True,
+    )
+    if dig_bars:
+        _merge_pool_bar_list(merged, dig_bars)
+        bars = _pool_bars_sorted(merged)
     return bars
+
+
+def _pool_bars_usable_for_trading(
+    bars: List[Dict[str, Any]], end_d: date, xtdata=None
+) -> bool:
+    """����δ�� BACKFILL ʱ�Կɱ�ǿ��ã��������㹻K����ĩ�ձ��뵽�� write_end�����գ���"""
+    trade = _pool_trade_bars(_filter_pool_bars(bars, end_d))
+    if len(trade) < POOL_INTRADAY_MIN_BARS:
+        return False
+    last_d = _pool_last_bar_date(trade)
+    if last_d is None:
+        return False
+    # �Ͻ�ȱ������������գ���ǰ�� 10 �տ��ޣ���� 7/31 ���� ok �̻�ȱ 8/3��
+    if last_d < end_d:
+        return False
+    return True
+
+
+def _csv_last_trade_date(csv_path: str) -> Optional[date]:
+    rows = _read_csv_rows(csv_path)
+    if not rows:
+        return None
+    last_d = None
+    for d_s, row in rows.items():
+        if not _is_valid_bar(row):
+            continue
+        try:
+            d = datetime.strptime(str(d_s)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if last_d is None or d > last_d:
+            last_d = d
+    return last_d
+
+
+def _merge_rows_keep_newer(
+    csv_path: str, new_rows: Dict[str, Dict[str, Any]], write_end_d: date
+) -> Dict[str, Dict[str, Any]]:
+    """�ϲ����� CSV�������������и��µĽ����գ���ֹ�ø�����ȡ���ǡ�"""
+    existing = _read_csv_rows(csv_path)
+    merged: Dict[str, Dict[str, Any]] = dict(existing)
+    for d_s, row in (new_rows or {}).items():
+        if not d_s:
+            continue
+        merged[str(d_s)[:10]] = row
+    _remove_bars_after_date(merged, write_end_d)
+    return _trim_rows_for_storage(merged)
 
 
 def _backfill_by_slices(
@@ -2831,7 +2989,7 @@ def _download_one_code(
             _mark_xtdata_rpc_dead(str(e))
             return "rpc_dead"
         print(
-            "[����ͬ��] nodate download fail %s | %s: %s"
+            "[����ͬ��] ����������ʧ�� %s | %s: %s"
             % (code, type(e).__name__, e)
         )
         return "none"
@@ -3440,9 +3598,82 @@ def _sync_one_code(
                         sleep_sec=0,
                     )
                     bars = _filter_bars_by_range(bars, start_d, end_d)
-            else:
-                if last_dl == "none":
-                    last_dl = "no_ctx_no_rpc"
+            # ���� ContextInfo �գ������� QMT ���� download_history_data�����а���Ҳ�ߣ��� xtdata��
+            if not _bars_meet_requirement(
+                bars, False, min_required, end_d=end_d, list_date=list_date
+            ):
+                _ensure_builtin_download_bound()
+                # �� CSV���ӻ��������������ֻ�� 15 ������˳�����
+                dl_start = fetch_start if rows else _recent_start_date(end_d)
+                n_ok, dl_detail = _download_1d_via_builtin([code], dl_start, end_d)
+                if n_ok > 0:
+                    # ����������Ҫһ��ʱ�䣻�̺���·��ͬ���� download ���� get_market_data_ex
+                    time.sleep(float(POOL_POST_DOWNLOAD_SLEEP_SEC))
+                    use_start = dl_start if not rows else start_d
+                    batch_map, src = _batch_fetch_1d_bars(
+                        ContextInfo,
+                        xtdata,
+                        [code],
+                        use_start,
+                        end_d,
+                        prefer_count=-1,
+                        quality_min=1,
+                    )
+                    more = _sanitize_bars(batch_map.get(code) or [])
+                    if not more:
+                        more = _sanitize_bars(
+                            _fetch_bars_local_raw(
+                                xtdata, code, use_start, end_d, ContextInfo
+                            )
+                        )
+                    if not more:
+                        # �� fast������ get_market_data_ex ��ǩ�����ԣ���ֻ�� get_local_data��
+                        dl_s, dl_e = _range_strings(use_start, end_d)
+                        more = _sanitize_bars(
+                            _fetch_valid_bars(
+                                xtdata,
+                                code,
+                                dl_s,
+                                dl_e,
+                                ContextInfo=ContextInfo,
+                                prefer_range=True,
+                                fast=False,
+                            )
+                        )
+                    more = _filter_bars_by_range(more, use_start, end_d)
+                    if more:
+                        bars = _merge_bar_lists(bars, more)
+                        last_dl = "builtin_dl_%s_%d" % (src or "ok", len(more))
+                        print(
+                            "[����ͬ��] �������غ���� %s bars=%d src=%s %s..%s"
+                            % (
+                                code,
+                                len(more),
+                                src or "local",
+                                use_start.isoformat(),
+                                end_d.isoformat(),
+                            )
+                        )
+                    else:
+                        last_dl = "builtin_dl_empty_%s" % (dl_detail or "ok")
+                        print(
+                            "[����ͬ��] ���������ѵ��õ����ؿ� %s detail=%s "
+                            "range=%s..%s"
+                            % (
+                                code,
+                                dl_detail or "ok",
+                                use_start.isoformat(),
+                                end_d.isoformat(),
+                            )
+                        )
+                elif last_dl in ("none", ""):
+                    last_dl = (
+                        "no_ctx_no_rpc"
+                        if not dl_detail
+                        else "no_ctx+builtin_miss_%s" % dl_detail
+                    )
+                elif dl_detail:
+                    last_dl = "%s+builtin_miss_%s" % (last_dl, dl_detail)
         bars = _ensure_today_from_tick(bars)
         if (
             start_d < end_d
@@ -3603,7 +3834,7 @@ def _sync_one_code_pool(
                 if bar.get("date")
             }
         )
-        _remove_bars_after_date(rows, write_end_d)
+        rows = _merge_rows_keep_newer(csv_path, rows, write_end_d)
         try:
             _write_csv_atomic(csv_path, rows)
             return "ok", None, len(rows)
@@ -3611,11 +3842,47 @@ def _sync_one_code_pool(
             return "fail", str(e), 0
 
     bars = _pool_trade_bars(_filter_pool_bars(fast_bars, write_end_d))
+    # ��·����ȱ write_end����������ͬ��������ͬ�������� 7/31 ��ȱ�̻�
+    last_fast = _pool_last_bar_date(bars)
+    if last_fast is None or last_fast < write_end_d:
+        st2, reason2, n2 = _sync_one_code(
+            xtdata,
+            cache_dir,
+            code,
+            write_end_d,
+            ContextInfo=ContextInfo,
+            sync_source="on_demand_pool_lag",
+            pref_bars=bars or None,
+        )
+        if st2 in ("ok", "skip"):
+            return st2, reason2, n2
+        # ����ʧ��Ҳ��Ҫ�ø������ݸ������� CSV
+        exist_last = _csv_last_trade_date(csv_path)
+        if exist_last is not None and (
+            last_fast is None or exist_last > last_fast
+        ):
+            return "fail", "pool_lag_%s_keep_csv_%s" % (
+                last_fast.isoformat() if last_fast else "none",
+                exist_last.isoformat(),
+            ), _count_valid_rows(_read_csv_rows(csv_path))
+
     valid_n = len(bars)
     q_reason = _pool_storage_reason(
         bars, write_end_d, xtdata=xtdata, list_date=_csv_list_date(code)
     )
     if valid_n > 0:
+        last_new = _pool_last_bar_date(bars)
+        exist_last = _csv_last_trade_date(csv_path)
+        # ��ȡ������д��
+        if exist_last is not None and last_new is not None and last_new < exist_last:
+            if exist_last >= write_end_d and _pool_bars_usable_for_trading(
+                _rows_to_bars(_read_csv_rows(csv_path)), write_end_d, xtdata=xtdata
+            ):
+                return "ok", "keep_newer_csv", _count_valid_rows(_read_csv_rows(csv_path))
+            return "fail", "pool_stale_fetch_%s_csv_%s" % (
+                last_new.isoformat(),
+                exist_last.isoformat(),
+            ), valid_n
         try:
             rows = _trim_rows_for_storage(
                 {
@@ -3624,11 +3891,27 @@ def _sync_one_code_pool(
                     if bar.get("date")
                 }
             )
-            _remove_bars_after_date(rows, write_end_d)
+            rows = _merge_rows_keep_newer(csv_path, rows, write_end_d)
+            # �ϲ�����ȱĩ�գ���д��ȱ����
+            merged_last = None
+            try:
+                if rows:
+                    merged_last = datetime.strptime(max(rows.keys())[:10], "%Y-%m-%d").date()
+            except ValueError:
+                merged_last = None
+            if merged_last is None or merged_last < write_end_d:
+                return "fail", "pool_invalid_%d_%s" % (
+                    len(rows),
+                    q_reason or ("lag_%s" % (merged_last.isoformat() if merged_last else "none")),
+                ), len(rows)
             _write_csv_atomic(csv_path, rows)
+            valid_n = len(rows)
         except Exception as e:
             return "fail", str(e), valid_n
     if q_reason:
+        # ����ĩ���ѵ� write_end �Ž��� partial hist
+        if _pool_bars_usable_for_trading(bars, write_end_d, xtdata=xtdata):
+            return "ok", "partial_%s" % q_reason, valid_n
         return "fail", "pool_invalid_%d_%s" % (valid_n, q_reason), valid_n
     if not bars:
         return "fail", "empty", 0
@@ -3708,7 +3991,7 @@ def _already_synced_to_end(manifest: Dict[str, Any], end_d: date) -> bool:
         return False
     if int(manifest.get("quality_version") or 0) < QUALITY_VERSION:
         return False
-    if str(manifest.get("backfill_start") or "") < BACKFILL_START_YMD:
+    if str(manifest.get("backfill_start") or "") < _backfill_start_ymd(end_d):
         return False
     if int(manifest.get("min_valid_bars_required") or 0) < MIN_BACKFILL_BARS:
         return False
@@ -3754,7 +4037,7 @@ def _arm_force_defer_after_hours() -> None:
     _FORCE_SLICE_IDLE_UNTIL = time.time() + 5.0
     remain = max(0.0, (target - now).total_seconds()) if now < target else 0.0
     print(
-        "[����ͬ��] FORCE defer soft_short dig until after-hours "
+        "[����ͬ��] ǿ�Ʋ��� �Ƴ������������̺� "
         "remain=%.0fs target=%02d:%02d (slice_idle=5s only)"
         % (remain, int(SYNC_HOUR), int(SYNC_MINUTE))
     )
@@ -3807,7 +4090,7 @@ def schedule_failed_manifest_recovery_on_init() -> None:
     delay = float(FORCE_INIT_DELAY_SEC if force else FAILED_RECOVERY_DELAY_SEC)
     _FAILED_RECOVERY_DUE_AT = time.time() + delay
     print(
-        "[����ͬ��] catch-up scheduled in %ds (init; quality=%d force=%s "
+        "[����ͬ��] �����Ѱ��� %ds �󣨳�ʼ��; quality=%d ǿ��=%s "
         "slice=%s idle=%.0fs)"
         % (
             int(delay),
@@ -3828,11 +4111,11 @@ def maybe_run_failed_manifest_recovery(ContextInfo=None) -> bool:
     _FAILED_RECOVERY_ATTEMPTED = True
     _FAILED_RECOVERY_DUE_AT = 0.0
     if not _should_schedule_failed_manifest_recovery():
-        print("[����ͬ��] init catch-up skipped (no longer needed)")
+        print("[����ͬ��] ��ʼ��������������������Ҫ��")
         if _daily_gate_open_for_tick():
             _schedule_tick_pipeline()
         return False
-    print("[����ͬ��] init catch-up start")
+    print("[����ͬ��] ��ʼ�����ܿ�ʼ")
     ok = run_catch_up_sync(ContextInfo, source="init_catchup")
     # ???? FORCE ??????????? tick???????????????
     if ok and _past_daily_sync_cutoff():
@@ -3875,8 +4158,8 @@ def maybe_run_force_year_backfill(ContextInfo=None) -> bool:
         remain_ah = max(0.0, (target - now).total_seconds())
         if now_ts - _FORCE_IDLE_LOG_TS >= 60.0:
             print(
-                "[����ͬ��] FORCE defer_after_hours (soft_short); "
-                "dig after %02d:%02d remain=%.0fs"
+                "[����ͬ��] ǿ�Ʋ��� �̺��Ƴ٣����̣�; "
+                "�̺������� %02d:%02d remain=%.0fs"
                 % (int(SYNC_HOUR), int(SYNC_MINUTE), remain_ah)
             )
             _FORCE_IDLE_LOG_TS = now_ts
@@ -3889,13 +4172,13 @@ def maybe_run_force_year_backfill(ContextInfo=None) -> bool:
         else:
             if now_ts - _FORCE_IDLE_LOG_TS >= 60.0:
                 print(
-                    "[����ͬ��] FORCE idle gap remain=%.0fs (quotes catch-up)"
+                    "[����ͬ��] ǿ�Ʋ��� ���м�϶ remain=%.0fs�����鲹�ܣ�"
                     % max(0.0, remain_idle)
                 )
                 _FORCE_IDLE_LOG_TS = now_ts
             return False
     print(
-        "[����ͬ��] force/partial arm force=%s partial=%s progress=%s/%s "
+        "[����ͬ��] ǿ��/��������װ ǿ��=%s partial=%s progress=%s/%s "
         "slice=%s quantum=%.0fs idle=%.0fs"
         % (
             "yes" if force else "no",
@@ -3918,7 +4201,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     global _SYNC_DONE_END_DATE, _SYNC_RUNNING, _FAIL_LOG_COUNT, _XTDATA_RPC_OK
     global _MISS_LOG_COUNT
     if _SYNC_RUNNING:
-        print("[����ͬ��] skip: already running (source=%s)" % source)
+        print("[����ͬ��] ����: �������� (source=%s)" % source)
         return False
 
     # Skip while tick full sync owns ContextInfo.
@@ -3928,7 +4211,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
         except ImportError:
             import qmt_builtin.ant_tick_full_sync_runner as tick_full
         if bool(getattr(tick_full, "_BUSY", False)):
-            print("[����ͬ��] skip: tick_full busy (source=%s)" % source)
+            print("[����ͬ��] ����: �ֱ�ͬ��æµ (source=%s)" % source)
             return False
     except Exception:
         pass
@@ -3952,20 +4235,21 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     try:
         xtdata = _load_xtdata()
     except Exception as e:
-        print("[����ͬ��] FAIL load xtdata: %s" % e)
+        print("[����ͬ��] ʧ�� ���� xtdata: %s" % e)
         return False
 
     end_d = _resolve_sync_end_date(xtdata, now)
     end_s = end_d.isoformat()
+    bf_start_ymd = _backfill_start_ymd(end_d, cache_dir)
 
     # Skip done unless FORCE / partial resume.
     if _SYNC_DONE_END_DATE == end_s and not force_year and not partial_running:
-        print("[����ͬ��] skip: in-memory done end=%s source=%s" % (end_s, source))
+        print("[����ͬ��] ����: �ڴ������ end=%s source=%s" % (end_s, source))
         return False
     if _already_synced_to_end(old_manifest, end_d):
         _SYNC_DONE_END_DATE = end_s
         print(
-            "[����ͬ��] skip: manifest completed end=%s source=%s"
+            "[����ͬ��] ����: manifest ����� end=%s source=%s"
             % (end_s, source)
         )
         return False
@@ -3976,23 +4260,23 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     verbose = _daily_sync_verbose()
     if verbose:
         print(
-            "[����ͬ��] primary=ContextInfo.get_market_data_ex(1d) "
+            "[����ͬ��] ��·��=ContextInfo.get_market_data_ex(1d) "
             "builtin_dl=%s xtdata_dl=off"
             % ("on" if builtin_dl_ready else "miss")
         )
     if ContextInfo is None:
         print(
-            "[����ͬ��] WARN: ContextInfo is None; "
-            "ContextInfo path unavailable"
+            "[����ͬ��] ����: ContextInfo Ϊ None; "
+            "ContextInfo ·��������"
         )
     if verbose and (
         force_year or int(old_manifest.get("quality_version") or 0) < QUALITY_VERSION
     ):
         print(
-            "[����ͬ��] backfill armed start=%s min_bars~%d quality=%d->%d "
+            "[����ͬ��] �ز�����װ start=%s min_bars~%d quality=%d->%d "
             "force=%s slice=%s quantum=%.0fs batch=%d"
             % (
-                BACKFILL_START_YMD,
+                bf_start_ymd,
                 MIN_BACKFILL_BARS,
                 int(old_manifest.get("quality_version") or 0),
                 QUALITY_VERSION,
@@ -4032,13 +4316,13 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     try:
         universe = _fetch_universe(xtdata, ContextInfo=ContextInfo)
         if not universe:
-            print("[����ͬ��] FAIL: empty universe")
+            print("[����ͬ��] ʧ��: ��Ʊ��Ϊ��")
             return False
 
         os.makedirs(cache_dir, exist_ok=True)
         _save_universe(universe_path, universe, end_s)
         print(
-            "[����ͬ��] catch-up begin version=%s source=%s end=%s count=%d"
+            "[����ͬ��] ���ܿ�ʼ �汾=%s source=%s end=%s count=%d"
             % (DAILY_SYNC_VERSION, source, end_s, len(universe))
         )
         if force_year:
@@ -4099,7 +4383,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             filtered.append(code)
         if miss_skip_count:
             print(
-                "[����ͬ��] miss_cache skip=%d remain=%d path=%s"
+                "[����ͬ��] miss���� skip=%d remain=%d path=%s"
                 % (miss_skip_count, len(filtered), _miss_cache_path(cache_dir))
             )
         # FORCE: truncated-first order. Cache after first scan; reuse on slices.
@@ -4109,7 +4393,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 filtered = _apply_force_ordered_cache(filtered, cached_ord)
                 if verbose:
                     print(
-                        "[����ͬ��] FORCE reuse ordered cache n=%d (skip CSV rescan)"
+                        "[����ͬ��] ǿ�Ʋ��� �������򻺴� n=%d������ CSV ��ɨ��"
                         % len(cached_ord)
                     )
             else:
@@ -4124,7 +4408,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 if cold:
                     if verbose:
                         print(
-                            "[����ͬ��] FORCE prioritize truncated=%d warm=%d"
+                            "[����ͬ��] ǿ�Ʋ��� ���� truncated=%d warm=%d"
                             % (len(cold), len(warm))
                         )
                     filtered = cold + warm
@@ -4153,7 +4437,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 failed_codes = [str(c) for c in prev_failed[:200]]
             if verbose:
                 print(
-                    "[����ͬ��] resume from progress=%d/%d ok=%d skip=%d fail=%d soft_short=%d"
+                    "[����ͬ��] �ӽ��Ȼָ�=%d/%d ok=%d skip=%d fail=%d ����=%d"
                     % (
                         resume_from,
                         total,
@@ -4175,7 +4459,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             # Mid-walk disarm: FORCE flag cleared => stop incomplete loop now.
             if force_year and (not _force_backfill_requested(cache_dir)):
                 print(
-                    "[����ͬ��] FORCE flag cleared mid-run; abort at %d/%d "
+                    "[����ͬ��] ǿ�Ʋ�����־�����б����; ��ֹ�� %d/%d "
                     "(source=%s)" % (max(0, pos - 1), total, source)
                 )
                 try:
@@ -4207,7 +4491,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         {
                             "version": 1,
                             "quality_version": QUALITY_VERSION,
-                            "backfill_start": BACKFILL_START_YMD,
+                            "backfill_start": bf_start_ymd,
                             "min_valid_bars_required": MIN_BACKFILL_BARS,
                             "sync_trade_date": end_s,
                             "universe_count": len(universe) + miss_skip_count,
@@ -4235,7 +4519,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     pass
                 _arm_force_slice_idle()
                 print(
-                    "[����ͬ��] yield time_slice before code after %.1fs "
+                    "[����ͬ��] ʱ��Ƭ�ó�������ǰ��after %.1fs "
                     "progress=%d/%d idle=%.0fs"
                     % (
                         time.time() - t_slice_start,
@@ -4261,7 +4545,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                             {
                                 "version": 1,
                                 "quality_version": QUALITY_VERSION,
-                                "backfill_start": BACKFILL_START_YMD,
+                                "backfill_start": bf_start_ymd,
                                 "min_valid_bars_required": MIN_BACKFILL_BARS,
                                 "sync_trade_date": end_s,
                                 "universe_count": len(universe) + miss_skip_count,
@@ -4289,7 +4573,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         pass
                     _arm_force_slice_idle()
                     print(
-                        "[����ͬ��] yield time_slice before ContextInfo "
+                        "[����ͬ��] ʱ��Ƭ�ó���ContextInfo ǰ��"
                         "after %.1fs progress=%d/%d idle=%.0fs"
                         % (
                             time.time() - t_slice_start,
@@ -4307,7 +4591,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 batch_tried = False
                 if verbose:
                     print(
-                        "[����ͬ��] batch %d-%d/%d begin (ContextInfo 1d size=%d)"
+                        "[����ͬ��] ���� %d-%d/%d ��ʼ (ContextInfo 1d size=%d)"
                         % (pos, batch_end, total, batch_sz)
                     )
                 fetch_start = end_d - timedelta(days=CTX_INCREMENTAL_LOOKBACK_DAYS)
@@ -4336,7 +4620,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     batch_tried = True
                     if verbose:
                         print(
-                            "[����ͬ��] batch ctx 1d source=%s hit=%d/%d "
+                            "[����ͬ��] ���� ContextInfo 1d source=%s hit=%d/%d "
                             "range=%s..%s cold=%d"
                             % (
                                 primary_source,
@@ -4349,7 +4633,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         )
                 except Exception as e:
                     print(
-                        "[����ͬ��] batch ctx 1d error: %s: %s"
+                        "[����ͬ��] ���� ContextInfo 1d ����: %s: %s"
                         % (type(e).__name__, e)
                     )
                     bars_prefetch = {}
@@ -4380,7 +4664,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                         {
                                             "version": 1,
                                             "quality_version": QUALITY_VERSION,
-                                            "backfill_start": BACKFILL_START_YMD,
+                                            "backfill_start": bf_start_ymd,
                                             "min_valid_bars_required": MIN_BACKFILL_BARS,
                                             "sync_trade_date": end_s,
                                             "universe_count": len(universe)
@@ -4412,8 +4696,8 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                     pass
                                 _arm_force_slice_idle()
                                 print(
-                                    "[����ͬ��] yield time_slice before "
-                                    "builtin_dl after %.1fs progress=%d/%d "
+                                    "[����ͬ��] ʱ��Ƭ�ó���ǰ��"
+                                    "�������� after %.1fs progress=%d/%d "
                                     "dl=%d/%d idle=%.0fs"
                                     % (
                                         time.time() - t_slice_start,
@@ -4435,7 +4719,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 dl_ok += 1
                             elif detail and dl_tried <= 3:
                                 print(
-                                    "[����ͬ��] builtin_dl miss %s %s..%s | %s"
+                                    "[����ͬ��] ��������δ���� %s %s..%s | %s"
                                     % (
                                         bc,
                                         eff.strftime("%Y%m%d"),
@@ -4445,13 +4729,13 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                         if verbose:
                             print(
-                                "[����ͬ��] builtin_dl 1d ok=%d/%d cold_short=%d "
+                                "[����ͬ��] �������� 1d ok=%d/%d cold_short=%d "
                                 "range_floor=%s"
                                 % (
                                     dl_ok,
                                     dl_tried,
                                     len(short_need),
-                                    BACKFILL_START_YMD,
+                                    bf_start_ymd,
                                 )
                             )
                         if dl_ok > 0:
@@ -4495,14 +4779,14 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                                 if verbose:
                                     print(
-                                        "[����ͬ��] after builtin_dl re-get "
-                                        "improved=%d/%d source=%s"
+                                        "[����ͬ��] �������غ���ȡ "
+                                        "����=%d/%d source=%s"
                                         % (improved, len(short_need), src2)
                                     )
                             except Exception as e:
                                 print(
-                                    "[����ͬ��] after builtin_dl re-get "
-                                    "error: %s: %s"
+                                    "[����ͬ��] �������غ���ȡ "
+                                    "����: %s: %s"
                                     % (type(e).__name__, e)
                                 )
 
@@ -4526,7 +4810,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                             ContextInfo=ContextInfo,
                         )
                     except Exception as e:
-                        print("[����ͬ��] batch full_tick error: %s" % e)
+                        print("[����ͬ��] ���� full_tick ����: %s" % e)
                         tick_prefetch = {}
 
                 # Optional xtdata download: after hours only.
@@ -4544,8 +4828,8 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                             end_d,
                         )
                         print(
-                            "[����ͬ��] optional batch download %s n=%d "
-                            "(ctx hit low)"
+                            "[����ͬ��] ��ѡ�������� %s n=%d "
+                            "��ContextInfo ����ƫ�ͣ�"
                             % (pre_tag, len(batch_codes))
                         )
                         if pre_tag == "batch_rpc_dead":
@@ -4572,7 +4856,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                     except Exception as e:
                         print(
-                            "[����ͬ��] optional download error: %s: %s"
+                            "[����ͬ��] ��ѡ���ش���: %s: %s"
                             % (type(e).__name__, e)
                         )
                         if _is_quote_rpc_error(e):
@@ -4586,7 +4870,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     time.sleep(CTX_BATCH_SLEEP_SEC)
 
             if verbose:
-                print("[����ͬ��] %d/%d syncing %s" % (pos, total, code))
+                print("[����ͬ��] %d/%d ͬ���� %s" % (pos, total, code))
 
             # Instrument status / halt classification.
             inst_reason = _classify_instrument_status(
@@ -4599,7 +4883,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 if last_d is not None and (end_d - last_d).days <= 15:
                     if verbose:
                         print(
-                            "[����ͬ��] ignore false delisted %s last_bar=%s"
+                            "[����ͬ��] ������������ %s last_bar=%s"
                             % (code, last_d.isoformat())
                         )
                     inst_reason = None
@@ -4632,7 +4916,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 ok_count += 1
                 if verbose:
                     print(
-                        "[����ͬ��] ok %s valid_rows=%d"
+                        "[����ͬ��] �ɹ� %s valid_rows=%d"
                         % (code, row_count)
                     )
             elif status == "skip":
@@ -4649,7 +4933,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         pass
                 # Default quiet: fail reasons only in summary counts / VERBOSE.
                 if verbose and reason:
-                    print("[����ͬ��] fail %s: %s" % (code, reason))
+                    print("[����ͬ��] ʧ�� %s: %s" % (code, reason))
 
             do_progress = (
                 pos % PROGRESS_EVERY == 0
@@ -4659,8 +4943,8 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             if do_progress:
                 t_progress_log = time.time()
                 print(
-                    "[����ͬ��] progress %d/%d ok=%d skip=%d fail=%d "
-                    "soft_short=%d miss_skip=%d primary=%s"
+        "[����ͬ��] ���� %d/%d ok=%d skip=%d fail=%d "
+        "����=%d miss_skip=%d primary=%s"
                     % (
                         pos,
                         total,
@@ -4679,7 +4963,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         {
                             "version": 1,
                             "quality_version": QUALITY_VERSION,
-                            "backfill_start": BACKFILL_START_YMD,
+                            "backfill_start": bf_start_ymd,
                             "min_valid_bars_required": MIN_BACKFILL_BARS,
                             "sync_trade_date": end_s,
                             "universe_count": len(universe) + miss_skip_count,
@@ -4715,7 +4999,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         {
                             "version": 1,
                             "quality_version": QUALITY_VERSION,
-                            "backfill_start": BACKFILL_START_YMD,
+                            "backfill_start": bf_start_ymd,
                             "min_valid_bars_required": MIN_BACKFILL_BARS,
                             "sync_trade_date": end_s,
                             "universe_count": len(universe) + miss_skip_count,
@@ -4743,7 +5027,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     pass
                 _arm_force_slice_idle()
                 print(
-                    "[����ͬ��] yield time_slice after %.1fs progress=%d/%d "
+                    "[����ͬ��] ʱ��Ƭ�ó� after %.1fs progress=%d/%d "
                     "remain~%d idle=%.0fs"
                     % (
                         time.time() - t_slice_start,
@@ -4786,7 +5070,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     continue
                 truncated_left += 1
         except Exception as e:
-            print("[����ͬ��] coverage scan error: %s" % e)
+            print("[����ͬ��] ����ɨ�����: %s" % e)
             truncated_left = max(truncated_left, 1)
         coverage_ok_ratio = (
             float(sample_n - truncated_left) / float(sample_n) if sample_n else 0.0
@@ -4820,10 +5104,10 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         _miss_cache_put(code, "short_history", end_d, cache_dir)
                 _miss_cache_save(cache_dir, force=True)
             except Exception as e:
-                print("[����ͬ��] soft_short seed miss_cache fail: %s" % e)
+                print("[����ͬ��] ����д�� miss����ʧ��: %s" % e)
             print(
-                "[����ͬ��] FORCE incomplete coverage_ok=%.1f%% truncated=%d/%d "
-                "soft_short=%d soft_deferred=%d; keep flag, reset progress for retry"
+                "[����ͬ��] ǿ�Ʋ���δ��� coverage_ok=%.1f%% truncated=%d/%d "
+                "����=%d soft_deferred=%d; ������־�����ý����Ա�����"
                 % (
                     100.0 * coverage_ok_ratio,
                     truncated_left,
@@ -4838,7 +5122,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 {
                     "version": 1,
                     "quality_version": QUALITY_VERSION,
-                    "backfill_start": BACKFILL_START_YMD,
+                    "backfill_start": bf_start_ymd,
                     "min_valid_bars_required": MIN_BACKFILL_BARS,
                     "sync_trade_date": end_s,
                     "universe_count": len(universe) + miss_skip_count,
@@ -4878,7 +5162,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
         manifest = {
             "version": 1,
             "quality_version": QUALITY_VERSION,
-            "backfill_start": BACKFILL_START_YMD,
+            "backfill_start": bf_start_ymd,
             "min_valid_bars_required": MIN_BACKFILL_BARS,
             "sync_trade_date": end_s,
             "universe_count": len(universe) + miss_skip_count,
@@ -4911,7 +5195,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
         _SYNC_DONE_END_DATE = end_s
         _clear_force_backfill_flag(cache_dir)
         print(
-            "[����ͬ��] done end=%s ok=%d skip=%d fail=%d soft_short=%d "
+            "[����ͬ��] ��� end=%s ok=%d skip=%d fail=%d ����=%d "
             "miss_skip=%d primary=%s start=%s min_bars~%d"
             % (
                 end_s,
@@ -4921,7 +5205,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 soft_short_count,
                 miss_skip_count,
                 primary_source or "-",
-                BACKFILL_START_YMD,
+                bf_start_ymd,
                 MIN_BACKFILL_BARS,
             )
         )
@@ -4952,7 +5236,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             pass
         return True
     except Exception as e:
-        print("[����ͬ��] ERROR: %s" % e)
+        print("[����ͬ��] ����: %s" % e)
         try:
             _save_manifest(
                 manifest_path,
@@ -5000,7 +5284,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
 
 def startup_catch_up(ContextInfo=None) -> bool:
     """????? QMT ?????????????????????????????? 15:35 + on-demand??"""
-    print("[����ͬ��] startup catch-up disabled (15:35 timer + on-demand only)")
+    print("[����ͬ��] ���������ѽ��ã��� 15:35 ��ʱ + ���裩")
     return False
 
 
@@ -5053,7 +5337,7 @@ def _schedule_tick_pipeline() -> None:
         return
     due = datetime.fromtimestamp(_TICK_CHAIN_DUE_AT).strftime("%H:%M:%S")
     print(
-        "[����ͬ��] tick pipeline scheduled in %ds (due ~%s, version=%s)"
+        "[����ͬ��] �ֱ���ˮ���Ѱ��� %ds ��Լ %s���汾=%s��"
         % (delay, due, DAILY_SYNC_VERSION)
     )
 
@@ -5070,7 +5354,7 @@ def _tick_chain_delay_ready() -> bool:
     if now - float(_TICK_CHAIN_WAIT_LOG_TS) >= 60.0:
         _TICK_CHAIN_WAIT_LOG_TS = now
         left = int(float(_TICK_CHAIN_DUE_AT) - now)
-        print("[����ͬ��] tick pipeline waiting %ds more (delay after daily)" % left)
+        print("[����ͬ��] �ֱ���ˮ���ٵȴ� %ds�����ߺ��ӳ٣�" % left)
     return False
 
 
@@ -5103,7 +5387,7 @@ def _load_tick_full_sync_runner():
         tick_full = importlib.reload(tick_full)
         _TICK_FULL_SYNC_MTIME = mtime
         print(
-            "[����ͬ��] tick module reloaded version=%s"
+            "[����ͬ��] �ֱ�ģ�������� �汾=%s"
             % getattr(tick_full, "TICK_FULL_SYNC_VERSION", "?")
         )
     return tick_full
@@ -5134,7 +5418,7 @@ def _load_sector_sync_runner():
         sector = importlib.reload(sector)
         _SECTOR_SYNC_MTIME = mtime
         print(
-            "[����ͬ��] sector module reloaded version=%s"
+            "[����ͬ��] ���ģ�������� �汾=%s"
             % getattr(sector, "SECTOR_SYNC_VERSION", "?")
         )
     return sector
@@ -5144,13 +5428,13 @@ def _chain_tick_pipeline(ContextInfo) -> None:
     """?????????tick ???? ?? ?????tick ????????????????"""
     try:
         tick_full = _load_tick_full_sync_runner()
-        print("[����ͬ��] chain tick_full_sync + after_rank")
+        print("[����ͬ��] ���� �ֱ�ͬ�� + �̺�����")
         if hasattr(tick_full, "run_post_daily_pipeline"):
             tick_full.run_post_daily_pipeline(ContextInfo)
         else:
             tick_full.tick_full_sync(ContextInfo)
     except Exception as e:
-        print("[����ͬ��] chain tick pipeline failed: %s" % e)
+        print("[����ͬ��] �����ֱ���ˮ��ʧ��: %s" % e)
 
 
 def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
@@ -5241,18 +5525,19 @@ def register_daily_sync_timer(ContextInfo) -> None:
             "SH",
         )
         print(
-            "[����ͬ��] timer registered %02d:%02d "
-            "(then chain tick -> after_rank -> sector)"
+            "[����ͬ��] ��ʱ����ע�� %02d:%02d "
+            "������� �ֱʡ��̺���������飩"
             % (SYNC_HOUR, SYNC_MINUTE)
         )
     except Exception as e:
-        print("[����ͬ��] run_time register failed: %s" % e)
+        print("[����ͬ��] run_time ע��ʧ��: %s" % e)
 
 
 _ON_DEMAND_BUSY = False
 _ON_DEMAND_DEFER_LOG_TS = 0.0
 _ON_DEMAND_STALL_LOG_TS = 0.0
 _ON_DEMAND_SKIP_LOG_TS = 0.0
+_ON_DEMAND_DAILY_LAST_TS = 0.0
 _AUDIT_POOL_LAST_TS = 0.0
 AUDIT_POOL_INTERVAL_SEC = 120.0
 
@@ -5272,18 +5557,38 @@ def _pool_csv_ready(
 
 
 def _purge_bad_pool_csv(code: str, cache_dir: str, end_d: date) -> bool:
-    """????????????????? CSV?????????? on_demand??"""
+    """�����������/���̵ĳ� CSV��������ʷ���� hist �Զ̣���ɾ��"""
     if _pool_csv_ready(code, cache_dir, end_d):
         return False
     csv_path = os.path.join(cache_dir, code + ".csv")
     if not os.path.isfile(csv_path):
         return False
+    rows = _read_csv_rows(csv_path)
+    check_d = _pool_daily_write_end_date(None, end_d)
+    _remove_bars_after_date(rows, check_d)
+    reason = _pool_storage_reason(
+        _rows_to_bars(rows), check_d, list_date=_csv_list_date(code)
+    )
+    # β���ѵ���һ�����������㹻��������������/FORCE����ɾ������
+    if reason and str(reason).startswith("hist_"):
+        last_d = None
+        try:
+            if rows:
+                last_d = datetime.strptime(max(rows.keys())[:10], "%Y-%m-%d").date()
+        except ValueError:
+            last_d = None
+        if (
+            last_d is not None
+            and last_d >= check_d - timedelta(days=POOL_MAX_DATE_LAG_DAYS)
+            and _count_valid_rows(rows) >= POOL_INTRADAY_MIN_BARS
+        ):
+            return False
     try:
         os.remove(csv_path)
-        print("[����ͬ��] purge bad pool csv %s" % code)
+        print("[����ͬ��] ������� csv %s reason=%s" % (code, reason or "?"))
         return True
     except Exception as e:
-        print("[����ͬ��] purge bad pool csv fail %s: %s" % (code, e))
+        print("[����ͬ��] ������� csv ʧ�� %s: %s" % (code, e))
         return False
 
 
@@ -5386,6 +5691,8 @@ def requeue_priority_daily_requests(
     data = load_requests()
     daily = data.setdefault("daily", {})
     requeued = 0
+    marked_done = 0
+    dirty = False
     for raw in codes or []:
         full = _to_full_stock_code(str(raw or ""))
         if not full:
@@ -5399,7 +5706,8 @@ def requeue_priority_daily_requests(
                 meta["status"] = "done"
                 meta["updated_at"] = _now_iso()
                 daily[full] = meta
-                requeued += 1
+                marked_done += 1
+                dirty = True
             continue
         prev = daily.get(full) if isinstance(daily.get(full), dict) else {}
         prev_retries = int(prev.get("retries") or 0)
@@ -5414,6 +5722,10 @@ def requeue_priority_daily_requests(
         elif prev_status == "pending" and prev_retries < MAX_RETRIES:
             # Already queued; do not reset retries every periodic tick.
             continue
+        elif prev_status == "done":
+            # done �����ʼ�δ������ȴ�����ԣ��������� pending ��ѭ��
+            if _pool_attempt_within(prev, POOL_REQUEUE_COOLDOWN_SEC):
+                continue
         elif prev_status in ("failed", "pending") or prev_retries >= MAX_RETRIES:
             # Cool down before resetting failed/exhausted ?? pending retries=0.
             # Without this, pool_invalid loops reset every ~few seconds and
@@ -5429,13 +5741,15 @@ def requeue_priority_daily_requests(
             "updated_at": _now_iso(),
         }
         requeued += 1
-    if requeued:
+        dirty = True
+    if dirty:
         save_requests(data)
+    if requeued:
         print(
             "[����ͬ��] requeue pool daily: %d codes (through=%s)"
             % (requeued, end_s)
         )
-    return requeued
+    return requeued + marked_done
 
 
 def _priority_sync_codes() -> set:
@@ -5533,7 +5847,7 @@ def _run_on_demand_batch(
     intraday: bool,
     priority: set,
 ) -> int:
-    global _ON_DEMAND_BUSY
+    global _ON_DEMAND_BUSY, _ON_DEMAND_DAILY_LAST_TS
     handled = 0
     try:
         from ant_data_sync_request import (
@@ -5551,7 +5865,7 @@ def _run_on_demand_batch(
                 mark_tick_failed,
             )
         except ImportError as e:
-            print("[����ͬ��] on_demand import failed: %s" % e)
+            print("[����ͬ��] ����ʧ��: %s" % e)
             return 0
 
     _, cache_dir, _, _ = _data_paths()
@@ -5580,7 +5894,7 @@ def _run_on_demand_batch(
 
     if daily_cache_hit or tick_cache_hit:
         print(
-            "[����ͬ��] on_demand cache_hit daily=%d tick=%d"
+            "[����ͬ��] �������� daily=%d tick=%d"
             % (daily_cache_hit, tick_cache_hit)
         )
 
@@ -5590,8 +5904,11 @@ def _run_on_demand_batch(
     try:
         xtdata = _load_xtdata()
     except Exception as e:
-        print("[����ͬ��] on_demand xtdata unavailable: %s" % e)
+        print("[����ͬ��] xtdata ������: %s" % e)
         return handled
+
+    # ���пձ���Ҳ���������� download_history_data����ֱ�ͬԴ bind��
+    _ensure_builtin_download_bound()
 
     synced_ok = 0
     synced_fail = 0
@@ -5606,14 +5923,14 @@ def _run_on_demand_batch(
                 if last_d is not None and (through_d - last_d).days <= 15:
                     _miss_cache_clear(code, cache_dir)
                     print(
-                        "[����ͬ��] on_demand cleared false delisted %s last_bar=%s"
+                        "[����ͬ��] ������������� %s last_bar=%s"
                         % (code, last_d.isoformat())
                     )
                 else:
                     reason = "miss_cache_%s" % miss_reason
                     mark_daily_failed(code, through_d, reason)
                     synced_fail += 1
-                    print("[����ͬ��] on_demand miss_skip %s: %s" % (code, reason))
+                    print("[����ͬ��] miss���� %s: %s" % (code, reason))
                     continue
             if miss_reason in ("today_halt", "suspended"):
                 csv_p = os.path.join(cache_dir, code + ".csv")
@@ -5621,7 +5938,7 @@ def _run_on_demand_batch(
                     reason = "miss_cache_%s" % miss_reason
                     mark_daily_failed(code, through_d, reason)
                     synced_fail += 1
-                    print("[����ͬ��] on_demand miss_skip %s: %s" % (code, reason))
+                    print("[����ͬ��] miss���� %s: %s" % (code, reason))
                     continue
             # empty_history / local_miss / invalid_0 / no_ctx??????? miss ???????????
             if miss_reason in (
@@ -5632,15 +5949,29 @@ def _run_on_demand_batch(
             ):
                 _miss_cache_clear(code, cache_dir)
                 print(
-                    "[����ͬ��] on_demand ignore soft miss %s reason=%s ?? retry daily"
+                    "[����ͬ��] ������ miss %s reason=%s �� ��������"
                     % (code, miss_reason)
                 )
-        sync_fn = (
-            _sync_one_code_pool if intraday and code in priority else _sync_one_code
-        )
-        status, reason, _rows = sync_fn(
-            xtdata, cache_dir, code, through_d, ContextInfo=ContextInfo
-        )
+        sync_through = through_d
+        if intraday:
+            # ����ֻ������һ���������գ�����������δ���� K������������ͬ��
+            sync_through = _pool_daily_write_end_date(xtdata, through_d)
+            status, reason, _rows = _sync_one_code(
+                xtdata,
+                cache_dir,
+                code,
+                sync_through,
+                ContextInfo=ContextInfo,
+                sync_source="on_demand_intraday",
+            )
+            _ON_DEMAND_DAILY_LAST_TS = time.time()
+        else:
+            sync_fn = (
+                _sync_one_code_pool if code in priority else _sync_one_code
+            )
+            status, reason, _rows = sync_fn(
+                xtdata, cache_dir, code, through_d, ContextInfo=ContextInfo
+            )
         if status == "ok":
             mark_daily_done(code, through_d)
             _miss_cache_clear(code, cache_dir)
@@ -5663,7 +5994,7 @@ def _run_on_demand_batch(
             mark_daily_failed(code, through_d, reason or status)
             synced_fail += 1
             print(
-                "[����ͬ��] on_demand fail %s: %s" % (code, reason or status)
+                "[����ͬ��] ʧ�� %s: %s" % (code, reason or status)
             )
     _miss_cache_save(cache_dir)
 
@@ -5676,20 +6007,20 @@ def _run_on_demand_batch(
             handled += 1
             synced_ok += 1
             print(
-                "[����ͬ��] on_demand tick ok %s %s"
+                "[����ͬ��] �ֱʳɹ� %s %s"
                 % (code_6, trade_d.strftime("%Y%m%d"))
             )
         else:
             mark_tick_failed(code_6, trade_d, reason or status)
             synced_fail += 1
             print(
-                "[����ͬ��] on_demand tick fail %s %s: %s"
+                "[����ͬ��] �ֱ�ʧ�� %s %s: %s"
                 % (code_6, trade_d.strftime("%Y%m%d"), reason or status)
             )
 
     if synced_ok or synced_fail:
         print(
-            "[����ͬ��] on_demand synced ok=%d fail=%d"
+            "[����ͬ��] ��ͬ�� ok=%d fail=%d"
             % (synced_ok, synced_fail)
         )
     return handled
@@ -5713,14 +6044,28 @@ def process_on_demand_sync_requests(
     daily_limit: int = 8,
     tick_limit: int = 4,
 ) -> int:
-    """??????????????/????????????????????? CSV + ?? tick pkl????"""
-    global _ON_DEMAND_BUSY, _ON_DEMAND_DEFER_LOG_TS, _ON_DEMAND_STALL_LOG_TS, _ON_DEMAND_SKIP_LOG_TS, _AUDIT_POOL_LAST_TS, _FORCE_SLICE_IDLE_UNTIL
+    """���а��������������ѣ����ǲ��Գأ������ؿ�ʱ���� download_history_data��������һ���������ա�"""
+    try:
+        return _process_on_demand_sync_requests_body(
+            ContextInfo, daily_limit=daily_limit, tick_limit=tick_limit
+        )
+    except KeyboardInterrupt:
+        return 0
+
+
+def _process_on_demand_sync_requests_body(
+    ContextInfo=None,
+    *,
+    daily_limit: int = 8,
+    tick_limit: int = 4,
+) -> int:
+    global _ON_DEMAND_BUSY, _ON_DEMAND_DEFER_LOG_TS, _ON_DEMAND_STALL_LOG_TS, _ON_DEMAND_SKIP_LOG_TS, _AUDIT_POOL_LAST_TS, _FORCE_SLICE_IDLE_UNTIL, _ON_DEMAND_DAILY_LAST_TS
     if _ON_DEMAND_BUSY or _SYNC_RUNNING:
         now_skip = time.time()
         if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
             reason = "sync_running" if _SYNC_RUNNING else "busy"
             print(
-                "[����ͬ��] on_demand skip (%s); retry when idle"
+                "[����ͬ��] ���� (%s); ����ʱ����"
                 % reason
             )
             _ON_DEMAND_SKIP_LOG_TS = now_skip
@@ -5738,7 +6083,7 @@ def process_on_demand_sync_requests(
         else:
             if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
                 print(
-                    "[����ͬ��] on_demand skip (FORCE idle remain=%.0fs)"
+                    "[����ͬ��] ������ǿ�Ʋ������� remain=%.0fs��"
                     % max(0.0, remain_idle)
                 )
                 _ON_DEMAND_SKIP_LOG_TS = now_skip
@@ -5752,7 +6097,7 @@ def process_on_demand_sync_requests(
     ):
         if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
             print(
-                "[����ͬ��] on_demand skip (FORCE/partial active; quotes first)"
+                "[����ͬ��] ������ǿ��/���ֽ�����; �������ȣ�"
             )
             _ON_DEMAND_SKIP_LOG_TS = now_skip
         return 0
@@ -5760,7 +6105,6 @@ def process_on_demand_sync_requests(
     intraday = _in_intraday_blocking_window()
     priority = _priority_sync_codes() if intraday else set()
     if intraday:
-        eff_daily_limit = _intraday_priority_daily_limit(len(priority))
         eff_tick_limit = 2
     else:
         eff_daily_limit = daily_limit
@@ -5782,60 +6126,69 @@ def process_on_demand_sync_requests(
                 list_pending_ticks,
             )
         except Exception as e:
-            print("[����ͬ��] on_demand import failed: %s" % e)
+            print("[����ͬ��] ����ʧ��: %s" % e)
             return 0
 
-    all_pending_daily = list_pending_daily(limit=50)
-    if intraday and priority:
-        pending_daily = [
-            item for item in all_pending_daily if item[0] in priority
-        ][:eff_daily_limit]
-    else:
-        pending_daily = all_pending_daily[:eff_daily_limit]
-    pending_tick = list_pending_ticks(limit=max(eff_tick_limit, 20))
-    if len(pending_tick) > eff_tick_limit:
-        eff_tick_limit = min(8, max(eff_tick_limit, len(pending_tick) // 4 + 1))
-        pending_tick = pending_tick[:eff_tick_limit]
-    if not intraday and len(all_pending_daily) > eff_daily_limit:
-        eff_daily_limit = min(15, max(eff_daily_limit, len(all_pending_daily) // 3 + 2))
-        pending_daily = all_pending_daily[:eff_daily_limit]
-
-    if intraday and priority and not pending_daily:
-        import time as _time
-
-        now = _time.time()
-        if now - _ON_DEMAND_DEFER_LOG_TS >= 60.0:
-            deferred = [c for c, _, _ in all_pending_daily if c not in priority]
-            if deferred:
+    # ���зſ�ɨ�裬�����ҵ��������������һֻ�ǳأ��زⲹ����
+    scan_n = 120 if intraday else 50
+    all_pending_daily = list_pending_daily(limit=scan_n)
+    if intraday:
+        # ���У�ÿ����� 1 ֻ���ߣ��������ȣ��������ѷǳض��У��ز�/������
+        now_ts = time.time()
+        interval = float(INTRADAY_ON_DEMAND_DAILY_INTERVAL_SEC)
+        can_fetch = (now_ts - float(_ON_DEMAND_DAILY_LAST_TS)) >= interval
+        pri_items = [it for it in all_pending_daily if it[0] in priority]
+        non_items = [it for it in all_pending_daily if it[0] not in priority]
+        pending_daily = []
+        if can_fetch:
+            pick = (pri_items + non_items)[: int(INTRADAY_ON_DEMAND_DAILY_BATCH)]
+            pending_daily = pick
+            if pending_daily and (now_ts - _ON_DEMAND_DEFER_LOG_TS) >= 60.0:
                 print(
-                    "[����ͬ��] on_demand defer non-pool daily during intraday "
-                    "(pool=%d codes; resume after 15:05)"
-                    % len(priority)
+                    "[����ͬ��] ������������ %dֻ/%.0fs "
+                    "(pool=%d queue��%d; ������һ������)"
+                    % (
+                        int(INTRADAY_ON_DEMAND_DAILY_BATCH),
+                        interval,
+                        len(priority),
+                        len(all_pending_daily),
+                    )
                 )
-                _ON_DEMAND_DEFER_LOG_TS = now
-        if now - _ON_DEMAND_STALL_LOG_TS >= 120.0 and priority:
+                _ON_DEMAND_DEFER_LOG_TS = now_ts
+        if now_ts - _ON_DEMAND_STALL_LOG_TS >= 120.0 and priority:
+            # ����β��̽�⣬����ȫ���� CSV ʱ���ֶ�ֹͣ���ˢ��ջ
             missing = [
                 c
                 for c in sorted(priority)
-                if not _pool_csv_ready(c, cache_dir, date.today())
+                if not _pool_csv_tail_ready(c, cache_dir, date.today())
             ]
             if missing:
                 print(
-                    "[����ͬ��] pool daily still missing %d codes "
-                    "(waiting on_demand queue): %s"
+                    "[����ͬ��] ����������ȱ %d ֻ "
+                    "���ȴ�������У�: %s"
                     % (
                         len(missing),
                         ", ".join(missing[:6])
                         + (" ..." if len(missing) > 6 else ""),
                     )
                 )
-                _ON_DEMAND_STALL_LOG_TS = now
+                _ON_DEMAND_STALL_LOG_TS = now_ts
+    else:
+        pending_daily = all_pending_daily[:eff_daily_limit]
+        if len(all_pending_daily) > eff_daily_limit:
+            eff_daily_limit = min(15, max(eff_daily_limit, len(all_pending_daily) // 3 + 2))
+            pending_daily = all_pending_daily[:eff_daily_limit]
+
+    pending_tick = list_pending_ticks(limit=max(eff_tick_limit, 20))
+    if len(pending_tick) > eff_tick_limit:
+        eff_tick_limit = min(8, max(eff_tick_limit, len(pending_tick) // 4 + 1))
+        pending_tick = pending_tick[:eff_tick_limit]
 
     if not pending_daily and not pending_tick:
         return 0
 
     print(
-        "[����ͬ��] on_demand start daily=%d tick=%d (queue daily=%d)"
+        "[����ͬ��] ��ʼ daily=%d tick=%d (queue daily=%d)"
         % (
             len(pending_daily),
             len(pending_tick),

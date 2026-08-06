@@ -260,6 +260,7 @@ def load_daily_dataframe(
     through_date: Optional[date] = None,
     allow_xtdata_fallback: bool = True,
     allow_on_demand: bool = True,
+    on_demand_timeout_sec: Optional[float] = None,
 ) -> Optional[pd.DataFrame]:
     """优先 daily_cache；builtin 下缺数据可请求大 QMT 同步落盘；mini 可选 xtdata 回退。"""
     df = load_daily_from_cache(stock_code, through_date=through_date)
@@ -272,7 +273,10 @@ def load_daily_dataframe(
             use_on_demand_qmt_sync = lambda: False  # type: ignore[assignment, misc]
             ensure_daily_dataframe = None  # type: ignore[assignment]
         if use_on_demand_qmt_sync() and callable(ensure_daily_dataframe):
-            return ensure_daily_dataframe(stock_code, through_date=through_date)
+            kw = {}
+            if on_demand_timeout_sec is not None:
+                kw["timeout_sec"] = float(on_demand_timeout_sec)
+            return ensure_daily_dataframe(stock_code, through_date=through_date, **kw)
     if not allow_xtdata_fallback:
         return None
     logger.info("[%s] daily_cache 无数据，回退 xtdata", stock_code)

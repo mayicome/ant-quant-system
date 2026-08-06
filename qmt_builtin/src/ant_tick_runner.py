@@ -74,7 +74,7 @@ def _light_row(raw: Any) -> Dict[str, Any]:
         "low", "lowPrice", "todayLow",
         "amount", "volume", "lastVol", "tradeVol", "tradeVolume", "tickVol",
         "singleVol", "matchQty", "qty", "volume_delta", "cumVol", "totalVol", "dealVol",
-        "askPrice", "askVol", "bidPrice", "bidVol", "time",
+        "askPrice", "askVol", "bidPrice", "bidVol", "timetag",
         "highLimit", "upperLimit", "limitUp", "lastClose", "preClose", "pre_close",
     )
     for c in cols:
@@ -671,7 +671,7 @@ class ShadowTickRunner:
             return events
 
         v_break = self._single_tick_volume(st, row)
-        tick_time = self._format_tick_time(row.get("time"))
+        tick_time = self._format_tick_time(self._tick_row_timetag(row))
 
         for task in active:
             tid = str(task.get("task_id") or "")
@@ -1530,20 +1530,33 @@ class ShadowTickRunner:
 
     @staticmethod
     def _format_tick_time(raw: Any) -> str:
+        """只格式化 timetag（如 '20240620 14:13:30'）→ HH:MM:SS；不解析 time 毫秒戳。"""
         if raw is None:
             return ""
-        try:
-            v = float(raw)
-            if v > 1e12:
-                v /= 1000.0
-            if v > 1e9:
-                from datetime import datetime, timezone, timedelta
+        s = str(raw).strip()
+        if not s:
+            return ""
+        # "20240620 14:13:30" / "2024-06-20 14:13:30" / "2024-06-20T14:13:30"
+        if " " in s or "T" in s:
+            try:
+                part = s.replace("T", " ").split()[-1]
+                if len(part) >= 8 and part[2] == ":":
+                    return part[:8]
+            except Exception:
+                pass
+        if len(s) >= 8 and s[2] == ":":
+            return s[:8]
+        return ""
 
-                dt = datetime.fromtimestamp(v, timezone(timedelta(hours=8)))
-                return dt.strftime("%H:%M:%S")
-        except (TypeError, ValueError):
-            pass
-        return str(raw)
+    @staticmethod
+    def _tick_row_timetag(row: Dict[str, Any]) -> Any:
+        """仅取官方全推 timetag；不用 time/stime 兜底。"""
+        if not isinstance(row, dict):
+            return None
+        v = row.get("timetag")
+        if v is None or str(v).strip() == "":
+            return None
+        return v
 
     @staticmethod
     def _event(

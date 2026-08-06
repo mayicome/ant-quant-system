@@ -729,8 +729,10 @@ def load_ticks_for_codes(
     trade_date: TradeDateInput,
     *,
     use_memory_cache: bool = True,
+    allow_on_demand: bool = True,
+    allow_xtdata_fallback: bool = True,
 ) -> Dict[str, Any]:
-    """批量加载：先统一读缓存，再批量 QMT，最后逐只补漏。"""
+    """批量加载：先统一读缓存；allow_on_demand/allow_xtdata_fallback 为 False 时本地缺失即跳过。"""
     result: Dict[str, Any] = {}
     codes: List[str] = []
     for c in stock_codes_6 or []:
@@ -765,13 +767,16 @@ def load_ticks_for_codes(
     if not missing:
         return result
 
+    if not allow_on_demand and not allow_xtdata_fallback:
+        return result
+
     try:
         from utils.data_sync_request import use_on_demand_qmt_sync, wait_tick_cache
     except ImportError:
         use_on_demand_qmt_sync = lambda: False  # type: ignore[assignment, misc]
         wait_tick_cache = None  # type: ignore[assignment]
 
-    if use_on_demand_qmt_sync() and callable(wait_tick_cache):
+    if allow_on_demand and use_on_demand_qmt_sync() and callable(wait_tick_cache):
         try:
             from utils.data_sync_request import (
                 BACKTEST_TICK_TIMEOUT_SEC,
@@ -810,6 +815,9 @@ def load_ticks_for_codes(
             missing = wait_list + skipped
         if not missing:
             return result
+
+    if not allow_xtdata_fallback:
+        return result
 
     try:
         import xtquant.xtdata as xtdata
@@ -850,10 +858,17 @@ def load_ticks_for_codes(
                 result[c6] = data
             missing = still
 
+    # 上面已做 pool 等待 / xtdata 回退；此处禁止再按只 ensure（默认 240s/只会把回测拖死）
     for c6 in missing:
         if c6 in result:
             continue
-        df = load_tick_data(c6, trade_date, use_memory_cache=use_memory_cache)
+        df = load_tick_data(
+            c6,
+            trade_date,
+            use_memory_cache=use_memory_cache,
+            allow_on_demand=allow_on_demand,
+            allow_xtdata_fallback=allow_xtdata_fallback,
+        )
         if df is not None and len(df) > 0:
             result[c6] = df
 

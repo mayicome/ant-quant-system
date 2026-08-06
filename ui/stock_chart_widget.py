@@ -1930,8 +1930,14 @@ class StockChartWidget(QWidget):
         task_id = getattr(self, 'task_id', None)
         if self.task_manager and task_id:
             if not self.task_manager.start_task(task_id):
-                self.logger.warning(f"[{self.stock_code}] 启动任务失败，保持当前状态")
-                return
+                # 仍在 running_tasks：对齐为运行中，避免「显示未运行却提示已在运行」
+                if task_id in getattr(self.task_manager, "running_tasks", {}):
+                    self.logger.info(
+                        f"[{self.stock_code}] 任务管理器已在运行，同步图表为运行中"
+                    )
+                else:
+                    self.logger.warning(f"[{self.stock_code}] 启动任务失败，保持当前状态")
+                    return
         self.task_running = True
         self.task_paused = False
         
@@ -1982,9 +1988,29 @@ class StockChartWidget(QWidget):
         # 优先通过任务管理器停止真实任务进程，避免退出时仍被判定有运行任务
         task_id = getattr(self, 'task_id', None)
         if self.task_manager and task_id:
-            if not self.task_manager.stop_task(task_id):
-                self.logger.warning(f"[{self.stock_code}] 暂停任务失败，保持当前状态")
-                return
+            ok = False
+            try:
+                ok = bool(self.task_manager.stop_task(task_id))
+            except Exception as e:
+                self.logger.warning(f"[{self.stock_code}] stop_task 异常: {e}")
+                ok = False
+            if not ok:
+                # 旧版/残缺登记：尽量强制清掉，避免永远停不掉
+                try:
+                    if task_id in getattr(self.task_manager, "running_tasks", {}):
+                        self.task_manager._force_remove_running_task(
+                            task_id, send_stop=False
+                        )
+                    mark = getattr(self.task_manager, "_mark_task_stopped_params", None)
+                    if callable(mark):
+                        mark(task_id, paused=True, status="未运行")
+                    self.logger.warning(
+                        f"[{self.stock_code}] 暂停走强制清理，已尽量移除运行登记"
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        f"[{self.stock_code}] 强制清理失败: {e}", exc_info=True
+                    )
         self.task_running = False
         self.task_paused = True
         

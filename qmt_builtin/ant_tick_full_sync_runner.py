@@ -1,19 +1,19 @@
 #coding:gbk
-"""ï¿½ï¿½ QMT ï¿½Ú£ï¿½ï¿½Ìºï¿½È« A ï¿½ï¿½ï¿½ï¿½ tick ï¿½ï¿½ï¿½Ìµï¿½ data/ticks/{YYYYMMDD}/*.parquetï¿½ï¿½
+"""´ó QMT ÄÚ£ºÅÌºóÈ« A µ±ÈÕ tick ÂäÅÌµ½ data/ticks/{YYYYMMDD}/*.parquet¡£
 
-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½15:35ï¿½ï¿½ï¿½ï¿½Éºï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½Ô¼ 15:31 ï¿½ï¿½ï¿½Ìºï¿½ tickï¿½ï¿½
-ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½Ñ¸Í¶ï¿½Ù·ï¿½ï¿½ï¿½ï¿½ï¿½
-  1) ContextInfo.get_local_data / get_market_data_ex(subscribe=False) ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
-  2) ï¿½ï¿½ï¿½ï¿½ download_history_data(code,"tick",YYYYMMDD,YYYYMMDD) ï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½ï¿½ï¿½ xtdataï¿½ï¿½
-  3) ï¿½ï¿½ get_market_data_ex(subscribe=False)
-  4) ï¿½ï¿½Ñ¡ subscribe=Trueï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½å£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê· supplyï¿½ï¿½
-Ä¬ï¿½Ï¹Ø±ï¿½ xtdata.download_history_*ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ ENABLE_XTDATA_DOWNLOADï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ miniQMT RPC Ë¢ï¿½ï¿½ï¿½ï¿½
-ï¿½É¶Ïµï¿½ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¿ï¿½ï¿½ï¿½ tickï¿½ï¿½parquet ï¿½ï¿½ï¿½ pklï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
-×¢ï¿½â£ºï¿½ï¿½ pkl Ò²ï¿½ã¡¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½Ý¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È«ï¿½ï¿½ï¿½ï¿½ parquetï¿½ï¿½
-ï¿½ï¿½É¾ pklï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ parquetï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç¨ï¿½Æ¼ï¿½ tools/convert_tick_pkl_to_parquet.pyï¿½ï¿½
-ï¿½ï¿½ï¿½Ì³É¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É£ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½ï¿½Ü¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì£ï¿½ï¿½ï¿½
-ï¿½ï¿½ï¿½ï¿½ï¿½ó°´´ï¿½ï¿½ï¿½Ê£ï¿½ï¿½Õ¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¿Â¼ï¿½ï¿½ï¿½Õ¼ä¹»ï¿½ï¿½É¾ï¿½ï¿½ï¿½É´æ³¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â£ï¿½ï¿½ï¿½
-ï¿½ï¿½ï¿½Ý´ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ Python 3.6ï¿½ï¿½ï¿½ï¿½Ö¹ from __future__ import annotationsï¿½ï¿½ï¿½ï¿½
+ÓÉÈÕÏßÍ¬²½£¨15:35£©Íê³Éºó´®ÐÐ´¥·¢£»ÂäÅÌº¬ÖÁÔ¼ 15:31 µÄÅÌºó tick¡£
+Ö÷Â·¾¶£¨Ñ¸Í¶¹Ù·½£©£º
+  1) ContextInfo.get_local_data / get_market_data_ex(subscribe=False) ¶Á±¾µØ
+  2) ÄÚÖÃ download_history_data(code,"tick",YYYYMMDD,YYYYMMDD) ²¹±¾µØ£¨·Ç xtdata£©
+  3) ÔÙ get_market_data_ex(subscribe=False)
+  4) ¿ÉÑ¡ subscribe=True£¨¶©ÔÄÓïÒå£¬²»ÊÇÀúÊ· supply£©
+Ä¬ÈÏ¹Ø±Õ xtdata.download_history_*£¨Í¬ÈÕÏß ENABLE_XTDATA_DOWNLOAD£©£¬±ÜÃâ miniQMT RPC Ë¢ÆÁ¡£
+¿É¶ÏµãÐøÅÜ£»±¾µØÒÑÓÐ¿ÉÓÃ tick£¨parquet »ò¾É pkl£©ÔòÌø¹ý¡£
+×¢Òâ£ºÓÐ pkl Ò²Ëã¡¸¿ÉÌø¹ý/ÓÐÊý¾Ý¡¹£¬²»µÈÓÚÒÑÈ«²¿ÊÇ parquet£»
+ÎðÉ¾ pkl£¬³ý·ÇÍ¬´úÂëÒÑÓÐÐ£ÑéÍ¨¹ýµÄ parquet¡£±¾µØÇ¨ÒÆ¼û tools/convert_tick_pkl_to_parquet.py¡£
+ÂäÅÌ³É¹¦£¨»òÒÑÍê³É£©ºó´®ÐÐ´¥·¢ÅÌºóÁ¿ÄÜ£¨Á¿ÄÜ¶Á±¾µØÂäÅÌ£©¡£
+½áÊøºó°´´ÅÅÌÊ£Óà¿Õ¼äÇåÀí×î¾ÉÈÕÄ¿Â¼£¨¿Õ¼ä¹»²»É¾£¬¿É´æ³¬¹ýÈý¸öÔÂ£©¡£
+¼æÈÝ´ó QMT ÄÚÖÃ Python 3.6£¨½ûÖ¹ from __future__ import annotations£©¡£
 """
 import json
 import os
@@ -23,41 +23,41 @@ from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 TICK_FULL_SYNC_VERSION = "20260801.06"
-# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ã£ºï¿½ï¿½ï¿½ï¿½ catch-up ï¿½Ð¶Ï£ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ daily_sync ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½
+# ÓëÈÕÏßÍ¬µã£º½ö×÷ catch-up ÅÐ¶Ï£»ÕýÊ½Æô¶¯ÓÉ daily_sync ´®ÐÐ´¥·¢
 SYNC_HOUR = 15
 SYNC_MINUTE = 35
 BATCH_SIZE = 20
-# ï¿½ï¿½ï¿½Ì·ï¿½Ê£ï¿½ï¿½Õ¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ MIN ï¿½ï¿½É¾ï¿½ï¿½ï¿½ï¿½ï¿½Ä¿Â¼ï¿½ï¿½É¾ï¿½ï¿½ TARGET ï¿½ï¿½Ö»Ê£ MIN_KEEP_DAYS
+# °´ÅÌ·ûÊ£Óà¿Õ¼äÇåÀí£ºµÍÓÚ MIN ²ÅÉ¾×î¾ÉÈÕÄ¿Â¼£¬É¾µ½ TARGET »òÖ»Ê£ MIN_KEEP_DAYS
 TICK_MIN_FREE_GB = 40.0
 TICK_TARGET_FREE_GB = 60.0
 TICK_MIN_KEEP_DAYS = 20
-# È¯ï¿½ï¿½ tick ï¿½ï¿½ï¿½ï¿½Ô¼ 20ï¿½C30 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ò±¾µï¿½/download ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½Õ£ï¿½ï¿½ï¿½ API ï¿½ï¿½ï¿½ï¿½
+# È¯ÉÌ tick Áô´æÔ¼ 20¨C30 ¸ö½»Ò×ÈÕ£»³¬³öÔò±¾µØ/download ³£ÓÀ¾ÃÎª¿Õ£¨·Ç API »µ£©
 TICK_RETENTION_CALENDAR_DAYS = 28
-# ï¿½ï¿½ QMT-onlyï¿½ï¿½Ä¬ï¿½Ï¹Ø±ï¿½ xtdata.download_history_*ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ miniQMT 58610ï¿½ï¿½ï¿½ï¿½
-# ï¿½ï¿½ï¿½ï¿½ï¿½Ô¿ï¿½ï¿½ï¿½Ê± Trueï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½ï¿½ï¿½ ENABLE_BUILTIN_TICK_DOWNLOADï¿½ï¿½ï¿½ï¿½
-# download ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ YYYYMMDDï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½áµ¼ï¿½ï¿½ download2 ï¿½ÕµÈ³ï¿½Ê±ï¿½ï¿½
+# ´ó QMT-only£ºÄ¬ÈÏ¹Ø±Õ xtdata.download_history_*£¨ÒÀÀµ miniQMT 58610£©¡£
+# ½öµ÷ÊÔ¿ÉÁÙÊ± True¡£Éú²ú²¹È±×ßÄÚÖÃ download_history_data£¨¼û ENABLE_BUILTIN_TICK_DOWNLOAD£©¡£
+# download ²ÎÊýÐëÓÃ YYYYMMDD£¨´øÊ±·ÖÃë»áµ¼ÖÂ download2 ¿ÕµÈ³¬Ê±£©
 ENABLE_XTDATA_TICK_DOWNLOAD = False
-# ï¿½Ù·ï¿½ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½Ä£ï¿½Í½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½ï¿½ï¿½ xtdataï¿½ï¿½
+# ¹Ù·½Ö÷Â·¾¶£ºÄ£ÐÍ½»Ò×ÄÚÖÃ download_history_data£¨·Ç xtdata£©
 ENABLE_BUILTIN_TICK_DOWNLOAD = True
-# ï¿½ï¿½ï¿½ï¿½+builtin ï¿½Ô¿ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ subscribe=Trueï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½å£¬ï¿½ï¿½ï¿½ï¿½Ê· supplyï¿½ï¿½
+# ±¾µØ+builtin ÈÔ¿ÕÊ±ÔÙÊÔ subscribe=True£¨¶©ÔÄÓïÒå£¬·ÇÀúÊ· supply£©
 ENABLE_CTX_TICK_SUBSCRIBE = True
 _DOWNLOAD_WAIT_SEC = 120
-# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½Öªï¿½ï¿½Æ±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ download ï¿½È´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¿ï¿½ï¿½ï¿½Õµï¿½ 120s
+# ÅúÄÚÈô¶àÎªÒÑÖª¿ÕÆ±£¬Ëõ¶Ì download µÈ´ý£¬±ÜÃâÃ¿Åú¿ÕµÈ 120s
 _DOWNLOAD_WAIT_SEC_FAST = 8
-# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø³ï¿½Ê±ï¿½Ò±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È«Ê§ï¿½Ü¡ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ Serverï¿½ï¿½ï¿½æ¾¯
+# Á¬Ðø¶àÅú¡¸ÏÂÔØ³¬Ê±ÇÒ±¾Åú¼¸ºõÈ«Ê§°Ü¡¹¡ú ÒÉËÆÐÐÇé¶ÏÁ¬£¬ÖÐÖ¹²¢ Server½´¸æ¾¯
 _CONN_FAIL_ABORT_BATCHES = 3
-# ContextInfo ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È«ï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tick ï¿½ï¿½ subscribe Ò²ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½Í£ï¿½ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½Ð¡Ê±
+# ContextInfo Á¬Ðø¶àÅúÈ«¿Õ£º±¾µØÎÞ tick ÇÒ subscribe Ò²ÎÞÊý¾Ý£¬ÔçÍ£±ÜÃâ¿Õ×ªÊýÐ¡Ê±
 _CTX_EMPTY_ABORT_BATCHES = 5
-# ABORT ï¿½ï¿½ï¿½ï¿½È´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¡ï¿½ï¿½ï¿½ï¿½Õ¡ï¿½ï¿½ï¿½ï¿½ï¿½Ï£ï¿½ï¿½ï¿½Ê·ï¿½ï¿½ï¿½î´°ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+# ABORT ºóÀäÈ´£º½öÓÃÓÚ¡¸½ñÈÕ¡¹Õæ¹ÊÕÏ£»ÀúÊ·»ØÌî´°Íâ/¿ÕÅú¸ÄÎªÌø¹ý¸ÃÈÕ²¢Ðø¶ÓÁÐ
 _ABORT_HOLD_SEC_CODEBUG = 6 * 3600
 _ABORT_HOLD_SEC_CTX_EMPTY = 30 * 60
-# manual_request / keep ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë£©
+# manual_request / keep ÈÕÖ¾½ÚÁ÷£¨Ãë£©
 _MANUAL_LOG_INTERVAL_SEC = 120.0
-# ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½È« A tick / manual_request ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß³Ì£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ intraday ï¿½ï¿½ï¿½Ú¶ï¿½ï¿½ë²¢ï¿½Ô¿ï¿½ï¿½ï¿½
-# ï¿½ï¿½ï¿½ï¿½ download_history_data Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ periodic_sync ï¿½ï¿½ results.json/ï¿½Ë»ï¿½/ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½È«Í£
+# ÅÌÖÐ±£»¤£ºÈ« A tick / manual_request ²»ÇÀÖ÷Ïß³Ì£¨ÓëÈÕÏß intraday ´°¿Ú¶ÔÆë²¢ÂÔ¿í£©
+# ·ñÔò download_history_data Ñ­»·»á¶öËÀ periodic_sync ¡ú results.json/ÕË»§/²ßÂÔÈ¡ÊýÈ«Í£
 _MARKET_PROTECT_START = dt_time(9, 0)
 _MARKET_PROTECT_END = dt_time(15, 30)
-# ï¿½ï¿½ï¿½ï¿½Õ¼ï¿½ï¿½ï¿½ï¿½ï¿½ß³ï¿½ï¿½ï¿½ï¿½Þ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ progress ï¿½ï¿½ï¿½Ë»Ø£ï¿½ï¿½ï¿½ï¿½Ë»ï¿½/on_demand/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+# µ¥´ÎÕ¼ÓÃÖ÷Ïß³ÌÉÏÏÞ£ºµ½µã´æ progress ²¢ÍË»Ø£¬ÈÃÕË»§/on_demand/ÐÐÇéÐÄÌøÏÈÅÜ
 _TIME_SLICE_SEC = 60.0
 _PROGRESS_NAME = "_full_sync_progress.json"
 _DONE_MARKER = "_full_sync_done.json"
@@ -65,9 +65,9 @@ _ABORT_HOLD_NAME = "_full_sync_abort_hold.json"
 _MANUAL_REQUEST_NAME = "manual_request.json"
 _PAUSE_FLAG_NAME = "PAUSE"
 _MISS_CACHE_NAME = "sync_miss_codes.json"
-# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ daily ï¿½ï¿½ local_miss / today_halt
+# ½öÌø¹ýÈ·ÈÏÎÞÐÐÇé/ÍËÊÐ£»²»Ìø¹ý daily µÄ local_miss / today_halt
 _MISS_SKIP_REASONS = ("empty_history", "delisted")
-# ï¿½ï¿½Ð©Ê§ï¿½ï¿½Ô­ï¿½ò²»µï¿½Ð´ï¿½ï¿½ miss_cacheï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/API ï¿½ï¿½ï¿½â£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê·ï¿½ï¿½
+# ÕâÐ©Ê§°ÜÔ­Òò²»µÃÐ´Èë miss_cache£¨´úÂë/API ÎÊÌâ£¬²»ÊÇÕæÎÞÀúÊ·£©
 _MISS_BLOCK_REASON_SUBSTR = (
     "attributeerror",
     "has no attribute",
@@ -94,12 +94,12 @@ _MANUAL_HOLD_LOG_TS = 0.0
 
 def _log(msg):
     # type: (str) -> None
-    print("[ï¿½Ö±ï¿½Í¬ï¿½ï¿½] %s" % msg)
+    print("[·Ö±ÊÍ¬²½] %s" % msg)
 
 
 def _in_market_hours_protect(now=None):
     # type: (Optional[datetime]) -> bool
-    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½È« A tick ï¿½Ø»î£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½"""
+    """¹¤×÷ÈÕÅÌÖÐ£º½ûÖ¹Æô¶¯È« A tick ÖØ»î£¬±ÜÃâ×èÈû²ßÂÔ/½»Ò×È¡Êý¡£"""
     now = now or datetime.now()
     if now.weekday() >= 5:
         return False
@@ -122,7 +122,7 @@ def _pause_requested():
 
 def _daily_sync_running():
     # type: () -> bool
-    """ï¿½ï¿½ï¿½ï¿½È«ï¿½ï¿½/ FORCE ï¿½ï¿½ï¿½ï¿½Õ¼ï¿½ï¿½Í¬Ò» ContextInfo ï¿½ï¿½ï¿½ß³ï¿½Ê±ï¿½ï¿½ï¿½Ð¿ï¿½ tickï¿½ï¿½"""
+    """ÈÕÏßÈ«Á¿/ FORCE »ØÌîÕ¼ÓÃÍ¬Ò» ContextInfo Ö÷Ïß³ÌÊ±Îð²¢ÐÐ¿ª tick¡£"""
     try:
         try:
             import ant_daily_sync_runner as daily
@@ -165,10 +165,10 @@ def _project_root():
 
 def _ticks_day_dir(day, ensure=False):
     # type: (str, bool) -> str
-    """ticks ï¿½ï¿½Ä¿Â¼Â·ï¿½ï¿½ï¿½ï¿½ensure=True Ê±ï¿½Å´ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ progress/done ï¿½Ã£ï¿½ï¿½ï¿½
+    """ticks ÈÕÄ¿Â¼Â·¾¶¡£ensure=True Ê±²Å´´½¨£¨Ð´ progress/done ÓÃ£©¡£
 
-    Ì½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½ï¿½ï¿½ / abort-hold Ê±ï¿½ï¿½ mkdirï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç½ï¿½ï¿½ï¿½ï¿½ï¿½ catch-up ï¿½ï¿½ï¿½ï¿½ï¿½Â¿ï¿½Ä¿Â¼ï¿½ï¿½
-    ï¿½Ìºï¿½ï¿½ï¿½ï¿½Ü°Ñ¡ï¿½ï¿½ï¿½Ä¿Â¼ï¿½ï¿½ï¿½ï¿½ï¿½Ð³É½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½Ò»Ö±ï¿½ï¿½ï¿½È´ï¿½ï¿½Ö±ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    Ì½²âÊÇ·ñÍê³É / abort-hold Ê±Îð mkdir£º·ñÔò·Ç½»Ò×ÈÕ catch-up »áÁôÏÂ¿ÕÄ¿Â¼£¬
+    ÅÌºóÁ¿ÄÜ°Ñ¡¸ÓÐÄ¿Â¼¡¹ÎóÅÐ³É½»Ò×ÈÕ£¬Ò»Ö±¡¸µÈ´ý·Ö±ÊÍ¬²½¡¹¡£
     """
     path = os.path.join(_project_root(), "data", "ticks", day)
     if ensure and (not os.path.isdir(path)):
@@ -209,7 +209,7 @@ def _load_xtdata():
 
         return xtdata
     except Exception as e:
-        _log("xtdataï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½: %s" % e)
+        _log("xtdataµ¼ÈëÊ§°Ü: %s" % e)
         return None
 
 
@@ -225,7 +225,7 @@ def _is_tradeday(xtdata, day):
 
 def _load_universe_from_file():
     # type: () -> List[str]
-    """ï¿½ï¿½ï¿½ï¿½ data/a_share_universe.jsonï¿½ï¿½daily_sync ï¿½ï¿½ï¿½Ì£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ RPCï¿½ï¿½"""
+    """»ØÍË data/a_share_universe.json£¨daily_sync ÂäÅÌ£©£¬²»ÒÀÀµÐÐÇé RPC¡£"""
     path = os.path.join(_project_root(), "data", "a_share_universe.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -233,20 +233,20 @@ def _load_universe_from_file():
         raw = list(payload.get("codes") or [])
         out = [str(c).strip() for c in raw if str(c).strip()]
         if out:
-            _log("ï¿½ï¿½Æ±ï¿½Ø»ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½ n=%d" % len(out))
+            _log("¹ÉÆ±³Ø»ØÍËÎÄ¼þ n=%d" % len(out))
         return out
     except Exception as e:
-        _log("ï¿½ï¿½Æ±ï¿½ï¿½ï¿½Ä¼ï¿½Ê§ï¿½ï¿½: %s" % e)
+        _log("¹ÉÆ±³ØÎÄ¼þÊ§°Ü: %s" % e)
         return []
 
 
 def _load_universe(xtdata, limit=0, ContextInfo=None):
     # type: (Any, int, Any) -> List[str]
-    # ï¿½ï¿½ï¿½ï¿½ï¿½ unicode ×ªï¿½å£¬ï¿½ï¿½ï¿½ï¿½ GBK/ï¿½ï¿½ï¿½ï¿½ï¿½ð»µµï¿½ï¿½Â¿Õ³ï¿½
+    # °å¿éÃû unicode ×ªÒå£¬±ÜÃâ GBK/±àÂëËð»µµ¼ÖÂ¿Õ³Ø
     sectors = (
-        "\u6caa\u6df1A\u80a1",  # ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½
-        "\u4e0a\u8bc1A\u80a1",  # ï¿½ï¿½Ö¤Aï¿½ï¿½
-        "\u6df1\u8bc1A\u80a1",  # ï¿½ï¿½Ö¤Aï¿½ï¿½
+        "\u6caa\u6df1A\u80a1",  # »¦ÉîA¹É
+        "\u4e0a\u8bc1A\u80a1",  # ÉÏÖ¤A¹É
+        "\u6df1\u8bc1A\u80a1",  # ÉîÖ¤A¹É
     )
     owners = []  # type: List[Tuple[str, Any]]
     if ContextInfo is not None:
@@ -287,7 +287,7 @@ def _load_universe(xtdata, limit=0, ContextInfo=None):
     if limit and limit > 0:
         out = out[:limit]
     if out:
-        _log("ï¿½ï¿½Æ±ï¿½ï¿½ï¿½ï¿½Ô´=%s n=%d" % (src, len(out)))
+        _log("¹ÉÆ±³ØÀ´Ô´=%s n=%d" % (src, len(out)))
     return out
 
 
@@ -344,7 +344,7 @@ def _save_miss_cache(payload):
             json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
     except Exception as e:
-        _log("missï¿½ï¿½ï¿½æ±£ï¿½ï¿½Ê§ï¿½ï¿½: %s" % e)
+        _log("miss»º´æ±£´æÊ§°Ü: %s" % e)
 
 
 def _full_from_c6(c6):
@@ -373,7 +373,7 @@ def _miss_active(meta, today):
 
 def _miss_reason_blocked(reason):
     # type: (Any) -> bool
-    """AttributeError / È± API ï¿½È²ï¿½ï¿½Ã¼ï¿½ï¿½ï¿½ empty_history miss_cacheï¿½ï¿½"""
+    """AttributeError / È± API µÈ²»µÃ¼ÇÈë empty_history miss_cache¡£"""
     s = str(reason or "").strip().lower()
     if not s:
         return False
@@ -449,7 +449,7 @@ def _save_progress(day, data):
             os.remove(path)
         os.rename(tmp, path)
     except Exception as e:
-        _log("ï¿½ï¿½ï¿½È±ï¿½ï¿½ï¿½Ê§ï¿½ï¿½: %s" % e)
+        _log("½ø¶È±£´æÊ§°Ü: %s" % e)
 
 
 def _mark_done(
@@ -506,7 +506,7 @@ def _is_historical_day(day_s, today=None):
 
 def _day_beyond_tick_retention(day_s, today=None, retention_days=None):
     # type: (str, Optional[date], Optional[int]) -> bool
-    """ï¿½ï¿½ï¿½ï¿½È¯ï¿½ï¿½ tick ï¿½ï¿½ï¿½æ´°ï¿½Ú£ï¿½ï¿½ï¿½ï¿½ï¿½È»ï¿½Õ£ï¿½ï¿½ï¿½"""
+    """³¬³öÈ¯ÉÌ tick Áô´æ´°¿Ú£¨°´×ÔÈ»ÈÕ£©¡£"""
     d = _parse_day_date(day_s)
     if d is None:
         return False
@@ -521,7 +521,7 @@ def _day_beyond_tick_retention(day_s, today=None, retention_days=None):
 
 def _mark_skipped_no_tick(day_s, reason="beyond_retention"):
     # type: (str, str) -> None
-    """ï¿½ï¿½Ç¸ï¿½ï¿½Õ¶ï¿½ï¿½Ð¿ï¿½ï¿½Æ½ï¿½ï¿½ï¿½È¯ï¿½ï¿½ï¿½ï¿½ tick / ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç³É¹ï¿½ï¿½ï¿½ï¿½Ì¡ï¿½"""
+    """±ê¼Ç¸ÃÈÕ¶ÓÁÐ¿ÉÍÆ½ø£ºÈ¯ÉÌÎÞ tick / ÀúÊ·¿ÕÅú£¬·Ç³É¹¦ÂäÅÌ¡£"""
     reason_s = str(reason or "beyond_retention")[:120]
     beyond = _day_beyond_tick_retention(day_s)
     extra = {
@@ -531,11 +531,11 @@ def _mark_skipped_no_tick(day_s, reason="beyond_retention"):
     }
     _mark_done(day_s, 0, 0, 0, elapsed_sec=0.0, extra=extra)
     msg = (
-        "SKIP ï¿½ï¿½tickï¿½ï¿½ day=%s reason=%sï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¯ï¿½ï¿½tickï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½"
+        "SKIP ÎÞtickÈÕ day=%s reason=%s£¨³¬³öÈ¯ÉÌtickÁô´æ»òÀúÊ·ÎÞÊý¾Ý£¬Ìø¹ýÐøÏÂÒ»¶ÓÁÐÈÕ£©"
         % (day_s, reason_s)
     )
     if beyond or reason_s.startswith("beyond_"):
-        msg = "SKIP ï¿½ï¿½ï¿½ï¿½È¯ï¿½ï¿½tickï¿½ï¿½ï¿½ï¿½ day=%s reason=%s" % (day_s, reason_s)
+        msg = "SKIP ³¬³öÈ¯ÉÌtickÁô´æ day=%s reason=%s" % (day_s, reason_s)
     _log(msg)
     _append_run_log(day_s, msg)
     _clear_abort_hold(day_s)
@@ -551,11 +551,11 @@ def _day_already_done(day):
             data = json.load(f)
         if not isinstance(data, dict):
             return False
-        # ï¿½É°ï¿½ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ï¿½Ìºï¿½Ê±ï¿½Î£ï¿½ï¿½ï¿½ï¿½Üµï¿½ï¿½É±ï¿½ï¿½ï¿½ï¿½ï¿½É£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü¶ï¿½ï¿½ï¿½ after_vol È« 0ï¿½ï¿½
+        # ¾É°æÂäÅÌÎ´º¬ÅÌºóÊ±¶Î£¬²»ÄÜµ±³É±¾°æÍê³É£¨·ñÔòÁ¿ÄÜ¶ÁÅÌ after_vol È« 0£©
         ver = str(data.get("version") or "")
         if ver < "20260728.04":
             return False
-        # ï¿½ï¿½ï¿½æ´°ï¿½ï¿½ / ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ catch-up ï¿½ï¿½Îªï¿½Ñ´ï¿½ï¿½ï¿½
+        # Áô´æ´°Íâ / ÀúÊ·¿ÕÅúÌø¹ý£º¶ÓÁÐÓë catch-up ÊÓÎªÒÑ´¦Àí
         if data.get("skipped_retention") or data.get("skipped_no_tick"):
             return True
         total = int(data.get("total") or 0)
@@ -610,14 +610,14 @@ def _set_abort_hold(day_s, reason, cooldown_sec):
     except Exception:
         pass
     _log(
-        "ï¿½ï¿½Ö¹ï¿½ï¿½È´ï¿½ï¿½ %s Ô­ï¿½ï¿½=%s"
+        "ÖÐÖ¹ÀäÈ´ÖÁ %s Ô­Òò=%s"
         % (payload["until"], _ABORT_HOLD_REASON[:80])
     )
 
 
 def _abort_hold_active(day_s):
     # type: (str) -> Tuple[bool, str]
-    """ï¿½ï¿½ï¿½ï¿½ ABORT ï¿½ï¿½È´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½ miss_cache ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å´ï¿½"""
+    """½ñÈÕ ABORT ÀäÈ´ÖÐÔòÌø¹ýÖØÅÜ£¬±ÜÃâ miss_cache ±»¿ÕÅú³Å´ó¡£"""
     global _ABORT_HOLD_DAY, _ABORT_HOLD_UNTIL, _ABORT_HOLD_REASON, _ABORT_HOLD_LOG_TS
     now = time.time()
     if _ABORT_HOLD_DAY == str(day_s) and now < float(_ABORT_HOLD_UNTIL or 0):
@@ -641,7 +641,7 @@ def _abort_hold_active(day_s):
 
 def _import_tick_io():
     # type: () -> Any
-    """ï¿½ï¿½ mtime ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ant_tick_cache_ioï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ deploy ï¿½ï¿½ï¿½ï¿½È± fetch_ticks_batchï¿½ï¿½"""
+    """°´ mtime ÈÈÖØÔØ ant_tick_cache_io£¬±ÜÃâ deploy ºóÈÔÈ± fetch_ticks_batch¡£"""
     global _TICK_IO_MTIME
     import importlib
 
@@ -672,7 +672,7 @@ def _import_tick_io():
         mod = importlib.reload(mod)
         _TICK_IO_MTIME = mtime
         _log(
-            "tick_ioï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½æ±¾=%s ï¿½ï¿½ï¿½ï¿½È¡=%s"
+            "tick_ioÒÑÖØÔØ °æ±¾=%s ÓÐÅúÈ¡=%s"
             % (
                 getattr(mod, "TICK_CACHE_IO_VERSION", "?"),
                 hasattr(mod, "fetch_ticks_batch"),
@@ -688,7 +688,7 @@ def _import_tick_io():
 
 def _load_sector_sync_runner():
     # type: () -> Any
-    """ï¿½ï¿½ mtime ï¿½ï¿½ï¿½ï¿½ï¿½Ø°ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 20260728.2ï¿½ï¿½"""
+    """°´ mtime ÈÈÖØÔØ°å¿éÍ¬²½£¬±ÜÃâ½ø³ÌÄÚÈÔÊÇ 20260728.2¡£"""
     global _SECTOR_MTIME
     import importlib
 
@@ -716,7 +716,7 @@ def _load_sector_sync_runner():
         mod = importlib.reload(mod)
         _SECTOR_MTIME = mtime
         _log(
-            "ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½æ±¾=%s"
+            "°å¿éÄ£¿éÒÑÖØÔØ °æ±¾=%s"
             % getattr(mod, "SECTOR_SYNC_VERSION", "?")
         )
     return mod
@@ -752,7 +752,7 @@ def _purge_old_tick_dirs(
     min_keep_days=TICK_MIN_KEEP_DAYS,
 ):
     # type: (float, float, int) -> List[str]
-    """ï¿½Õ¼ä¹»ï¿½ï¿½É¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¿Â¼É¾ï¿½ï¿½Ä¿ï¿½ï¿½Ê£ï¿½ï¿½ï¿½Ö»Ê£ min_keep_daysï¿½ï¿½"""
+    """¿Õ¼ä¹»²»É¾£»²»×ãÊ±´Ó×î¾ÉÈÕÄ¿Â¼É¾µ½Ä¿±êÊ£Óà»òÖ»Ê£ min_keep_days¡£"""
     root = os.path.join(_project_root(), "data", "ticks")
     if not os.path.isdir(root):
         return []
@@ -777,7 +777,7 @@ def _purge_old_tick_dirs(
     target_b = int(target_free * (1024.0 ** 3))
     if free_b >= min_b:
         _log(
-            "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: Ê£ï¿½ï¿½=%.1fGB >= ï¿½ï¿½ï¿½ï¿½=%.1fGBï¿½ï¿½ï¿½ï¿½ï¿½ï¿½%dï¿½ï¿½ï¿½ï¿½Ä¿Â¼ï¿½ï¿½"
+            "ÇåÀíÌø¹ý: Ê£Óà=%.1fGB >= ÏÂÏÞ=%.1fGB£¨±£Áô%d¸öÈÕÄ¿Â¼£©"
             % (free_b / (1024.0 ** 3), min_free, len(days))
         )
         return []
@@ -793,15 +793,15 @@ def _purge_old_tick_dirs(
         try:
             shutil.rmtree(path)
             removed.append(ymd)
-            _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¿Â¼ %sï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç°Ê£ï¿½ï¿½%.1fGBï¿½ï¿½" % (ymd, (free_now or 0) / (1024.0 ** 3)))
+            _log("ÒÑÇåÀíÈÕÄ¿Â¼ %s£¨ÇåÀíÇ°Ê£Óà%.1fGB£©" % (ymd, (free_now or 0) / (1024.0 ** 3)))
         except Exception as e:
-            _log("ï¿½ï¿½ï¿½ï¿½ %s Ê§ï¿½ï¿½: %s" % (ymd, e))
+            _log("ÇåÀí %s Ê§°Ü: %s" % (ymd, e))
     return removed
 
 
 def _download_batch_builtin(tick_io, full_codes, ymd):
     # type: (Any, List[str], str) -> Tuple[int, str]
-    """ï¿½ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ download_history_data ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tickï¿½ï¿½ï¿½ï¿½ 58610ï¿½ï¿½ï¿½ï¿½"""
+    """´ó QMT ÄÚÖÃ download_history_data ÅúÁ¿²¹±¾µØ tick£¨·Ç 58610£©¡£"""
     if not ENABLE_BUILTIN_TICK_DOWNLOAD or tick_io is None:
         return 0, "builtin_dl_off"
     fn = getattr(tick_io, "download_ticks_via_builtin", None)
@@ -815,12 +815,12 @@ def _download_batch_builtin(tick_io, full_codes, ymd):
 
 def _download_batch(xtdata, full_codes, ymd, wait_sec=None):
     # type: (Any, List[str], str, Optional[float]) -> bool
-    """ï¿½ï¿½Ñ¡ xtdata ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½Ä¬ï¿½Ï¹Ø±Õ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½È´ï¿½ï¿½Øµï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½"""
+    """¿ÉÑ¡ xtdata ÅúÁ¿ÏÂÔØ£»Ä¬ÈÏ¹Ø±Õ¡£·µ»ØÊÇ·ñµÈ´ý»Øµ÷³¬Ê±£¨ÒÉËÆÍ¨µÀ²»Í¨£©¡£"""
     if not ENABLE_XTDATA_TICK_DOWNLOAD:
         return False
     if xtdata is None:
         return True
-    # download_history_* ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ YYYYMMDDï¿½ï¿½ï¿½ï¿½ 091500/153100 Ê± download2 ï¿½ï¿½ï¿½ÕµÈ³ï¿½Ê±
+    # download_history_* ±ØÐëÓÃ YYYYMMDD£»´ø 091500/153100 Ê± download2 ³£¿ÕµÈ³¬Ê±
     day_s = str(ymd or "").replace("-", "").replace("/", "")[:8]
     done = {"ok": False}
     wait = float(_DOWNLOAD_WAIT_SEC if wait_sec is None else wait_sec)
@@ -840,7 +840,7 @@ def _download_batch(xtdata, full_codes, ymd, wait_sec=None):
             if not done["ok"]:
                 timed_out = True
                 _log(
-                    "download2ï¿½È´ï¿½ï¿½ï¿½Ê± %ssï¿½ï¿½ï¿½ï¿½ï¿½ï¿½=%dï¿½ï¿½"
+                    "download2µÈ´ý³¬Ê± %ss£¨±¾Åú=%d£©"
                     % (int(wait), len(full_codes or []))
                 )
         else:
@@ -850,7 +850,7 @@ def _download_batch(xtdata, full_codes, ymd, wait_sec=None):
                 except Exception:
                     pass
     except Exception as e:
-        _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø´ï¿½ï¿½ï¿½: %s" % e)
+        _log("ÅúÁ¿ÏÂÔØ´íÎó: %s" % e)
         timed_out = True
     return timed_out
 
@@ -862,23 +862,23 @@ def _notify_conn_dead(day_s, detail):
             import ant_server_chan as sct
         except ImportError:
             import qmt_builtin.ant_server_chan as sct
-        title = "ï¿½ï¿½QMTï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
+        title = "´óQMTÒÉËÆÐÐÇé¶ÏÁ¬"
         body = (
-            "È«A tickï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±/Ê§ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½QMTï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Óºï¿½ï¿½ï¿½ï¿½Ø²ï¿½ï¿½Ô¡ï¿½\n\n"
-            "ï¿½ï¿½=%s\nï¿½æ±¾=%s\n%s"
+            "È«A tickÂäÅÌÁ¬Ðø¶àÅú³¬Ê±/Ê§°Ü£¬ÒÑÖÐÖ¹£¬Çë¼ì²é´óQMTÐÐÇéÁ¬½ÓºóÖØÔØ²ßÂÔ¡£\n\n"
+            "ÈÕ=%s\n°æ±¾=%s\n%s"
             % (day_s, TICK_FULL_SYNC_VERSION, detail)
         )
         r = sct.notify_alert(
             title, body, alert_key="tick_full_sync_conn_%s" % day_s, cooldown_sec=3600
         )
         if r.get("skipped"):
-            _log("serverï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: %s" % r.get("message"))
+            _log("server½´ÒÑÌø¹ý: %s" % r.get("message"))
         elif r.get("success"):
-            _log("serverï¿½ï¿½ï¿½æ¾¯ï¿½Ñ·ï¿½ (%s)" % r.get("source"))
+            _log("server½´¸æ¾¯ÒÑ·¢ (%s)" % r.get("source"))
         else:
-            _log("serverï¿½ï¿½ï¿½æ¾¯Ê§ï¿½ï¿½: %s" % r.get("message"))
+            _log("server½´¸æ¾¯Ê§°Ü: %s" % r.get("message"))
     except Exception as e:
-        _log("serverï¿½ï¿½ï¿½æ¾¯ï¿½ì³£: %s" % e)
+        _log("server½´¸æ¾¯Òì³£: %s" % e)
 
 
 def _notify_ctx_empty(day_s, detail):
@@ -888,28 +888,28 @@ def _notify_ctx_empty(day_s, detail):
             import ant_server_chan as sct
         except ImportError:
             import qmt_builtin.ant_server_chan as sct
-        title = "È«A tickï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
+        title = "È«A tick±¾µØ/·þÎñÆ÷ÎÞÊý¾Ý"
         body = (
-            "ï¿½ï¿½ï¿½Ø¶ï¿½ + ï¿½ï¿½ï¿½ï¿½ download_history_data + get_market_data_ex(tick) "
-            "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½\n"
-            "Ëµï¿½ï¿½ï¿½ï¿½ï¿½Ù·ï¿½ï¿½ï¿½È·Â·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ download_history_data(period=tick,YYYYMMDD)ï¿½ï¿½"
-            "ï¿½ï¿½ get_market_data_ex(subscribe=False)ï¿½ï¿½subscribeï¿½Ù²ï¿½ï¿½ï¿½Ê·ï¿½ï¿½\n"
-            "ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½Í½ï¿½ï¿½ï¿½ï¿½Ü²ï¿½ï¿½Ôºï¿½ï¿½ï¿½ tick_probe ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½"
-            "ï¿½ï¿½ UI ï¿½ï¿½ï¿½Ý¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö±Ê¡ï¿½ï¿½ï¿½Ö¹Ä¬ï¿½ï¿½ï¿½ï¿½ miniQMTï¿½ï¿½\n\n"
-            "ï¿½ï¿½=%s\nï¿½æ±¾=%s\n%s"
+            "±¾µØ¶Á + ÄÚÖÃ download_history_data + get_market_data_ex(tick) "
+            "Á¬Ðø¶àÅúÎª¿Õ£¬ÒÑÖÐÖ¹¡£\n"
+            "ËµÃ÷£º¹Ù·½ÕýÈ·Â·¾¶ÊÇÏÈ download_history_data(period=tick,YYYYMMDD)£¬"
+            "ÔÙ get_market_data_ex(subscribe=False)£»subscribe¡Ù²¹ÀúÊ·¡£\n"
+            "ÏÂÒ»²½£ºÔÚÄ£ÐÍ½»Ò×ÅÜ²ßÂÔº¯Êý tick_probe ¿´ÄÄ×é±äÌåÓÐÊý¾Ý£»"
+            "»ò UI Êý¾Ý¹ÜÀí²¹·Ö±Ê¡£½ûÖ¹Ä¬ÈÏ×ß miniQMT¡£\n\n"
+            "ÈÕ=%s\n°æ±¾=%s\n%s"
             % (day_s, TICK_FULL_SYNC_VERSION, detail)
         )
         r = sct.notify_alert(
             title, body, alert_key="tick_full_sync_empty_%s" % day_s, cooldown_sec=3600
         )
         if r.get("skipped"):
-            _log("serverï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: %s" % r.get("message"))
+            _log("server½´ÒÑÌø¹ý: %s" % r.get("message"))
         elif r.get("success"):
-            _log("serverï¿½ï¿½ï¿½æ¾¯ï¿½Ñ·ï¿½ (%s)" % r.get("source"))
+            _log("server½´¸æ¾¯ÒÑ·¢ (%s)" % r.get("source"))
         else:
-            _log("serverï¿½ï¿½ï¿½æ¾¯Ê§ï¿½ï¿½: %s" % r.get("message"))
+            _log("server½´¸æ¾¯Ê§°Ü: %s" % r.get("message"))
     except Exception as e:
-        _log("serverï¿½ï¿½ï¿½æ¾¯ï¿½ì³£: %s" % e)
+        _log("server½´¸æ¾¯Òì³£: %s" % e)
 
 
 def _write_one_from_raw(tick_io, full_code, trade_d, raw, overwrite=False):
@@ -975,24 +975,24 @@ def run_tick_full_sync(
     skip_retention_gate=False,
 ):
     # type: (Any, Optional[str], bool, int, bool, bool) -> bool
-    """Í¬ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½Õ£ï¿½Ä¬ï¿½Ï½ï¿½ï¿½ì£©È« A tick ï¿½ï¿½ï¿½ï¿½Ä¿ data/ticksï¿½ï¿½
+    """Í¬²½Ö¸¶¨ÈÕ£¨Ä¬ÈÏ½ñÌì£©È« A tick µ½ÏîÄ¿ data/ticks¡£
 
-    allow_intraday=True ï¿½ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½ï¿½ï¿½ï¿½ï¿½Ð¾Ü¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½
-    skip_retention_gate=Trueï¿½ï¿½manual_request ï¿½ï¿½Ê½ï¿½Å¶ï¿½ï¿½Õ²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ´°ï¿½Ô¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
-    ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¼ï¿½ï¿½ï¿½ï¿½ï¿½ß³ï¿½Ô¼ _TIME_SLICE_SECï¿½ï¿½ï¿½ï¿½ï¿½Ú´ï¿½ progress ï¿½Ë»Ø£ï¿½ï¿½É¶Ïµï¿½ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½
+    allow_intraday=True ½öÓ¦¼±£»Ä¬ÈÏÅÌÖÐ¾Ü¾øÆô¶¯£¬±ÜÃâ¶öËÀ½»Ò×/²ßÂÔÈ¡Êý¡£
+    skip_retention_gate=True£ºmanual_request ÏÔÊ½ÅÅ¶ÓÈÕ²»°´Áô´æ´°×Ô¶¯Ìø¹ý¡£
+    µ¥´Î×î¶àÕ¼ÓÃÖ÷Ïß³ÌÔ¼ _TIME_SLICE_SEC£¬µ½ÆÚ´æ progress ÍË»Ø£¨¿É¶ÏµãÐøÅÜ£©¡£
     """
     global _BUSY, _LAST_DONE_DAY, _ABORT_HOLD_LOG_TS, _PROTECT_DEFER_LOG_TS
     global _PAUSE_DEFER_LOG_TS
 
     if _BUSY:
-        _log("Ã¦Âµï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½")
+        _log("Ã¦ÂµÖÐ£¬Ìø¹ý")
         return False
 
     if _pause_requested():
         ts = time.time()
         if ts - _PAUSE_DEFER_LOG_TS >= 60.0:
             _PAUSE_DEFER_LOG_TS = ts
-            _log("ï¿½ï¿½ï¿½ï¿½Í£ï¿½ï¿½É¾ï¿½ï¿½ data/tick_full_sync/PAUSE ï¿½ï¿½ï¿½ï¿½ï¿½")
+            _log("ÒÑÔÝÍ££ºÉ¾³ý data/tick_full_sync/PAUSE ºó¼ÌÐø")
         return False
 
     if (not allow_intraday) and _in_market_hours_protect():
@@ -1000,7 +1000,7 @@ def run_tick_full_sync(
         if ts - _PROTECT_DEFER_LOG_TS >= 60.0:
             _PROTECT_DEFER_LOG_TS = ts
             _log(
-                "ï¿½Ý»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ %s-%sï¿½ï¿½ï¿½ï¿½ï¿½È½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½"
+                "ÔÝ»º£ºÅÌÖÐ±£»¤ %s-%s£¨ÓÅÏÈ½»Ò×/²ßÂÔÈ¡Êý£©"
                 % (
                     _MARKET_PROTECT_START.strftime("%H:%M"),
                     _MARKET_PROTECT_END.strftime("%H:%M"),
@@ -1009,12 +1009,12 @@ def run_tick_full_sync(
         return False
 
     if _daily_sync_running():
-        _log("ï¿½Ý»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ContextInfoï¿½ï¿½")
+        _log("ÔÝ»º£ºÈÕÏßÍ¬²½½øÐÐÖÐ£¨¹²ÓÃContextInfo£©")
         return False
 
     xtdata = _load_xtdata()
     if xtdata is None and ContextInfo is None:
-        _log("ï¿½ï¿½ContextInfoï¿½ï¿½ï¿½ï¿½xtdata")
+        _log("ÎÞContextInfoÇÒÎÞxtdata")
         return False
 
     now = datetime.now()
@@ -1026,24 +1026,24 @@ def run_tick_full_sync(
         day_s = trade_d.strftime("%Y%m%d")
 
     if xtdata is not None and not _is_tradeday(xtdata, trade_d):
-        _log("ï¿½Ç½ï¿½ï¿½ï¿½ï¿½ï¿½: %s" % day_s)
+        _log("·Ç½»Ò×ÈÕ: %s" % day_s)
         return False
     if xtdata is None and trade_d.weekday() >= 5:
-        _log("ï¿½Ç½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½Ä©ï¿½ï¿½: %s" % day_s)
+        _log("·Ç½»Ò×ÈÕ£¨ÖÜÄ©£©: %s" % day_s)
         return False
 
     if (not force) and (_LAST_DONE_DAY == day_s or _day_already_done(day_s)):
-        _log("ï¿½ï¿½ï¿½ï¿½ï¿½: %s" % day_s)
+        _log("ÒÑÍê³É: %s" % day_s)
         return True
 
-    # ï¿½ï¿½ï¿½ï¿½È¯ï¿½ï¿½ tick ï¿½ï¿½ï¿½æ£ºÖ±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¶ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ abort-holdï¿½ï¿½ï¿½ï¿½
-    # manual_request ï¿½ï¿½Ê½ï¿½Å¶ï¿½ï¿½Õ¿ï¿½ skip_retention_gateï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø²ï¿½ï¿½ï¿½ 28 ï¿½Õ´ï¿½ï¿½ï¿½É±ï¿½ï¿½
+    # ³¬³öÈ¯ÉÌ tick Áô´æ£ºÖ±½ÓÌø¹ý²¢ÈÃ¶ÓÁÐÇ°½ø£¨Îð abort-hold£©¡£
+    # manual_request ÏÔÊ½ÅÅ¶ÓÈÕ¿É skip_retention_gate£¬±ÜÃâÓÃ»§µãÃû»Ø²¹±» 28 ÈÕ´°ÎóÉ±¡£
     if (not force) and (not skip_retention_gate) and _day_beyond_tick_retention(day_s):
         _mark_skipped_no_tick(day_s, "beyond_retention_%dd" % int(TICK_RETENTION_CALENDAR_DAYS))
         _LAST_DONE_DAY = day_s
         return True
 
-    # ABORT ï¿½ï¿½È´ï¿½ï¿½ï¿½ï¿½Ô¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¡ï¿½ï¿½ï¿½ï¿½ï¿½Ï£ï¿½ï¿½ï¿½Ê·ï¿½ï¿½ ctx-empty ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    # ABORT ÀäÈ´£º½öÔ¼Êø¡¸½ñÈÕ¡¹Õæ¹ÊÕÏ£»ÀúÊ·ÈÕ ctx-empty ¸ÄÎªÌø¹ýÐøÅÜ
     if not force:
         held, hold_reason = _abort_hold_active(day_s)
         if held:
@@ -1056,7 +1056,7 @@ def run_tick_full_sync(
             if ts - _ABORT_HOLD_LOG_TS >= 120.0:
                 _ABORT_HOLD_LOG_TS = ts
                 _log(
-                    "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½È´ï¿½ï¿½ day=%s Ô­ï¿½ï¿½=%s"
+                    "Ìø¹ý£ºÖÐÖ¹ÀäÈ´ÖÐ day=%s Ô­Òò=%s"
                     % (day_s, hr[:80])
                 )
             return False
@@ -1064,11 +1064,11 @@ def run_tick_full_sync(
     try:
         tick_io = _import_tick_io()
     except AttributeError as e:
-        _log("tick_ioï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹: %s" % e)
+        _log("tick_ioµ¼ÈëÖÐÖ¹: %s" % e)
         _append_run_log(day_s, "ABORT code-bug %s" % e)
         _set_abort_hold(day_s, "code-bug:%s" % e, _ABORT_HOLD_SEC_CODEBUG)
         return False
-    # ï¿½ï¿½ï¿½ñ¿ª¹Ø£ï¿½ï¿½ï¿½ï¿½ï¿½ GBK ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ src ï¿½ï¿½Ò»ï¿½ï¿½Ê±ï¿½ï¿½È¥ download / ï¿½Øµï¿½ subscribe
+    # ¾µÏñ¿ª¹Ø£¬±ÜÃâ GBK ¸±±¾Óë src ²»Ò»ÖÂÊ±ÈÔÈ¥ download / ¹Øµô subscribe
     try:
         tick_io.ENABLE_XTDATA_TICK_DOWNLOAD = ENABLE_XTDATA_TICK_DOWNLOAD
     except Exception:
@@ -1088,16 +1088,16 @@ def run_tick_full_sync(
         pass
     universe = _load_universe(xtdata, limit=limit, ContextInfo=ContextInfo)
     if not universe:
-        _log("ï¿½ï¿½Æ±ï¿½ï¿½Îªï¿½ï¿½")
-        # Ð´ï¿½ï¿½ run.logï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½Å²é£¨ï¿½ï¿½Ç°ï¿½ï¿½ printï¿½ï¿½Ä¿Â¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ STARTï¿½ï¿½
+        _log("¹ÉÆ±³ØÎª¿Õ")
+        # Ð´Èë run.log£¬±ãÓÚÅÌºóÅÅ²é£¨´ËÇ°½ö print£¬Ä¿Â¼¿ÕÇÒÎÞ START£©
         _append_run_log(
             day_s,
-            "ABORT ï¿½ï¿½Æ±ï¿½ï¿½Îªï¿½ï¿½ version=%sï¿½ï¿½ï¿½ï¿½ContextInfoï¿½ï¿½ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½Ë£ï¿½"
+            "ABORT ¹ÉÆ±³ØÎª¿Õ version=%s£¨ÐèContextInfo»òÎÄ¼þ»ØÍË£©"
             % TICK_FULL_SYNC_VERSION,
         )
         return False
 
-    # ï¿½É°ï¿½ï¿½ï¿½ï¿½Ì½Ø¶ï¿½ï¿½ï¿½ 15:00ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½Ê±ï¿½Î£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü¶ï¿½ï¿½ï¿½ after_vol È« 0
+    # ¾É°æÂäÅÌ½Ø¶ÏÔÚ 15:00£¬Éý¼¶ºóÐèÖØÀ­º¬ÅÌºóÊ±¶Î£¬·ñÔòÁ¿ÄÜ¶ÁÅÌ after_vol È« 0
     legacy_resync = False
     done_marker = _done_path(day_s)
     if os.path.isfile(done_marker):
@@ -1108,7 +1108,7 @@ def run_tick_full_sync(
             if old_ver < "20260728.04":
                 legacy_resync = True
                 _log(
-                    "ï¿½É°ï¿½Í¬ï¿½ï¿½ version=%s ï¿½ï¿½ ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½ï¿½ %s"
+                    "¾É°æÍ¬²½ version=%s ¡ú º¬ÅÌºóÖØÀ­ %s"
                     % (old_ver or "?", day_s)
                 )
                 try:
@@ -1122,8 +1122,8 @@ def run_tick_full_sync(
     t_start = time.time()
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _log(
-        "ï¿½ï¿½Ê¼ day=%s ï¿½ï¿½Æ±ï¿½ï¿½=%d ï¿½æ±¾=%s xtdata_dl=%s builtin_dl=%s "
-        "ctx_sub=%s ï¿½ï¿½Â·ï¿½ï¿½=download_history_data+get_market_data_ex at=%s"
+        "¿ªÊ¼ day=%s ¹ÉÆ±³Ø=%d °æ±¾=%s xtdata_dl=%s builtin_dl=%s "
+        "ctx_sub=%s Ö÷Â·¾¶=download_history_data+get_market_data_ex at=%s"
         % (
             day_s,
             len(universe),
@@ -1136,7 +1136,7 @@ def run_tick_full_sync(
     )
     _append_run_log(
         day_s,
-        "START n=%d force=%s ï¿½É°ï¿½ï¿½ï¿½ï¿½ï¿½=%s xtdata_dl=%s builtin_dl=%s "
+        "START n=%d force=%s ¾É°æÖØÀ­=%s xtdata_dl=%s builtin_dl=%s "
         "ctx_sub=%s at=%s"
         % (
             len(universe),
@@ -1176,7 +1176,7 @@ def run_tick_full_sync(
             meta = miss_codes.get(c6) if isinstance(miss_codes.get(c6), dict) else None
         if (not force) and meta is not None and _miss_active(meta, trade_d):
             reason = str(meta.get("reason") or "")
-            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/È·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ local_miss / today_halt / invalid_0
+            # ½öÍËÊÐ/È·ÈÏÎÞÀúÊ·£»²»Ìø¹ý local_miss / today_halt / invalid_0
             if reason in _MISS_SKIP_REASONS:
                 miss_skip += 1
                 fail_map[c6] = "miss_cache_%s" % reason
@@ -1191,7 +1191,7 @@ def run_tick_full_sync(
         pending.append(fc)
     if miss_skip:
         _log(
-            "missï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½=%d ï¿½ï¿½ï¿½ï¿½=%d path=%s"
+            "miss»º´æÌø¹ý=%d ´ýÅÜ=%d path=%s"
             % (miss_skip, len(pending), _miss_cache_path())
         )
 
@@ -1210,47 +1210,47 @@ def run_tick_full_sync(
         for i in range(0, len(pending), BATCH_SIZE):
             if _pause_requested():
                 aborted_yield = True
-                _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Èºï¿½ï¿½Ã³ï¿½")
-                _append_run_log(day_s, "YIELD ï¿½ï¿½Í£ Ê£ï¿½ï¿½=%d" % (len(pending) - i))
+                _log("ÔËÐÐÖÐÔÝÍ££º±£´æ½ø¶ÈºóÈÃ³ö")
+                _append_run_log(day_s, "YIELD ÔÝÍ£ Ê£Óà=%d" % (len(pending) - i))
                 break
             if (not allow_intraday) and _in_market_hours_protect():
                 aborted_yield = True
-                _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã³ï¿½")
+                _log("ÔËÐÐÖÐÅÌÖÐ±£»¤£ºÈÃ³ö")
                 _append_run_log(
-                    day_s, "YIELD ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ Ê£ï¿½ï¿½=%d" % (len(pending) - i)
+                    day_s, "YIELD ÅÌÖÐ±£»¤ Ê£Óà=%d" % (len(pending) - i)
                 )
                 break
             if (time.time() - t_start) >= float(_TIME_SLICE_SEC):
                 aborted_yield = True
                 _log(
-                    "Ê±ï¿½ï¿½Æ¬ï¿½Ã³ï¿½ ï¿½ï¿½ï¿½ï¿½%.0fsï¿½ï¿½Ê£ï¿½ï¿½Ô¼%dï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
+                    "Ê±¼äÆ¬ÈÃ³ö ÒÑÓÃ%.0fs£¨Ê£ÓàÔ¼%d£©£»ÖÜÆÚÈÎÎñÐøÅÜ"
                     % (time.time() - t_start, max(0, len(pending) - i))
                 )
                 _append_run_log(
                     day_s,
-                    "YIELD Ê±ï¿½ï¿½Æ¬ sec=%.0f Ê£ï¿½ï¿½=%d"
+                    "YIELD Ê±¼äÆ¬ sec=%.0f Ê£Óà=%d"
                     % (time.time() - t_start, len(pending) - i),
                 )
                 break
             batch = pending[i : i + BATCH_SIZE]
-            # ï¿½ï¿½Â·ï¿½ï¿½Ô¤ï¿½ï¿½ï¿½Ø£ï¿½ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½YYYYMMDDï¿½ï¿½ï¿½ï¿½xtdata Ä¬ï¿½Ï¹ï¿½
+            # Ö÷Â·¾¶Ô¤ÏÂÔØ£ºÄÚÖÃ download_history_data£¨YYYYMMDD£©£»xtdata Ä¬ÈÏ¹Ø
             n_builtin, builtin_err = _download_batch_builtin(tick_io, batch, day_s)
             if n_builtin > 0:
                 _log(
-                    "ï¿½ï¿½ï¿½ï¿½download_history_data ï¿½É¹ï¿½=%d/%d day=%s"
+                    "ÄÚÖÃdownload_history_data ³É¹¦=%d/%d day=%s"
                     % (n_builtin, len(batch), day_s)
                 )
             elif builtin_err and builtin_err not in ("builtin_dl_off",):
-                _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø±ï¿½×¢: %s" % builtin_err)
+                _log("ÄÚÖÃÏÂÔØ±¸×¢: %s" % builtin_err)
             timed_out = _download_batch(
                 xtdata, batch, day_s, wait_sec=next_wait
             )
-            # ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ builtin downloadï¿½ï¿½ï¿½ï¿½ get_market_data_ex
+            # Ö÷Â·¾¶£º±¾µØ ¡ú£¨ÒÑ builtin download£©¡ú get_market_data_ex
             batch_map = {}  # type: Dict[str, Any]
             batch_fetch_ok = True
             batch_fetch_err = ""
             try:
-                # ï¿½ï¿½Ç°ï¿½ï¿½È«ï¿½É¹ï¿½ï¿½ï¿½ï¿½ï¿½ downloadï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ fetch ï¿½ï¿½È±Æ±ï¿½ï¿½ï¿½ï¿½
+                # ÅúÇ°ÒÑÈ«³É¹¦Ôò²»ÔÙ download£»²¿·ÖÊ§°ÜÁô¸ø fetch ¶ÔÈ±Æ±²¹ÏÂ
                 redo_dl = bool(
                     ENABLE_BUILTIN_TICK_DOWNLOAD and (n_builtin < len(batch))
                 )
@@ -1263,7 +1263,7 @@ def run_tick_full_sync(
                     allow_builtin_download=redo_dl,
                 ) or {}
             except TypeError:
-                # ï¿½ï¿½ GBK ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ allow_builtin_download ï¿½ï¿½ï¿½ï¿½
+                # ¾É GBK ¸±±¾ÉÐÎÞ allow_builtin_download ²ÎÊý
                 try:
                     batch_map = tick_io.fetch_ticks_batch(
                         batch,
@@ -1275,7 +1275,7 @@ def run_tick_full_sync(
                 except AttributeError as e:
                     batch_fetch_ok = False
                     batch_fetch_err = "%s" % e
-                    _log("ï¿½ï¿½È¡tickï¿½ï¿½ï¿½ï¿½(code-bug): %s" % e)
+                    _log("ÅúÈ¡tick´íÎó(code-bug): %s" % e)
                     aborted_code_bug = True
                     _append_run_log(
                         day_s, "ABORT code-bug %s" % str(e).replace("\n", " ")
@@ -1287,12 +1287,12 @@ def run_tick_full_sync(
                 except Exception as e:
                     batch_fetch_ok = False
                     batch_fetch_err = "%s" % e
-                    _log("ï¿½ï¿½È¡tickï¿½ï¿½ï¿½ï¿½: %s" % e)
+                    _log("ÅúÈ¡tick´íÎó: %s" % e)
                     batch_map = {}
             except AttributeError as e:
                 batch_fetch_ok = False
                 batch_fetch_err = "%s" % e
-                _log("ï¿½ï¿½È¡tickï¿½ï¿½ï¿½ï¿½(code-bug): %s" % e)
+                _log("ÅúÈ¡tick´íÎó(code-bug): %s" % e)
                 aborted_code_bug = True
                 _append_run_log(
                     day_s, "ABORT code-bug %s" % str(e).replace("\n", " ")
@@ -1304,7 +1304,7 @@ def run_tick_full_sync(
             except Exception as e:
                 batch_fetch_ok = False
                 batch_fetch_err = "%s" % e
-                _log("ï¿½ï¿½È¡tickï¿½ï¿½ï¿½ï¿½: %s" % e)
+                _log("ÅúÈ¡tick´íÎó: %s" % e)
                 if _miss_reason_blocked(e):
                     aborted_code_bug = True
                     _append_run_log(
@@ -1333,7 +1333,7 @@ def run_tick_full_sync(
                     overwrite=(force or legacy_resync),
                     ContextInfo=ContextInfo,
                     prefetched=pref,
-                    # ï¿½ï¿½ï¿½ï¿½ï¿½Ô¹ï¿½ ContextInfo/localï¿½ï¿½È±Æ±ï¿½ï¿½ï¿½Ùµï¿½Æ±ï¿½Ø´ò£¨·ï¿½ï¿½Õ¹Ò£ï¿½
+                    # ÅúÒÑÊÔ¹ý ContextInfo/local£»È±Æ±²»ÔÙµ¥Æ±ÖØ´ò£¨·À¿Õ¹Ò£©
                     allow_refetch=False,
                 )
                 if status == "ok":
@@ -1349,7 +1349,7 @@ def run_tick_full_sync(
                     fail_new += 1
                     batch_fail += 1
                     fail_map[c6] = reason or status
-                    # ï¿½ï¿½ API ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø¿Õ²Å¼ï¿½ missï¿½ï¿½AttributeError/ï¿½ï¿½Ê§ï¿½Ü²ï¿½Ð´ miss_cache
+                    # ½ö API Õý³£·µ»Ø¿Õ²Å¼Ç miss£»AttributeError/ÅúÊ§°Ü²»Ð´ miss_cache
                     if (
                         batch_fetch_ok
                         and str(reason or "") in ("empty_tick", "empty")
@@ -1357,7 +1357,7 @@ def run_tick_full_sync(
                     ):
                         _miss_put(miss_payload, full, "empty_tick", trade_d)
                         miss_dirty = True
-            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È«ï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¶ï¿½ timeoutï¿½ï¿½ï¿½ï¿½ xtdata_dl=on Ê±ï¿½ï¿½ï¿½ï¿½ï¿½å£©
+            # ÕûÅú¼¸ºõÈ«¿Õ£ººóÐøÅúÓÃ¶Ì timeout£¨½ö xtdata_dl=on Ê±ÓÐÒâÒå£©
             if batch_ok == 0 and batch_fail >= max(1, int(len(batch) * 0.8)):
                 next_wait = float(_DOWNLOAD_WAIT_SEC_FAST)
             else:
@@ -1366,8 +1366,8 @@ def run_tick_full_sync(
             progress["fail"] = fail_map
             _save_progress(day_s, progress)
             _log(
-                "ï¿½ï¿½ï¿½ï¿½ %d/%d ï¿½ï¿½ï¿½ï¿½ï¿½É¹ï¿½=%d ï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½=%d ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½=%d missï¿½ï¿½ï¿½ï¿½=%d "
-                "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½=%d ï¿½ï¿½Ê±=%s ï¿½ï¿½È¡ok=%s"
+                "½ø¶È %d/%d ÐÂÔö³É¹¦=%d ÐÂÔöÊ§°Ü=%d ÒÑÓÐÌø¹ý=%d missÌø¹ý=%d "
+                "±¾ÅúÃüÖÐ=%d ³¬Ê±=%s ÅúÈ¡ok=%s"
                 % (
                     min(i + BATCH_SIZE, len(pending)),
                     len(pending),
@@ -1381,10 +1381,10 @@ def run_tick_full_sync(
                 )
             )
             if batch_fetch_err and not batch_fetch_ok:
-                # ï¿½ï¿½ AttributeError ï¿½ï¿½ï¿½ï¿½Ê§ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¼ï¿½ progressï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ missï¿½ï¿½ï¿½Æ¿ï¿½ï¿½ï¿½ streak
+                # ·Ç AttributeError µÄÅúÊ§°Ü£º±¾ÅúÒÑ¼Ç progress£¬²»³Å miss£»¼Æ¿ÕÅú streak
                 pass
 
-            # ï¿½ï¿½ï¿½Ø³ï¿½Ê±ï¿½Ò±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ³É¹ï¿½ ï¿½ï¿½ ï¿½ï¿½ÎªÍ¨ï¿½ï¿½ï¿½ì³£ï¿½ï¿½ï¿½ï¿½ xtdata_dl=onï¿½ï¿½
+            # ÏÂÔØ³¬Ê±ÇÒ±¾Åú¼¸ºõÎÞ³É¹¦ ¡ú ¼ÆÎªÍ¨µÀÒì³££¨½ö xtdata_dl=on£©
             if (
                 ENABLE_XTDATA_TICK_DOWNLOAD
                 and timed_out
@@ -1393,7 +1393,7 @@ def run_tick_full_sync(
             ):
                 conn_fail_streak += 1
                 _log(
-                    "ï¿½ï¿½ï¿½Æ¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ %d/%dï¿½ï¿½ï¿½ï¿½Ê±+ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½"
+                    "ÒÉËÆ¶ÏÁ¬Á¬Ðø %d/%d£¨³¬Ê±+±¾Åú¿Õ£©"
                     % (conn_fail_streak, _CONN_FAIL_ABORT_BATCHES)
                 )
             else:
@@ -1402,7 +1402,7 @@ def run_tick_full_sync(
             if conn_fail_streak >= int(_CONN_FAIL_ABORT_BATCHES):
                 aborted_conn = True
                 detail = (
-                    "ï¿½Ñ´ï¿½ï¿½ï¿½ %d/%d\nok_new=%d fail_new=%d\nï¿½ï¿½ï¿½ï¿½ï¿½ì³£ï¿½ï¿½=%d"
+                    "ÒÑ´¦Àí %d/%d\nok_new=%d fail_new=%d\nÁ¬ÐøÒì³£Åú=%d"
                     % (
                         min(i + BATCH_SIZE, len(pending)),
                         len(pending),
@@ -1411,7 +1411,7 @@ def run_tick_full_sync(
                         conn_fail_streak,
                     )
                 )
-                _log("ABORT ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½")
+                _log("ABORT ÒÉËÆÐÐÇé¶ÏÁ¬")
                 _append_run_log(day_s, "ABORT conn-dead " + detail.replace("\n", " | "))
                 _notify_conn_dead(day_s, detail)
                 _set_abort_hold(
@@ -1419,8 +1419,8 @@ def run_tick_full_sync(
                 )
                 break
 
-            # ï¿½ï¿½ï¿½ï¿½+builtin download+subscribe ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È«ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½Í£
-            # ï¿½ï¿½ fetch Ê§ï¿½Ü£ï¿½API ï¿½ì³£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë¡¸ï¿½æ¡¤ï¿½ï¿½ï¿½ï¿½ï¿½é¡¹ï¿½ï¿½Ò²ï¿½ï¿½Ð´ miss
+            # ±¾µØ+builtin download+subscribe Á¬Ðø¶àÅúÈ«¿Õ ¡ú ÔçÍ£
+            # Åú fetch Ê§°Ü£¨API Òì³££©²»¼ÆÈë¡¸Õæ¡¤¿ÕÐÐÇé¡¹£¬Ò²²»Ð´ miss
             if (
                 (not ENABLE_XTDATA_TICK_DOWNLOAD)
                 and batch_fetch_ok
@@ -1430,7 +1430,7 @@ def run_tick_full_sync(
             ):
                 ctx_empty_streak += 1
                 _log(
-                    "ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ %d/%d"
+                    "±¾µØ/ÄÚÖÃ/¶©ÔÄÁ¬Ðø¿ÕÅú %d/%d"
                     % (ctx_empty_streak, _CTX_EMPTY_ABORT_BATCHES)
                 )
             else:
@@ -1440,8 +1440,8 @@ def run_tick_full_sync(
             if ctx_empty_streak >= int(_CTX_EMPTY_ABORT_BATCHES):
                 aborted_ctx_empty = True
                 detail = (
-                    "ï¿½Ñ´ï¿½ï¿½ï¿½ %d/%d\nok_new=%d fail_new=%d\nï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½=%d\n"
-                    "builtin_dl=%s ctx_sub=%sï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tick_probeï¿½ï¿½ï¿½ï¿½ miniQMT"
+                    "ÒÑ´¦Àí %d/%d\nok_new=%d fail_new=%d\nÁ¬Ðø¿ÕÅú=%d\n"
+                    "builtin_dl=%s ctx_sub=%s£»ÇëÅÜ tick_probe£»Îð¿ª miniQMT"
                     % (
                         min(i + BATCH_SIZE, len(pending)),
                         len(pending),
@@ -1452,22 +1452,22 @@ def run_tick_full_sync(
                         "on" if ENABLE_CTX_TICK_SUBSCRIBE else "off",
                     )
                 )
-                # ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tick ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ 30min
+                # ÀúÊ·»ØÌîÁ¬Ðø¿Õ£º¶à°ëÊÇÁô´æÍâ/µ±ÈÕÎÞ tick ¡ú Ìø¹ý¸ÃÈÕÐø¶ÓÁÐ£¬²»¿¨ 30min
                 if _is_historical_day(day_s) and ok_new == 0:
                     _log(
-                        "ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È´ï¿½ï¿½: %s"
+                        "ÀúÊ·ÈÕÁ¬Ðø¿ÕÅú ¡ú Ìø¹ý¸ÃÈÕ£¨²»½øÀäÈ´£©: %s"
                         % day_s
                     )
                     _append_run_log(
                         day_s,
-                        "SKIP ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ " + detail.replace("\n", " | "),
+                        "SKIP ÀúÊ·¿ÕÅú " + detail.replace("\n", " | "),
                     )
-                    # ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ miss ï¿½ï¿½ï¿½É¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ miss ï¿½ï¿½ï¿½
+                    # ¿ÕÅúÐ´ÈëµÄ miss ²»¿É¿¿£¬¶ªÆú±¾ÌË miss ±ä¸ü
                     miss_dirty = False
                     _mark_skipped_no_tick(day_s, "ctx-empty-historical")
                     _LAST_DONE_DAY = day_s
                     return True
-                _log("ABORT ContextInfo tickÎªï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½+ï¿½ï¿½ï¿½Ä£ï¿½")
+                _log("ABORT ContextInfo tickÎª¿Õ£¨±¾µØ+ÄÚÖÃÏÂÔØ+¶©ÔÄ£©")
                 _append_run_log(
                     day_s, "ABORT ctx-empty " + detail.replace("\n", " | ")
                 )
@@ -1488,10 +1488,10 @@ def run_tick_full_sync(
         elapsed = time.time() - t_start
         elapsed_min = elapsed / 60.0
         if aborted_yield:
-            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì£ï¿½ï¿½ï¿½ï¿½ï¿½ doneï¿½ï¿½ï¿½Â´ï¿½ï¿½ï¿½ï¿½Ü¡ï¿½ï¿½Ë»ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½Ë»ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½È¸ï¿½ï¿½Â¡ï¿½
+            # ½ø¶ÈÒÑÂäÅÌ£»²»±ê done£¬ÏÂ´ÎÐøÅÜ¡£ÍË»ØÖ÷Ñ­»·ÈÃÕË»§/ÐÐÇéÏÈ¸üÐÂ¡£
             msg = (
-                "ï¿½ï¿½Æ¬ï¿½ï¿½ï¿½ï¿½ ï¿½É¹ï¿½=%d Ê§ï¿½ï¿½=%d ï¿½ï¿½ï¿½ï¿½Ê£ï¿½ï¿½=%d ï¿½ï¿½ï¿½ï¿½=%d "
-                "ï¿½ï¿½Ê±=%.1fmin (%.0fs) %s -> %s"
+                "±¾Æ¬½áÊø ³É¹¦=%d Ê§°Ü=%d ´ýÅÜÊ£Óà=%d ×ÜÊý=%d "
+                "ºÄÊ±=%.1fmin (%.0fs) %s -> %s"
                 % (
                     ok_total,
                     fail_total,
@@ -1513,7 +1513,7 @@ def run_tick_full_sync(
                 else ("conn-dead" if aborted_conn else "ctx-empty")
             )
             msg = (
-                "ï¿½ï¿½ï¿½ï¿½Ö¹(%s) ï¿½É¹ï¿½=%d Ê§ï¿½ï¿½=%d ï¿½ï¿½ï¿½ï¿½=%d ï¿½ï¿½Ê±=%.1fmin (%.0fs) %s -> %s"
+                "ÒÑÖÐÖ¹(%s) ³É¹¦=%d Ê§°Ü=%d ×ÜÊý=%d ºÄÊ±=%.1fmin (%.0fs) %s -> %s"
                 % (
                     tag,
                     ok_total,
@@ -1540,7 +1540,7 @@ def run_tick_full_sync(
         _LAST_DONE_DAY = day_s
         removed = _purge_old_tick_dirs()
         msg = (
-            "ï¿½ï¿½ï¿½ ï¿½É¹ï¿½=%d Ê§ï¿½ï¿½=%d ï¿½ï¿½ï¿½ï¿½=%d ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½=%d ï¿½ï¿½Ê±=%.1fmin (%.0fs) %s -> %s"
+            "Íê³É ³É¹¦=%d Ê§°Ü=%d ×ÜÊý=%d ÒÑÇåÀí=%d ºÄÊ±=%.1fmin (%.0fs) %s -> %s"
             % (
                 ok_total,
                 fail_total,
@@ -1555,7 +1555,7 @@ def run_tick_full_sync(
         _log(msg)
         _append_run_log(day_s, msg)
         if removed:
-            _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: %s" % ",".join(removed[:10]))
+            _log("ÒÑÇåÀíÈÕÆÚ: %s" % ",".join(removed[:10]))
         ok_enough = ok_total >= max(1000, int(total * 0.5))
         if not ok_enough:
             try:
@@ -1564,8 +1564,8 @@ def run_tick_full_sync(
                 except ImportError:
                     import qmt_builtin.ant_server_chan as sct
                 sct.notify_alert(
-                    "È«A tickï¿½ï¿½ï¿½Ì³É¹ï¿½ï¿½ï¿½ï¿½ï¿½",
-                    "ï¿½ï¿½=%s\nok=%d fail=%d total=%d\nï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ tick_full_syncï¿½ï¿½"
+                    "È«A tickÂäÅÌ³É¹¦¹ýÉÙ",
+                    "ÈÕ=%s\nok=%d fail=%d total=%d\nÇë¼ì²éºó²¹ÅÜ tick_full_sync¡£"
                     % (day_s, ok_total, fail_total, total),
                     alert_key="tick_full_low_%s" % day_s,
                     cooldown_sec=3600,
@@ -1576,11 +1576,11 @@ def run_tick_full_sync(
     except Exception as e:
         elapsed = time.time() - t_start
         _log(
-            "Ê§ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½%.1fmin: %s: %s"
+            "Ê§°Ü ÒÑÅÜ%.1fmin: %s: %s"
             % (elapsed / 60.0, type(e).__name__, e)
         )
         _append_run_log(
-            day_s, "FAILED ï¿½ï¿½ï¿½ï¿½%.1fs: %s" % (elapsed, e)
+            day_s, "FAILED ÒÑÅÜ%.1fs: %s" % (elapsed, e)
         )
         try:
             try:
@@ -1588,8 +1588,8 @@ def run_tick_full_sync(
             except ImportError:
                 import qmt_builtin.ant_server_chan as sct
             sct.notify_alert(
-                "È«A tickï¿½ï¿½ï¿½ï¿½ï¿½ì³£ï¿½Ë³ï¿½",
-                "ï¿½ï¿½=%s\n%s: %s" % (day_s, type(e).__name__, e),
+                "È«A tickÂäÅÌÒì³£ÍË³ö",
+                "ÈÕ=%s\n%s: %s" % (day_s, type(e).__name__, e),
                 alert_key="tick_full_fail_%s" % day_s,
                 cooldown_sec=3600,
             )
@@ -1607,7 +1607,7 @@ def _manual_request_path():
 
 def _normalize_manual_days(req):
     # type: (Dict[str, Any]) -> List[str]
-    """ï¿½ï¿½ day / days ï¿½Ö¶Î³ï¿½ï¿½ YYYYMMDD ï¿½ï¿½ï¿½Ð£ï¿½È¥ï¿½Ø¡ï¿½ï¿½ï¿½ï¿½ò£©¡ï¿½"""
+    """´Ó day / days ×Ö¶Î³é³ö YYYYMMDD ¶ÓÁÐ£¨È¥ÖØ¡¢±£Ðò£©¡£"""
     out = []  # type: List[str]
     seen = set()  # type: Set[str]
 
@@ -1627,18 +1627,18 @@ def _normalize_manual_days(req):
             _push(item)
     elif days_raw not in (None, ""):
         _push(days_raw)
-    # ï¿½ï¿½ï¿½Ý¾Éµï¿½ï¿½ï¿½ï¿½Ö¶Î£ï¿½ï¿½ï¿½ days ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ day ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ï¿½ï¿½Ê±×·ï¿½Óµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½Éµï¿½ï¿½Ã·ï¿½ï¿½ï¿½Ö¤
+    # ¼æÈÝ¾Éµ¥ÈÕ×Ö¶Î£»Èô days ÒÑÓÐÔò day ½öÔÚÎ´³öÏÖÊ±×·¼Óµ½¶ÓÊ×ÒâÍ¼ÓÉµ÷ÓÃ·½±£Ö¤
     if not out:
         _push(req.get("day"))
     elif req.get("day") not in (None, ""):
-        # days ï¿½ï¿½ï¿½È£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø¸ï¿½ï¿½ï¿½ day
+        # days ÓÅÏÈ£»ºöÂÔÖØ¸´µÄ day
         pass
     return out
 
 
 def _write_manual_request_remaining(path, req, remaining):
     # type: (str, Dict[str, Any], List[str]) -> None
-    """ï¿½ï¿½ï¿½ï¿½Î´Ö´ï¿½Ðµï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ manual_request.jsonï¿½ï¿½Ô­ï¿½ï¿½ï¿½æ»»ï¿½ï¿½ï¿½ï¿½"""
+    """°ÑÉÐÎ´Ö´ÐÐµÄÈÕÆÚÐ´»Ø manual_request.json£¨Ô­×ÓÌæ»»£©¡£"""
     payload = dict(req) if isinstance(req, dict) else {}
     payload["days"] = list(remaining)
     if "day" in payload:
@@ -1656,13 +1656,13 @@ def _write_manual_request_remaining(path, req, remaining):
 
 def _try_after_rank_manual_request(ContextInfo=None):
     # type: (Any) -> None
-    """Ë³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ data/after_hours_rank/manual_request.jsonï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½ï¿½É´ï¿½ï¿½ï£©ï¿½ï¿½"""
+    """Ë³´øÏû»¯ data/after_hours_rank/manual_request.json£¨ÈÈÖØÔØÂ·¾¶¿É´¥´ï£©¡£"""
     try:
         try:
             import ant_after_hours_rank_runner as ar
         except ImportError:
             import qmt_builtin.ant_after_hours_rank_runner as ar
-        # ï¿½ï¿½ï¿½Ä¼ï¿½ mtime ï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½È·ï¿½ï¿½ï¿½Ôµï¿½ force/manual_request ï¿½Â°ï¿½
+        # °´ÎÄ¼þ mtime ÈÈÖØÔØ£¬È·±£³Ôµ½ force/manual_request ÐÂ°æ
         import importlib
 
         ar = importlib.reload(ar)
@@ -1670,27 +1670,27 @@ def _try_after_rank_manual_request(ContextInfo=None):
         if callable(fn):
             fn(ContextInfo)
     except Exception as e:
-        _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½: %s" % e)
+        _log("´®ÁªÁ¿ÄÜÊÖ¶¯ÇëÇóÊ§°Ü: %s" % e)
 
 
 def process_manual_request(ContextInfo=None):
     # type: (Any) -> Optional[bool]
-    """ï¿½ï¿½ï¿½ï¿½ data/tick_full_sync/manual_request.jsonï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ó·µ»ï¿½ Noneï¿½ï¿½
+    """´¦Àí data/tick_full_sync/manual_request.json£»ÎÞÇëÇó·µ»Ø None¡£
 
-    ï¿½ï¿½ï¿½ / ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ë£¬ï¿½ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ periodic_sync ï¿½ï¿½ï¿½ï¿½Êµ ContextInfo Ö´ï¿½Ð¡ï¿½
+    Íâ¹Ò / ¹¤¾ßÐ´Èë£¬´ó QMT ²ßÂÔ periodic_sync ÓÃÕæÊµ ContextInfo Ö´ÐÐ¡£
 
-    ï¿½ï¿½ï¿½ï¿½::
+    µ¥ÈÕ::
         {"day":"20260730","force":false}
 
-    ï¿½ï¿½ï¿½Õ¶ï¿½ï¿½Ð£ï¿½Ã¿ï¿½ï¿½Ö»ï¿½Ü¶ï¿½ï¿½ï¿½Ò»ï¿½Õ£ï¿½Ê£ï¿½ï¿½Ð´ï¿½ï¿½ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½Â´ï¿½ periodic ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½::
+    ¶àÈÕ¶ÓÁÐ£¨Ã¿´ÎÖ»ÅÜ¶ÓÊ×Ò»ÈÕ£¬Ê£ÓàÐ´»ØÎÄ¼þ£¬ÏÂ´Î periodic ¼ÌÐø£©::
         {"days":["20260728","20260729"],"force":false,"limit":0}
 
-    ï¿½ï¿½ï¿½Ð£ï¿½09:00ï¿½C15:10ï¿½ï¿½Ä¬ï¿½ï¿½ deferï¿½ï¿½ï¿½ï¿½É¾ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½
-    ï¿½ï¿½Ñ¡ `"allow_intraday": true` Ó¦ï¿½ï¿½Ç¿ï¿½Ü£ï¿½ï¿½ï¿½ï¿½Æ¼ï¿½ï¿½ï¿½ï¿½ï¿½
-    ï¿½ï¿½Ä¬ï¿½Ï¿ï¿½ enable_xtdata_downloadï¿½ï¿½miniQMTï¿½ï¿½ï¿½ï¿½ï¿½É¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½
-    manual_request.done.jsonï¿½ï¿½Î´ï¿½ï¿½É£ï¿½time-sliceï¿½ï¿½ï¿½ï¿½Ñµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¶ï¿½ï¿½×¡ï¿½
-    ï¿½ï¿½ï¿½ï¿½È¯ï¿½ï¿½ tick ï¿½ï¿½ï¿½ï¿½ / ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ²ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½ abort-holdï¿½ï¿½ï¿½ï¿½
-    ï¿½ï¿½ï¿½ï¿½ tick ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ£ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½á³¢ï¿½ï¿½ after_hours_rank/manual_request.jsonï¿½ï¿½
+    ÅÌÖÐ£¨09:00¨C15:10£©Ä¬ÈÏ defer£¬²»É¾¶ÓÁÐ£¬±ÜÃâ×èÈû½»Ò×/²ßÂÔÈ¡Êý¡£
+    ¿ÉÑ¡ `"allow_intraday": true` Ó¦¼±Ç¿ÅÜ£¨²»ÍÆ¼ö£©¡£
+    ÎðÄ¬ÈÏ¿ª enable_xtdata_download£¨miniQMT£©¡£³É¹¦À­ÆðºóÐ´Èë
+    manual_request.done.json£»Î´Íê³É£¨time-slice£©Ôò°Ñµ±ÈÕÁôÔÚ¶ÓÊ×¡£
+    ³¬³öÈ¯ÉÌ tick Áô´æ / ÀúÊ·ÈÕÁ¬Ðø¿ÕÅú£ºÌø¹ý¸ÃÈÕ²¢ÐøÏÂÒ»¶ÓÁÐÈÕ£¨²» abort-hold£©¡£
+    ÎÞÂÛ tick ¶ÓÁÐÓÐÎÞ£¬½áÊøÊ±¶¼»á³¢ÊÔ after_hours_rank/manual_request.json¡£
     """
     try:
         return _process_manual_request_body(ContextInfo)
@@ -1712,7 +1712,7 @@ def _process_manual_request_body(ContextInfo=None):
         ts = time.time()
         if ts - _PAUSE_DEFER_LOG_TS >= 60.0:
             _PAUSE_DEFER_LOG_TS = ts
-            _log("ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý»ï¿½ï¿½ï¿½PAUSEï¿½ï¿½Ö¾")
+            _log("ÊÖ¶¯ÇëÇóÔÝ»º£ºPAUSE±êÖ¾")
         return False
     if _daily_sync_running():
         return False
@@ -1720,7 +1720,7 @@ def _process_manual_request_body(ContextInfo=None):
         with open(path, "r", encoding="utf-8") as f:
             req = json.load(f) or {}
     except Exception as e:
-        _log("ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡Ê§ï¿½ï¿½: %s" % e)
+        _log("ÊÖ¶¯ÇëÇó¶ÁÈ¡Ê§°Ü: %s" % e)
         return False
     if not isinstance(req, dict):
         return False
@@ -1730,14 +1730,14 @@ def _process_manual_request_body(ContextInfo=None):
         if ts - _PROTECT_DEFER_LOG_TS >= 60.0:
             _PROTECT_DEFER_LOG_TS = ts
             _log(
-                "ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ "
-                "ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½%sï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"
+                "ÊÖ¶¯ÇëÇóÔÝ»º£ºÅÌÖÐ±£»¤ "
+                "£¨¶ÓÁÐ±£Áô£»%sºó¼ÌÐø£©"
                 % _MARKET_PROTECT_END.strftime("%H:%M")
             )
         return False
     days = _normalize_manual_days(req)
     if not days:
-        _log("ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð§: %s" % (req.get("days") or req.get("day")))
+        _log("ÊÖ¶¯ÇëÇóÈÕÆÚÎÞÐ§: %s" % (req.get("days") or req.get("day")))
         try:
             os.remove(path)
         except Exception:
@@ -1751,8 +1751,8 @@ def _process_manual_request_body(ContextInfo=None):
     if "enable_xtdata_download" in req:
         ENABLE_XTDATA_TICK_DOWNLOAD = bool(req.get("enable_xtdata_download"))
 
-    # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ / ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ Ò»ï¿½ï¿½ï¿½Æ½ï¿½ï¿½ï¿½
-    # ï¿½ï¿½ï¿½æ´°ï¿½â²»ï¿½ï¿½ï¿½Ú´ï¿½ï¿½Ô¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½manual_request ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    # ¶ÓÊ×Á¬Ïû£ºÒÑÍê³É / ÀúÊ·¿ÕÅúÌø¹ý ¡ª Ò»´ÎÍÆ½ø¡£
+    # Áô´æ´°Íâ²»ÔÙÔÚ´Ë×Ô¶¯Ìø¹ý£ºmanual_request ÀïµÄÈÕÆÚÊÇÓÃ»§ÏÔÊ½µãÃû¡£
     skipped_head = []  # type: List[str]
     while days:
         head = days[0]
@@ -1771,18 +1771,18 @@ def _process_manual_request_body(ContextInfo=None):
                     skipped_head.append(head)
                     days = days[1:]
                     continue
-                # ï¿½ï¿½ï¿½ï¿½ abort-holdï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ holdï¿½ï¿½ï¿½ï¿½Ë¢ MANUAL_REQUEST
+                # ½ñÈÕ abort-hold£º½ÚÁ÷ÈÕÖ¾£¬²»Çå hold¡¢²»Ë¢ MANUAL_REQUEST
                 ts = time.time()
                 if ts - _MANUAL_HOLD_LOG_TS >= float(_MANUAL_LOG_INTERVAL_SEC):
                     _MANUAL_HOLD_LOG_TS = ts
                     _ABORT_HOLD_LOG_TS = ts
                     _log(
-                        "ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý»ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½È´ day=%s Ô­ï¿½ï¿½=%s Ê£ï¿½ï¿½=%d"
+                        "ÊÖ¶¯ÇëÇóÔÝ»º£ºÖÐÖ¹ÀäÈ´ day=%s Ô­Òò=%s Ê£Óà=%d"
                         % (head, hr[:60], max(0, len(days) - 1))
                     )
                     _append_run_log(
                         head,
-                        "MANUAL_REQUEST ï¿½Ý»ï¿½ ï¿½ï¿½Ö¹ï¿½ï¿½È´ reason=%s remain=%d"
+                        "MANUAL_REQUEST ÔÝ»º ÖÐÖ¹ÀäÈ´ reason=%s remain=%d"
                         % (hr[:60], max(0, len(days) - 1)),
                     )
                 return False
@@ -1790,7 +1790,7 @@ def _process_manual_request_body(ContextInfo=None):
 
     if skipped_head:
         _log(
-            "ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ %d ï¿½ï¿½: %s"
+            "ÊÖ¶¯ÇëÇóÌø¹ýÒÑÍê³É/¿ÕÅú %d ÈÕ: %s"
             % (len(skipped_head), ",".join(skipped_head[:8]))
         )
     if not days:
@@ -1798,17 +1798,17 @@ def _process_manual_request_body(ContextInfo=None):
             os.remove(path)
         except Exception:
             pass
-        _log("ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¿Õ£ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½Éºï¿½")
+        _log("ÊÖ¶¯ÇëÇó¶ÓÁÐÒÑ¿Õ£¨Ìø¹ý/Íê³Éºó£©")
         return True
 
     day_s = days[0]
     remaining = days[1:]
-    # ï¿½ï¿½ force Ê±ï¿½ï¿½ abort-holdï¿½ï¿½Ä¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½Ö¾
+    # ½ö force Ê±Çå abort-hold£»Ä¬ÈÏ×ðÖØÀäÈ´£¬±ÜÃâÃ¿ÃëÖØÅÜË¢ÈÕÖ¾
     if force:
         _clear_abort_hold(day_s)
 
     _log(
-        "ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ day=%s Ê£ï¿½ï¿½=%d force=%s limit=%s xtdata_dl=%s src=%s"
+        "ÊÖ¶¯ÇëÇó day=%s Ê£Óà=%d force=%s limit=%s xtdata_dl=%s src=%s"
         % (
             day_s,
             len(remaining),
@@ -1849,7 +1849,7 @@ def _process_manual_request_body(ContextInfo=None):
                 indent=2,
             )
     except Exception as e:
-        _log("ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½éµµÊ§ï¿½ï¿½: %s" % e)
+        _log("ÊÖ¶¯ÇëÇó¹éµµÊ§°Ü: %s" % e)
         return False
 
     ok = run_tick_full_sync(
@@ -1869,28 +1869,28 @@ def _process_manual_request_body(ContextInfo=None):
                 if os.path.isfile(path):
                     os.remove(path)
         else:
-            # time-slice / ï¿½ï¿½ï¿½ï¿½ ABORTï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×£ï¿½ï¿½Â´ï¿½ periodic ï¿½ï¿½ï¿½ï¿½
+            # time-slice / ½ñÈÕ ABORT£ºµ±ÈÕÁô¶ÓÊ×£¬ÏÂ´Î periodic ÐøÅÜ
             _write_manual_request_remaining(path, req, [day_s] + list(remaining))
             ts = time.time()
             if ts - _MANUAL_KEEP_LOG_TS >= float(_MANUAL_LOG_INTERVAL_SEC):
                 _MANUAL_KEEP_LOG_TS = ts
                 _log(
-                    "ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ day=%s ï¿½Ú¶ï¿½ï¿½×£ï¿½Î´ï¿½ï¿½É£ï¿½Ê£ï¿½ï¿½=%d"
+                    "ÊÖ¶¯ÇëÇó±£Áô day=%s ÓÚ¶ÓÊ×£¨Î´Íê³É£©Ê£Óà=%d"
                     % (day_s, len(remaining))
                 )
     except Exception as e:
-        _log("ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¸ï¿½ï¿½ï¿½Ê§ï¿½ï¿½: %s" % e)
-        # ï¿½éµµÊ§ï¿½ï¿½Ê±ï¿½ð¶ª¶Ó£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô­ï¿½Ä¼ï¿½
+        _log("ÊÖ¶¯ÇëÇó¶ÓÁÐ¸üÐÂÊ§°Ü: %s" % e)
+        # ¹éµµÊ§°ÜÊ±Îð¶ª¶Ó£º¾¡Á¿±£ÁôÔ­ÎÄ¼þ
         return False
     return ok
 
 
 def tick_full_sync(ContextInfo):
     # type: (Any) -> bool
-    """ï¿½ï¿½ï¿½Ý¾ï¿½ timer ï¿½ï¿½Ú£ï¿½ï¿½ï¿½ï¿½ï¿½ manual_request ï¿½ï¿½ï¿½ï¿½ï¿½È°ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü¡ï¿½
+    """¼æÈÝ¾É timer Èë¿Ú£»ÈôÓÐ manual_request ÔòÓÅÏÈ°´Ö¸¶¨ÈÕÐøÅÜ¡£
 
-    ï¿½ï¿½ï¿½Õ¶ï¿½ï¿½Ð£ï¿½Ã¿ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½Õ£ï¿½Ê£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ manual_request.jsonï¿½ï¿½
-    ï¿½ï¿½ periodic_sync / ï¿½Â´ï¿½ timer ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½âµ¥ï¿½ï¿½ï¿½ï¿½Ú¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½
+    ¶àÈÕ¶ÓÁÐ£ºÃ¿´ÎÖ»Ïû»¯¶ÓÊ×Ò»ÈÕ£¬Ê£ÓàÁôÔÚ manual_request.json£¬
+    ÓÉ periodic_sync / ÏÂ´Î timer ¼ÌÐø£¨±ÜÃâµ¥´ÎÈë¿Ú¿¨ËÀÊýÈÕ£©¡£
     """
     manual = process_manual_request(ContextInfo)
     if manual is not None:
@@ -1900,17 +1900,17 @@ def tick_full_sync(ContextInfo):
 
 def run_post_daily_pipeline(ContextInfo=None):
     # type: (Any) -> bool
-    """ï¿½ï¿½ï¿½ï¿½Ö®ï¿½ï¿½tick ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½Ìºï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½"""
+    """ÈÕÏßÖ®ºó£ºtick ÂäÅÌ ¡ú ÅÌºóÁ¿ÄÜ ¡ú °å¿éÍ¬²½¡£"""
     now = datetime.now()
     day = now.strftime("%Y%m%d")
-    # ï¿½Ç½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½Ä©/ï¿½Ú¼ï¿½ï¿½Õ£ï¿½Ä¬ï¿½ï¿½ï¿½ï¿½Ë®ï¿½ß²ï¿½ï¿½Ü¡ï¿½ï¿½ï¿½ï¿½ì¡¹ï¿½ï¿½ï¿½ï¿½Ê·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ manual_request
+    # ·Ç½»Ò×ÈÕ£¨ÖÜÄ©/½Ú¼ÙÈÕ£©Ä¬ÈÏÁ÷Ë®Ïß²»ÅÜ¡¸½ñÌì¡¹£»ÀúÊ·²¹Êý×ß manual_request
     if not _today_is_tradeday(ContextInfo):
-        _log("ï¿½Ç½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½Ï·Ö±ï¿½ï¿½ï¿½Ë®ï¿½ï¿½: %s" % day)
+        _log("·Ç½»Ò×ÈÕÌø¹ýÄ¬ÈÏ·Ö±ÊÁ÷Ë®Ïß: %s" % day)
         _chain_sector_after_pipeline(ContextInfo)
         return False
-    # ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½ï¿½ï¿½ï¿½×£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ daily Õ¢ï¿½Åµï¿½×¡ï¿½ï¿½
+    # ÈÕÏßÎ´Íê³ÉÔò²»ÇÀÏÂÔØ£¨¶µµ×£»Õý³£ÒÑÓÉ daily Õ¢ÃÅµ²×¡£©
     if not _daily_gate_open():
-        _log("ï¿½È´ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½Éºï¿½ï¿½ï¿½ï¿½Ü·Ö±ï¿½")
+        _log("µÈ´ýÈÕÏßÍ¬²½Íê³ÉºóÔÙÅÜ·Ö±Ê")
         return False
     ok = run_tick_full_sync(ContextInfo, force=False)
     if ok or _day_already_done(day):
@@ -1921,7 +1921,7 @@ def run_post_daily_pipeline(ContextInfo=None):
 
 def _today_is_tradeday(ContextInfo=None):
     # type: (Any) -> bool
-    """ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½Ä¬ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½Ë®ï¿½ï¿½ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ticks Ä¿Â¼ï¿½ï¿½ï¿½ï¿½"""
+    """½ñÈÕÊÇ·ñ½»Ò×ÈÕ£»¹©Ä¬ÈÏÅÌºóÁ÷Ë®ÏßÔçÍË£¨²»½¨¿Õ ticks Ä¿Â¼£©¡£"""
     today = date.today()
     xtdata = _load_xtdata()
     if xtdata is not None:
@@ -1954,7 +1954,7 @@ def _daily_gate_open():
 
 def _run_after_rank_after_sync(ContextInfo, day):
     # type: (Any, str) -> None
-    """ï¿½ï¿½ï¿½Ì¾ï¿½ï¿½ï¿½ï¿½ó´¥·ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ticksï¿½ï¿½ï¿½ï¿½"""
+    """ÂäÅÌ¾ÍÐ÷ºó´¥·¢ÅÌºóÁ¿ÄÜ£¨¶Á±¾µØ ticks£©¡£"""
     try:
         try:
             import ant_after_hours_rank_runner as ar
@@ -1964,29 +1964,29 @@ def _run_after_rank_after_sync(ContextInfo, day):
             return
         if getattr(ar, "_BUSY", False):
             return
-        _log("ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½ï¿½ day=%s" % day)
+        _log("´®ÁªÅÌºóÁ¿ÄÜ day=%s" % day)
         ar.run_after_hours_rank(ContextInfo, day=day, force=False)
     except Exception as e:
-        _log("ï¿½ï¿½ï¿½ï¿½ï¿½Ìºï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½: %s" % e)
+        _log("´®ÁªÅÌºóÁ¿ÄÜÊ§°Ü: %s" % e)
 
 
 def _chain_sector_after_pipeline(ContextInfo):
     # type: (Any) -> None
-    """ï¿½ï¿½ï¿½ï¿½Ö®ï¿½ó£º°ï¿½ï¿½É·ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì£ï¿½ï¿½ï¿½"""
+    """Á¿ÄÜÖ®ºó£º°å¿é³É·ÖÍ¬²½£¨ºóÌ¨£¬²»µ²Ö÷Á÷³Ì£©¡£"""
     try:
         sector = _load_sector_sync_runner()
         if hasattr(sector, "run_after_hours_pipeline"):
             sector.run_after_hours_pipeline(ContextInfo)
         elif hasattr(sector, "_start_sector_sync_bg"):
-            _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½ï¿½")
+            _log("´®Áª°å¿éÍ¬²½£¨ºóÌ¨£©")
             sector._start_sector_sync_bg(ContextInfo, "after_hours_pipeline", force=True)
     except Exception as e:
-        _log("ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½Ê§ï¿½ï¿½: %s" % e)
+        _log("´®Áª°å¿éÍ¬²½Ê§°Ü: %s" % e)
 
 
 def maybe_catch_up_tick_full_sync(ContextInfo=None):
     # type: (Any) -> bool
-    """ï¿½Ìºï¿½ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ daily ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ pipelineï¿½ï¿½ï¿½Ë´ï¿½ï¿½ï¿½ï¿½ï¿½ tick Õ¢ï¿½Å¶ï¿½ï¿½×£ï¿½ï¿½ï¿½"""
+    """ÅÌºó²¹ÅÜ£¨ÓÅÏÈ×ß daily µÄÕûÌõ pipeline£»´Ë´¦½ö×÷ tick Õ¢ÃÅ¶µµ×£©¡£"""
     global _CATCHUP_LOG_TS, _ABORT_HOLD_LOG_TS
 
     if _BUSY:
@@ -2012,7 +2012,7 @@ def maybe_catch_up_tick_full_sync(ContextInfo=None):
         if ts - _ABORT_HOLD_LOG_TS >= 120.0:
             _ABORT_HOLD_LOG_TS = ts
             _log(
-                "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½È´ day=%s Ô­ï¿½ï¿½=%s"
+                "²¹ÅÜÌø¹ý£ºÖÐÖ¹ÀäÈ´ day=%s Ô­Òò=%s"
                 % (day, (hold_reason or "")[:80])
             )
         return False
@@ -2021,7 +2021,7 @@ def maybe_catch_up_tick_full_sync(ContextInfo=None):
     if ts - _CATCHUP_LOG_TS >= 120.0:
         _CATCHUP_LOG_TS = ts
         _log(
-            "ï¿½è²¹ï¿½ï¿½ day=%sï¿½ï¿½ï¿½ï¿½ï¿½ßºï¿½ %02d:%02dï¿½ï¿½"
+            "Ðè²¹ÅÜ day=%s£¨ÈÕÏßºó %02d:%02d£©"
             % (day, SYNC_HOUR, SYNC_MINUTE)
         )
 
@@ -2030,24 +2030,21 @@ def maybe_catch_up_tick_full_sync(ContextInfo=None):
 
 def register_tick_full_sync_timer(ContextInfo):
     # type: (Any) -> None
-    """ï¿½ï¿½ï¿½Ùµï¿½ï¿½ï¿½×¢ï¿½á¶¨Ê±ï¿½ï¿½ï¿½ï¿½ daily_bar_sync(15:35) ï¿½ï¿½Éºï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½"""
-    _log(
-        "ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ±¾=%s"
-        % TICK_FULL_SYNC_VERSION
-    )
+    """²»ÔÙµ¥¶À×¢²á¶¨Ê±£ºÓÉ daily_bar_sync(15:35) Íê³Éºó´®ÐÐ´¥·¢¡£"""
+    return
 
 
 def tick_probe(ContextInfo, day="20260730"):
     # type: (Any, str) -> Any
-    """ï¿½ï¿½ï¿½Ôºï¿½ï¿½ï¿½ï¿½ï¿½Ì½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ download + ContextInfo tick ï¿½ï¿½ï¿½å£¨2ï¿½C3 Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ±ï¿½ï¿½ï¿½ï¿½
+    """²ßÂÔº¯Êý£ºÌ½²âÄÚÖÃ download + ContextInfo tick ±äÌå£¨2¨C3 Ö»Á÷¶¯ÐÔÆ±£©¡£
 
-    Ä£ï¿½Í½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½Ò»ï¿½Î±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É£ï¿½ï¿½ï¿½ï¿½Ð´ data/tick_full_sync/tick_probe_*.log
-    ï¿½ï¿½ï¿½ï¿½Ó¡ [tick_probe] ï¿½Ð¡ï¿½
+    Ä£ÐÍ½»Ò×ÀïÌí¼Ó/µ÷ÓÃÒ»´Î±¾º¯Êý¼´¿É£»½á¹ûÐ´ data/tick_full_sync/tick_probe_*.log
+    ²¢´òÓ¡ [tick_probe] ÐÐ¡£
     """
     try:
         tick_io = _import_tick_io()
     except Exception as e:
-        _log("tick_probeï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½: %s" % e)
+        _log("tick_probeµ¼ÈëÊ§°Ü: %s" % e)
         return None
     try:
         if hasattr(tick_io, "bind_download_history_data"):
@@ -2056,8 +2053,8 @@ def tick_probe(ContextInfo, day="20260730"):
         pass
     fn = getattr(tick_io, "run_tick_api_probe", None)
     if not callable(fn):
-        _log("tick_probe: È±ï¿½ï¿½run_tick_api_probeï¿½ï¿½ï¿½ï¿½ï¿½Ø²ï¿½ï¿½ï¿½ant_tick_cache_ioï¿½ï¿½")
+        _log("tick_probe: È±ÉÙrun_tick_api_probe£¨ÇëÖØ²¿Êðant_tick_cache_io£©")
         return None
     day_s = str(day or "20260730").replace("-", "").replace("/", "")[:8]
-    _log("tick_probeï¿½ï¿½Ê¼ day=%s ï¿½æ±¾=%s" % (day_s, TICK_FULL_SYNC_VERSION))
+    _log("tick_probe¿ªÊ¼ day=%s °æ±¾=%s" % (day_s, TICK_FULL_SYNC_VERSION))
     return fn(ContextInfo, day=day_s)

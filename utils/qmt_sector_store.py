@@ -159,6 +159,8 @@ class QmtSectorStore:
         self._code_sectors: Dict[str, List[str]] = {}
         self._index_built_for: Optional[tuple] = None
         self._index_lock = threading.Lock()
+        # 名称查询时 xtdata 一旦失败则整进程禁用，避免全市场逐只重连卡死 UI
+        self._xtdata_name_disabled = False
 
     def xtdata(self):
         if self._xtdata is None:
@@ -184,12 +186,29 @@ class QmtSectorStore:
     def get_universe(self) -> Set[str]:
         """沪深 A 股全集。
 
-        优先 xtdata「沪深A股」；其次 data/a_share_universe.json（日线同步写入）；
-        再回退板块反查索引键。勿把「仅有板块标签的子集」当成全集，
-        否则「不属于任何板块」虚拟板块成员会变成 0，全选也只剩 ~4755。
+        builtin/standalone：优先 data/a_share_universe.json（大 QMT 同步），
+        避免本机连不上 xtquant 时在选股启动路径上反复超时。
+        其他模式：优先 xtdata「沪深A股」；其次本地文件；再回退板块反查索引键。
+        勿把「仅有板块标签的子集」当成全集，否则「不属于任何板块」虚拟板块成员会变成 0。
         """
         if self._universe:
             return self._universe
+
+        prefer_file = False
+        try:
+            from utils.qmt_execution_config import get_qmt_mode
+
+            prefer_file = get_qmt_mode() in ("builtin", "standalone")
+        except Exception:
+            prefer_file = False
+
+        if prefer_file:
+            self._xtdata_name_disabled = True
+            uni = self._universe_from_file()
+            if uni:
+                self._universe = uni
+                return self._universe
+
         try:
             raw = self.xtdata().get_stock_list_in_sector(_UNIVERSE_SECTOR) or []
         except Exception as e:
@@ -398,6 +417,8 @@ class QmtSectorStore:
                 return name
         except Exception:
             pass
+        if self._xtdata_name_disabled:
+            return "未知"
         try:
             suffix = ".SH" if code6.startswith("6") else ".SZ"
             detail = self.xtdata().get_instrument_detail(f"{code6}{suffix}")
@@ -406,7 +427,7 @@ class QmtSectorStore:
                 if n:
                     return str(n)
         except Exception:
-            pass
+            self._xtdata_name_disabled = True
         return "未知"
 
     def stocks_for_sectors(

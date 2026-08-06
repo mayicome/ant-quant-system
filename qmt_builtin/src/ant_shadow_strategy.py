@@ -3,11 +3,14 @@
 import os
 import sys
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
-SHADOW_VERSION = "20260801.01"
+SHADOW_VERSION = "20260804.07"
 SEED_INTERVAL_SEC = 3
 AUCTION_SEED_INTERVAL_SEC = 1.0
+# 盘中 quotes_recv_at(本机收到推送墙钟) 落后超过该秒数 → full_tick 补种
+# 须早于主程序「行情推送停」告警（约 50s），否则会先告警再补种
+QUOTE_STALE_SEED_SEC = 18.0
 NIGHT_RETRY_INTERVAL_SEC = 3.0
 NIGHT_PENDING_TIMEOUT_SEC = 90.0
 _ORDERS_ENABLED = True
@@ -67,13 +70,6 @@ def _import_rules_io_module():
 
 
 _rio = _import_rules_io_module()
-print(
-    "[交易核心] rules_io loaded prune=%s file=%s"
-    % (
-        hasattr(_rio, "prune_results_stocks"),
-        os.path.join(QMT_BUILTIN_DIR, "ant_rules_io.py"),
-    )
-)
 PROJECT_ROOT = _rio.PROJECT_ROOT
 RESULTS_FLUSH_INTERVAL_SEC = _rio.RESULTS_FLUSH_INTERVAL_SEC
 RULES_RELOAD_INTERVAL_SEC = _rio.RULES_RELOAD_INTERVAL_SEC
@@ -169,7 +165,7 @@ def _ensure_tick_runner_module() -> bool:
         src_sc = False
         src_early = False
     print(
-        "[交易核心] tick_runner hot-loaded mtime=%s single_buy=%s single_sell=%s breakthrough_sell=%s best_sell=%s best_buy=%s cage=%s grid=%s clear=%s early=%s file=%s"
+        "[交易核心] tick_runner 热加载 mtime=%s 单点买=%s 单点卖=%s 突破卖=%s 弹性卖=%s 弹性买=%s 笼子=%s 网格=%s 清仓=%s 提前=%s file=%s"
         % (
             int(mtime),
             src_ok,
@@ -235,10 +231,6 @@ def _get_daily_sync_runner():
     importlib.reload(req_mod)
     _DAILY_SYNC_MOD = mod
     _DAILY_SYNC_MTIME = mtime
-    print(
-        "[日线同步] module loaded version=%s file=%s"
-        % (getattr(mod, "DAILY_SYNC_VERSION", "?"), path)
-    )
     return mod
 
 
@@ -258,10 +250,6 @@ def _get_after_hours_rank_runner():
     mod = importlib.reload(mod)
     _AFTER_RANK_MOD = mod
     _AFTER_RANK_MTIME = mtime
-    print(
-        "[盘后排名] 模块已加载 版本=%s 文件=%s"
-        % (getattr(mod, "AFTER_HOURS_RANK_VERSION", "?"), path)
-    )
     return mod
 
 
@@ -281,10 +269,6 @@ def _get_tick_full_sync_runner():
     mod = importlib.reload(mod)
     _TICK_FULL_SYNC_MOD = mod
     _TICK_FULL_SYNC_MTIME = mtime
-    print(
-        "[分笔同步] 模块已加载 版本=%s 文件=%s"
-        % (getattr(mod, "TICK_FULL_SYNC_VERSION", "?"), path)
-    )
     return mod
 
 
@@ -304,10 +288,6 @@ def _get_sector_sync_runner():
     mod = importlib.reload(mod)
     _SECTOR_SYNC_MOD = mod
     _SECTOR_SYNC_MTIME = mtime
-    print(
-        "[板块同步] module loaded version=%s file=%s"
-        % (getattr(mod, "SECTOR_SYNC_VERSION", "?"), path)
-    )
     return mod
 
 
@@ -376,9 +356,9 @@ def _disarm_task_in_rules_armed(task_id: str) -> None:
                 import json as _json
 
                 _json.dump(data, f, ensure_ascii=False, indent=2)
-        print("[交易核心] disarmed task in rules_armed: %s" % tid)
+        print("[交易核心] 已解除武装任务 rules_armed: %s" % tid)
     except Exception as e:
-        print("[交易核心] disarm rules_armed error: %s" % e)
+        print("[交易核心] 解除武装 rules_armed 错误: %s" % e)
 
 
 
@@ -436,9 +416,9 @@ def _mark_grid_point_in_rules_armed(task_id: str, grid_index: int, all_done: boo
         except Exception:
             from qmt_builtin.ant_rules_io import save_json_atomic
         save_json_atomic(_RULES_PATH, data)
-        print("[交易核心] grid mark rules_armed: %s g=%s all=%s" % (tid, gi, all_done))
+        print("[交易核心] 网格标记 rules_armed: %s g=%s all=%s" % (tid, gi, all_done))
     except Exception as e:
-        print("[交易核心] grid mark rules_armed error: %s" % e)
+        print("[交易核心] 网格标记 rules_armed 错误: %s" % e)
 
 
 def _seed_done_from_results_orders() -> None:
@@ -492,7 +472,7 @@ def _seed_done_from_results_orders() -> None:
         _RUNNER.hydrate_done_task_ids(ids)
         _RESULTS["done_task_ids"] = _RUNNER.dump_done_task_ids()
     except Exception as e:
-        print("[交易核心] seed done_task_ids error: %s" % e)
+        print("[交易核心] 种子 done_task_ids 错误: %s" % e)
 
 
 def _is_trading_day_local(d):
@@ -653,7 +633,7 @@ def _finalize_night_market_orders() -> bool:
         o["night_confirmed"] = True
         changed = True
         print(
-            "[交易核心] night confirmed %s tid=%s bst=%s sysid=%s"
+            "[交易核心] 夜市确认 %s tid=%s bst=%s sysid=%s"
             % (code, tid, bst, o.get("order_sysid"))
         )
     return changed
@@ -712,9 +692,9 @@ def _clear_done_task(stock_code: str, task_id: str) -> None:
         st = _RUNNER._states.get(str(stock_code or "").strip().upper())
         if st is not None and hasattr(st, "done_task_ids"):
             st.done_task_ids.discard(str(task_id))
-            print("[交易核心] unlock task for retry: %s" % task_id)
+            print("[交易核心] 解锁任务以便重试: %s" % task_id)
     except Exception as e:
-        print("[交易核心] unlock task error: %s" % e)
+        print("[交易核心] 解锁任务错误: %s" % e)
 
 
 def _refresh_orders_enabled(rules: Optional[dict] = None) -> None:
@@ -746,7 +726,8 @@ def _refresh_min_buy_amount(rules: Optional[dict] = None) -> None:
         _MIN_BUY_AMOUNT = max(0.0, float((data or {}).get("min_buy_amount") or 0))
     except (TypeError, ValueError):
         _MIN_BUY_AMOUNT = 0.0
-    print("[交易核心] min_buy_amount=%.2f" % _MIN_BUY_AMOUNT)
+    if _MIN_BUY_AMOUNT > 0:
+        print("[交易核心] 最低买入金额=%.2f" % _MIN_BUY_AMOUNT)
 
 
 def _parse_hms_to_seconds(raw: str) -> int:
@@ -773,10 +754,11 @@ def _refresh_buy_block_window(rules: Optional[dict] = None) -> None:
     _BUY_BLOCK_ENABLED = bool(data.get("buy_block_window_enabled"))
     _BUY_BLOCK_START = str(data.get("buy_block_start") or "09:30:00").strip()
     _BUY_BLOCK_END = str(data.get("buy_block_end") or "09:31:30").strip()
-    print(
-        "[交易核心] buy_block enabled=%s %s-%s"
-        % (_BUY_BLOCK_ENABLED, _BUY_BLOCK_START, _BUY_BLOCK_END)
-    )
+    if _BUY_BLOCK_ENABLED:
+        print(
+            "[交易核心] 开盘禁买 enabled=True %s-%s"
+            % (_BUY_BLOCK_START, _BUY_BLOCK_END)
+        )
 
 
 def _is_in_buy_block_window() -> bool:
@@ -864,7 +846,7 @@ def _finalize_buy_block_skip(
         "msg": msg,
     }
     print(
-        "[交易核心] order buy_block skip %s tid=%s px=%s vol=%s msg=%s"
+        "[交易核心] 委托开盘禁买跳过 %s tid=%s px=%s vol=%s msg=%s"
         % (code, tid, px, vol, msg)
     )
     if tid:
@@ -929,7 +911,7 @@ def _finalize_band_hard_pass_skip(
         "msg": msg,
     }
     print(
-        "[交易核心] order band_hard_pass skip %s tid=%s px=%s detail=%s"
+        "[交易核心] 委托价格带硬通过跳过 %s tid=%s px=%s detail=%s"
         % (code, tid, px, (detail[:80] + "...") if len(detail) > 80 else detail)
     )
     if tid:
@@ -959,7 +941,7 @@ def _mark_buy_task_done(code: str, tid: str, gi_raw=None) -> None:
         if hasattr(_RUNNER, "dump_done_task_ids") and _RESULTS is not None:
             _RESULTS["done_task_ids"] = _RUNNER.dump_done_task_ids()
     except Exception as e:
-        print("[交易核心] mark buy done error: %s" % e)
+        print("[交易核心] 标记买入完成错误: %s" % e)
 
 
 def _finalize_order_below_min_skip(
@@ -1012,7 +994,7 @@ def _finalize_order_below_min_skip(
         "msg": cash_msg,
     }
     print(
-        "[交易核心] order below_min end %s tid=%s px=%s vol=%s msg=%s"
+        "[交易核心] 委托低于最低金额结束 %s tid=%s px=%s vol=%s msg=%s"
         % (code, tid, px, vol, cash_msg)
     )
     if early_order:
@@ -1166,7 +1148,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
         return False
     po = _get_passorder_mod()
     if po is None:
-        print("[交易核心] passorder module missing")
+        print("[交易核心] 缺少 passorder 模块")
         return False
     changed = False
     for ev in events:
@@ -1309,7 +1291,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                         "msg": cash_msg,
                     }
                     print(
-                        "[交易核心] order night_buy skip %s px=%s vol=%s msg=%s"
+                        "[交易核心] 委托夜市买跳过 %s px=%s vol=%s msg=%s"
                         % (code, px, vol, cash_msg)
                     )
                     changed = True
@@ -1323,7 +1305,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     strategy_name="蚂蚁-夜市买入",
                     user_order_id=uid,
                 )
-                side_tag = "night_buy"
+                side_tag = "夜市买"
             else:
                 ok, reason, record = po.place_limit_sell(
                     ContextInfo,
@@ -1333,7 +1315,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     strategy_name="蚂蚁-夜市卖出",
                     user_order_id=uid,
                 )
-                side_tag = "night_sell"
+                side_tag = "夜市卖"
             record["task_id"] = tid
             record["event_type"] = ev_type
             po.append_order_record(_RESULTS, record)
@@ -1345,7 +1327,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 "msg": record.get("msg") or reason,
             }
             print(
-                "[交易核心] order %s %s ok=%s px=%s vol=%s msg=%s"
+                "[交易核心] 委托 %s %s ok=%s px=%s vol=%s msg=%s"
                 % (side_tag, code, ok, record.get("price"), record.get("volume"), record.get("msg"))
             )
             # 不 disarm / 不记 done；废单或失败由轮询重试
@@ -1432,7 +1414,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     except Exception:
                         pass
                     print(
-                        "[交易核心] order early_buy skip %s px=%s vol=%s msg=%s"
+                        "[交易核心] 委托提前买跳过 %s px=%s vol=%s msg=%s"
                         % (code, px, vol, cash_msg)
                     )
                     changed = True
@@ -1446,7 +1428,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     strategy_name="蚂蚁-提前买入",
                     user_order_id=uid,
                 )
-                side_tag = "early_buy"
+                side_tag = "提前买"
             else:
                 ok, reason, record = po.place_limit_sell(
                     ContextInfo,
@@ -1456,7 +1438,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     strategy_name="蚂蚁-提前卖出",
                     user_order_id=uid,
                 )
-                side_tag = "early_sell"
+                side_tag = "提前卖"
             record["task_id"] = tid
             record["event_type"] = ev_type
             record["early_order"] = True
@@ -1474,7 +1456,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 "msg": record.get("msg") or reason,
             }
             print(
-                "[交易核心] order %s %s ok=%s px=%s vol=%s msg=%s"
+                "[交易核心] 委托 %s %s ok=%s px=%s vol=%s msg=%s"
                 % (side_tag, code, ok, record.get("price"), record.get("volume"), record.get("msg"))
             )
             if not ok:
@@ -1516,7 +1498,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     pass
             po.append_order_record(_RESULTS, record)
             print(
-                "[交易核心] early_cancel %s sysid=%s ok=%s msg=%s"
+                "[交易核心] 提前撤单 %s sysid=%s ok=%s msg=%s"
                 % (code, sysid, ok, record.get("msg"))
             )
             changed = True
@@ -1619,7 +1601,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             if tid:
                 _disarm_task_in_rules_armed(tid)
             print(
-                "[交易核心] order scheduled_clear skip %s px=%s vol=%s msg=%s"
+                "[交易核心] 委托定时清仓跳过 %s px=%s vol=%s msg=%s"
                 % (code, record.get("price"), record.get("volume"), record.get("msg"))
             )
             changed = True
@@ -1637,7 +1619,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     vol = 0
             vol = (vol // 100) * 100
             if vol <= 0:
-                print("[交易核心] best_sell skip no position %s" % code)
+                print("[交易核心] 弹性卖跳过 无持仓 %s" % code)
                 continue
         if ev_type == "scheduled_clear_hit":
             # 生成时 max_volume 常为全仓；盘中弹性/突破已卖后须按可卖量截断，否则柜台废单。
@@ -1653,7 +1635,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 ):
                     snap.sync_account_snapshot_to_results(ContextInfo, _RESULTS)
             except Exception as e:
-                print("[交易核心] scheduled_clear position sync fail: %s" % e)
+                print("[交易核心] 定时清仓持仓同步失败: %s" % e)
             pos_map = (_RESULTS or {}).get("positions") or {}
             prow = None
             if isinstance(pos_map, dict):
@@ -1698,7 +1680,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     )
                     avail = clipped
             if avail <= 0:
-                print("[交易核心] scheduled_clear skip no position %s" % code)
+                print("[交易核心] 定时清仓跳过 无持仓 %s" % code)
                 if tid:
                     _disarm_task_in_rules_armed(tid)
                 continue
@@ -1725,22 +1707,22 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             )
             if ev_type == "best_sell_hit":
                 strategy_name = "蚂蚁-弹性卖出"
-                side_tag = "best_sell"
+                side_tag = "弹性卖"
             elif ev_type == "breakthrough_sell_hit":
                 strategy_name = "蚂蚁-突破卖出"
-                side_tag = "breakthrough_sell"
+                side_tag = "突破卖"
             elif ev_type == "cage_sell_hit":
                 strategy_name = "蚂蚁-笼子卖出"
-                side_tag = "cage_sell"
+                side_tag = "笼子卖"
             elif ev_type == "grid_sell_hit":
                 strategy_name = "蚂蚁-网格卖出"
-                side_tag = "grid_sell"
+                side_tag = "网格卖"
             elif ev_type == "scheduled_clear_hit":
                 strategy_name = "蚂蚁-定时清仓"
-                side_tag = "scheduled_clear"
+                side_tag = "定时清仓"
             else:
                 strategy_name = "蚂蚁-单点卖出"
-                side_tag = "single_sell"
+                side_tag = "单点卖"
             ok, reason, record = po.place_limit_sell(
                 ContextInfo,
                 code,
@@ -1757,7 +1739,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 tick_row=tick_dict,
             )
             strategy_name = "蚂蚁-突破买入"
-            side_tag = "breakthrough_buy"
+            side_tag = "突破买"
             is_buy_order = True
         elif ev_type == "best_buy_hit":
             buy_px = po.resolve_buy_limit_price(
@@ -1767,7 +1749,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 tick_row=tick_dict,
             )
             strategy_name = "蚂蚁-弹性买入"
-            side_tag = "best_buy"
+            side_tag = "弹性买"
             is_buy_order = True
         elif ev_type == "cage_buy_hit":
             buy_px = po.resolve_buy_limit_price(
@@ -1777,7 +1759,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 tick_row=tick_dict,
             )
             strategy_name = "蚂蚁-笼子买入"
-            side_tag = "cage_buy"
+            side_tag = "笼子买"
             is_buy_order = True
         elif ev_type == "grid_buy_hit":
             buy_px = po.resolve_buy_limit_price(
@@ -1787,7 +1769,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 tick_row=tick_dict,
             )
             strategy_name = "蚂蚁-网格买入"
-            side_tag = "grid_buy"
+            side_tag = "网格买"
             is_buy_order = True
         else:
             buy_px = po.resolve_buy_limit_price(
@@ -1797,7 +1779,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 tick_row=tick_dict,
             )
             strategy_name = "蚂蚁-单点买入"
-            side_tag = "single_buy"
+            side_tag = "单点买"
             is_buy_order = True
 
         if is_buy_order:
@@ -1866,7 +1848,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     "msg": cash_msg,
                 }
                 print(
-                    "[交易核心] order %s skip %s px=%s vol=%s msg=%s"
+                    "[交易核心] 委托 %s 跳过 %s px=%s vol=%s msg=%s"
                     % (side_tag, code, buy_px, vol, cash_msg)
                 )
                 _unlock_order_task(code, tid, gi_raw, ev_type)
@@ -1901,7 +1883,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             "msg": record.get("msg") or reason,
         }
         print(
-            "[交易核心] order %s %s ok=%s px=%s vol=%s msg=%s"
+            "[交易核心] 委托 %s %s ok=%s px=%s vol=%s msg=%s"
             % (side_tag, code, ok, record.get("price"), record.get("volume"), record.get("msg"))
         )
         if not ok and str(reason or record.get("msg") or "") in (
@@ -1951,7 +1933,9 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
 
 def _log_armed_tasks(rules: Optional[dict]) -> None:
     tasks = (rules or {}).get("tasks") or []
-    print("[交易核心] armed tasks=%d" % len(tasks))
+    if not tasks:
+        return
+    print("[交易核心] 已武装任务=%d" % len(tasks))
     for t in tasks:
         print(
             "[交易核心] task %s %s type=%s trig=%s vol=%s enabled=%s"
@@ -1967,12 +1951,12 @@ def _log_armed_tasks(rules: Optional[dict]) -> None:
 
 
 def init(ContextInfo):
-    print("[交易核心] init begin version=%s" % SHADOW_VERSION, flush=True)
     global _RUNNER, _SUB_ID, _RESULTS, _RULES_PATH, _RESULTS_PATH, _RULES_SIG, _TICK_COUNT, _CONTEXT, _SUBSCRIBED_CODES
     _CONTEXT = ContextInfo
     _ensure_tick_runner_module()
     _RULES_PATH, _RESULTS_PATH = default_paths(PROJECT_ROOT)
-    print("[交易核心] rules_file_exists=%s" % os.path.isfile(_RULES_PATH), flush=True)
+    if not os.path.isfile(_RULES_PATH):
+        print("[交易核心] 规则文件不存在: %s" % _RULES_PATH, flush=True)
     rules = load_rules_armed(_RULES_PATH)
     _refresh_orders_enabled(rules)
     _RULES_SIG = rules_file_signature(_RULES_PATH)
@@ -2013,11 +1997,13 @@ def init(ContextInfo):
     _subscribe_codes(ContextInfo, subscribe_codes)
     removed = prune_results_stocks(_RESULTS, subscribe_codes)
     if removed:
-        print("[交易核心] pruned results.stocks removed=%d keep=%d" % (removed, len(subscribe_codes)))
+        print("[交易核心] 已裁剪 results.stocks removed=%d keep=%d" % (removed, len(subscribe_codes)))
         _flush_results_to_disk(force=True)
     print(
-        "[交易核心] init trade_date=%s tasks=%d watch=%d pool_watch=%d subscribe=%d orders_enabled=%s"
+        "[交易核心] 就绪 版本=%s trade_date=%s tasks=%d watch=%d pool_watch=%d "
+        "subscribe=%d orders_enabled=%s"
         % (
+            SHADOW_VERSION,
             rules.get("trade_date"),
             len(_RUNNER.stock_codes()),
             len(rules.get("watch_codes") or []),
@@ -2026,20 +2012,19 @@ def init(ContextInfo):
             _ORDERS_ENABLED,
         )
     )
-    print("[交易核心] rules reload=%ss results flush=%ss" % (RULES_RELOAD_INTERVAL_SEC, RESULTS_FLUSH_INTERVAL_SEC))
 
     try:
         snap = _load_py_module("ant_account_snapshot", "ant_account_snapshot.py")
         if snap is None or not hasattr(snap, "bind_trading_account"):
-            print("[交易核心] set_account skip: ant_account_snapshot missing")
+            print("[交易核心] set_account 跳过: 缺少 ant_account_snapshot")
         else:
             ok_acc, acc_info = snap.bind_trading_account(ContextInfo)
             if ok_acc:
-                print("[交易核心] set_account ok account=%s" % acc_info)
+                print("[交易核心] set_account 成功 account=%s" % acc_info)
             else:
-                print("[交易核心] set_account skip: %s" % acc_info)
+                print("[交易核心] set_account 跳过: %s" % acc_info)
     except Exception as e:
-        print("[交易核心] set_account error: %s: %s" % (type(e).__name__, e))
+        print("[交易核心] set_account 错误: %s: %s" % (type(e).__name__, e))
 
     #   1      rules_armed     +   results
     try:
@@ -2050,19 +2035,19 @@ def init(ContextInfo):
             "SH",
         )
     except Exception as e:
-        print(f"[交易核心] run_time not available: {e}")
+        print(f"[交易核心] run_time 不可用: {e}")
 
     try:
         sector = _get_sector_sync_runner()
         sector.register_startup_sector_timer(ContextInfo)
         sector.register_sector_sync_timer(ContextInfo)
     except Exception as e:
-        print("[交易核心] sector_sync timer register failed: %s" % e)
+        print("[交易核心] 板块同步定时注册失败: %s" % e)
         try:
             register_startup_sector_timer(ContextInfo)
             register_sector_sync_timer(ContextInfo)
         except Exception as e2:
-            print("[交易核心] sector_sync fallback failed: %s" % e2)
+            print("[交易核心] 板块同步回退失败: %s" % e2)
     daily_sync = _get_daily_sync_runner()
     daily_sync.register_daily_sync_timer(ContextInfo)
     daily_sync.schedule_failed_manifest_recovery_on_init()
@@ -2070,13 +2055,13 @@ def init(ContextInfo):
         after_rank = _get_after_hours_rank_runner()
         after_rank.register_after_hours_rank_timer(ContextInfo)
     except Exception as e:
-        print("[交易核心] after_hours_rank timer register failed: %s" % e)
+        print("[交易核心] 盘后排名定时注册失败: %s" % e)
     try:
         tick_full = _get_tick_full_sync_runner()
         tick_full.register_tick_full_sync_timer(ContextInfo)
     except Exception as e:
-        print("[交易核心] tick_full_sync timer register failed: %s" % e)
-    print("[交易核心] init done", flush=True)
+        print("[交易核心] 分笔同步定时注册失败: %s" % e)
+    # 初始化完成信息已并入上方「就绪」一行
 
 
 def handlebar(ContextInfo):
@@ -2085,14 +2070,25 @@ def handlebar(ContextInfo):
     _CONTEXT = ContextInfo
     try:
         periodic_sync(ContextInfo)
+    except KeyboardInterrupt:
+        # 模型交易手动停止会注入 KeyboardInterrupt；勿打印深栈
+        return
     except Exception as e:
-        print("[交易核心] handlebar periodic error: %s" % e)
+        print("[交易核心] handlebar 周期错误: %s" % e)
 
 
 def periodic_sync(ContextInfo):
     """主线程入口：禁止在 tick 回调或后台线程调用。"""
     global _CONTEXT, _LAST_PERIODIC_TS
     _CONTEXT = ContextInfo
+    try:
+        _periodic_sync_body(ContextInfo)
+    except KeyboardInterrupt:
+        return
+
+
+def _periodic_sync_body(ContextInfo):
+    global _LAST_PERIODIC_TS
     now = time.time()
     if now - _LAST_PERIODIC_TS < float(RULES_RELOAD_INTERVAL_SEC) * 0.8:
         return
@@ -2118,50 +2114,66 @@ def periodic_sync(ContextInfo):
             night_ord = _handle_order_events(ContextInfo, night_ev, {})
         if night_fin or night_ord:
             _flush_results_to_disk(force=True)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print("[交易核心] night market poll error: %s" % e)
+        print("[交易核心] 夜市轮询错误: %s" % e)
     _flush_results_to_disk(force=True)
     daily_sync = _get_daily_sync_runner()
     try:
         daily_sync.maybe_run_failed_manifest_recovery(ContextInfo)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print("[交易核心] failed recovery sync error: %s" % e)
+        print("[交易核心] 失败恢复同步错误: %s" % e)
     try:
         if hasattr(daily_sync, "maybe_run_force_year_backfill"):
             daily_sync.maybe_run_force_year_backfill(ContextInfo)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print("[交易核心] force year backfill error: %s" % e)
+        print("[交易核心] 强制补数年回补错误: %s" % e)
     try:
         daily_sync.process_on_demand_sync_requests(ContextInfo)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print("[交易核心] on_demand sync error: %s" % e)
+        print("[交易核心] 按需同步错误: %s" % e)
     try:
         import ant_cancel_request as _cancel_req
 
         n = _cancel_req.process_pending_cancels(ContextInfo)
         if n:
             _flush_results_to_disk(force=True)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print("[交易核心] cancel_request error: %s" % e)
+        print("[交易核心] 撤单请求错误: %s" % e)
     # 手动指定日 tick 全量续跑（data/tick_full_sync/manual_request.json）
     try:
         tick_full = _get_tick_full_sync_runner()
         if hasattr(tick_full, "process_manual_request"):
             tick_full.process_manual_request(ContextInfo)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print("[交易核心] tick_full manual_request error: %s" % e)
+        print("[交易核心] 分笔手动请求错误: %s" % e)
     # 手动指定日盘后量能重跑（data/after_hours_rank/manual_request.json）
     try:
         after_rank = _get_after_hours_rank_runner()
         if hasattr(after_rank, "process_manual_request"):
             after_rank.process_manual_request(ContextInfo)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print("[交易核心] after_hours_rank manual_request error: %s" % e)
+        print("[交易核心] 盘后排名手动请求错误: %s" % e)
     # 盘后流水线补跑：日线 → tick 落盘 → 量能（互相串行，不抢下载）
     try:
         daily_sync.maybe_catch_up_after_hours_pipeline(ContextInfo)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        print("[交易核心] after_hours pipeline catch-up error: %s" % e)
+        print("[交易核心] 盘后流水线补跑错误: %s" % e)
 
 
 def _maybe_sync_account_snapshot(ContextInfo) -> None:
@@ -2179,7 +2191,7 @@ def _maybe_sync_account_snapshot(ContextInfo) -> None:
             msg = "ant_account_snapshot missing"
             if msg != _ACCOUNT_SNAPSHOT_IMPORT_ERR:
                 _ACCOUNT_SNAPSHOT_IMPORT_ERR = msg
-                print("[交易核心] account snapshot import error: %s" % msg)
+                print("[交易核心] 账户快照导入错误: %s" % msg)
             return
         sync_fn = snap.sync_account_snapshot_to_results
         _ACCOUNT_SNAPSHOT_IMPORT_ERR = ""
@@ -2188,20 +2200,20 @@ def _maybe_sync_account_snapshot(ContextInfo) -> None:
         msg = "%s: %s" % (type(e).__name__, e)
         if msg != _ACCOUNT_SNAPSHOT_IMPORT_ERR:
             _ACCOUNT_SNAPSHOT_IMPORT_ERR = msg
-            print("[交易核心] account snapshot import error: %s" % msg)
+            print("[交易核心] 账户快照导入错误: %s" % msg)
         return
     try:
         ok, reason = sync_fn(ContextInfo, _RESULTS)
     except Exception as e:
         _LAST_ACCOUNT_SYNC_TS = now
-        print("[交易核心] account snapshot error: %s: %s" % (type(e).__name__, e))
+        print("[交易核心] 账户快照错误: %s: %s" % (type(e).__name__, e))
         return
     _LAST_ACCOUNT_SYNC_TS = now
     if ok:
         _ACCOUNT_SNAPSHOT_SKIP_REASON = ""
     elif reason != _ACCOUNT_SNAPSHOT_SKIP_REASON:
         _ACCOUNT_SNAPSHOT_SKIP_REASON = reason
-        print("[交易核心] account snapshot skip: %s" % reason)
+        print("[交易核心] 账户快照跳过: %s" % reason)
 
 
 def _process_pending_resubscribe(ContextInfo) -> None:
@@ -2212,7 +2224,7 @@ def _process_pending_resubscribe(ContextInfo) -> None:
     _PENDING_RESUBSCRIBE = None
     _SUBSCRIBED_CODES = list(pending)
     _subscribe_codes(ContextInfo, pending)
-    print("[交易核心] resubscribe done (deferred) codes=%d" % len(pending))
+    print("[交易核心] 重新订阅完成（延迟） codes=%d" % len(pending))
 
 
 # QMT run_time may resolve the first timer name; keep alias on strategy module.
@@ -2245,7 +2257,7 @@ def reload_rules_if_changed(ContextInfo, *, allow_resubscribe: bool = True):
         except Exception:
             pass
         tasks_changed, codes_changed = True, True
-        print("[交易核心] runner recreated after tick_runner hot-load")
+        print("[交易核心] tick_runner 热加载后已重建 runner")
     else:
         tasks_changed, codes_changed = _RUNNER.reload_rules(rules)
     _RULES_SIG = sig
@@ -2260,7 +2272,7 @@ def reload_rules_if_changed(ContextInfo, *, allow_resubscribe: bool = True):
     n_tasks = len(rules.get("tasks") or [])
     n_pool = len(rules.get("strategy_pool_watch") or [])
     print(
-        "[交易核心] rules reload: tasks=%d pool_watch=%d subscribe=%d"
+        "[交易核心] 规则重载: tasks=%d pool_watch=%d subscribe=%d"
         % (n_tasks, n_pool, len(subscribe_codes))
     )
     _log_armed_tasks(rules)
@@ -2271,16 +2283,16 @@ def reload_rules_if_changed(ContextInfo, *, allow_resubscribe: bool = True):
             if _RESULTS is not None:
                 removed = prune_results_stocks(_RESULTS, subscribe_codes)
                 if removed:
-                    print("[交易核心] rules reload: pruned stocks removed=%d" % removed)
-            print("[交易核心] rules reload: resubscribe done")
+                    print("[交易核心] 规则重载: 已裁剪股票 removed=%d" % removed)
+            print("[交易核心] 规则重载: 重新订阅完成")
         else:
             _PENDING_RESUBSCRIBE = list(subscribe_codes)
             print(
-                "[交易核心] rules reload: resubscribe deferred codes=%d"
+                "[交易核心] 规则重载: 重新订阅已延迟 codes=%d"
                 % len(subscribe_codes)
             )
     elif tasks_changed:
-        print("[交易核心] rules reload: tasks updated (trigger/params)")
+        print("[交易核心] 规则重载: 任务已更新（触发价/参数）")
 
 
 def _subscribe_codes(ContextInfo, codes):
@@ -2288,12 +2300,12 @@ def _subscribe_codes(ContextInfo, codes):
     if _SUB_ID:
         try:
             ContextInfo.unsubscribe_quote(_SUB_ID)
-            print("[交易核心] unsubscribe ok sub_id=%s" % _SUB_ID)
+            print("[交易核心] 取消订阅成功 sub_id=%s" % _SUB_ID)
         except Exception as e:
-            print("[交易核心] unsubscribe failed: %s" % e)
+            print("[交易核心] 取消订阅失败: %s" % e)
         _SUB_ID = None
     if not codes:
-        print("[交易核心] subscribe skipped: no codes (unsubscribed)")
+        print("[交易核心] 订阅跳过: 无代码（已取消订阅）")
         return
     try:
         _CONTEXT = ContextInfo
@@ -2307,19 +2319,93 @@ def _subscribe_codes(ContextInfo, codes):
             pass
         _maybe_seed_snapshots(force=True)
     except Exception as e:
-        print(f"[交易核心] subscribe failed: {e}")
+        print(f"[交易核心] 订阅失败: {e}")
+
+
+def _tick_time_lag_sec(tick_hhmmss: str, now=None) -> Optional[float]:
+    """last_tick_time(HH:MM:SS) 相对墙钟的滞后秒数；无法解析则 None。"""
+    from datetime import datetime as _dt
+
+    s = str(tick_hhmmss or "").strip()
+    if len(s) < 8:
+        return None
+    now = now or _dt.now()
+    try:
+        parts = s[:8].split(":")
+        t = now.replace(
+            hour=int(parts[0]),
+            minute=int(parts[1]),
+            second=int(float(parts[2])),
+            microsecond=0,
+        )
+        lag = (now - t).total_seconds()
+        if lag < -120:
+            return None
+        return max(0.0, lag)
+    except Exception:
+        return None
+
+
+def _iso_recv_age_sec(raw, now=None) -> Optional[float]:
+    """quotes_recv_at / quote_recv_at（ISO）相对墙钟秒数。"""
+    from datetime import datetime as _dt
+
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    now = now or _dt.now()
+    try:
+        if "T" in s:
+            dt = _dt.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
+        elif " " in s:
+            dt = _dt.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+        else:
+            return None
+        return max(0.0, (now - dt).total_seconds())
+    except Exception:
+        return None
+
+
+def _in_continuous_quote_watch(now=None) -> bool:
+    """连续竞价监控窗（含午后）；集合竞价另有更勤 seed。"""
+    from datetime import datetime as _dt
+    from datetime import time as dt_time
+
+    now = now or _dt.now()
+    t = now.time()
+    return (dt_time(9, 30) <= t <= dt_time(11, 30)) or (
+        dt_time(13, 0) <= t <= dt_time(15, 0)
+    )
 
 
 def _codes_need_seed() -> bool:
     global _RESULTS, _SUBSCRIBED_CODES
     if _RESULTS is None or not _SUBSCRIBED_CODES:
         return False
+    from datetime import datetime as _dt
+
     stocks = _RESULTS.get("stocks") or {}
+    now = _dt.now()
+    watch = _in_continuous_quote_watch(now)
     for code in _SUBSCRIBED_CODES:
         bucket = stocks.get(code) or {}
         if float(bucket.get("last_price") or 0) <= 0:
             return True
         if float(bucket.get("today_open") or 0) <= 0:
+            return True
+    # 订阅推送墙钟过期 → full_tick 补种（不看 sticky timetag / 价格是否变动）
+    if watch:
+        gag = _iso_recv_age_sec((_RESULTS or {}).get("quotes_recv_at"), now)
+        if gag is None:
+            # 尚无全局墙钟：看单票；都没有则补种一次把字段种上
+            any_recv = False
+            for code in _SUBSCRIBED_CODES:
+                if _iso_recv_age_sec((stocks.get(code) or {}).get("quote_recv_at"), now) is not None:
+                    any_recv = True
+                    break
+            if not any_recv:
+                return True
+        elif gag >= float(QUOTE_STALE_SEED_SEC):
             return True
     return False
 
@@ -2346,6 +2432,17 @@ def _maybe_seed_snapshots(force: bool = False) -> None:
             return
         if not _codes_need_seed():
             return
+    # 过期补种时打一行，避免 silently 卡死
+    if (not force) and _in_continuous_quote_watch():
+        try:
+            gag = _iso_recv_age_sec((_RESULTS or {}).get("quotes_recv_at"))
+            if gag is not None and gag >= float(QUOTE_STALE_SEED_SEC):
+                print(
+                    "[交易核心] 行情推送墙钟过期 recv_lag=%.0fs → full_tick 补种"
+                    % gag
+                )
+        except Exception:
+            pass
     changed = _seed_snapshots_from_full_tick(_SUBSCRIBED_CODES)
     _LAST_SEED_TS = now
     if changed:
@@ -2375,7 +2472,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
             if isinstance(tick_map, dict) and tick_map:
                 source = "ContextInfo"
         except Exception as e:
-            print("[交易核心] seed ContextInfo.get_full_tick failed: %s" % e)
+            print("[交易核心] 种子 ContextInfo.get_full_tick 失败: %s" % e)
             tick_map = None
 
     if not isinstance(tick_map, dict) or not tick_map:
@@ -2389,7 +2486,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
             tick_map = xtdata.get_full_tick(list(code_list))
             source = "xtdata"
         except Exception as e:
-            print("[交易核心] seed xtdata.get_full_tick failed: %s" % e)
+            print("[交易核心] 种子 xtdata.get_full_tick 失败: %s" % e)
             return False
 
     if not isinstance(tick_map, dict) or not tick_map:
@@ -2407,13 +2504,23 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
         lp = extract_tick_price(row)
         if lp <= 0:
             continue
-        tick_time = ShadowTickRunner._format_tick_time(row.get("time"))
+        # 只用官方 timetag；缺则空串，便于暴露行情时间问题（不用 time/墙钟兜底）
+        raw_tt = None
+        if ShadowTickRunner is not None:
+            raw_tt = ShadowTickRunner._tick_row_timetag(row)
+        else:
+            raw_tt = row.get("timetag")
+        tick_time = (
+            ShadowTickRunner._format_tick_time(raw_tt)
+            if ShadowTickRunner is not None
+            else ""
+        )
         if update_price_snapshot(_RESULTS, stock_code, lp, tick_time, tick_row=row):
             changed = True
             seeded += 1
     if seeded:
         print(
-            "[交易核心] seeded %d/%d codes from full_tick via %s"
+            "[交易核心] 已种子 %d/%d codes 来自 full_tick via %s"
             % (seeded, len(code_list), source or "?")
         )
     return changed
@@ -2437,19 +2544,28 @@ def _on_tick(datas):
         lp = extract_tick_price(row)
         if lp <= 0:
             continue
-        tick_time = ShadowTickRunner._format_tick_time(row.get("time"))
+        raw_tt = None
+        if ShadowTickRunner is not None:
+            raw_tt = ShadowTickRunner._tick_row_timetag(row)
+        else:
+            raw_tt = row.get("timetag")
+        tick_time = (
+            ShadowTickRunner._format_tick_time(raw_tt)
+            if ShadowTickRunner is not None
+            else ""
+        )
         if update_price_snapshot(_RESULTS, code, lp, tick_time, tick_row=row):
             price_changed = True
 
     try:
         events = _RUNNER.on_quote_dict(datas)
     except Exception as e:
-        print(f"[交易核心] on_tick error: {e}")
+        print(f"[交易核心] on_tick 错误: {e}")
         return
 
     _TICK_COUNT += 1
     if _TICK_COUNT == 1:
-        print("[交易核心] first tick received")
+        print("[交易核心] 收到首个 tick")
 
     for ev in events:
         code = str(ev.get("stock_code") or "")
@@ -2458,14 +2574,14 @@ def _on_tick(datas):
             f"trig={ev.get('trigger_price')} {ev.get('msg')}"
         )
         if ev.get("detail"):
-            print(f"[交易核心] detail: {ev.get('detail')}")
+            print(f"[交易核心] 详情: {ev.get('detail')}")
         price_changed = True
 
     order_changed = False
     try:
         order_changed = _handle_order_events(_CONTEXT, events, datas)
     except Exception as e:
-        print("[交易核心] order handle error: %s: %s" % (type(e).__name__, e))
+        print("[交易核心] 委托处理错误: %s: %s" % (type(e).__name__, e))
 
     elastic_changed = False
     try:
@@ -2518,4 +2634,4 @@ def _flush_results_to_disk(force: bool = False):
         save_json_atomic(_RESULTS_PATH, _RESULTS)
         _LAST_FLUSH_TS = now
     except Exception as e:
-        print(f"[交易核心] write results failed: {e}")
+        print(f"[交易核心] 写入 results 失败: {e}")

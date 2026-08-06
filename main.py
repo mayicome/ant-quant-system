@@ -996,7 +996,7 @@ def main():
             try:
                 from PyQt5.QtWidgets import QLabel
                 from PyQt5.QtCore import Qt as _Qt
-                splash = QLabel("正在加载主程序，请稍候…")
+                splash = QLabel("正在加载量化交易系统")
                 splash.setWindowTitle("蚂蚁量化交易系统")
                 splash.setAlignment(_Qt.AlignCenter)
                 splash.setFixedSize(360, 80)

@@ -492,6 +492,39 @@ class KeyPriceCalculator:
             self.logger.error(f"计算技术指标失败: {e}")
             return df
     
+    def _prior_close_ma(self, df, period, is_trading_day, current_time, today):
+        """上一完整交易日收盘口径的真均线（近 period 日收盘均值）。
+
+        - 交易日且尚未到 REFERENCE_SWITCH_TIME：若末根已是今日 K（未收盘），剔除后再算；
+        - 收盘切换后或非交易日：末根已是完整交易日，直接用末根及之前 period 日。
+        与「N日」重合点不同；供开盘夹档等策略使用。
+        """
+        try:
+            if df is None or len(df) == 0 or period <= 0:
+                return None
+            closes = df["close"].astype(float)
+            latest_date = df.iloc[-1]["time"]
+            if hasattr(latest_date, "date"):
+                latest_date = latest_date.date()
+            else:
+                latest_date = pd.to_datetime(latest_date).date()
+            series = closes
+            if (
+                is_trading_day
+                and current_time < REFERENCE_SWITCH_TIME
+                and latest_date == today
+                and len(closes) >= 2
+            ):
+                series = closes.iloc[:-1]
+            if len(series) < period:
+                return None
+            val = float(series.iloc[-period:].mean())
+            if val != val or val <= 0:
+                return None
+            return val
+        except Exception:
+            return None
+
     def _calculate_ma_intersection_price(self, df, period, prev_close, is_trading_day, current_time):
         """
         计算与均线重合的可能的最新价
@@ -1232,6 +1265,16 @@ class KeyPriceCalculator:
                         # 如果无法计算重合价格，显示当前均线值
                         final_price = stock_price_round(current_ma, precision)
                         key_prices.append((f"{period}日", final_price))
+
+            # 上一完整交易日收盘口径真均线（与「N日」重合点并存）
+            for period in ma_periods:
+                prior_ma = self._prior_close_ma(
+                    df, period, is_trading_day, current_time, today
+                )
+                if prior_ma is not None:
+                    key_prices.append(
+                        (f"昨MA{period}", stock_price_round(prior_ma, precision))
+                    )
             
             # 布林带价格点
             if not pd.isna(latest_data['BOLL_UPPER']):

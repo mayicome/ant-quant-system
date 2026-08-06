@@ -2,6 +2,8 @@
 """QMT ???д data/data_sync_requests.json?????????? Python 3.6+???? future annotations????"""
 import json
 import os
+import shutil
+import tempfile
 import re
 import time
 from datetime import date, datetime
@@ -28,20 +30,44 @@ def _now_iso() -> str:
 
 
 def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
+    """Atomic JSON write with unique temp file (avoids WinError 2 on shared .tmp)."""
     folder = os.path.dirname(path) or "."
     if not os.path.isdir(folder):
         os.makedirs(folder)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    for attempt in range(8):
-        try:
-            os.replace(tmp, path)
-            return
-        except OSError:
-            if attempt >= 7:
-                raise
-            time.sleep(0.05 * (attempt + 1))
+    fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp", prefix=".dsr_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        last_err = None
+        for attempt in range(12):
+            try:
+                os.replace(tmp, path)
+                tmp = ""
+                return
+            except OSError as e:
+                last_err = e
+                if attempt >= 7 and os.path.isfile(tmp):
+                    try:
+                        shutil.copy2(tmp, path)
+                        tmp = ""
+                        return
+                    except OSError:
+                        pass
+                time.sleep(0.05 * (attempt + 1))
+        if last_err is not None:
+            raise last_err
+        raise OSError("atomic write failed: %s" % path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _empty_requests() -> Dict[str, Any]:
@@ -66,6 +92,59 @@ def load_requests() -> Dict[str, Any]:
 
 def save_requests(data: Dict[str, Any]) -> None:
     _atomic_write_json(REQUESTS_PATH, data)
+
+
+_DAILY_FAILED_PRUNE_KEY = "daily_failed_pruned_on"
+
+
+def _is_daily_failed_trace(meta):
+    # type: (Dict[str, Any]) -> bool
+    st = str(meta.get("status") or "")
+    retries = int(meta.get("retries") or 0)
+    return st == "failed" or (st == "pending" and retries >= MAX_RETRIES)
+
+
+def _daily_meta_stamp(meta):
+    # type: (Dict[str, Any]) -> Optional[date]
+    for key in ("updated_at", "last_attempt_at", "requested_at", "through_date"):
+        d = _parse_date(meta.get(key))
+        if d is not None:
+            return d
+    return None
+
+
+def prune_stale_daily_failures(today=None):
+    # type: (Optional[date]) -> int
+    """跨自然日清除按需日线失败痕迹（stamp < today）；当日失败保留。"""
+    if today is None:
+        today = date.today()
+    today_s = today.isoformat()
+    data = load_requests()
+    if str(data.get(_DAILY_FAILED_PRUNE_KEY) or "") == today_s:
+        return 0
+    daily = data.get("daily")
+    if not isinstance(daily, dict):
+        daily = {}
+        data["daily"] = daily
+    removed = 0
+    for code in list(daily.keys()):
+        meta = daily.get(code)
+        if not isinstance(meta, dict):
+            continue
+        if not _is_daily_failed_trace(meta):
+            continue
+        stamp = _daily_meta_stamp(meta)
+        if stamp is None or stamp < today:
+            daily.pop(code, None)
+            removed += 1
+    data[_DAILY_FAILED_PRUNE_KEY] = today_s
+    try:
+        save_requests(data)
+    except Exception:
+        return 0
+    if removed:
+        print("[按需同步] 已清除跨日日线失败痕迹 %d 条" % removed)
+    return removed
 
 
 def _parse_date(raw: Any) -> Optional[date]:
@@ -113,6 +192,7 @@ def _short_history_stale(meta: Dict[str, Any]) -> bool:
 
 def list_pending_daily(limit: int = 20) -> List[Tuple[str, date, Dict[str, Any]]]:
     global _PENDING_ROTATE_OFFSET
+    prune_stale_daily_failures()
     data = load_requests()
     pending = []  # type: List[Tuple[str, date, Dict[str, Any], str]]
     daily = data.get("daily") or {}

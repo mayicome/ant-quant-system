@@ -215,7 +215,10 @@ def _opening_auction_wait_timeout_sec() -> float:
     return 30.0
 
 
-def _get_prices_with_key_points_builtin(stock_codes_6: List[str]) -> tuple:
+def _get_prices_with_key_points_builtin(
+    stock_codes_6: List[str],
+    on_progress=None,
+) -> tuple:
     """builtin：strategy_pool_watch → 等 results.json → KeyPriceCalculator(daily_cache)。"""
     from utils.builtin_live_prices import (
         format_not_ready_message,
@@ -224,6 +227,13 @@ def _get_prices_with_key_points_builtin(stock_codes_6: List[str]) -> tuple:
         wait_results_ready,
     )
     from utils.strategy_pool_watch import code_6_to_full, set_strategy_pool_watch
+
+    def _progress(msg: str) -> None:
+        if callable(on_progress):
+            try:
+                on_progress(str(msg))
+            except Exception:
+                pass
 
     errors: List[str] = []
     codes = [
@@ -236,6 +246,7 @@ def _get_prices_with_key_points_builtin(stock_codes_6: List[str]) -> tuple:
 
     try:
         set_strategy_pool_watch(codes)
+        _progress(f"已请求订阅 {len(codes)} 只，等待 results.json…")
     except Exception as e:
         errors.append(f"[strategy_pool_watch] 写入失败: {e}")
         return {}, errors
@@ -244,6 +255,7 @@ def _get_prices_with_key_points_builtin(stock_codes_6: List[str]) -> tuple:
     from utils.data_sync_request import (
         submit_daily_requests,
         wait_daily_cache_pool,
+        _pump_ui_events,
     )
 
     full_codes = [_code_with_suffix(c) for c in codes]
@@ -261,9 +273,15 @@ def _get_prices_with_key_points_builtin(stock_codes_6: List[str]) -> tuple:
         if not codes:
             errors.append("[行情未就绪] 过滤缺失后无可用股票")
             return {}, errors
+    _progress(
+        f"现价就绪 {int(stats.get('ready') or 0)}/{int(stats.get('pool') or len(codes))}，等待日线…"
+    )
+
+    def _daily_prog(ready_n: int, total_n: int, label: str) -> None:
+        _progress(f"等待{label}缓存 {ready_n}/{total_n}")
 
     _, missing_daily = wait_daily_cache_pool(
-        codes, through_date=_date.today()
+        codes, through_date=_date.today(), on_progress=_daily_prog
     )
 
     if missing_daily:
@@ -306,12 +324,17 @@ def _get_prices_with_key_points_builtin(stock_codes_6: List[str]) -> tuple:
         return result, errors
 
     calculator = KeyPriceCalculator()
-    for code_6 in list(result.keys()):
+    code_keys = list(result.keys())
+    total_keys = len(code_keys)
+    # 池级 wait 已做过；大股票池禁止逐票再按需同步，否则主线程会假死数十分钟
+    for i, code_6 in enumerate(code_keys):
+        if i == 0 or (i + 1) % 25 == 0 or (i + 1) == total_keys:
+            _progress(f"计算关键价 {i + 1}/{total_keys}")
+            _pump_ui_events()
         full_code = _code_with_suffix(code_6)
         live_row = dict(result.get(code_6) or {})
-        # 允许按需同步：wait 已提交请求；计算器侧再读 cache / 短等均可
         key_list = calculator.calculate_key_points(
-            full_code, error_out=errors, allow_on_demand_sync=True
+            full_code, error_out=errors, allow_on_demand_sync=False
         )
         for item in key_list:
             if not isinstance(item, dict):
@@ -355,12 +378,13 @@ def _get_prices_with_key_points_builtin(stock_codes_6: List[str]) -> tuple:
     return result, errors
 
 
-def get_prices_with_key_points(stock_codes_6: List[str]) -> tuple:
+def get_prices_with_key_points(stock_codes_6: List[str], on_progress=None) -> tuple:
     """
     获取当前价、昨收，并实时计算关键价格点，一并返回给策略代码。
     返回: (result_dict, error_messages)
     result_dict 结构: { "000001": { "current", "pre_close", "涨停板", "跌停板", ... }, ... }
     error_messages: 计算关键价格点时的错误信息列表，供调用方写入运行日志。
+    on_progress: 可选回调 str -> None，用于大股票池进度日志。
     """
     global _LIVE_SOURCE_LOGGED
     errors: List[str] = []
@@ -370,7 +394,9 @@ def get_prices_with_key_points(stock_codes_6: List[str]) -> tuple:
             errors.append(
                 "[配置] 实盘行情来源: results.json 现价/今开 + daily_cache 关键价（builtin；超时失败不回退）"
             )
-        return _get_prices_with_key_points_builtin(stock_codes_6)
+        return _get_prices_with_key_points_builtin(
+            stock_codes_6, on_progress=on_progress
+        )
 
     if not _LIVE_SOURCE_LOGGED:
         _LIVE_SOURCE_LOGGED = True

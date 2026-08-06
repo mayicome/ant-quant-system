@@ -8,12 +8,15 @@ import os
 import sys
 import time
 
-ENTRY_VERSION = "20260801.01"
+ENTRY_VERSION = "20260805.01"
 _shadow = None
 _ACCOUNT_SNAPSHOT_MOD = None
 _ENTRY_ACCOUNT_SKIP = ""
 _LAST_ENTRY_ACCOUNT_SYNC = 0.0
-_ENTRY_ACCOUNT_INTERVAL_SEC = 2.0
+_ENTRY_ACCOUNT_INTERVAL_SEC = 3.0
+# 委托/成交查询较重，过勤会堵同一线程上的 tick 回调与 full_tick 补种
+_LAST_ENTRY_ORDER_DEAL_SYNC = 0.0
+_ENTRY_ORDER_DEAL_INTERVAL_SEC = 12.0
 # 内置 download_history_data：每进程只 bind/log 一次（勿在 handlebar 热路径刷屏）
 _DOWNLOAD_HISTORY_BOUND = False
 _DOWNLOAD_HISTORY_MISS_LOGGED = False
@@ -30,7 +33,7 @@ def _plog(msg):
             pass
 
 
-_plog("[蚂蚁入口] module load ENTRY_VERSION=%s" % ENTRY_VERSION)
+_plog("[入口] 模块已加载 版本=%s" % ENTRY_VERSION)
 
 
 def _qmt_python_dir():
@@ -69,24 +72,32 @@ def _load_shadow():
     global _shadow
     path = _shadow_py_path()
     if not path:
-        _plog("[蚂蚁入口] FATAL: ant_shadow_strategy.py not found")
+        _plog("[入口] 致命: 未找到 ant_shadow_strategy.py")
         _shadow = None
         return None
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError:
+        mtime = 0
+    # 同文件未改则复用，避免 init 再整包 reload 刷双份启动日志
+    if _shadow is not None and getattr(_shadow, "_ANT_SHADOW_MTIME", None) == mtime:
+        return _shadow
     for key in list(sys.modules.keys()):
         if key == "ant_shadow_strategy" or key.startswith("ant_shadow_"):
             sys.modules.pop(key, None)
-    mod_name = "ant_shadow_%d" % int(os.path.getmtime(path))
+    mod_name = "ant_shadow_%d" % mtime
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
-        _plog("[蚂蚁入口] FATAL: cannot load " + path)
+        _plog("[入口] 致命: 无法加载 " + path)
         _shadow = None
         return None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
+    mod._ANT_SHADOW_MTIME = mtime
     _shadow = mod
     ver = getattr(mod, "SHADOW_VERSION", "?")
-    _plog("[蚂蚁入口] shadow loaded version=%s file=%s" % (ver, path))
+    _plog("[入口] 交易核心已加载 版本=%s" % ver)
     return mod
 
 
@@ -231,7 +242,7 @@ def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, accoun
 
 def _entry_sync_account_snapshot(ContextInfo):
     """?? QMT ???/????????????????? get_trade_detail_data??"""
-    global _ENTRY_ACCOUNT_SKIP, _LAST_ENTRY_ACCOUNT_SYNC
+    global _ENTRY_ACCOUNT_SKIP, _LAST_ENTRY_ACCOUNT_SYNC, _LAST_ENTRY_ORDER_DEAL_SYNC
     try:
         now = time.time()
         if now - _LAST_ENTRY_ACCOUNT_SYNC < float(_ENTRY_ACCOUNT_INTERVAL_SEC):
@@ -245,14 +256,14 @@ def _entry_sync_account_snapshot(ContextInfo):
         if snap is None:
             if _ENTRY_ACCOUNT_SKIP != "snapshot_mod_missing":
                 _ENTRY_ACCOUNT_SKIP = "snapshot_mod_missing"
-                print("[交易核心] account snapshot skip: ant_account_snapshot missing")
+                print("[交易核心] 账户快照跳过: 缺少 ant_account_snapshot")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
         aid = snap.resolve_account_id(ContextInfo)
         if not aid:
             if _ENTRY_ACCOUNT_SKIP != "no_account_id":
                 _ENTRY_ACCOUNT_SKIP = "no_account_id"
-                print("[交易核心] account snapshot skip: no_account_id")
+                print("[交易核心] 账户快照跳过: no_account_id")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
         try:
@@ -260,7 +271,7 @@ def _entry_sync_account_snapshot(ContextInfo):
         except NameError:
             if _ENTRY_ACCOUNT_SKIP != "no_gtd":
                 _ENTRY_ACCOUNT_SKIP = "no_gtd"
-                print("[交易核心] account snapshot skip: get_trade_detail_data not in entry scope")
+                print("[交易核心] 账户快照跳过: 入口作用域无 get_trade_detail_data")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
 
@@ -279,18 +290,37 @@ def _entry_sync_account_snapshot(ContextInfo):
         except Exception:
             pos_try_log = []
         # ORDER/DEAL: do NOT query with strategyName="" (filters everything out)
-        order_raw = _entry_fetch_trade_detail(
-            aid,
-            "order",
-            strategy_names=("\u8682\u8681\u002d\u5355\u70b9\u4e70\u5165", "\u8682\u8681\u002d\u5355\u70b9\u5356\u51fa", "\u8682\u8681\u002d\u7a81\u7834\u4e70\u5165", "\u8682\u8681\u002d\u7a81\u7834\u5356\u51fa", "\u8682\u8681\u002d\u5f39\u6027\u5356\u51fa", "\u8682\u8681\u002d\u5f39\u6027\u4e70\u5165", "\u8682\u8681\u002d\u7b3c\u5b50\u4e70\u5165", "\u8682\u8681\u002d\u7b3c\u5b50\u5356\u51fa", "\u8682\u8681\u002d\u7f51\u683c\u4e70\u5165", "\u8682\u8681\u002d\u7f51\u683c\u5356\u51fa", "\u8682\u8681\u002d\u5b9a\u65f6\u6e05\u4ed3", "\u8682\u8681\u002d\u5185\u7f6e\u4e0b\u5355"),
-            account_type_hint=acct_type_hint,
-        )
-        deal_raw = _entry_fetch_trade_detail(
-            aid,
-            "deal",
-            strategy_names=("\u8682\u8681\u002d\u5355\u70b9\u4e70\u5165", "\u8682\u8681\u002d\u5355\u70b9\u5356\u51fa", "\u8682\u8681\u002d\u7a81\u7834\u4e70\u5165", "\u8682\u8681\u002d\u7a81\u7834\u5356\u51fa", "\u8682\u8681\u002d\u5f39\u6027\u5356\u51fa", "\u8682\u8681\u002d\u5f39\u6027\u4e70\u5165", "\u8682\u8681\u002d\u7b3c\u5b50\u4e70\u5165", "\u8682\u8681\u002d\u7b3c\u5b50\u5356\u51fa", "\u8682\u8681\u002d\u7f51\u683c\u4e70\u5165", "\u8682\u8681\u002d\u7f51\u683c\u5356\u51fa", "\u8682\u8681\u002d\u5b9a\u65f6\u6e05\u4ed3", "\u8682\u8681\u002d\u5185\u7f6e\u4e0b\u5355"),
-            account_type_hint=acct_type_hint,
-        )
+        # 降频：None 时 apply 侧沿用缓存，避免每轮多路 GTD 堵行情
+        order_raw = None
+        deal_raw = None
+        if now - _LAST_ENTRY_ORDER_DEAL_SYNC >= float(_ENTRY_ORDER_DEAL_INTERVAL_SEC):
+            _strat_names = (
+                "\u8682\u8681\u002d\u5355\u70b9\u4e70\u5165",
+                "\u8682\u8681\u002d\u5355\u70b9\u5356\u51fa",
+                "\u8682\u8681\u002d\u7a81\u7834\u4e70\u5165",
+                "\u8682\u8681\u002d\u7a81\u7834\u5356\u51fa",
+                "\u8682\u8681\u002d\u5f39\u6027\u5356\u51fa",
+                "\u8682\u8681\u002d\u5f39\u6027\u4e70\u5165",
+                "\u8682\u8681\u002d\u7b3c\u5b50\u4e70\u5165",
+                "\u8682\u8681\u002d\u7b3c\u5b50\u5356\u51fa",
+                "\u8682\u8681\u002d\u7f51\u683c\u4e70\u5165",
+                "\u8682\u8681\u002d\u7f51\u683c\u5356\u51fa",
+                "\u8682\u8681\u002d\u5b9a\u65f6\u6e05\u4ed3",
+                "\u8682\u8681\u002d\u5185\u7f6e\u4e0b\u5355",
+            )
+            order_raw = _entry_fetch_trade_detail(
+                aid,
+                "order",
+                strategy_names=_strat_names,
+                account_type_hint=acct_type_hint,
+            )
+            deal_raw = _entry_fetch_trade_detail(
+                aid,
+                "deal",
+                strategy_names=_strat_names,
+                account_type_hint=acct_type_hint,
+            )
+            _LAST_ENTRY_ORDER_DEAL_SYNC = now
         ok, reason = snap.apply_trade_detail_raw(
             ContextInfo,
             results,
@@ -319,13 +349,13 @@ def _entry_sync_account_snapshot(ContextInfo):
                 pass
         elif reason != _ENTRY_ACCOUNT_SKIP:
             _ENTRY_ACCOUNT_SKIP = reason
-            print("[交易核心] account snapshot skip: %s" % reason)
+            print("[交易核心] 账户快照跳过: %s" % reason)
     except Exception as e:
         _LAST_ENTRY_ACCOUNT_SYNC = time.time()
         msg = "%s: %s" % (type(e).__name__, e)
         if msg != _ENTRY_ACCOUNT_SKIP:
             _ENTRY_ACCOUNT_SKIP = msg
-            print("[交易核心] account snapshot error: %s" % msg)
+            print("[交易核心] 账户快照错误: %s" % msg)
 
 
 def _reload_daily_sync_runner():
@@ -337,7 +367,7 @@ def _reload_daily_sync_runner():
         import qmt_builtin.ant_daily_sync_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[日线同步] timer entry version=%s"
+        "[日线同步] 定时入口 版本=%s"
         % getattr(runner, "DAILY_SYNC_VERSION", "?")
     )
     return runner
@@ -349,7 +379,7 @@ def _ensure_passorder_bound():
         root = _qmt_python_dir()
         path = os.path.join(root, "ant_passorder.py") if root else ""
         if not (path and os.path.isfile(path)):
-            print("[蚂蚁入口] ant_passorder.py missing")
+            print("[入口] 缺少 ant_passorder.py")
             return False
         mod_name = "ant_passorder_%d" % int(os.path.getmtime(path))
         po = sys.modules.get(mod_name)
@@ -364,7 +394,7 @@ def _ensure_passorder_bound():
             return bool(po.bind_runtime_globals(globals()))
         return False
     except Exception as e:
-        print("[蚂蚁入口] bind passorder error: %s: %s" % (type(e).__name__, e))
+        print("[入口] 绑定 passorder 错误: %s: %s" % (type(e).__name__, e))
         return False
 
 
@@ -396,24 +426,22 @@ def _ensure_download_history_bound():
             ok = bool(fn(globals()))
             if ok:
                 _DOWNLOAD_HISTORY_BOUND = True
-                _plog("[蚂蚁入口] bind download_history_data ok")
             elif not _DOWNLOAD_HISTORY_MISS_LOGGED:
                 _DOWNLOAD_HISTORY_MISS_LOGGED = True
-                _plog("[蚂蚁入口] bind download_history_data miss (not in strategy globals)")
+                _plog("[入口] 绑定 download_history_data 未命中（策略 globals 中无此函数）")
             return ok
         return False
     except Exception as e:
         if not _DOWNLOAD_HISTORY_MISS_LOGGED:
             _DOWNLOAD_HISTORY_MISS_LOGGED = True
             _plog(
-                "[蚂蚁入口] bind download_history_data error: %s: %s"
+                "[入口] 绑定 download_history_data 错误: %s: %s"
                 % (type(e).__name__, e)
             )
         return False
 
 
 def init(ContextInfo):
-    _plog("[蚂蚁入口] init begin entry version=%s" % ENTRY_VERSION)
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
@@ -423,29 +451,37 @@ def init(ContextInfo):
     _ensure_download_history_bound()
     shadow = _load_shadow()
     if shadow is None:
-        _plog("[蚂蚁入口] init aborted: shadow is None")
+        _plog("[入口] 初始化中止: 交易核心为 None")
         return
-    ret = shadow.init(ContextInfo)
-    _plog("[蚂蚁入口] init returned")
-    return ret
+    return shadow.init(ContextInfo)
 
 
 def handlebar(ContextInfo):
-    _ensure_passorder_bound()
-    _ensure_download_history_bound()
-    if _shadow is None:
+    try:
+        _ensure_passorder_bound()
+        _ensure_download_history_bound()
+        if _shadow is None:
+            return
+        # 先跑交易核心（含 full_tick 补种），再查账户，避免 GTD 堵行情墙钟
+        out = _shadow.handlebar(ContextInfo)
+        _entry_sync_account_snapshot(ContextInfo)
+        return out
+    except KeyboardInterrupt:
+        # 模型交易手动停止；吞掉以免深栈刷屏
         return
-    _entry_sync_account_snapshot(ContextInfo)
-    return _shadow.handlebar(ContextInfo)
 
 
 def periodic_sync(ContextInfo):
-    _ensure_passorder_bound()
-    _ensure_download_history_bound()
-    _entry_sync_account_snapshot(ContextInfo)
-    if _shadow is None:
+    try:
+        _ensure_passorder_bound()
+        _ensure_download_history_bound()
+        if _shadow is None:
+            return
+        out = _shadow.periodic_sync(ContextInfo)
+        _entry_sync_account_snapshot(ContextInfo)
+        return out
+    except KeyboardInterrupt:
         return
-    return _shadow.periodic_sync(ContextInfo)
 
 
 def shadow_sync(ContextInfo):
@@ -514,7 +550,7 @@ def tick_probe(ContextInfo):
     runner = _reload_tick_full_sync_runner()
     fn = getattr(runner, "tick_probe", None)
     if not callable(fn):
-        _plog("[蚂蚁入口] tick_probe missing on runner")
+        _plog("[入口] runner 上缺少 tick_probe")
         return None
     return fn(ContextInfo, day="20260730")
 
@@ -528,11 +564,11 @@ def sector_data_sync(ContextInfo):
         try:
             import qmt_builtin.ant_sector_sync_runner as runner
         except ImportError:
-            print("[蚂蚁入口] sector_data_sync: ant_sector_sync_runner not found")
+            print("[入口] sector_data_sync: 未找到 ant_sector_sync_runner")
             return
     runner = importlib.reload(runner)
     print(
-        "[板块同步] timer entry version=%s"
+        "[板块同步] 定时入口 版本=%s"
         % getattr(runner, "SECTOR_SYNC_VERSION", "?")
     )
     return runner.sector_data_sync(ContextInfo)
@@ -547,7 +583,7 @@ def _dispatch_account_snapshot_callback(callback_name, ContextInfo, payload):
         if callable(fn):
             fn(ContextInfo, payload)
     except Exception as e:
-        print("[蚂蚁入口] %s error: %s" % (callback_name, e))
+        print("[入口] %s 错误: %s" % (callback_name, e))
 
 
 def account_callback(ContextInfo, accountInfo):
@@ -589,9 +625,9 @@ def order_callback(ContextInfo, orderInfo):
                 st = str(getattr(orderInfo, "m_nOrderStatus", "") or "")
             except Exception:
                 pass
-            print("[交易核心] order_callback status=%s" % st)
+            print("[交易核心] 委托回调 status=%s" % st)
     except Exception as e:
-        print("[蚂蚁入口] order_callback error: %s: %s" % (type(e).__name__, e))
+        print("[入口] order_callback 错误: %s: %s" % (type(e).__name__, e))
 
 
 
@@ -617,9 +653,9 @@ def deal_callback(ContextInfo, dealInfo):
                 _shadow.flush_results(ContextInfo)
             except Exception:
                 pass
-            print("[交易核心] deal_callback")
+            print("[交易核心] 成交回调")
     except Exception as e:
-        print("[蚂蚁入口] deal_callback error: %s: %s" % (type(e).__name__, e))
+        print("[入口] deal_callback 错误: %s: %s" % (type(e).__name__, e))
 
 
 def startup_sector_sync(ContextInfo):
@@ -631,11 +667,11 @@ def startup_sector_sync(ContextInfo):
         try:
             import qmt_builtin.ant_sector_sync_runner as runner
         except ImportError:
-            print("[蚂蚁入口] startup_sector_sync: ant_sector_sync_runner not found")
+            print("[入口] startup_sector_sync: 未找到 ant_sector_sync_runner")
             return
     runner = importlib.reload(runner)
     print(
-        "[板块同步] startup entry version=%s"
+        "[板块同步] 启动入口 版本=%s"
         % getattr(runner, "SECTOR_SYNC_VERSION", "?")
     )
     return runner.startup_sector_sync(ContextInfo)

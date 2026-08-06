@@ -1,5 +1,5 @@
 #coding:gbk
-"""rules_armed.json / results.json ï¿½ï¿½Ð´ï¿½ï¿½QMT ï¿½ï¿½ï¿½Ã²ï¿½ï¿½Ô²à£©ï¿½ï¿½"""
+"""rules_armed.json / results.json ¶ÁÐ´£¨QMT ÄÚÖÃ²ßÂÔ²à£©¡£"""
 import json
 import os
 import shutil
@@ -15,7 +15,7 @@ except ImportError:
 
 RULES_VERSION = 1
 RESULTS_VERSION = 1
-# QMT ï¿½ï¿½ï¿½Ã²ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¯ rules_armed.json ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½ï¿½ë£©
+# QMT ÄÚÖÃ²ßÂÔÂÖÑ¯ rules_armed.json µÄ¼ä¸ô£¨Ãë£©
 RULES_RELOAD_INTERVAL_SEC = 1
 RESULTS_FLUSH_INTERVAL_SEC = 1
 
@@ -77,20 +77,20 @@ def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not rule_type:
         rule_type = "breakthrough_buy"
     default_name = {
-        "single_buy": "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "single_sell": "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "breakthrough_buy": "Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "breakthrough_sell": "Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "best_sell": "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "best_buy": "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "cage_buy": "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "cage_sell": "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "grid_buy": "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "grid_sell": "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "scheduled_clear": "ï¿½ï¿½Ê±ï¿½ï¿½ï¿½",
-        "night_buy": "Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-        "night_sell": "Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
-    }.get(rule_type, "Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½")
+        "single_buy": "µ¥µãÂòÈë",
+        "single_sell": "µ¥µãÂô³ö",
+        "breakthrough_buy": "Í»ÆÆÂòÈë",
+        "breakthrough_sell": "Í»ÆÆÂô³ö",
+        "best_sell": "µ¯ÐÔÂô³ö",
+        "best_buy": "µ¯ÐÔÂòÈë",
+        "cage_buy": "Áý×ÓÂòÈë",
+        "cage_sell": "Áý×ÓÂô³ö",
+        "grid_buy": "Íø¸ñÂòÈë",
+        "grid_sell": "Íø¸ñÂô³ö",
+        "scheduled_clear": "¶¨Ê±Çå²Ö",
+        "night_buy": "Ò¹ÊÐÂòÈë",
+        "night_sell": "Ò¹ÊÐÂô³ö",
+    }.get(rule_type, "Í»ÆÆÂòÈë")
 
     executed_grids = []
     for x in raw.get("executed_grids") or []:
@@ -210,7 +210,7 @@ def collect_subscribe_codes(
     watch_codes: Optional[List[str]] = None,
     strategy_pool_watch: Optional[List[str]] = None,
 ) -> List[str]:
-    """tasks ï¿½ï¿½ watch_codes ï¿½ï¿½ strategy_pool_watch ï¿½ï¿½ subscribe_whole_quote ï¿½Ð±ï¿½ï¿½ï¿½"""
+    """tasks ¡È watch_codes ¡È strategy_pool_watch ¡ú subscribe_whole_quote ÁÐ±í¡£"""
     codes = set()
     for item in tasks or []:
         if not isinstance(item, dict):
@@ -229,12 +229,12 @@ def collect_live_subscribe_codes(
     tasks: List[Dict[str, Any]],
     watch_codes: Optional[List[str]] = None,
 ) -> List[str]:
-    """tasks + watch_codesï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ strategy_pool_watchï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ pool ï¿½ï¿½ï¿½Í·Åºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¡ï¿½"""
+    """tasks + watch_codes£¨²»º¬ strategy_pool_watch£©£»½öÓÃÓÚ pool ÒÑÊÍ·ÅºóµÄËõ¶©ÔÄ¡£"""
     return collect_subscribe_codes(tasks, watch_codes, strategy_pool_watch=None)
 
 
 def prune_results_stocks(results: Dict[str, Any], keep_codes: Any) -> int:
-    """ï¿½Æ³ï¿½ results.stocks ï¿½Ð²ï¿½ï¿½ï¿½ keep_codes ï¿½ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ strategy_pool ï¿½ï¿½ï¿½Í¡ï¿½"""
+    """ÒÆ³ý results.stocks ÖÐ²»ÔÚ keep_codes µÄÌõÄ¿£¬±ÜÃâ strategy_pool ÅòÕÍ¡£"""
     if not isinstance(results, dict):
         return 0
     stocks = results.get("stocks")
@@ -308,6 +308,7 @@ def empty_results(mode: str = "shadow", trade_date: str = "") -> Dict[str, Any]:
         "version": RESULTS_VERSION,
         "trade_date": trade_date,
         "updated_at": _now_iso(),
+        "quotes_recv_at": "",
         "mode": mode,
         "stocks": {},
     }
@@ -327,6 +328,7 @@ def append_stock_event(
         {
             "last_price": 0.0,
             "last_tick_time": "",
+            "quote_recv_at": "",
             "today_open": 0.0,
             "today_high": 0.0,
             "today_low": 0.0,
@@ -346,7 +348,7 @@ def append_stock_event(
 
 
 def _first_level_px(raw: Any) -> float:
-    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ list/tuple ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
+    """ÂòÂôÅÌÒ»µµ£º¿ÉÄÜÊÇ list/tuple »ò±êÁ¿¡£"""
     try:
         if isinstance(raw, (list, tuple)):
             if not raw:
@@ -362,7 +364,7 @@ def _first_level_px(raw: Any) -> float:
 
 
 def _in_opening_call_auction_window() -> bool:
-    """A ï¿½É¿ï¿½ï¿½Ì¼ï¿½ï¿½Ï¾ï¿½ï¿½ï¿½ 09:15ï¿½C09:30ï¿½ï¿½ï¿½ï¿½ 9:25 ï¿½ï¿½Ïºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½"""
+    """A ¹É¿ªÅÌ¼¯ºÏ¾º¼Û 09:15¨C09:30£¨º¬ 9:25 ´éºÏºóÖÁÁ¬Ðø¾º¼ÛÇ°£©¡£"""
     try:
         t = datetime.now().time()
     except Exception:
@@ -371,7 +373,7 @@ def _in_opening_call_auction_window() -> bool:
 
 
 def _in_call_auction_indicative_window() -> bool:
-    """09:15ï¿½C09:24ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ¥ï¿½ï¿½/Î´ï¿½É½ï¿½ï¿½Î¿ï¿½ï¿½Û½×¶Î£ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½Ì³É½ï¿½ï¿½ï¿½ï¿½ï¿½"""
+    """09:15¨C09:24£ºÐéÄâÆ¥Åä/Î´³É½»²Î¿¼¼Û½×¶Î£¨·ÇÕýÊ½¿ªÅÌ³É½»£©¡£"""
     try:
         t = datetime.now().time()
     except Exception:
@@ -380,7 +382,7 @@ def _in_call_auction_indicative_window() -> bool:
 
 
 def extract_tick_price(row: Dict[str, Any]) -> float:
-    """ï¿½ï¿½ï¿½Â¼Û£ï¿½ï¿½ï¿½ï¿½Ï¾ï¿½ï¿½Û½×¶ï¿½ lastPrice ï¿½ï¿½Îª 0ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Î¿ï¿½ï¿½Û£ï¿½ï¿½ï¿½ï¿½ï¿½Æ¥ï¿½ï¿½Û£ï¿½ï¿½ï¿½"""
+    """×îÐÂ¼Û£»¼¯ºÏ¾º¼Û½×¶Î lastPrice ³£Îª 0£¬¸ÄÓÃÂòÂôÒ»µµ²Î¿¼¼Û£¨¾º¼ÛÆ¥Åä¼Û£©¡£"""
     for key in ("lastPrice", "last_price", "tradePrice", "matchPrice", "price", "last"):
         raw = row.get(key)
         if raw is None:
@@ -391,7 +393,7 @@ def extract_tick_price(row: Dict[str, Any]) -> float:
                 return val
         except (TypeError, ValueError):
             continue
-    # 09:15ï¿½C09:30ï¿½ï¿½È«ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â¼ï¿½Î´Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Ç¼ï¿½ï¿½Ï¾ï¿½ï¿½Û²Î¿ï¿½ï¿½ï¿½
+    # 09:15¨C09:30£ºÈ«ÍÆ/¿ìÕÕÀï×îÐÂ¼ÛÎ´Ð´£¬µ«ÂòÂôÒ»ÒÑÊÇ¼¯ºÏ¾º¼Û²Î¿¼¼Û
     if _in_opening_call_auction_window():
         bid = _first_level_px(row.get("bidPrice"))
         ask = _first_level_px(row.get("askPrice"))
@@ -405,7 +407,7 @@ def extract_tick_price(row: Dict[str, Any]) -> float:
 
 
 def extract_tick_open(row: Dict[str, Any]) -> float:
-    """ï¿½ï¿½ subscribe_whole_quote ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½Ö¶Î¡ï¿½"""
+    """´Ó subscribe_whole_quote ¿ìÕÕÈ¡½ñ¿ªÅÌ×Ö¶Î¡£"""
     for key in ("open", "openPrice", "open_price", "todayOpen"):
         raw = row.get(key)
         if raw is None:
@@ -416,7 +418,7 @@ def extract_tick_open(row: Dict[str, Any]) -> float:
                 return val
         except (TypeError, ValueError):
             continue
-    # ï¿½ï¿½ 9:25 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã²Î¿ï¿½ï¿½Û³ä¿ªï¿½Ì£ï¿½9:15ï¿½C9:24 ï¿½ï¿½ï¿½ï¿½Û²ï¿½ï¿½Ãµï¿½ï¿½ï¿½ï¿½ï¿½
+    # ½ö 9:25 ºóÔÊÐíÓÃ²Î¿¼¼Û³ä¿ªÅÌ£»9:15¨C9:24 ÐéÄâ¼Û²»µÃµ±×÷½ñ¿ª
     if _in_opening_call_auction_window() and not _in_call_auction_indicative_window():
         px = extract_tick_price(row)
         if px > 0:
@@ -458,10 +460,13 @@ def update_price_snapshot(
     last_tick_time: str = "",
     tick_row: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """ï¿½ï¿½ï¿½ï¿½ï¿½Ö¼Û£ï¿½tick_row ï¿½ï¿½ï¿½ï¿½Ê±Í¬ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½Õ¸ßµÍ£ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½Î²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½
+    """¸üÐÂÏÖ¼Û£»tick_row ´æÔÚÊ±Í¬²½½ñ¿ª/µ±ÈÕ¸ßµÍ£¨½»Ò×Ê±¶Î²ßÂÔÉú³ÉÓÃ£©¡£
 
-    ï¿½ï¿½ï¿½Õ¸ßµï¿½Ö»ï¿½Ï¡ï¿½ï¿½ï¿½ï¿½Ìºï¿½É½ï¿½ï¿½Û¡ï¿½ï¿½ì¼£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 9:15ï¿½C9:24 ï¿½ï¿½ï¿½Ï¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ¥ï¿½ï¿½ï¿½
-    ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Çµï¿½Í£ï¿½ï¿½ï¿½ï¿½È¾ today_low/today_highï¿½ï¿½
+    Ã¿´Î³É¹¦µ÷ÓÃ¶¼»áË¢ÐÂ quote_recv_at / quotes_recv_at£¨±¾»úÊÕµ½ÍÆËÍÇ½ÖÓ£©£¬
+    ¼´Ê¹¼Û¸ñÓë timetag Î´±ä¡ª¡ª¹©Íâ²¿½¡¿µ¼ì²éÅÐ¶Ï¶©ÔÄÊÇ·ñ´æ»î¡£
+
+    ½ñÈÕ¸ßµÍÖ»ÈÏ¡¸¿ªÅÌºó³É½»¼Û¡¹¹ì¼££¬±ÜÃâ 9:15¨C9:24 ¼¯ºÏ¾º¼ÛÐéÄâÆ¥Åä¼Û
+    £¨³£Ãþµ½ÕÇµøÍ££©ÎÛÈ¾ today_low/today_high¡£
     """
     code = str(stock_code or "").strip().upper()
     if not code or last_price <= 0:
@@ -472,6 +477,7 @@ def update_price_snapshot(
         {
             "last_price": 0.0,
             "last_tick_time": "",
+            "quote_recv_at": "",
             "today_open": 0.0,
             "today_high": 0.0,
             "today_low": 0.0,
@@ -487,6 +493,14 @@ def update_price_snapshot(
     if tick_time and bucket.get("last_tick_time") != tick_time:
         bucket["last_tick_time"] = tick_time
         changed = True
+    # ±¾»úÊÕµ½ÍÆËÍµÄÇ½ÖÓ£º¼Û¸ñ/timetag ²»±äÒ²ÒªË¢ÐÂ£¬¹©½¡¿µ¼ì²éÅÐ¶Ï¶©ÔÄÊÇ·ñ´æ»î
+    recv_at = _now_iso()
+    if bucket.get("quote_recv_at") != recv_at:
+        bucket["quote_recv_at"] = recv_at
+        changed = True
+    if results.get("quotes_recv_at") != recv_at:
+        results["quotes_recv_at"] = recv_at
+        changed = True
 
     row = tick_row if isinstance(tick_row, dict) else {}
     open_px = extract_tick_open(row) if row else 0.0
@@ -498,19 +512,19 @@ def update_price_snapshot(
         and new_price > 0
         and not _in_call_auction_indicative_window()
     ):
-        # 9:15ï¿½C9:24 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+        # 9:15¨C9:24 ²»ÓÃÐéÄâ¼ÛËøËÀ½ñ¿ª
         bucket["today_open"] = new_price
         changed = True
 
     open_px = float(bucket.get("today_open") or 0) or float(open_px or 0)
 
-    # ï¿½ï¿½ï¿½â¾ºï¿½Û½×¶Î£ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½Õ¸ßµï¿½
+    # ÐéÄâ¾º¼Û½×¶Î£º²»Ð´½ñÈÕ¸ßµÍ
     if _in_call_auction_indicative_window():
         if changed:
             results["updated_at"] = _now_iso()
         return changed
 
-    # 9:25 ï¿½ï¿½ï¿½Ô¿ï¿½ï¿½ï¿½+ï¿½É½ï¿½ï¿½ï¿½Î¬ï¿½ï¿½ï¿½ßµÍ£ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ low ï¿½ï¿½ï¿½ñ¾º¼ï¿½ï¿½ï¿½ï¿½â¼«Öµï¿½ï¿½ï¿½ï¿½ï¿½
+    # 9:25 ºó£ºÒÔ¿ªÅÌ+³É½»¼ÛÎ¬»¤¸ßµÍ£»ÐÐÇéÔ´ low ÈôÏñ¾º¼ÛÐéÄâ¼«ÖµÔòºöÂÔ
     tick_hi, tick_lo = extract_tick_high_low(row) if row else (0.0, 0.0)
     cur_hi = float(bucket.get("today_high") or 0)
     cur_lo = float(bucket.get("today_low") or 0)
@@ -522,7 +536,7 @@ def update_price_snapshot(
         elif open_px > 0 and float(tick_lo) + 1e-9 >= open_px:
             trusted_lo = float(tick_lo)
         elif open_px > 0 and new_price + 1e-9 >= open_px * 0.98 and float(tick_lo) < open_px * 0.92:
-            trusted_lo = 0.0  # ï¿½Ö¼ï¿½ï¿½Ñ»Ø¿ï¿½ï¿½Ì¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ù·ï¿½ low È´ï¿½ï¿½ï¿½Ò£ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½Ûµï¿½Í£ï¿½ï¿½ï¿½ï¿½Û£ï¿½
+            trusted_lo = 0.0  # ÏÖ¼ÛÒÑ»Ø¿ªÅÌ¸½½ü£¬¹Ù·½ low È´ÉîÔÒ£¨³£Îª¾º¼ÛµøÍ£ÐéÄâ¼Û£©
         else:
             trusted_lo = float(tick_lo)
 
@@ -601,6 +615,10 @@ def load_results_prices(path: str) -> Dict[str, Dict[str, Any]]:
         out[norm] = {
             "last_price": price,
             "last_tick_time": str(bucket.get("last_tick_time") or ""),
+            "quote_recv_at": str(
+                bucket.get("quote_recv_at") or data.get("quotes_recv_at") or ""
+            ),
+            "quotes_recv_at": str(data.get("quotes_recv_at") or ""),
             "today_open": float(bucket.get("today_open") or 0),
             "today_high": float(bucket.get("today_high") or 0),
             "today_low": float(bucket.get("today_low") or 0),
@@ -610,7 +628,7 @@ def load_results_prices(path: str) -> Dict[str, Dict[str, Any]]:
 
 
 def load_account_positions_snapshot(path: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
-    """ï¿½ï¿½ results.json ï¿½ï¿½È¡ï¿½ï¿½ï¿½Ã²ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½Ê½ï¿½/ï¿½Ö²Ö£ï¿½ï¿½ï¿½ï¿½â²¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ UIï¿½ï¿½ï¿½ï¿½"""
+    """´Ó results.json ¶ÁÈ¡ÄÚÖÃ²ßÂÔÐ´ÈëµÄ×Ê½ð/³Ö²Ö£¨¹©Íâ²¿Ö÷³ÌÐò UI£©¡£"""
     if not os.path.isfile(path):
         return None, {}
     try:
@@ -654,12 +672,12 @@ def load_account_positions_snapshot(path: str) -> Tuple[Optional[Dict[str, Any]]
         if vol <= 0:
             continue
         name = str(meta.get("stock_name") or "").strip()
-        if (not name or name in ("Î´Öªï¿½ï¿½ï¿½ï¿½", "Î´Öª")) and get_name is not None:
+        if (not name or name in ("Î´ÖªÃû³Æ", "Î´Öª")) and get_name is not None:
             try:
                 name = str(get_name(norm.split(".")[0]) or "").strip()
             except Exception:
                 name = name or ""
-            if name in ("Î´Öªï¿½ï¿½ï¿½ï¿½", "Î´Öª"):
+            if name in ("Î´ÖªÃû³Æ", "Î´Öª"):
                 name = ""
         positions[norm] = {
             "account_id": str(meta.get("account_id") or account.get("account_id") or ""),
@@ -674,7 +692,7 @@ def load_account_positions_snapshot(path: str) -> Tuple[Optional[Dict[str, Any]]
 
 
 def load_orders_snapshot(path: str) -> list:
-    """ï¿½ï¿½ results.json ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ passorder ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ò¶©µï¿½ï¿½Ð±ï¿½/Í¼ï¿½ï¿½×´Ì¬ï¿½ï¿½ï¿½ï¿½"""
+    """´Ó results.json ¶ÁÈ¡ÄÚÖÃ passorder ¶©µ¥£¨¹©Ö÷³ÌÐò¶©µ¥ÁÐ±í/Í¼±í×´Ì¬£©¡£"""
     if not os.path.isfile(path):
         return []
     try:
@@ -692,7 +710,7 @@ def load_orders_snapshot(path: str) -> list:
 
 
 def load_elastic_states_snapshot(path: str) -> dict:
-    """ï¿½ï¿½ results.json ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×´Ì¬ï¿½ï¿½triggered / ï¿½ï¿½Öµï¿½Û£ï¿½ï¿½ï¿½"""
+    """´Ó results.json ¶ÁÈ¡µ¯ÐÔÂòÂô¸ú×Ù×´Ì¬£¨triggered / ¼«Öµ¼Û£©¡£"""
     if not os.path.isfile(path):
         return {}
     try:
@@ -710,7 +728,7 @@ def load_elastic_states_snapshot(path: str) -> dict:
 
 
 def load_broker_orders_snapshot(path: str) -> list:
-    """ï¿½ï¿½ results.json ï¿½ï¿½È¡ï¿½ï¿½ QMT get_trade_detail_data(ORDER) ï¿½ï¿½ï¿½Õ¡ï¿½"""
+    """´Ó results.json ¶ÁÈ¡´ó QMT get_trade_detail_data(ORDER) ¿ìÕÕ¡£"""
     if not os.path.isfile(path):
         return []
     try:
