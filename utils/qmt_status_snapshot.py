@@ -93,7 +93,7 @@ def force_start_text(ymd: Optional[str] = None) -> str:
 # 与 qmt_builtin runners 对齐的常量（监控器侧硬编码，避免导入 QMT 模块）
 SYNC_HOUR = 15
 SYNC_MINUTE = 35
-TICK_CHAIN_DELAY_SEC = 900
+TICK_CHAIN_DELAY_SEC = 30
 MARKET_PROTECT_START = dt_time(9, 0)
 MARKET_PROTECT_END = dt_time(15, 30)
 RESULTS_STALE_SEC = 180.0
@@ -871,8 +871,13 @@ def _schedule_block(now: Optional[datetime] = None) -> Dict[str, Any]:
         },
         {
             "name": "分笔全量（日线后链式）",
-            "when": "日线完成后约 +%d 分钟（约 %s）"
-            % (TICK_CHAIN_DELAY_SEC // 60, tick_chain_at.strftime("%H:%M")),
+            "when": (
+                "日线完成后约 +%d 秒（约 %s）"
+                % (TICK_CHAIN_DELAY_SEC, tick_chain_at.strftime("%H:%M:%S"))
+                if TICK_CHAIN_DELAY_SEC < 60
+                else "日线完成后约 +%d 分钟（约 %s）"
+                % (TICK_CHAIN_DELAY_SEC // 60, tick_chain_at.strftime("%H:%M"))
+            ),
             "note": "链式延迟 %d 秒" % TICK_CHAIN_DELAY_SEC,
         },
         {

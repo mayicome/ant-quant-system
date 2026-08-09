@@ -805,27 +805,74 @@ def _safe_rank_int(v: object, default: int = 10**9) -> int:
         return default
 
 
-# 导出综合分：score = Elig * 权重 + 标签内RS（越小越靠前）
+# 导出/clip 综合分：score = Elig * 权重 + 标签内RS（越小越靠前）
 # 权重=8：约「差 1 档 Elig ≈ 差 8 名 RS」；若希望 Elig 几乎不被 RS 反超，可调到 50+
+# 导出行序与 clip 取票均按该 score（见 clip_strength_sort_key）；已取消 max_per_tag 配额重排。
 EXPORT_ELIG_WEIGHT = 8
+
+
+def clip_strength_sort_key(
+    elig: object,
+    rs: object,
+    code: object = "",
+    *,
+    elig_weight: int = EXPORT_ELIG_WEIGHT,
+) -> Tuple[int, int, int, str]:
+    """clip/导出强度键（score = Elig×权重 + 标签内RS）。
+
+    score = 合格榜内序位 × elig_weight + 合格榜标签内RS排名；
+    tie-break：Elig → RS → code。越小越强。
+    """
+    try:
+        w = max(0, int(elig_weight))
+    except (TypeError, ValueError):
+        w = int(EXPORT_ELIG_WEIGHT)
+    e = _safe_rank_int(elig)
+    r = _safe_rank_int(rs)
+    c = str(code or "").strip()
+    if c.isdigit():
+        c = c.zfill(6)
+    return (e * w + r, e, r, c)
+
+
+def clip_strength_sort_key_from_row(
+    row: Dict[str, object],
+    *,
+    elig_weight: int = EXPORT_ELIG_WEIGHT,
+) -> Tuple[int, int, int, str]:
+    """从选股行/成交行取 clip 强度键。"""
+    c = str(row.get("code") or row.get("股票代码") or row.get("代码") or "").strip()
+    return clip_strength_sort_key(
+        row.get("合格榜内序位"),
+        row.get("合格榜标签内RS排名"),
+        c,
+        elig_weight=elig_weight,
+    )
 
 
 def reorder_selection_rows_for_export(
     rows: List[Dict[str, object]],
     *,
-    max_per_tag: int = 2,
+    max_per_tag: Optional[int] = None,
     elig_weight: int = EXPORT_ELIG_WEIGHT,
 ) -> List[Dict[str, object]]:
-    """导出前按选股日重排，便于策略生成器按池顺序做 clip 截断。
+    """导出前按选股日重排：仅按强度分（与 clip 一致）。
 
-    每个选股日内：
-    1) 按综合分 score=Elig*elig_weight+标签内RS 升序（再 Elig、RS、代码 tie-break）；
-    2) 同「合格榜对应标签」优先最多保留 max_per_tag 只排在前面，多出的同标签票放到该日末尾。
+    每个选股日内按 score=Elig*elig_weight+标签内RS 升序（再 Elig、RS、代码 tie-break）。
     无 Elig 字段的规则：保持该日内相对顺序不变。
+
+    max_per_tag 已默认关闭（None/0=不做同标签前置配额）；保留参数仅为兼容旧调用，
+    传入正整数时仍可把超出配额的同标签票挪到该日末尾（实盘/导出默认不用）。
     """
     if not rows:
         return []
-    max_per_tag = max(0, int(max_per_tag))
+    if max_per_tag is None:
+        max_per_tag = 0
+    else:
+        try:
+            max_per_tag = max(0, int(max_per_tag))
+        except (TypeError, ValueError):
+            max_per_tag = 0
     try:
         w = max(0, int(elig_weight))
     except (TypeError, ValueError):
@@ -834,23 +881,12 @@ def reorder_selection_rows_for_export(
     def _as_of(r: Dict[str, object]) -> str:
         return str(r.get("as_of") or r.get("选股日") or "").strip()
 
-    def _code(r: Dict[str, object]) -> str:
-        c = str(r.get("code") or r.get("股票代码") or "").strip()
-        if c.isdigit():
-            return c.zfill(6)
-        return c
-
     def _tag(r: Dict[str, object]) -> str:
         t = str(r.get("合格榜对应标签") or "").strip()
         return t if t else "_none_"
 
     def _has_elig(r: Dict[str, object]) -> bool:
         return ("合格榜内序位" in r) and r.get("合格榜内序位") not in (None, "")
-
-    def _score(r: Dict[str, object]) -> int:
-        elig = _safe_rank_int(r.get("合格榜内序位"))
-        rs = _safe_rank_int(r.get("合格榜标签内RS排名"))
-        return elig * w + rs
 
     by_day: Dict[str, List[Dict[str, object]]] = {}
     day_order: List[str] = []
@@ -869,12 +905,7 @@ def reorder_selection_rows_for_export(
             continue
         ranked = sorted(
             day_rows,
-            key=lambda r: (
-                _score(r),
-                _safe_rank_int(r.get("合格榜内序位")),
-                _safe_rank_int(r.get("合格榜标签内RS排名")),
-                _code(r),
-            ),
+            key=lambda r: clip_strength_sort_key_from_row(r, elig_weight=w),
         )
         if max_per_tag <= 0:
             out.extend(ranked)
@@ -5102,7 +5133,7 @@ class SectorStockFilterDialog(QDialog):
         rows = self._result_rows_by_rule.get(rid, [])
         if not rows:
             return False
-        rows = reorder_selection_rows_for_export(rows, max_per_tag=2)
+        rows = reorder_selection_rows_for_export(rows)
         r = self._get_rule_by_id(rid)
         rule_name = str(r.get("name") if r else "规则")
         is_first_board = self._is_first_board_rule_name(rule_name)
@@ -5147,7 +5178,7 @@ class SectorStockFilterDialog(QDialog):
         if not rows:
             QMessageBox.information(self, "提示", "该规则没有结果可保存")
             return
-        rows = reorder_selection_rows_for_export(rows, max_per_tag=2)
+        rows = reorder_selection_rows_for_export(rows)
         r = self._get_rule_by_id(rid)
         rule_name = str(r.get("name") if r else "规则")
         is_first_board = self._is_first_board_rule_name(rule_name)
@@ -5322,7 +5353,7 @@ class SectorStockFilterDialog(QDialog):
                 rows = self._result_rows_by_rule.get(rid, [])
                 if not rows:
                     continue
-                rows = reorder_selection_rows_for_export(rows, max_per_tag=2)
+                rows = reorder_selection_rows_for_export(rows)
                 rule_counts[rname] = len(rows)
                 for rr in rows:
                     stock_copy = {

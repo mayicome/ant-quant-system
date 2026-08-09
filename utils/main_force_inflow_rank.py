@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Optional, Tuple
+from datetime import date, datetime, timedelta
+from typing import Dict, Optional, Tuple, Union
 
 import pandas as pd
 
 # 兼容旧调用；全量模式请传 0
 MIN_INFLOW_WAN = 0.0
+
+DateLike = Union[str, date, datetime]
 
 
 def _zfill_code(raw: object) -> str:
@@ -116,8 +119,77 @@ def _get_xtdata():
     return _xtdata
 
 
+def _as_date(as_of: Optional[DateLike] = None) -> date:
+    if as_of is None:
+        return date.today()
+    if isinstance(as_of, datetime):
+        return as_of.date()
+    if isinstance(as_of, date):
+        return as_of
+    s = re.sub(r"\D", "", str(as_of or ""))
+    if len(s) >= 8:
+        return datetime.strptime(s[:8], "%Y%m%d").date()
+    return date.today()
+
+
+def _float_mv_csv_path(as_of: date) -> str:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ymd = as_of.strftime("%Y%m%d")
+    return os.path.join(root, "history_data", "个股主力净流入", f"个股主力净流入_{ymd}.csv")
+
+
+def _read_float_market_cap_yuan_from_csv(path: str) -> Dict[str, float]:
+    """从主力净流入 CSV 读 code6 → 流通市值(元)。无列则返回空。"""
+    out: Dict[str, float] = {}
+    if not path or not os.path.isfile(path):
+        return out
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+    except Exception:
+        return out
+    code_col = _find_col(df, "代码")
+    cap_col = _find_col(df, "流通市值")
+    if not code_col or not cap_col:
+        return out
+    for _, r in df.iterrows():
+        c6 = _zfill_code(r.get(code_col))
+        if not c6:
+            continue
+        raw = r.get(cap_col)
+        yuan: Optional[float] = None
+        if isinstance(raw, (int, float)) and not pd.isna(raw):
+            v = float(raw)
+            # CSV 接口偶发纯数字元；显示串走 parse
+            yuan = v if v > 1e7 else parse_inflow_to_yuan(raw)
+        else:
+            yuan = parse_inflow_to_yuan(raw)
+        if yuan is not None and yuan > 0:
+            out[c6] = yuan
+    return out
+
+
+def load_float_market_cap_yuan_map(as_of: Optional[DateLike] = None) -> Dict[str, float]:
+    """优先读当日「个股主力净流入」流通市值；缺文件则前后各最多 12 个自然日。
+
+    与板块选股同源，不依赖 miniQMT / xtdata。
+    """
+    d0 = _as_date(as_of)
+    primary = _read_float_market_cap_yuan_from_csv(_float_mv_csv_path(d0))
+    if primary:
+        return primary
+    for delta in range(1, 13):
+        for sign in (1, -1):
+            d = d0 + timedelta(days=sign * delta)
+            if d.weekday() >= 5:
+                continue
+            got = _read_float_market_cap_yuan_from_csv(_float_mv_csv_path(d))
+            if got:
+                return got
+    return {}
+
+
 def float_market_cap_yuan(code6: str, last_price: Optional[float] = None) -> Optional[float]:
-    """流通市值（元）= FloatVolume × 最新价（缺则 PreClose）。"""
+    """流通市值（元）= FloatVolume × 最新价（缺则 PreClose）。依赖 xtdata/miniQMT。"""
     xt = _get_xtdata()
     if xt is None:
         return None

@@ -93,6 +93,11 @@ OPTIONAL_STRATEGY_PARAM_KEYS = (
     PARAM_SIZING_MODE,
     PARAM_CLIP_L,
     PARAM_CLIP_U,
+    # 开盘夹档 Cond2（strategy_e6d1b97b 等）；Cond3 已迁选股，键仍保留可选覆盖
+    "require_open_rel_ma5",
+    "open_rel_ma5_lo",
+    "open_rel_ma5_hi",
+    "require_ma5_lt_ma10_lt_ma20",
 )
 
 

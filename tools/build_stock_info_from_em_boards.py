@@ -32,52 +32,7 @@ DEFAULT_PROGRESS = os.path.join(DATA_DIR, "all_a_stock_info.em_boards.progress.j
 STOCK_LIST_CSV = os.path.join(DATA_DIR, "all_a_stocks.csv")
 F10_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax"
 
-_DYNAMIC_BOARD_EXACT = frozenset(
-    {
-        "最近多板",
-        "昨日涨停",
-        "昨日连板",
-        "昨日连板_含一字",
-        "昨日首板",
-        "今日涨停",
-        "今日连板",
-        "涨停",
-        "跌停",
-        "炸板",
-        "题材股",
-        "东方财富热股",
-    }
-)
-_DYNAMIC_BOARD_KEYWORDS = (
-    "昨日",
-    "今日",
-    "连板",
-    "涨停",
-    "跌停",
-    "炸板",
-    "自然涨停",
-    "一字板",
-    "新高",
-    "高振幅",
-    "热股",
-    "预增",
-    "预减",
-    "业绩增",
-    "打二板",
-    "首亏",
-    "中报",
-    "年报",
-    "季报",
-)
-
-
-def _is_dynamic_market_board(name: str) -> bool:
-    n = str(name or "").strip()
-    if not n:
-        return True
-    if n in _DYNAMIC_BOARD_EXACT:
-        return True
-    return any(k in n for k in _DYNAMIC_BOARD_KEYWORDS)
+from utils.em_board_exclude import is_excluded_em_board as _is_dynamic_market_board
 
 
 def _clear_proxy_env() -> None:

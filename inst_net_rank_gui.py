@@ -371,7 +371,10 @@ def build_longhubang_reports() -> dict:
     jg_3d = jg_3d_stat.copy()
 
     # 流通市值归一：净额(万)*1e4 / 流通市值(元) * 100 → 占流通%
-    from utils.main_force_inflow_rank import float_market_cap_yuan, yuan_to_display
+    # 只读主力净流入 CSV，不回退 xtdata / miniQMT。
+    from utils.main_force_inflow_rank import load_float_market_cap_yuan_map, yuan_to_display
+
+    cap_map = load_float_market_cap_yuan_map(data_date_jg or run_date_str)
 
     def _attach_cap_ratios(df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
@@ -382,7 +385,7 @@ def build_longhubang_reports() -> dict:
             code = str(r.get("code") or "").zfill(6)
             day_wan = float(pd.to_numeric(r.get("净额当日万"), errors="coerce") or 0.0)
             d3_wan = float(pd.to_numeric(r.get("净额三日万"), errors="coerce") or 0.0)
-            cap = float_market_cap_yuan(code)
+            cap = cap_map.get(code)
             if cap is not None and cap > 0:
                 day_ratios.append(round(day_wan * 1e4 / cap * 100.0, 2))
                 d3_ratios.append(round(d3_wan * 1e4 / cap * 100.0, 2))

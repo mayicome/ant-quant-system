@@ -2,6 +2,7 @@
 """回测启动前批量检查/预热日线与 tick 缓存。"""
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -120,22 +121,44 @@ def _tick_pairs_need_wait(
     codes_6: Sequence[str],
     trade_days: Sequence[date],
 ) -> Tuple[List[Tuple[str, date]], int]:
-    """返回 (仍需等待的 code×日, 已判定不可用跳过数)。"""
+    """返回 (仍缺本地文件的 code×日, 已判定不可用跳过数)。
+
+    只做文件存在性检查（及 sync 失败标记），不读 parquet 内容。
+    """
     try:
-        from utils.data_sync_request import _tick_cache_ready, tick_sync_unavailable
+        from utils.tick_data_cache import tick_cache_file_ready
+        from utils.data_sync_request import MAX_RETRIES, load_requests
     except ImportError:
-        from data_sync_request import _tick_cache_ready, tick_sync_unavailable  # type: ignore
+        from tick_data_cache import tick_cache_file_ready  # type: ignore
+        from data_sync_request import MAX_RETRIES, load_requests  # type: ignore
+
+    tick_root = (load_requests() or {}).get("tick") or {}
+    if not isinstance(tick_root, dict):
+        tick_root = {}
 
     missing: List[Tuple[str, date]] = []
     skipped = 0
     for d in trade_days:
+        ymd = d.strftime("%Y%m%d")
         for c6 in codes_6:
-            if _tick_cache_ready(c6, d):
+            c6n = str(c6).zfill(6)
+            if tick_cache_file_ready(c6n, d):
                 continue
-            if tick_sync_unavailable(c6, d):
+            bucket = tick_root.get(c6n) if isinstance(tick_root.get(c6n), dict) else {}
+            meta = (
+                bucket.get(ymd)
+                if isinstance(bucket, dict) and isinstance(bucket.get(ymd), dict)
+                else {}
+            )
+            status = str((meta or {}).get("status") or "")
+            try:
+                retries = int((meta or {}).get("retries") or 0)
+            except (TypeError, ValueError):
+                retries = 0
+            if status == "failed" or retries >= int(MAX_RETRIES):
                 skipped += 1
                 continue
-            missing.append((c6, d))
+            missing.append((c6n, d))
     return missing, skipped
 
 

@@ -23,7 +23,7 @@ POOL_TAIL_DOWNLOAD_SLEEP_SEC = 5.0
 # After-hours post-download pause between codes (keep short).
 FULL_POST_DOWNLOAD_SLEEP_SEC = 0.2
 # Delay before chaining tick full sync after daily gate opens.
-TICK_CHAIN_DELAY_SEC = 900
+TICK_CHAIN_DELAY_SEC = 30
 MIN_STORAGE_BARS = 1
 POOL_INTRADAY_MIN_BARS = 120
 POOL_MAX_DATE_LAG_DAYS = 10

@@ -917,6 +917,18 @@ def group_codes_by_selection_date_from_file(file_path: str) -> Tuple[Dict[date, 
     从板块筛选等导出的 Excel/CSV 中按「选股日」分组股票代码。
     返回 (按日分组的代码字典, 列说明文案)。
     """
+    by_date, _strength_by_day, hint = group_codes_and_clip_strength_by_selection_date(file_path)
+    return by_date, hint
+
+
+def group_codes_and_clip_strength_by_selection_date(
+    file_path: str,
+) -> Tuple[Dict[date, List[str]], Dict[date, Dict[str, Dict[str, object]]], str]:
+    """按选股日返回代码列表 + clip 强度元数据（Elig/标签内RS）。
+
+    strength_by_day[d][code6] = {"合格榜内序位": ..., "合格榜标签内RS排名": ...}
+    供 clip_equity 按强度分取票（与导出强度序一致；无 max_per_tag）。
+    """
     file_path = os.path.abspath(file_path)
     if not os.path.isfile(file_path):
         raise ValueError("文件不存在")
@@ -946,7 +958,10 @@ def group_codes_by_selection_date_from_file(file_path: str) -> Tuple[Dict[date, 
         raise ValueError("未找到日期列（需要「选股日」或 screen_as_of 等列）")
     if not cc:
         raise ValueError("未找到股票代码列（需要「股票代码」等列）")
+    elig_col = _find_column_by_header_candidates(df, ("合格榜内序位",))
+    rs_col = _find_column_by_header_candidates(df, ("合格榜标签内RS排名",))
     by_date: Dict[date, List[str]] = defaultdict(list)
+    strength_by_day: Dict[date, Dict[str, Dict[str, object]]] = defaultdict(dict)
     seen = set()
     for _, row in df.iterrows():
         d = _parse_cell_to_date(row.get(dc))
@@ -958,11 +973,49 @@ def group_codes_by_selection_date_from_file(file_path: str) -> Tuple[Dict[date, 
             continue
         seen.add(key)
         by_date[d].append(code)
+        meta: Dict[str, object] = {}
+        if elig_col:
+            meta["合格榜内序位"] = row.get(elig_col)
+        if rs_col:
+            meta["合格榜标签内RS排名"] = row.get(rs_col)
+        if meta:
+            strength_by_day[d][code] = meta
     if not by_date:
         raise ValueError("没有有效行（日期或代码为空）")
     ordered = dict(sorted(by_date.items()))
-    hint = f"日期列「{dc}」，代码列「{cc}」，共 {len(ordered)} 个交易日、{sum(len(v) for v in ordered.values())} 条记录"
-    return ordered, hint
+    strength_ordered = {d: dict(strength_by_day.get(d) or {}) for d in ordered}
+    hint = (
+        f"日期列「{dc}」，代码列「{cc}」，共 {len(ordered)} 个交易日、"
+        f"{sum(len(v) for v in ordered.values())} 条记录"
+    )
+    if elig_col and rs_col:
+        hint += "；含合格榜内序位/标签内RS（供 clip 强度分）"
+    return ordered, strength_ordered, hint
+
+
+def _inject_clip_strength_into_prices(
+    prices: Dict[str, Any],
+    strength_by_code: Optional[Dict[str, Dict[str, object]]],
+) -> int:
+    """把 clip 强度字段写入 prices[code]，返回写入只数。"""
+    if not isinstance(prices, dict) or not strength_by_code:
+        return 0
+    n = 0
+    for code, meta in strength_by_code.items():
+        if not isinstance(meta, dict):
+            continue
+        c6 = _normalize_code_6(code)
+        if not c6:
+            continue
+        p = prices.get(c6)
+        if not isinstance(p, dict):
+            continue
+        if "合格榜内序位" in meta and meta.get("合格榜内序位") not in (None, ""):
+            p["合格榜内序位"] = meta.get("合格榜内序位")
+        if "合格榜标签内RS排名" in meta and meta.get("合格榜标签内RS排名") not in (None, ""):
+            p["合格榜标签内RS排名"] = meta.get("合格榜标签内RS排名")
+        n += 1
+    return n
 
 
 def _unique_traded_rows_for_selection_copy(trades: List[dict]) -> List[dict]:
@@ -1396,7 +1449,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         params_layout.setContentsMargins(12, 12, 12, 12)
         params_layout.addWidget(QLabel(
             "以下参数会传入策略。仓位模式：固定金额=每只用「单股拟买入金额」；"
-            "账户clip=总权益/clip(当日股票池只数S, L, U)，且进档最多买 U 只（按股票池顺序）。"
+            "账户clip=总权益/clip(当日股票池只数S, L, U)，且进档最多买 U 只"
+            "（按强度分 Elig×8+标签内RS，与导出序一致）。"
             "用 clip 时请勿勾选「只生成前 N」（否则 S 会被截断）。"
         ))
         params_form = QFormLayout()
@@ -3005,15 +3059,41 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.warning(self, "导入结果", "未能从该文件中解析出有效的 6 位股票代码。")
             return
         added = self._merge_codes_into_pool(codes)
+        # 若含合格榜字段：写入 clip_strength_by_code，供 clip 按强度分取票
+        strength_note = ""
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in (".xlsx", ".xls", ".csv"):
+                _, strength_by_day, _ = group_codes_and_clip_strength_by_selection_date(path)
+                merged_strength: Dict[str, Dict[str, object]] = {}
+                for day_map in strength_by_day.values():
+                    for c6, meta in (day_map or {}).items():
+                        if c6 and isinstance(meta, dict):
+                            merged_strength[c6] = meta
+                if merged_strength:
+                    sid = self._get_selected_strategy_id()
+                    cfg = self._find_strategy_by_id(sid) if sid else None
+                    if cfg is not None:
+                        sp = dict(cfg.strategy_params or {})
+                        prev = dict(sp.get("clip_strength_by_code") or {})
+                        prev.update(merged_strength)
+                        sp["clip_strength_by_code"] = prev
+                        cfg.strategy_params = sp
+                        save_strategy(cfg)
+                        strength_note = f"；已写入 clip 强度 {len(merged_strength)} 只"
+        except Exception:
+            strength_note = ""
         if added > 0:
             msg = f"已从文件并入 {added} 只股票并自动保存"
             if added < len(codes):
                 msg += f"（文件解析 {len(codes)} 只，其余已在池中或重复）"
-            msg += "。"
+            msg += f"{strength_note}。"
             QMessageBox.information(self, "导入结果", msg)
         else:
             QMessageBox.information(
-                self, "导入结果", "导入完成：这些股票已在当前策略股票池中，无新增。"
+                self,
+                "导入结果",
+                f"导入完成：这些股票已在当前策略股票池中，无新增{strength_note}。",
             )
 
     def _on_import_positions(self):
@@ -4235,6 +4315,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 cfg.strategy_code or "", cfg.strategy_params, getattr(cfg, "name", "") or ""
             ):
                 _inject_code_sell_day_index(params, codes, root)
+            # clip 强度：写入 prices，供策略按 Elig×8+RS 截断（≠导出行序）
+            strength_map = params.get("clip_strength_by_code") or {}
+            if isinstance(strength_map, dict) and strength_map:
+                n_inj = _inject_clip_strength_into_prices(price_map, strength_map)
+                if n_inj:
+                    self._append_run_log(
+                        f"已注入 clip 强度字段 {n_inj} 只（合格榜内序位/标签内RS；截断按强度分）"
+                    )
             # 注入各股票可用持仓（如「持仓卖出」等策略通过 params["positions"] 使用）
             positions_debug_info = ""
             try:
@@ -5440,6 +5528,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "导出失败", str(e))
 
+    def _notify_batch_backtest_server_chan(self, title: str, content: str) -> None:
+        """批量回测结束推送 Server酱（收件人见 data/notify_server_chan.json，默认马毅）。"""
+        try:
+            from utils.server_chan_notify import send_server_chan
+
+            send_server_chan(title, content)
+        except Exception:
+            pass
+
     def _on_batch_backtest_from_selection_file(self):
         """按选股文件中的「选股日」分组，对每个交易日单独跑回测并汇总（无需拆文件）。"""
         sid = self._get_selected_strategy_id()
@@ -5463,7 +5560,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not path:
             return
         try:
-            by_day, hint = group_codes_by_selection_date_from_file(path)
+            by_day, strength_by_day, hint = group_codes_and_clip_strength_by_selection_date(path)
         except Exception as e:
             QMessageBox.warning(self, "无法解析文件", str(e))
             return
@@ -5660,9 +5757,16 @@ class StrategyGeneratorMainWindow(QMainWindow):
                         bt_progress, slot_lo, slot_hi, f"{tag}回测 "
                     )
                     try:
+                        day_strength = strength_by_day.get(d) or {}
                         if use_dual and segments_dual:
+                            segs_run = []
+                            for seg0 in segments_dual:
+                                sp = dict(seg0.get("strategy_params") or {})
+                                if day_strength:
+                                    sp["clip_strength_by_code"] = day_strength
+                                segs_run.append({**seg0, "strategy_params": sp})
                             result = run_backtest_segmented(
-                                segments_dual,
+                                segs_run,
                                 codes,
                                 start_d,
                                 end_d,
@@ -5675,9 +5779,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
                                 progress=bt_sub,
                             )
                         else:
+                            sp_run = dict(cfg.strategy_params or {})
+                            if day_strength:
+                                sp_run["clip_strength_by_code"] = day_strength
                             result = run_backtest(
                                 strategy_code=cfg.strategy_code or "",
-                                strategy_params=cfg.strategy_params or {},
+                                strategy_params=sp_run,
                                 stock_codes_6=codes,
                                 start_date=start_d,
                                 end_date=end_d,
@@ -5821,6 +5928,17 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 self._last_batch_export_bundle = None
                 self._last_batch_bundle_strategy_id = None
             self._refresh_backtest_export_button()
+            n_ok = sum(1 for r in summary_rows if r.get("总收益率%") is not None)
+            n_fail = len(summary_rows) - n_ok
+            sct_body = (
+                f"策略：{cfg.name}\n"
+                f"规则：{mode_txt}\n"
+                f"完成：{len(summary_rows)} 日（成功 {n_ok} / 失败 {n_fail}）\n"
+                f"成交明细：{len(all_batch_trades)} 笔"
+            )
+            if stock_summary_rows:
+                sct_body += f"\n有交易股票：{len(stock_summary_rows)} 只"
+            self._notify_batch_backtest_server_chan("批量回测完成", sct_body)
             if summary_rows:
                 save_ask = QMessageBox.question(
                     self,
@@ -5863,6 +5981,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
                         except Exception as ex:
                             QMessageBox.warning(self, "保存失败", str(ex))
         except Exception as e:
+            self._notify_batch_backtest_server_chan(
+                "批量回测失败",
+                f"策略：{getattr(cfg, 'name', '')}\n{e}",
+            )
             QMessageBox.critical(self, "批量回测错误", str(e))
             self.backtest_result_text.setPlainText(f"批量回测失败：{e}")
             self._fill_backtest_trades_table([])

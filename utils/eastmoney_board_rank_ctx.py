@@ -6,7 +6,7 @@
 概念：可选；缺任一日 concept CSV 时概念侧为空，不报错。
 
 合格 TopN（方案 B）：按涨跌幅排名顺序遍历全日榜，跳过成分股数 < MIN_MEMBERS
-的标签，取满 top_n 个。
+的标签，以及交易状态/风格因子等非产业属性板（utils.em_board_exclude），取满 top_n 个。
 
 同一次加载产出两臂池（便于对照实验）：
 - continuous_*：连续热门 = D ∩ D-1 合格 TopN
@@ -243,8 +243,12 @@ def _eligible_top_n(
 ) -> Dict[str, int]:
     """按排名顺序取合格 TopN：跳过成分股数 < min_members 的标签，取满 top_n。
 
+    同时跳过交易状态/风格因子等非产业属性板（见 utils.em_board_exclude）。
+
     返回 name → 东财原始排名。dict 插入序 = 合格榜内序位（1..top_n）。
     """
+    from utils.em_board_exclude import is_excluded_em_board
+
     n = max(1, int(top_n))
     min_m = max(0, int(min_members))
     out: Dict[str, int] = {}
@@ -252,6 +256,8 @@ def _eligible_top_n(
         if len(out) >= n:
             break
         if not name or name in out:
+            continue
+        if is_excluded_em_board(name):
             continue
         try:
             cnt = int(member_count(name))
@@ -910,7 +916,26 @@ def load_em_board_hot_map(
                 hit_count_key: len(hits),
             }
             if include_eligible:
-                # 合格榜内序位：命中标签中最小（最热）的 eligible_rank
+                # 全部命中标签明细（供规则按「任一标签 Elig+RS 过关」再筛，并在过关集里取最热）
+                tag_rows = []
+                for h in hits:
+                    try:
+                        elig_n = int(h.get("tag_rs_n") or 0)
+                    except (TypeError, ValueError):
+                        elig_n = 0
+                    tag_rows.append(
+                        {
+                            "tag": str(h.get("tag") or ""),
+                            "kind": str(h.get("kind") or ""),
+                            "eligible_rank": int(h.get("eligible_rank") or 0),
+                            "em_rank": int(h.get("em_rank") or 0),
+                            "rs_rank": int(h.get("rs_rank") or 0),
+                            "tag_rs_n": elig_n,
+                            "rs": h.get("rs"),
+                        }
+                    )
+                row_out["合格榜命中标签"] = tag_rows
+                # 兼容旧字段：仍填「全部命中里最热」；规则侧应改读命中列表后重选过关最热
                 best_elig = min(
                     hits,
                     key=lambda h: (
@@ -923,14 +948,12 @@ def load_em_board_hot_map(
                 row_out["合格榜对应标签"] = str(best_elig.get("tag") or "")
                 row_out["合格榜标签类型"] = str(best_elig.get("kind") or "")
                 row_out["合格榜标签东财排名"] = int(best_elig.get("em_rank") or 0)
-                # 与定义序位的同一标签上的组内 RS 名次（档位实验用）
                 row_out["合格榜标签内RS排名"] = int(best_elig.get("rs_rank") or 0)
                 try:
                     elig_n = int(best_elig.get("tag_rs_n") or 0)
                 except (TypeError, ValueError):
                     elig_n = 0
                 row_out["合格榜标签RS样本数"] = elig_n
-                # 供规则展示：无硬顶时的前 1/3 截断（实际是否再套 RS_HI 由规则决定）
                 row_out["合格榜标签RS前三分之一"] = (
                     max(1, (elig_n + 2) // 3) if elig_n > 0 else 0
                 )

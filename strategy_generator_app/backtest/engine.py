@@ -234,6 +234,43 @@ def _append_tick_coverage(
     )
 
 
+def _append_tick_coverage_disk(
+    log: List[Dict[str, Any]],
+    trade_date: date,
+    scope: str,
+    requested: List[str],
+) -> None:
+    """按本地 tick 文件是否存在统计覆盖，不读入 parquet（大批量选股日可用）。"""
+    uniq = sorted({c for c in (_norm_code6_simple(x) for x in (requested or [])) if c})
+    ready_fn = None
+    try:
+        from .tick_cache_loader import tick_data_cache_module
+
+        ready_fn = getattr(tick_data_cache_module(), "tick_cache_file_ready", None)
+    except Exception:
+        ready_fn = None
+    with_tick: List[str] = []
+    missing: List[str] = []
+    for c6 in uniq:
+        ok = False
+        if callable(ready_fn):
+            try:
+                ok = bool(ready_fn(c6, trade_date))
+            except Exception:
+                ok = False
+        (with_tick if ok else missing).append(c6)
+    log.append(
+        {
+            "date": trade_date.strftime("%Y-%m-%d"),
+            "scope": scope,
+            "requested_count": len(uniq),
+            "with_tick_count": len(with_tick),
+            "missing_count": len(missing),
+            "missing_codes": missing,
+        }
+    )
+
+
 def _finalize_tick_coverage(log: List[Dict[str, Any]]) -> Dict[str, Any]:
     """汇总 tick 覆盖（批量回测备注/导出用）。"""
     pool_missing_union: Set[str] = set()
@@ -352,7 +389,11 @@ def _apply_generation_time_prices_from_ticks(
     generation_time: str,
     ticks_by_stock: Dict[str, Any],
 ) -> None:
-    """9:25+ 与实盘一致：现价/今开高低仅来自 tick；缺 tick 不用日线今开盘填。"""
+    """生成时刻晚于 09:25 时，用 tick 刷新现价/今高低；缺 tick 不用日线填。
+
+    恰好 09:25：早盘日线已把 current/最新价设为今开盘（竞价结束口径），
+    不再整池灌入全日 tick——大批量选股日否则会卡死在读数百份 parquet。
+    """
     from .data_provider import get_prices_at_time, get_today_high_low_at_time
 
     parts = (generation_time or "").strip().split(":")
@@ -361,8 +402,30 @@ def _apply_generation_time_prices_from_ticks(
         gm = int(parts[1]) if len(parts) > 1 else 0
     except ValueError:
         return
-    if not ((gh > 9) or (gh == 9 and gm >= 25)):
+    if gh < 9 or (gh == 9 and gm < 25):
         return
+    # 09:25 整分：保留早盘今开盘，跳过整池 tick 刷新
+    if gh == 9 and gm == 25:
+        return
+
+    # >09:25：按需补 tick（调用方可能未做整池预加载）
+    need = [
+        c
+        for c in (_norm_code6_simple(x) for x in (codes_union or []))
+        if c and c not in ticks_by_stock
+    ]
+    if need:
+        try:
+            from .data_provider import load_ticks_for_codes as _load_ticks
+        except Exception:
+            _load_ticks = None
+        if callable(_load_ticks):
+            try:
+                got = _load_ticks(need, trade_date) or {}
+                if isinstance(got, dict):
+                    ticks_by_stock.update(got)
+            except Exception:
+                pass
 
     at_time_prices = get_prices_at_time(
         codes_union, trade_date, generation_time, ticks_by_stock=ticks_by_stock
@@ -608,8 +671,11 @@ def run_backtest_segmented(
         day_had_any_intent = False
         day_ticks_cache: Dict[str, Any] = {}
         if use_tick_level:
-            _preload_day_ticks(day_ticks_cache, codes_for_prices, fill_day, load_ticks_for_codes)
-            _append_tick_coverage(tick_coverage_log, fill_day, "股票池", codes_for_prices, day_ticks_cache)
+            # 股票池覆盖只查本地文件是否存在，不预读整池 parquet。
+            # 真正读 tick 延后到：生成时刻>09:25 的价刷新，或意图撮合（通常仅数只）。
+            _append_tick_coverage_disk(
+                tick_coverage_log, fill_day, "股票池", codes_for_prices
+            )
         # carry_over_pending_intents（tick 级）按“带执行状态”语义实现：
         # - False：时段2不继承任何时段1 intents（相当于删除时段1任务，重新使用时段2任务）
         # - True：时段2继承时段1在 tick 窗口内“仍未成交”的 intents；已成交的意图不会再重复成交
@@ -861,6 +927,22 @@ def run_backtest_segmented(
             if not strategy_uses_scheduled_clear(strategy_code, params_for_run, seg_name):
                 strip_scheduled_clear_params(params_for_run)
             _inject_limit_up_defer_params(params_for_run, lu_deferred_codes)
+            # clip 强度字段写入 prices（策略也可从 params.clip_strength_by_code 读取）
+            _str_map = params_for_run.get("clip_strength_by_code") or {}
+            if isinstance(_str_map, dict) and _str_map and isinstance(prices, dict):
+                for _c, _meta in _str_map.items():
+                    if not isinstance(_meta, dict):
+                        continue
+                    _c6 = str(_c or "").strip()
+                    if _c6.isdigit():
+                        _c6 = _c6.zfill(6)
+                    _p = prices.get(_c6)
+                    if not isinstance(_p, dict):
+                        continue
+                    if _meta.get("合格榜内序位") not in (None, ""):
+                        _p["合格榜内序位"] = _meta.get("合格榜内序位")
+                    if _meta.get("合格榜标签内RS排名") not in (None, ""):
+                        _p["合格榜标签内RS排名"] = _meta.get("合格榜标签内RS排名")
 
             intents: List[Dict[str, Any]] = []
             if use_engine_form:

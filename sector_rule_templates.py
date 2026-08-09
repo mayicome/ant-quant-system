@@ -1540,11 +1540,22 @@ def rule_code_em_today_hot_elig_band(
     ma_gap_lo: float = 0.005,
     ma_gap_hi: float = 0.02,
     min_float_mv_yi: float = 120.0,
+    any_tag: bool = False,
+    apply_stock_filters: bool = True,
+    require_min_float_mv: Optional[bool] = None,
+    require_ma_gap: Optional[bool] = None,
+    require_ma_lt_align: Optional[bool] = None,
+    require_no_recent_lu: Optional[bool] = None,
 ) -> str:
     """今日合格 TopN 全量 + 合格榜内序位档 + 组内 RS 档 + 均线/市值过滤。
 
-    EligibleRank = 命中标签中最小的合格榜内序位（行业/概念各自 1..top_n）。
-    组内 RS 默认用「合格榜标签内RS排名」（与定义序位的同一标签）。
+    生成的规则内同时包含「只认最热」与「任一标签」两套 select，运行时由常量 ANY_TAG 切换。
+    any_tag 仅决定生成时 ANY_TAG 的初始值（False/True）。
+    apply_stock_filters=False：默认关闭全部个股硬过滤（仍计算并写出诊断字段）。
+    可用 require_* 单独覆盖（None=跟随 apply_stock_filters）：
+      - require_ma_gap / require_no_recent_lu → 条件一
+      - require_ma_lt_align → 条件三 选股日 MA5<MA10<MA20（收盘后可知，宜放选股）
+      - require_min_float_mv → 流通市值门槛
 
     rs_lo / rs_hi：
       - 默认 None → 使用 [1, rs_top_k]（兼容旧头/中/尾档）
@@ -1565,6 +1576,15 @@ def rule_code_em_today_hot_elig_band(
     if r_hi is not None and r_hi < r_lo:
         raise ValueError(f"rs 区间无效: [{r_lo}, {r_hi}]")
 
+    def _resolve_flag(explicit: Optional[bool]) -> bool:
+        return bool(apply_stock_filters) if explicit is None else bool(explicit)
+
+    req_mv = _resolve_flag(require_min_float_mv)
+    req_gap = _resolve_flag(require_ma_gap)
+    req_align = _resolve_flag(require_ma_lt_align)
+    req_lu = _resolve_flag(require_no_recent_lu)
+    any_stock_filter = bool(req_mv or req_gap or req_align or req_lu)
+
     gap_lo_pct = float(ma_gap_lo) * 100.0
     gap_hi_pct = float(ma_gap_hi) * 100.0
     band_label = f"合格榜内序位[{lo},{hi}]"
@@ -1582,9 +1602,62 @@ def rule_code_em_today_hot_elig_band(
             "避免小板块全入选、大板块只取固定名次"
         )
 
+    # 两种 select 都写入规则；运行时由常量 ANY_TAG 切换（改 True/False 即可，不必重生代码）
+    pick_note = (
+        "选股切换：改顶部 ANY_TAG（False=只认最热标签；True=任一标签 Elig+RS 过关）\n"
+        "# True 时：合格榜*=全部命中最热；选出标签*=过关集最热"
+    )
+    if not any_stock_filter:
+        filter_note = (
+            "个股过滤：关闭（APPLY_STOCK_FILTERS=False；仍写出市值/均线/涨停诊断字段）"
+        )
+    else:
+        parts = []
+        if req_gap:
+            parts.append(
+                f"|MA5-MA10|/min∈[{gap_lo_pct:.1f}%,{gap_hi_pct:.1f}%]"
+            )
+        if req_lu:
+            parts.append(f"近{int(rs_lookback)}日无涨停")
+        if req_align:
+            parts.append("MA5<MA10<MA20")
+        if req_mv:
+            parts.append(f"流通市值≥{float(min_float_mv_yi):.0f}亿")
+        filter_note = "个股过滤：" + "；".join(parts)
+    hottest_body = _EM_TODAY_HOT_SELECT_HOTTEST_ONLY.format(
+        gap_lo_pct=gap_lo_pct,
+        gap_hi_pct=gap_hi_pct,
+        rs_lookback=int(rs_lookback),
+        min_float_mv_yi=float(min_float_mv_yi),
+        elig_lo=lo,
+        elig_hi=hi,
+        rs_skip=rs_skip,
+    )
+    any_body = _EM_TODAY_HOT_SELECT_ANY_TAG.format(
+        gap_lo_pct=gap_lo_pct,
+        gap_hi_pct=gap_hi_pct,
+        rs_lookback=int(rs_lookback),
+        min_float_mv_yi=float(min_float_mv_yi),
+        elig_skip=f"合格序位不在[{lo},{hi}]",
+        rs_skip=rs_skip,
+    )
+    select_body = (
+        hottest_body
+        + "\n\n"
+        + any_body
+        + "\n\n"
+        + "def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):\n"
+        + "    if ANY_TAG:\n"
+        + "        return _select_any_tag("
+        + "stock_code, stock_name, sectors, daily_data, as_of_date, ctx)\n"
+        + "    return _select_hottest_only("
+        + "stock_code, stock_name, sectors, daily_data, as_of_date, ctx)\n"
+    )
+
     return f'''# 东财今日热门：合格 Top{int(top_n)}（成分≥{int(min_members)}）+ {band_label} + {rs_label}
 # {rs_mode_note}
-# 个股过滤：|MA5-MA10|/min∈[{gap_lo_pct:.1f}%,{gap_hi_pct:.1f}%]；近{int(rs_lookback)}日无涨停；MA5<MA10<MA20；流通市值≥{float(min_float_mv_yi):.0f}亿
+# {pick_note}
+# {filter_note}
 # 依赖引擎 ctx["em_board_hot"]（today_pool_codes / today_code_hits / float_mv_yi）
 TOP_N = {int(top_n)}
 RS_TOP_K = {int(rs_top_k)}
@@ -1599,6 +1672,12 @@ MA_GAP_HI = {float(ma_gap_hi)}
 ELIG_LO = {lo}
 ELIG_HI = {hi}
 MIN_FLOAT_MV_YI = {float(min_float_mv_yi)}
+ANY_TAG = {str(bool(any_tag))}
+REQUIRE_MIN_FLOAT_MV = {str(bool(req_mv))}
+REQUIRE_MA_GAP = {str(bool(req_gap))}
+REQUIRE_MA_LT_ALIGN = {str(bool(req_align))}
+REQUIRE_NO_RECENT_LU = {str(bool(req_lu))}
+APPLY_STOCK_FILTERS = {str(bool(any_stock_filter))}  # 兼容：任一子开关开启即为 True
 HOT_MODE = "today_elig_{lo}_{hi}_rs_{r_lo}_{'ge' if r_hi is None else r_hi}_frac1of3"
 N = 20
 
@@ -1694,7 +1773,12 @@ def _recent_lu_stats(stock_code, stock_name, daily_data, as_of_date, lookback):
     return count, days_ago
 
 
-def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
+{select_body}
+'''
+
+
+# 只认最热标签（ANY_TAG=False）
+_EM_TODAY_HOT_SELECT_HOTTEST_ONLY = '''def _select_hottest_only(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
     em = (ctx or {{}}).get("em_board_hot") or {{}}
     if not isinstance(em, dict) or not em:
         return False, {{"_skip": "无东财热门上下文"}}
@@ -1731,10 +1815,10 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
             "热门模式": HOT_MODE,
             "合格榜内序位": elig,
             "合格榜对应标签": hit.get("合格榜对应标签", ""),
-            "_skip": "合格序位不在[{lo},{hi}]",
+            "_skip": "合格序位不在[{elig_lo},{elig_hi}]",
         }}
 
-    # 只认「定 Elig 的同一标签」上的组内 RS；禁止回退到「在其中的RS」（会蹭其他弱标签）
+    # 只认「定 Elig 的同一最热标签」上的组内 RS
     if "合格榜标签内RS排名" not in hit or hit.get("合格榜标签内RS排名") in (None, ""):
         return False, {{
             "热门模式": HOT_MODE,
@@ -1756,7 +1840,6 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         rs_ok = rs_in_tag >= int(RS_LO)
         rs_cut = None
     else:
-        # 每标签前 RS_TOP_FRAC_NUM/RS_TOP_FRAC_DEN，硬顶 RS_HI
         den = int(RS_TOP_FRAC_DEN) if int(RS_TOP_FRAC_DEN) > 0 else 3
         num = int(RS_TOP_FRAC_NUM) if int(RS_TOP_FRAC_NUM) > 0 else 1
         if tag_rs_n <= 0:
@@ -1766,7 +1849,7 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
                 "合格榜对应标签": hit.get("合格榜对应标签", ""),
                 "_skip": "缺合格榜标签RS样本数",
             }}
-        frac_cut = max(1, (tag_rs_n * num + den - 1) // den)  # ceil(n*num/den)
+        frac_cut = max(1, (tag_rs_n * num + den - 1) // den)
         rs_cut = min(int(RS_HI), frac_cut)
         rs_ok = int(RS_LO) <= rs_in_tag <= int(rs_cut)
     if not rs_ok:
@@ -1776,7 +1859,7 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
             "合格榜标签内RS排名": rs_in_tag,
             "合格榜标签RS样本数": tag_rs_n,
             "合格榜标签RS截断": rs_cut if rs_cut is not None else "",
-            "_skip": {rs_skip!r},
+            "_skip": "{rs_skip}",
         }}
 
     mv_map = em.get("float_mv_yi") or {{}}
@@ -1787,65 +1870,85 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
             mv = float(raw) if raw is not None and raw != "" else None
         except (TypeError, ValueError):
             mv = None
-    if mv is None or mv < float(MIN_FLOAT_MV_YI):
-        return False, {{
-            "热门模式": HOT_MODE,
-            "合格榜内序位": elig,
-            "流通市值_亿": "" if mv is None else round(mv, 2),
-            "_skip": "流通市值缺失或<{float(min_float_mv_yi):.0f}亿",
-        }}
 
     closes = _closes_through(daily_data, as_of_date)
     ma5 = _ma(closes, 5)
     ma10 = _ma(closes, 10)
     ma20 = _ma(closes, 20)
-    if ma5 is None or ma10 is None or ma20 is None:
-        return False, {{
-            "热门模式": HOT_MODE,
-            "_skip": "均线不足(需MA5/MA10/MA20)",
-        }}
-
-    lo_ma = min(float(ma5), float(ma10))
-    if lo_ma <= 0:
-        return False, {{"热门模式": HOT_MODE, "_skip": "均线无效"}}
-    gap = abs(float(ma5) - float(ma10)) / lo_ma
-    if gap < float(MA_GAP_LO) or gap > float(MA_GAP_HI):
-        return False, {{
-            "热门模式": HOT_MODE,
-            "MA5": round(ma5, 4),
-            "MA10": round(ma10, 4),
-            "均线差占比": round(gap, 6),
-            "_skip": "均线差不在[{gap_lo_pct:.1f}%,{gap_hi_pct:.1f}%]",
-        }}
-
-    if not (float(ma5) < float(ma10) < float(ma20)):
-        return False, {{
-            "热门模式": HOT_MODE,
-            "MA5": round(ma5, 4),
-            "MA10": round(ma10, 4),
-            "MA20": round(ma20, 4),
-            "_skip": "非MA5<MA10<MA20",
-        }}
-
+    gap = None
+    if ma5 is not None and ma10 is not None:
+        lo_ma = min(float(ma5), float(ma10))
+        if lo_ma > 0:
+            gap = abs(float(ma5) - float(ma10)) / lo_ma
     lu_count, lu_days_ago = _recent_lu_stats(
         stock_code, stock_name, daily_data, as_of_date, RS_LOOKBACK
     )
-    if int(lu_count) > 0:
-        return False, {{
-            "热门模式": HOT_MODE,
-            "最近10个交易日内的涨停板数量": int(lu_count),
-            "_skip": "近{int(rs_lookback)}日有涨停",
-        }}
 
+    if REQUIRE_MIN_FLOAT_MV:
+        if mv is None or mv < float(MIN_FLOAT_MV_YI):
+            return False, {{
+                "热门模式": HOT_MODE,
+                "合格榜内序位": elig,
+                "流通市值_亿": "" if mv is None else round(mv, 2),
+                "_skip": "流通市值缺失或<{min_float_mv_yi:.0f}亿",
+            }}
+    if REQUIRE_MA_GAP:
+        if ma5 is None or ma10 is None:
+            return False, {{
+                "热门模式": HOT_MODE,
+                "_skip": "均线不足(需MA5/MA10)",
+            }}
+        if gap is None:
+            return False, {{"热门模式": HOT_MODE, "_skip": "均线无效"}}
+        if gap < float(MA_GAP_LO) or gap > float(MA_GAP_HI):
+            return False, {{
+                "热门模式": HOT_MODE,
+                "MA5": round(ma5, 4),
+                "MA10": round(ma10, 4),
+                "均线差占比": round(gap, 6),
+                "_skip": "均线差不在[{gap_lo_pct:.1f}%,{gap_hi_pct:.1f}%]",
+            }}
+    if REQUIRE_MA_LT_ALIGN:
+        if ma5 is None or ma10 is None or ma20 is None:
+            return False, {{
+                "热门模式": HOT_MODE,
+                "_skip": "均线不足(需MA5/MA10/MA20)",
+            }}
+        if not (float(ma5) < float(ma10) < float(ma20)):
+            return False, {{
+                "热门模式": HOT_MODE,
+                "MA5": round(ma5, 4),
+                "MA10": round(ma10, 4),
+                "MA20": round(ma20, 4),
+                "_skip": "非MA5<MA10<MA20",
+            }}
+    if REQUIRE_NO_RECENT_LU:
+        if int(lu_count) > 0:
+            return False, {{
+                "热门模式": HOT_MODE,
+                "最近10个交易日内的涨停板数量": int(lu_count),
+                "_skip": "近{rs_lookback}日有涨停",
+            }}
+
+    tag = hit.get("合格榜对应标签", "")
+    kind = hit.get("合格榜标签类型", "")
+    em_rank = hit.get("合格榜标签东财排名", "")
     extra = {{
         "热门模式": HOT_MODE,
         "合格榜内序位": elig,
-        "合格榜对应标签": hit.get("合格榜对应标签", ""),
-        "合格榜标签类型": hit.get("合格榜标签类型", ""),
-        "合格榜标签东财排名": hit.get("合格榜标签东财排名", ""),
+        "合格榜对应标签": tag,
+        "合格榜标签类型": kind,
+        "合格榜标签东财排名": em_rank,
         "合格榜标签内RS排名": rs_in_tag,
         "合格榜标签RS样本数": tag_rs_n,
         "合格榜标签RS截断": rs_cut if rs_cut is not None else "",
+        "选出标签": tag,
+        "选出标签类型": kind,
+        "选出标签合格榜内序位": elig,
+        "选出标签东财排名": em_rank,
+        "选出标签内RS排名": rs_in_tag,
+        "选出标签RS样本数": tag_rs_n,
+        "选出标签RS截断": rs_cut if rs_cut is not None else "",
         "今日热门板块最高排名A": hit.get("今日热门板块最高排名A", ""),
         "今日热门概念最高排名B": hit.get("今日热门概念最高排名B", ""),
         "在A中的RS排名": hit.get("在A中的RS排名", ""),
@@ -1856,13 +1959,13 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "在其中的RS排名": hit.get("在其中的RS排名", ""),
         "近10日RS": hit.get("近10日RS", ""),
         "命中今日热门标签数": hit.get("命中今日热门标签数", ""),
-        "流通市值_亿": round(mv, 2),
+        "流通市值_亿": "" if mv is None else round(mv, 2),
         "最近10个交易日内的涨停板数量": int(lu_count),
         "最近的涨停板是几日前": lu_days_ago,
-        "MA5": round(ma5, 4),
-        "MA10": round(ma10, 4),
-        "MA20": round(ma20, 4),
-        "均线差占比": round(gap, 6),
+        "MA5": "" if ma5 is None else round(ma5, 4),
+        "MA10": "" if ma10 is None else round(ma10, 4),
+        "MA20": "" if ma20 is None else round(ma20, 4),
+        "均线差占比": "" if gap is None else round(gap, 6),
         "东财榜日期D": str(em.get("as_of") or ""),
         "东财榜日期D-1": str(em.get("prev_date") or ""),
         "TOP_N": int(TOP_N),
@@ -1878,6 +1981,253 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "MIN_FLOAT_MV_YI": float(MIN_FLOAT_MV_YI),
         "MA_GAP_LO": float(MA_GAP_LO),
         "MA_GAP_HI": float(MA_GAP_HI),
+        "ANY_TAG": bool(ANY_TAG),
+        "REQUIRE_MIN_FLOAT_MV": bool(REQUIRE_MIN_FLOAT_MV),
+        "REQUIRE_MA_GAP": bool(REQUIRE_MA_GAP),
+        "REQUIRE_MA_LT_ALIGN": bool(REQUIRE_MA_LT_ALIGN),
+        "REQUIRE_NO_RECENT_LU": bool(REQUIRE_NO_RECENT_LU),
+        "APPLY_STOCK_FILTERS": bool(APPLY_STOCK_FILTERS),
+    }}
+    return True, extra
+'''
+
+
+# 任一标签过关（ANY_TAG=True）
+_EM_TODAY_HOT_SELECT_ANY_TAG = '''def _select_any_tag(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
+    em = (ctx or {{}}).get("em_board_hot") or {{}}
+    if not isinstance(em, dict) or not em:
+        return False, {{"_skip": "无东财热门上下文"}}
+
+    err = str(em.get("error") or "").strip()
+    if err:
+        return False, {{
+            "东财榜日期D": str(em.get("as_of") or ""),
+            "东财榜日期D-1": str(em.get("prev_date") or ""),
+            "热门模式": HOT_MODE,
+            "_skip": err,
+        }}
+
+    c6 = _code6(stock_code)
+    pool = em.get("today_pool_codes") or set()
+    hits = em.get("today_code_hits") or {{}}
+    if c6 not in pool:
+        return False, {{
+            "东财榜日期D": str(em.get("as_of") or ""),
+            "热门模式": HOT_MODE,
+            "_skip": "不在今日热门组内RS池",
+        }}
+
+    hit = hits.get(c6) if isinstance(hits, dict) else None
+    if not isinstance(hit, dict):
+        return False, {{"_skip": "池内无明细", "热门模式": HOT_MODE}}
+
+    def _as_int(v, default=0):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+
+    def _iter_tag_hits(h):
+        rows = h.get("合格榜命中标签")
+        if isinstance(rows, list) and rows:
+            out = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                out.append({{
+                    "tag": str(r.get("tag") or ""),
+                    "kind": str(r.get("kind") or ""),
+                    "eligible_rank": _as_int(r.get("eligible_rank")),
+                    "em_rank": _as_int(r.get("em_rank")),
+                    "rs_rank": _as_int(r.get("rs_rank")),
+                    "tag_rs_n": _as_int(r.get("tag_rs_n")),
+                }})
+            if out:
+                return out
+        return [{{
+            "tag": str(h.get("合格榜对应标签") or ""),
+            "kind": str(h.get("合格榜标签类型") or ""),
+            "eligible_rank": _as_int(h.get("合格榜内序位")),
+            "em_rank": _as_int(h.get("合格榜标签东财排名")),
+            "rs_rank": _as_int(h.get("合格榜标签内RS排名")),
+            "tag_rs_n": _as_int(h.get("合格榜标签RS样本数")),
+        }}]
+
+    def _rs_pass(rs_in_tag, tag_rs_n):
+        if rs_in_tag <= 0:
+            return False, None
+        if RS_HI is None:
+            return rs_in_tag >= int(RS_LO), None
+        den = int(RS_TOP_FRAC_DEN) if int(RS_TOP_FRAC_DEN) > 0 else 3
+        num = int(RS_TOP_FRAC_NUM) if int(RS_TOP_FRAC_NUM) > 0 else 1
+        if tag_rs_n <= 0:
+            return False, None
+        frac_cut = max(1, (tag_rs_n * num + den - 1) // den)
+        rs_cut = min(int(RS_HI), frac_cut)
+        ok = int(RS_LO) <= rs_in_tag <= int(rs_cut)
+        return ok, rs_cut
+
+    passers = []
+    n_elig_fail = 0
+    n_rs_fail = 0
+    for t in _iter_tag_hits(hit):
+        elig_i = int(t.get("eligible_rank") or 0)
+        if elig_i < int(ELIG_LO) or elig_i > int(ELIG_HI):
+            n_elig_fail += 1
+            continue
+        rs_i = int(t.get("rs_rank") or 0)
+        n_i = int(t.get("tag_rs_n") or 0)
+        ok, cut = _rs_pass(rs_i, n_i)
+        if not ok:
+            n_rs_fail += 1
+            continue
+        t = dict(t)
+        t["_rs_cut"] = cut
+        passers.append(t)
+
+    if not passers:
+        return False, {{
+            "热门模式": HOT_MODE,
+            "合格榜命中数": len(_iter_tag_hits(hit)),
+            "Elig未过": n_elig_fail,
+            "RS未过": n_rs_fail,
+            "_skip": "无标签同时满足Elig+RS",
+        }}
+
+    best = min(
+        passers,
+        key=lambda t: (
+            int(t.get("eligible_rank") or 999999),
+            int(t.get("em_rank") or 999999),
+            str(t.get("tag") or ""),
+        ),
+    )
+    elig = int(best.get("eligible_rank") or 0)
+    rs_in_tag = int(best.get("rs_rank") or 0)
+    tag_rs_n = int(best.get("tag_rs_n") or 0)
+    rs_cut = best.get("_rs_cut")
+
+    mv_map = em.get("float_mv_yi") or {{}}
+    mv = None
+    if isinstance(mv_map, dict):
+        try:
+            raw = mv_map.get(c6)
+            mv = float(raw) if raw is not None and raw != "" else None
+        except (TypeError, ValueError):
+            mv = None
+
+    closes = _closes_through(daily_data, as_of_date)
+    ma5 = _ma(closes, 5)
+    ma10 = _ma(closes, 10)
+    ma20 = _ma(closes, 20)
+    gap = None
+    if ma5 is not None and ma10 is not None:
+        lo_ma = min(float(ma5), float(ma10))
+        if lo_ma > 0:
+            gap = abs(float(ma5) - float(ma10)) / lo_ma
+    lu_count, lu_days_ago = _recent_lu_stats(
+        stock_code, stock_name, daily_data, as_of_date, RS_LOOKBACK
+    )
+
+    if REQUIRE_MIN_FLOAT_MV:
+        if mv is None or mv < float(MIN_FLOAT_MV_YI):
+            return False, {{
+                "热门模式": HOT_MODE,
+                "合格榜内序位": elig,
+                "流通市值_亿": "" if mv is None else round(mv, 2),
+                "_skip": "流通市值缺失或<{min_float_mv_yi:.0f}亿",
+            }}
+    if REQUIRE_MA_GAP:
+        if ma5 is None or ma10 is None:
+            return False, {{
+                "热门模式": HOT_MODE,
+                "_skip": "均线不足(需MA5/MA10)",
+            }}
+        if gap is None:
+            return False, {{"热门模式": HOT_MODE, "_skip": "均线无效"}}
+        if gap < float(MA_GAP_LO) or gap > float(MA_GAP_HI):
+            return False, {{
+                "热门模式": HOT_MODE,
+                "MA5": round(ma5, 4),
+                "MA10": round(ma10, 4),
+                "均线差占比": round(gap, 6),
+                "_skip": "均线差不在[{gap_lo_pct:.1f}%,{gap_hi_pct:.1f}%]",
+            }}
+    if REQUIRE_MA_LT_ALIGN:
+        if ma5 is None or ma10 is None or ma20 is None:
+            return False, {{
+                "热门模式": HOT_MODE,
+                "_skip": "均线不足(需MA5/MA10/MA20)",
+            }}
+        if not (float(ma5) < float(ma10) < float(ma20)):
+            return False, {{
+                "热门模式": HOT_MODE,
+                "MA5": round(ma5, 4),
+                "MA10": round(ma10, 4),
+                "MA20": round(ma20, 4),
+                "_skip": "非MA5<MA10<MA20",
+            }}
+    if REQUIRE_NO_RECENT_LU:
+        if int(lu_count) > 0:
+            return False, {{
+                "热门模式": HOT_MODE,
+                "最近10个交易日内的涨停板数量": int(lu_count),
+                "_skip": "近{rs_lookback}日有涨停",
+            }}
+
+    extra = {{
+        "热门模式": HOT_MODE,
+        "合格榜内序位": hit.get("合格榜内序位", ""),
+        "合格榜对应标签": hit.get("合格榜对应标签", ""),
+        "合格榜标签类型": hit.get("合格榜标签类型", ""),
+        "合格榜标签东财排名": hit.get("合格榜标签东财排名", ""),
+        "合格榜标签内RS排名": hit.get("合格榜标签内RS排名", ""),
+        "合格榜标签RS样本数": hit.get("合格榜标签RS样本数", ""),
+        "选出标签": best.get("tag", ""),
+        "选出标签类型": best.get("kind", ""),
+        "选出标签合格榜内序位": elig,
+        "选出标签东财排名": best.get("em_rank", ""),
+        "选出标签内RS排名": rs_in_tag,
+        "选出标签RS样本数": tag_rs_n,
+        "选出标签RS截断": rs_cut if rs_cut is not None else "",
+        "今日热门板块最高排名A": hit.get("今日热门板块最高排名A", ""),
+        "今日热门概念最高排名B": hit.get("今日热门概念最高排名B", ""),
+        "在A中的RS排名": hit.get("在A中的RS排名", ""),
+        "在B中的RS排名": hit.get("在B中的RS排名", ""),
+        "A对应板块": hit.get("A对应板块", ""),
+        "B对应概念": hit.get("B对应概念", ""),
+        "RS最好的热门板块或概念": hit.get("RS最好的热门板块或概念", ""),
+        "在其中的RS排名": hit.get("在其中的RS排名", ""),
+        "近10日RS": hit.get("近10日RS", ""),
+        "命中今日热门标签数": hit.get("命中今日热门标签数", ""),
+        "流通市值_亿": "" if mv is None else round(mv, 2),
+        "最近10个交易日内的涨停板数量": int(lu_count),
+        "最近的涨停板是几日前": lu_days_ago,
+        "MA5": "" if ma5 is None else round(ma5, 4),
+        "MA10": "" if ma10 is None else round(ma10, 4),
+        "MA20": "" if ma20 is None else round(ma20, 4),
+        "均线差占比": "" if gap is None else round(gap, 6),
+        "东财榜日期D": str(em.get("as_of") or ""),
+        "东财榜日期D-1": str(em.get("prev_date") or ""),
+        "TOP_N": int(TOP_N),
+        "RS_TOP_K": int(RS_TOP_K),
+        "RS_LO": int(RS_LO),
+        "RS_HI": RS_HI,
+        "RS_TOP_FRAC_NUM": int(RS_TOP_FRAC_NUM),
+        "RS_TOP_FRAC_DEN": int(RS_TOP_FRAC_DEN),
+        "RS_LOOKBACK": int(RS_LOOKBACK),
+        "MIN_MEMBERS": int(MIN_MEMBERS),
+        "ELIG_LO": int(ELIG_LO),
+        "ELIG_HI": int(ELIG_HI),
+        "MIN_FLOAT_MV_YI": float(MIN_FLOAT_MV_YI),
+        "MA_GAP_LO": float(MA_GAP_LO),
+        "MA_GAP_HI": float(MA_GAP_HI),
+        "ANY_TAG": bool(ANY_TAG),
+        "REQUIRE_MIN_FLOAT_MV": bool(REQUIRE_MIN_FLOAT_MV),
+        "REQUIRE_MA_GAP": bool(REQUIRE_MA_GAP),
+        "REQUIRE_MA_LT_ALIGN": bool(REQUIRE_MA_LT_ALIGN),
+        "REQUIRE_NO_RECENT_LU": bool(REQUIRE_NO_RECENT_LU),
+        "APPLY_STOCK_FILTERS": bool(APPLY_STOCK_FILTERS),
     }}
     return True, extra
 '''

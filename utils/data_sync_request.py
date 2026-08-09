@@ -347,12 +347,12 @@ def _daily_cache_ready(code: str, through_date: Optional[date]) -> bool:
 
 
 def _tick_cache_ready(code_6: str, trade_date: date) -> bool:
+    """预热/队列用：只看本地文件是否存在，避免整表读 parquet。"""
     try:
-        from utils.tick_data_cache import read_tick_cache
+        from utils.tick_data_cache import tick_cache_file_ready
     except ImportError:
-        from tick_data_cache import read_tick_cache  # type: ignore[no-redef]
-    df = read_tick_cache(code_6, trade_date)
-    return df is not None and len(df) > 0
+        from tick_data_cache import tick_cache_file_ready  # type: ignore[no-redef]
+    return bool(tick_cache_file_ready(code_6, trade_date))
 
 
 def submit_daily_requests(
