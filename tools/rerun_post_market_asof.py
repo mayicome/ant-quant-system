@@ -94,13 +94,14 @@ def main() -> int:
         ("sector_stock_filter.py", ("--auto-run", f"--as-of={asof_dash}")),
         ("profit_index_gui.py", ("--auto-run",)),
         ("main_line_group_gui.py", ("--auto-run",)),
-        ("inst_net_rank_gui.py", ("--auto-run",)),
         ("limit_up_structure_analysis_gui.py", ("--auto-run",)),
         ("tools/seal_rating_daily_verify.py", ("--auto-run", f"--verify-date={asof_ymd}")),
         ("limit_up_gene_analysis_gui.py", ("--auto-run",)),
         ("main_force_net_inflow_gui.py", ("--auto-run",)),
         ("lhb_analysis_gui.py", ("--auto-run",)),
         ("tools/lhb_premium_daily_verify.py", ("--auto-run", f"--verify-date={asof_ymd}")),
+        # 机构榜依赖新浪龙虎榜源，偏晚更新：放到分析类任务末尾
+        ("inst_net_rank_gui.py", ("--auto-run",)),
         # 与 run_all_if_trading_day 末步一致：F10 更新 all_a_stock_info.json
         ("tools/build_stock_info_from_em_boards.py", ("--mode", "f10", "--no-resume", "--preview", "0")),
     ]

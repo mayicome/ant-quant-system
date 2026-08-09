@@ -2035,15 +2035,17 @@ class LimitUpGeneAnalysisDialog(QDialog):
                 except Exception:
                     pass
 
-    def _auto_export_gene_excels_and_pngs(self) -> bool:
-        """自动模式：导出涨停基因 Excel + PNG。"""
+    def _export_gene_excels_and_pngs(self, exit_after: bool = False) -> bool:
+        """导出涨停基因 Excel + PNG；auto-run 时再延时退出。"""
         date = getattr(self, "_limitup_date", "") or datetime.now().strftime("%Y%m%d")
         out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history_data")
         os.makedirs(out_dir, exist_ok=True)
 
         n = self.first_board_table.columnCount()
         if self.first_board_table.rowCount() <= 0 or n <= 0:
-            self.status_label.setText("自动运行完成，但无可导出的基因统计表。")
+            self.status_label.setText("无可导出的基因统计表。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
 
         aligns: List[str] = []
@@ -2078,20 +2080,27 @@ class LimitUpGeneAnalysisDialog(QDialog):
             excel_text_format_columns={0, 2, 3, 4},
         )
         if not ok_xlsx:
-            self.status_label.setText(f"自动导出失败：{base_name}.xlsx 导出失败。")
+            self.status_label.setText(f"导出失败：{base_name}.xlsx 导出失败。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
         self._auto_adjust_excel_column_widths(xlsx_path)
         ok_png = self._excel_to_png_via_wps(xlsx_path, png_path)
         if not ok_png:
             ok_png = self._export_qtable_to_png(self.first_board_table, png_path)
         if not ok_png:
-            self.status_label.setText(f"自动导出失败：{base_name}.png 导出失败。")
+            self.status_label.setText(f"导出失败：{base_name}.png 导出失败。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
 
         self._auto_last_exports = [xlsx_path, png_path]
+        exit_tip = "；10秒后退出" if exit_after else ""
         self.status_label.setText(
-            f"自动运行完成，已导出：{os.path.basename(xlsx_path)}、{os.path.basename(png_path)}；10秒后退出。"
+            f"已导出：{os.path.basename(xlsx_path)}、{os.path.basename(png_path)}{exit_tip}。"
         )
+        if exit_after:
+            QTimer.singleShot(10000, self.accept)
         return True
 
     def _export_wechat_html(self) -> None:
@@ -2494,10 +2503,10 @@ class LimitUpGeneAnalysisDialog(QDialog):
             self.status_label.setText(f"分析完成：共 {len(today_rows)} 只股票；{suffix}\n{debug_msg}")
 
         self._enable_action_buttons(True)
-        if self._auto_run and finish_kind != "list_only" and (not self._auto_export_done):
-            self._auto_export_done = True
-            self._auto_export_gene_excels_and_pngs()
-            QTimer.singleShot(10000, self.accept)
+        if finish_kind != "list_only" and not (self._auto_run and self._auto_export_done):
+            if self._auto_run:
+                self._auto_export_done = True
+            self._export_gene_excels_and_pngs(exit_after=self._auto_run)
 
     def _on_error(self, msg: str):
         self.status_label.setText(f"出错：{msg}")

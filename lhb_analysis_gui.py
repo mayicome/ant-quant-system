@@ -703,17 +703,18 @@ class Dialog(QDialog):
             f"原始数据2 stock_lhb_stock_detail_em 汇总（前{len(raw_detail_show)}行，共{len(df_raw_detail)}行）\n"
             f"{raw_detail_show.to_string(index=False)}"
         )
+        png_path = os.path.splitext(out_fp)[0] + ".png"
+        self._auto_adjust_excel_column_widths(out_fp)
+        ok_png = self._excel_to_png_via_wps(out_fp, png_path)
+        if not ok_png:
+            ok_png = self._summary_df_to_png(df_result, png_path)
+        exit_tip = "；10秒后自动退出" if self._auto_run else ""
+        if ok_png:
+            self.status.setText(f"分析完成：{date_str}；已导出：{out_fp}、{png_path}{exit_tip}。")
+        else:
+            self.status.setText(f"分析完成：{date_str}；已导出Excel但图片导出失败{exit_tip}。")
         if self._auto_run and (not self._auto_finished):
             self._auto_finished = True
-            png_path = os.path.splitext(out_fp)[0] + ".png"
-            self._auto_adjust_excel_column_widths(out_fp)
-            ok_png = self._excel_to_png_via_wps(out_fp, png_path)
-            if not ok_png:
-                ok_png = self._summary_df_to_png(df_result, png_path)
-            if ok_png:
-                self.status.setText(f"分析完成：{date_str}；已导出：{out_fp}、{png_path}；10秒后自动退出。")
-            else:
-                self.status.setText(f"分析完成：{date_str}；已导出Excel但图片导出失败；10秒后自动退出。")
             QTimer.singleShot(10000, self.accept)
 
     def _on_failed(self, err: str):

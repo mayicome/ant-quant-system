@@ -3206,10 +3206,12 @@ class LimitUpGeneAnalysisDialog(QDialog):
                 except Exception:
                     pass
 
-    def _auto_export_streak_excel_and_png(self) -> bool:
-        """自动模式：导出封单结构 Excel，再导出表格图片。"""
+    def _export_streak_excel_and_png(self, exit_after: bool = False) -> bool:
+        """导出封单结构 Excel，再导出表格图片；auto-run 时再延时退出。"""
         if self.streak_table.rowCount() <= 0 or self.streak_table.columnCount() <= 0:
-            self.status_label.setText("自动运行完成，但封单结构表为空，未导出。")
+            self.status_label.setText("封单结构表为空，未导出。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
         date = getattr(self, "_limitup_date", "") or datetime.now().strftime("%Y%m%d")
         out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history_data")
@@ -3229,7 +3231,9 @@ class LimitUpGeneAnalysisDialog(QDialog):
             show_dialogs=False,
         )
         if not ok_xlsx:
-            self.status_label.setText("自动导出失败：Excel 导出失败。")
+            self.status_label.setText("导出失败：Excel 导出失败。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
 
         self._auto_adjust_excel_column_widths(xlsx_path)
@@ -3237,14 +3241,19 @@ class LimitUpGeneAnalysisDialog(QDialog):
         if not ok_png:
             ok_png = self._export_qtable_to_png(self.streak_table, png_path)
         if not ok_png:
-            self.status_label.setText("自动导出失败：图片导出失败。")
+            self.status_label.setText("导出失败：图片导出失败。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
 
         self._auto_last_export_xlsx = xlsx_path
         self._auto_last_export_png = png_path
+        exit_tip = "；10秒后退出" if exit_after else ""
         self.status_label.setText(
-            f"自动运行完成，已导出：{os.path.basename(xlsx_path)}、{os.path.basename(png_path)}；10秒后退出。"
+            f"已导出：{os.path.basename(xlsx_path)}、{os.path.basename(png_path)}{exit_tip}。"
         )
+        if exit_after:
+            QTimer.singleShot(10000, self.accept)
         return True
 
     def _export_wechat_html(self) -> None:
@@ -3676,10 +3685,10 @@ class LimitUpGeneAnalysisDialog(QDialog):
             self.status_label.setText(f"分析完成：共 {len(today_rows)} 只股票；{suffix}\n{debug_msg}")
 
         self._enable_action_buttons(True)
-        if self._auto_run and finish_kind != "list_only" and (not self._auto_export_done):
-            self._auto_export_done = True
-            self._auto_export_streak_excel_and_png()
-            QTimer.singleShot(10000, self.accept)
+        if finish_kind != "list_only" and not (self._auto_run and self._auto_export_done):
+            if self._auto_run:
+                self._auto_export_done = True
+            self._export_streak_excel_and_png(exit_after=self._auto_run)
 
     def _on_error(self, msg: str):
         self.status_label.setText(f"出错：{msg}")

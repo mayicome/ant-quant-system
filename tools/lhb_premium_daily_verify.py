@@ -400,7 +400,8 @@ def main() -> int:
         verify_ymd = ymd(date.today())
 
     pred_ymd = args.pred_date.strip().replace("-", "")[:8] if args.pred_date else ""
-    write_png = bool(args.auto_run or args.png_out)
+    # 手动运行与 auto-run 均写出 PNG（也可 --png-out 指定路径）
+    write_png = True
     rc, _, _, _ = run_verify(
         verify_ymd=verify_ymd,
         pred_ymd=pred_ymd,

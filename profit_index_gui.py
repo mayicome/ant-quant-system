@@ -210,8 +210,7 @@ class ProfitIndexDialog(QDialog):
         finally:
             self.start_btn.setText("已完成（可重复开始）")
             self.start_btn.setEnabled(True)
-            if self._auto_run:
-                self._save_auto_run_screenshot_and_exit()
+            self._save_result_screenshot(exit_after=self._auto_run)
 
     def on_error(self, error_msg: str):
         self.chart.status_label.setText(f"计算出错: {error_msg}")
@@ -302,8 +301,8 @@ class ProfitIndexDialog(QDialog):
     def _on_days_changed(self, _value: int):
         self._save_settings()
 
-    def _save_auto_run_screenshot_and_exit(self):
-        """自动运行模式：保存截图后自动退出程序。"""
+    def _save_result_screenshot(self, exit_after: bool = False):
+        """保存界面截图到 history_data；auto-run 时再延时退出。"""
         try:
             root = os.path.dirname(os.path.abspath(__file__))
             history_dir = os.path.join(root, "history_data")
@@ -317,13 +316,21 @@ class ProfitIndexDialog(QDialog):
             pix = self.grab()
             ok = pix.save(screenshot_path, "PNG")
             if ok:
-                self.chart.status_label.setText(f"自动运行完成，截图已保存：{screenshot_path}")
+                msg = f"截图已保存：{screenshot_path}"
+                if exit_after:
+                    msg = f"自动运行完成，{msg}；10秒后退出"
+                self.chart.status_label.setText(msg)
             else:
-                self.chart.status_label.setText("自动运行完成，但截图保存失败。")
+                self.chart.status_label.setText(
+                    "截图保存失败。" + ("；10秒后退出" if exit_after else "")
+                )
         except Exception as e:
-            self.chart.status_label.setText(f"自动运行完成，但截图异常：{e}")
+            self.chart.status_label.setText(
+                f"截图异常：{e}" + ("；10秒后退出" if exit_after else "")
+            )
         finally:
-            QTimer.singleShot(10000, self.accept)
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
 
 def main():
     print_concept_stock_summary()

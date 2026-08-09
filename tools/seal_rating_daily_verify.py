@@ -521,16 +521,17 @@ def main() -> int:
     print(summary.to_string(index=False))
     print(f"\n已写出: {out_path}")
 
-    if args.auto_run:
-        if not verify_ymd:
-            print("无法确定验证日，跳过 PNG")
-            return 1
+    # 手动运行与 auto-run 均写出分档对照 PNG（能确定验证日时）
+    if verify_ymd:
         png_path = Path(args.png_out) if args.png_out else HIST / f"封单评级验证日报_{verify_ymd}.png"
         ok = export_summary_png(summary, headline, verify_ymd, seal_ymd, png_path)
         if not ok:
             print(f"PNG 写出失败: {png_path}")
             return 1
         print(f"已写出图片: {png_path}")
+    elif args.auto_run:
+        print("无法确定验证日，跳过 PNG")
+        return 1
 
     return 0
 

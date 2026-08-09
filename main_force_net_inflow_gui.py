@@ -620,10 +620,10 @@ class MainForceNetInflowDialog(QDialog):
         )
         self.btn_run.setEnabled(True)
         self.btn_export.setEnabled(True)
-        if self._auto_run and (not self._auto_export_done):
-            self._auto_export_done = True
-            self._auto_export_excel_and_png()
-            QTimer.singleShot(10000, self.accept)
+        if not (self._auto_run and self._auto_export_done):
+            if self._auto_run:
+                self._auto_export_done = True
+            self._export_excel_and_png(exit_after=self._auto_run)
 
     def _fill_unified_table(self, rows: List[UnifiedRow]) -> None:
         if rows:
@@ -846,9 +846,11 @@ class MainForceNetInflowDialog(QDialog):
     def _on_export(self) -> None:
         self._export_excel_file(show_dialogs=True)
 
-    def _auto_export_excel_and_png(self) -> bool:
+    def _export_excel_and_png(self, exit_after: bool = False) -> bool:
         if not self._rows:
-            self.status.setText("自动运行完成，但无统计结果，未导出。")
+            self.status.setText("无统计结果，未导出。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
         script_dir = os.path.dirname(os.path.abspath(__file__))
         out_dir = os.path.join(script_dir, "history_data")
@@ -858,17 +860,24 @@ class MainForceNetInflowDialog(QDialog):
         png_path = os.path.join(out_dir, f"{base}.png")
         out_xlsx = self._export_excel_file(show_dialogs=False, path=xlsx_path)
         if not out_xlsx:
-            self.status.setText("自动导出失败：Excel 导出失败。")
+            self.status.setText("导出失败：Excel 导出失败。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
         ok_png = self._export_table_to_png(png_path)
         if not ok_png:
-            self.status.setText("自动导出失败：图片导出失败。")
+            self.status.setText("导出失败：图片导出失败。")
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
             return False
         self._auto_last_export_xlsx = out_xlsx
         self._auto_last_export_png = png_path
+        exit_tip = "；10秒后退出" if exit_after else ""
         self.status.setText(
-            f"自动运行完成，已导出：{os.path.basename(out_xlsx)}、{os.path.basename(png_path)}；10秒后退出。"
+            f"已导出：{os.path.basename(out_xlsx)}、{os.path.basename(png_path)}{exit_tip}。"
         )
+        if exit_after:
+            QTimer.singleShot(10000, self.accept)
         return True
 
 

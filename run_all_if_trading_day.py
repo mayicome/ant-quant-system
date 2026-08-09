@@ -106,13 +106,14 @@ def main() -> int:
         ("sector_stock_filter.py", ("--auto-run",)),
         ("profit_index_gui.py", ("--auto-run",)),
         ("main_line_group_gui.py", ("--auto-run",)),
-        ("inst_net_rank_gui.py", ("--auto-run",)),
         ("limit_up_structure_analysis_gui.py", ("--auto-run",)),
         ("tools/seal_rating_daily_verify.py", ("--auto-run",)),
         ("limit_up_gene_analysis_gui.py", ("--auto-run",)),
         ("main_force_net_inflow_gui.py", ("--auto-run",)),
         ("lhb_analysis_gui.py", ("--auto-run",)),
         ("tools/lhb_premium_daily_verify.py", ("--auto-run",)),
+        # 机构榜依赖新浪龙虎榜源，偏晚更新：放到分析类任务末尾，尽量等数据就绪
+        ("inst_net_rank_gui.py", ("--auto-run",)),
         # 每日最后：F10 逐只更新概念/板块并并入 all_a_stock_info.json
         # --no-resume：每日重拉；--mode f10：避开易断的 push2 板块成分接口
         ("tools/build_stock_info_from_em_boards.py", ("--mode", "f10", "--no-resume", "--preview", "0")),

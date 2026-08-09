@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QApplication,
@@ -517,7 +517,9 @@ class LonghubangDialog(QDialog):
         layout.addLayout(top)
 
         self.status = QLabel("待执行：点击“开始分析并导出机构榜单”", self)
-        self.status.setFont(QFont("", 10))
+        self.status.setTextFormat(Qt.PlainText)
+        # WPS COM 导图后默认字体偶发把个别 ASCII 字形渲成乱码，固定用雅黑
+        self.status.setFont(QFont("Microsoft YaHei", 10))
         top.addWidget(self.status, 1)
 
         self.run_btn = QPushButton("开始分析并导出机构榜单", self)
@@ -594,8 +596,7 @@ class LonghubangDialog(QDialog):
         ]
         self.raw_text.setPlainText("\n".join(raw_blocks))
         self.status.setText("分析完成，文件已导出到 history_data。")
-        if self._auto_run:
-            self._export_form_image_and_exit(result)
+        self._export_form_image(result, exit_after=self._auto_run)
 
     def _on_failed(self, err: str):
         self.status.setText("分析失败")
@@ -822,8 +823,14 @@ class LonghubangDialog(QDialog):
         fig.savefig(png_fp, dpi=180, bbox_inches="tight")
         plt.close(fig)
 
-    def _export_form_image_and_exit(self, result: dict):
-        """自动模式：把导出的 Excel 转成图片，并自动退出。"""
+    def _set_status_text(self, text: str) -> None:
+        """状态栏纯文本刷新（导图后重设字体，避免 WPS 影响字形）。"""
+        self.status.setTextFormat(Qt.PlainText)
+        self.status.setFont(QFont("Microsoft YaHei", 10))
+        self.status.setText(str(text or ""))
+
+    def _export_form_image(self, result: dict, exit_after: bool = False):
+        """把导出的 Excel 转成图片；auto-run 时再延时退出。"""
         try:
             out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history_data")
             os.makedirs(out_dir, exist_ok=True)
@@ -833,6 +840,10 @@ class LonghubangDialog(QDialog):
             xlsx_fp = (result.get("jg_paths") or {}).get("机构四榜连排")
             if not xlsx_fp:
                 raise RuntimeError("未找到机构四榜连排导出文件路径")
+            exit_tip = "；10秒后退出" if exit_after else ""
+            png_name = os.path.basename(png_fp)
+            # 状态栏不直接拼 ".png"：WPS COM 后个别 ASCII 字形会花屏，改用中文后缀说明
+            png_stem = png_name[:-4] if png_name.lower().endswith(".png") else png_name
             # 默认严格走 WPS；仅在非严格模式下才允许回退
             try:
                 self._excel_to_png_via_wps(xlsx_fp, png_fp)
@@ -840,7 +851,7 @@ class LonghubangDialog(QDialog):
                     f.write("method=WPS_COM\n")
                     f.write(f"xlsx={os.path.abspath(xlsx_fp)}\n")
                     f.write(f"png={os.path.abspath(png_fp)}\n")
-                self.status.setText(f"自动运行完成（WPS导图），已导出图片：{os.path.basename(png_fp)}，即将退出")
+                self._set_status_text(f"已导出图片：{png_stem}（PNG，表格导图成功）{exit_tip}")
             except Exception as e_wps:
                 if self._wps_strict:
                     with open(log_fp, "w", encoding="utf-8") as f:
@@ -854,13 +865,15 @@ class LonghubangDialog(QDialog):
                     f.write(f"xlsx={os.path.abspath(xlsx_fp)}\n")
                     f.write(f"png={os.path.abspath(png_fp)}\n")
                     f.write(f"wps_error={e_wps}\n")
-                self.status.setText(
-                    f"自动运行完成（WPS失败已回退），已导出图片：{os.path.basename(png_fp)}，即将退出"
+                self._set_status_text(
+                    f"已导出图片：{png_stem}（PNG，表格导图失败已用备用方式）{exit_tip}"
                 )
         except Exception as e:
-            self.status.setText(f"自动模式截图失败：{e}，即将退出")
+            tip = "；10秒后退出" if exit_after else ""
+            self._set_status_text(f"导图失败：{e}{tip}")
         finally:
-            QTimer.singleShot(10000, self.accept)
+            if exit_after:
+                QTimer.singleShot(10000, self.accept)
 
 
 def main():
