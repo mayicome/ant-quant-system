@@ -68,9 +68,10 @@ class StrategyConfig:
 PARAM_BUY_AMOUNT_PER_STOCK = "buy_amount_per_stock"   # 单股拟买入金额(元)
 PARAM_MIN_ORDER_AMOUNT = "min_order_amount"           # 每笔最小交易金额(元)
 PARAM_GENERATE_TOP_N = "generate_top_n"               # 只生成前 N 个（按股票池顺序；0=不限制）
-PARAM_SIZING_MODE = "sizing_mode"                     # fixed | clip_equity
+PARAM_SIZING_MODE = "sizing_mode"                     # fixed | clip_equity | fixed_n_equity
 PARAM_CLIP_L = "clip_L"                               # clip(S,L,U) 下限
 PARAM_CLIP_U = "clip_U"                               # clip(S,L,U) 上限（兼当日最多买入只数）
+PARAM_FIXED_N = "fixed_n"                             # fixed_n_equity：最多买 N 只；仓位=权益/min(N,进档)
 ALLOWED_PARAM_KEYS = (PARAM_BUY_AMOUNT_PER_STOCK, PARAM_MIN_ORDER_AMOUNT)
 # 可选扩展键：仅当 JSON/导入里显式出现时保留；不写进默认表，避免影响未配置策略的回测行为
 OPTIONAL_STRATEGY_PARAM_KEYS = (
@@ -93,6 +94,7 @@ OPTIONAL_STRATEGY_PARAM_KEYS = (
     PARAM_SIZING_MODE,
     PARAM_CLIP_L,
     PARAM_CLIP_U,
+    PARAM_FIXED_N,
     # 开盘夹档 Cond2（strategy_e6d1b97b 等）；Cond3 已迁选股，键仍保留可选覆盖
     "require_open_rel_ma5",
     "open_rel_ma5_lo",

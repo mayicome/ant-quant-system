@@ -84,6 +84,7 @@ from PyQt5.QtWidgets import (
     QDateTimeEdit,
     QTimeEdit,
     QToolButton,
+    QSplitter,
 )
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 from PyQt5.QtGui import QIcon, QFontMetrics, QTextCursor
@@ -102,6 +103,7 @@ from config.strategy_config import (
     PARAM_SIZING_MODE,
     PARAM_CLIP_L,
     PARAM_CLIP_U,
+    PARAM_FIXED_N,
     PARAM_MIN_ORDER_AMOUNT,
     PARAM_GENERATE_TOP_N,
     apply_generate_top_n,
@@ -1105,10 +1107,17 @@ class StrategyRowWidget(QWidget):
 
 
 class StrategyListWidget(QListWidget):
-    """带删除、导出图标和右键菜单的策略列表"""
+    """带删除、导出图标和右键菜单的策略列表；支持横向滚动以显示完整策略名。"""
 
     strategy_delete_requested = pyqtSignal(str)
     strategy_rename_requested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setTextElideMode(Qt.ElideNone)
 
     def contextMenuEvent(self, event):
         # 若点击在空白处，用列表坐标取 item 作为兜底（行内右键由 StrategyRowWidget 处理）
@@ -1346,15 +1355,19 @@ class StrategyGeneratorMainWindow(QMainWindow):
         toolbar.addAction(import_act)
 
     def _init_central(self):
-        # 主体布局：左侧策略列表 + 右侧详情 Tab
+        # 主体布局：左侧策略列表 + 右侧详情 Tab（中间可拖动调节宽度）
         central = QWidget(self)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
 
-        # 左侧：策略列表（带x删除与右键菜单）
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(6)
+
+        # 左侧：策略列表（带x删除与右键菜单；可横向滚动看全名称）
         self.strategy_list = StrategyListWidget()
-        self.strategy_list.setMinimumWidth(240)
+        self.strategy_list.setMinimumWidth(180)
         # 统一使用白色背景，避免灰色交替行在失去焦点时与选中项的深灰色混淆
         self.strategy_list.setAlternatingRowColors(False)
         self.strategy_list.itemDoubleClicked.connect(self._on_doubleclick_rename)
@@ -1367,6 +1380,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
         # 右侧：未保存提示条 + 详情 Tab
         right_container = QWidget()
+        right_container.setMinimumWidth(420)
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
         self.unsaved_bar = QWidget()
@@ -1449,14 +1463,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
         params_layout.setContentsMargins(12, 12, 12, 12)
         params_layout.addWidget(QLabel(
             "以下参数会传入策略。仓位模式：固定金额=每只用「单股拟买入金额」；"
-            "账户clip=总权益/clip(当日股票池只数S, L, U)，且进档最多买 U 只"
-            "（按强度分 Elig×8+标签内RS，与导出序一致）。"
-            "用 clip 时请勿勾选「只生成前 N」（否则 S 会被截断）。"
+            "账户clip=总权益/clip(当日股票池只数S, L, U)，且进档最多买 U 只；"
+            "固定N全仓=总权益/min(N,进档只数)，最多买 N 只（稀缺日按实际进档打满）。"
+            "截断均按强度分 Elig×8+标签内RS。用 clip/固定N 时请勿勾选「只生成前 N」。"
         ))
         params_form = QFormLayout()
         self.param_sizing_mode_combo = QComboBox()
         self.param_sizing_mode_combo.addItem("固定金额（buy_amount_per_stock）", "fixed")
         self.param_sizing_mode_combo.addItem("账户clip(S,L,U)", "clip_equity")
+        self.param_sizing_mode_combo.addItem("固定N全仓（权益/min(N,进档)）", "fixed_n_equity")
         self.param_sizing_mode_combo.setToolTip(
             "仅当策略代码支持 sizing_mode 时生效。未改代码的旧策略仍只用单股拟买入金额。"
         )
@@ -1477,6 +1492,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.param_clip_u_spin.setValue(4)
         self.param_clip_u_spin.setToolTip("clip 上限 U：S 很大时按 1/U，且当日最多买 U 只。")
         params_form.addRow("clip 上限 U：", self.param_clip_u_spin)
+        self.param_fixed_n_spin = QSpinBox()
+        self.param_fixed_n_spin.setRange(1, 100)
+        self.param_fixed_n_spin.setValue(5)
+        self.param_fixed_n_spin.setToolTip(
+            "固定N全仓：最多买 N 只；单笔≈总权益/min(N,当日进档只数)。"
+        )
+        params_form.addRow("固定 N：", self.param_fixed_n_spin)
         self.param_min_order_amount_spin = QDoubleSpinBox()
         self.param_min_order_amount_spin.setRange(0, 99999999)
         self.param_min_order_amount_spin.setDecimals(0)
@@ -1515,6 +1537,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.param_buy_amount_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
         self.param_clip_l_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
         self.param_clip_u_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
+        self.param_fixed_n_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
         self.param_min_order_amount_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
         self.logic_code_edit.textChanged.connect(lambda: self._mark_dirty("logic"))
         self._on_sizing_mode_changed()
@@ -1648,7 +1671,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         # 内容较长：用滚动容器避免窗口较小时控件被压扁看不清
         self.backtest_tab_widget = QScrollArea()
         self.backtest_tab_widget.setWidgetResizable(True)
-        self.backtest_tab_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.backtest_tab_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         _backtest_inner = QWidget()
         self.backtest_tab_widget.setWidget(_backtest_inner)
         backtest_layout = QVBoxLayout(_backtest_inner)
@@ -2095,8 +2118,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.detail_tabs.addTab(self.backtest_tab_widget, "回测")
 
         right_layout.addWidget(self.detail_tabs, 1)
-        layout.addWidget(self.strategy_list)
-        layout.addWidget(right_container, 1)
+        splitter.addWidget(self.strategy_list)
+        splitter.addWidget(right_container)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([320, 880])
+        layout.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
 
@@ -2133,6 +2160,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
             name_text += f"  ({len(cfg.stock_codes)} 只)"
         name_label = QLabel(name_text)
         name_label.setStyleSheet("border: none;")
+        name_label.setToolTip(name_text)
+        name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        name_w = QFontMetrics(name_label.font()).boundingRect(name_text).width() + 8
+        name_label.setMinimumWidth(name_w)
         export_btn = QToolButton()
         export_btn.setText("📤")
         export_btn.setToolTip("导出策略")
@@ -2141,6 +2172,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         layout.addWidget(del_btn)
         layout.addWidget(name_label, 1)
         layout.addWidget(export_btn)
+        # 供列表项 sizeHint 使用：保证长名称可横向滚出可视区
+        row._row_min_width = 4 + 22 + 4 + name_w + 4 + 24 + 4
         return row
 
     def _load_strategies_into_list(self, reselect_id: str | None = None):
@@ -2156,9 +2189,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
             for cfg in self._strategies:
                 item = QListWidgetItem()
                 item.setData(Qt.UserRole, cfg.id)
-                item.setSizeHint(QSize(0, 28))
+                row_w = self._make_strategy_row_widget(cfg)
+                # 先算宽度再挂到列表，避免长名称被裁切且无法横向滚动
+                min_w = int(getattr(row_w, "_row_min_width", 240) or 240)
+                item.setSizeHint(QSize(min_w, 28))
                 self.strategy_list.addItem(item)
-                self.strategy_list.setItemWidget(item, self._make_strategy_row_widget(cfg))
+                self.strategy_list.setItemWidget(item, row_w)
             if self.strategy_list.count() > 0:
                 chosen = None
                 rid = (reselect_id or "").strip()
@@ -2364,18 +2400,24 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if getattr(self, "param_sizing_mode_combo", None) is not None:
             mode = str(self.param_sizing_mode_combo.currentData() or "fixed")
         is_clip = mode == "clip_equity"
+        is_fixed_n = mode == "fixed_n_equity"
+        is_equity = is_clip or is_fixed_n
         if getattr(self, "param_clip_l_spin", None) is not None:
             self.param_clip_l_spin.setEnabled(is_clip)
         if getattr(self, "param_clip_u_spin", None) is not None:
             self.param_clip_u_spin.setEnabled(is_clip)
+        if getattr(self, "param_fixed_n_spin", None) is not None:
+            self.param_fixed_n_spin.setEnabled(is_fixed_n)
         if getattr(self, "param_buy_amount_spin", None) is not None:
-            # clip 按账户权益分配；固定金额仅 fixed 模式使用（避免误改造成以为仍按该金额下单）
-            self.param_buy_amount_spin.setEnabled(not is_clip)
-            self.param_buy_amount_spin.setToolTip(
-                "clip 模式下不使用本金额（按总权益/clip(S,L,U)）。"
-                if is_clip
-                else "固定金额模式：每只股票按此金额计算买入数量。"
-            )
+            # 权益仓位模式不用固定金额；仅 fixed 模式使用
+            self.param_buy_amount_spin.setEnabled(not is_equity)
+            if is_clip:
+                tip = "clip 模式下不使用本金额（按总权益/clip(S,L,U)）。"
+            elif is_fixed_n:
+                tip = "固定N全仓模式不使用本金额（按总权益/min(N,进档只数)）。"
+            else:
+                tip = "固定金额模式：每只股票按此金额计算买入数量。"
+            self.param_buy_amount_spin.setToolTip(tip)
         # __init__ 早期也会调到这里，此时可能尚未设置 _loading_strategy
         if not getattr(self, "_loading_strategy", True):
             self._mark_dirty("params")
@@ -2397,6 +2439,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 U = L
             out[PARAM_CLIP_L] = L
             out[PARAM_CLIP_U] = U
+        elif mode == "fixed_n_equity":
+            out[PARAM_FIXED_N] = int(self.param_fixed_n_spin.value())
         return out
 
     def _merge_strategy_params_from_form(self, base: Optional[dict] = None) -> dict:
@@ -2472,7 +2516,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not params:
             params = {}
         mode = str(params.get(PARAM_SIZING_MODE) or "fixed").strip().lower()
-        if mode not in ("fixed", "clip_equity"):
+        if mode not in ("fixed", "clip_equity", "fixed_n_equity"):
             mode = "fixed"
         if getattr(self, "param_sizing_mode_combo", None) is not None:
             self.param_sizing_mode_combo.blockSignals(True)
@@ -2484,6 +2528,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
             self.param_clip_l_spin.setValue(int(params.get(PARAM_CLIP_L, 2) or 2))
         if getattr(self, "param_clip_u_spin", None) is not None:
             self.param_clip_u_spin.setValue(int(params.get(PARAM_CLIP_U, 4) or 4))
+        if getattr(self, "param_fixed_n_spin", None) is not None:
+            self.param_fixed_n_spin.setValue(int(params.get(PARAM_FIXED_N, 5) or 5))
         self.param_min_order_amount_spin.setValue(float(params.get(PARAM_MIN_ORDER_AMOUNT, 5000)))
         self._load_generate_top_n_to_form(params)
         self._on_sizing_mode_changed()
