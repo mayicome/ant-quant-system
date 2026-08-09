@@ -390,15 +390,38 @@ def _make_rule_dict(
             ),
         }
     if rule_type == "best_buy":
-        return {
+        out = {
             "id": rule_id,
             "type": "best_buy",
             "enabled": True,
-            "name": "弹性买入",
+            "name": intent.get("name") or "弹性买入",
             "trigger_price": f("trigger_price"),
             "rise_percent": f("rise_percent", DEFAULT_BEST_RISE_PERCENT),
             "volume": i("volume"),
         }
+        # 可选：动态反弹阈值 / 确认参数（不传则走全局 Elastic 配置）
+        for key in (
+            "rise_scale",
+            "max_rise_percent",
+            "dynamic_thresholds",
+            "confirm_ticks",
+            "cooldown_after_extreme_ticks",
+        ):
+            if key in intent and intent.get(key) is not None and intent.get(key) != "":
+                try:
+                    if key in ("dynamic_thresholds", "confirm_ticks", "cooldown_after_extreme_ticks"):
+                        out[key] = int(intent.get(key))
+                    else:
+                        out[key] = float(intent.get(key))
+                except (TypeError, ValueError):
+                    pass
+        try:
+            lu = float(intent.get("limit_up") or 0)
+            if lu > 0:
+                out["limit_up"] = round(lu, 4)
+        except (TypeError, ValueError):
+            pass
+        return out
     if rule_type == "best_sell":
         out = {
             "id": rule_id,
