@@ -164,6 +164,16 @@ def _today_weekday_fallback(check_date: date) -> bool:
     return True
 
 
+def previous_tradeday(from_date: Optional[date] = None) -> date:
+    """返回 from_date（默认今天）之前最近一个交易日。"""
+    d = (from_date or date.today()) - timedelta(days=1)
+    for _ in range(40):
+        if is_tradeday(d):
+            return d
+        d -= timedelta(days=1)
+    return d
+
+
 def is_tradeday(check_date: Optional[date] = None) -> bool:
     """
     判断指定日期是否为交易日。

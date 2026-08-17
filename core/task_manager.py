@@ -91,7 +91,7 @@ class TaskManager(QObject):
         
         # 添加缺失的属性
         self.running_tasks = {}  # 正在运行的任务
-        self.max_tasks = 20      # 最大任务数
+        self.max_tasks = 100     # 最大并发任务数（预约重载可能一次启动 20+）
         self.monitoring = True   # 监控状态属性，默认开启
         
         # 添加任务加载标志，避免重复加载

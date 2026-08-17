@@ -12,8 +12,8 @@ Tick 本地缓存（全项目统一口径）：
 警告：pkl 本身就是可用 tick 副本。没有同代码 parquet 前禁止删除 pkl。
 本地迁移（无下载）：tools/convert_tick_pkl_to_parquet.py
 
-内存缓存生命周期：回测按「加载一天 → 用完 → 清一天」调用
-clear_tick_memory_cache(trade_date=...)，避免跨日囤积导致十几 GB。
+内存缓存：进程内 LRU（TICK_MEMORY_CACHE_MAX，默认 320 个 code×date）。
+回测引擎默认跨日复用，仅在整段回测结束或批量结束时全清；可用 trim_tick_memory_cache 限内存。
 """
 from __future__ import annotations
 
@@ -25,9 +25,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 TradeDateInput = Union[date, datetime, str]
 
-_MEMORY_CACHE: Dict[tuple, Any] = {}
+# 内存缓存生命周期：回测默认用 LRU 跨日复用（多日持有/批量选股重叠窗口会重复读同一日 tick）。
+# 条数上限由 TICK_MEMORY_CACHE_MAX 控制（默认 320 个 code×date）；引擎可在整段回测结束再全清。
+from collections import OrderedDict
 
-# 落盘保留列（另含 ask1..ask5 / bid1..bid5 / ask1_vol.. / bid1_vol..）
+_MEMORY_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
+try:
+    _MEMORY_CACHE_MAX = max(32, int(os.environ.get("TICK_MEMORY_CACHE_MAX", "640") or 640))
+except Exception:
+    _MEMORY_CACHE_MAX = 640
+_TICK_PREPARED_ATTR = "_tick_prepared_for_use"
 _DISK_BASE_COLS = (
     "time_ts",
     "lastPrice",
@@ -86,6 +93,59 @@ def clear_tick_memory_cache(
     for k in keys:
         _MEMORY_CACHE.pop(k, None)
     return len(keys)
+
+
+def trim_tick_memory_cache(max_entries: Optional[int] = None) -> int:
+    """将内存缓存裁到 max_entries（默认 TICK_MEMORY_CACHE_MAX），FIFO 淘汰最旧。返回删除条数。"""
+    limit = _MEMORY_CACHE_MAX if max_entries is None else max(1, int(max_entries))
+    n = 0
+    while len(_MEMORY_CACHE) > limit:
+        _MEMORY_CACHE.popitem(last=False)
+        n += 1
+    return n
+
+
+def _memory_cache_get(mem_key: tuple) -> Optional[Any]:
+    cached = _MEMORY_CACHE.get(mem_key)
+    if cached is None:
+        return None
+    try:
+        _MEMORY_CACHE.move_to_end(mem_key)
+    except Exception:
+        pass
+    return cached
+
+
+def _memory_cache_put(mem_key: tuple, data: Any) -> None:
+    if data is None:
+        return
+    _MEMORY_CACHE[mem_key] = data
+    try:
+        _MEMORY_CACHE.move_to_end(mem_key)
+    except Exception:
+        pass
+    while len(_MEMORY_CACHE) > _MEMORY_CACHE_MAX:
+        _MEMORY_CACHE.popitem(last=False)
+
+
+def _mark_tick_prepared(df: Any) -> Any:
+    try:
+        attrs = getattr(df, "attrs", None)
+        if attrs is not None:
+            attrs[_TICK_PREPARED_ATTR] = True
+    except Exception:
+        pass
+    return df
+
+
+def _is_tick_prepared(df: Any) -> bool:
+    try:
+        attrs = getattr(df, "attrs", None)
+        if isinstance(attrs, dict) and attrs.get(_TICK_PREPARED_ATTR):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def tick_memory_cache_size() -> int:
@@ -324,13 +384,15 @@ def prepare_tick_for_disk(df: Any) -> Optional[Any]:
 
 
 def prepare_tick_for_use(df: Any) -> Optional[Any]:
-    """读盘后展开五档 list，并补 datetime。"""
+    """读盘后展开五档 list，并补 datetime。已标记 prepared 的 DataFrame 直接返回。"""
     try:
         import pandas as pd
     except ImportError:
         return None
     if df is None:
         return None
+    if _is_tick_prepared(df):
+        return df
     try:
         data = df if isinstance(df, pd.DataFrame) else pd.DataFrame(df)
     except Exception:
@@ -343,7 +405,8 @@ def prepare_tick_for_use(df: Any) -> Optional[Any]:
     data = coerce_tick_dataframe(data)
     if data is None or len(data) == 0:
         return None
-    return expand_depth_lists(data)
+    data = expand_depth_lists(data)
+    return _mark_tick_prepared(data)
 
 
 def normalize_tick_dataframe(raw: Any) -> Optional[Any]:
@@ -677,17 +740,19 @@ def load_tick_data(
     mem_key = (c6, d.isoformat())
 
     if use_memory_cache:
-        cached = _MEMORY_CACHE.get(mem_key)
+        cached = _memory_cache_get(mem_key)
         if cached is not None and len(cached) > 0:
+            if _is_tick_prepared(cached):
+                return cached
             coerced = prepare_tick_for_use(cached)
             if coerced is not None and len(coerced) > 0:
-                _MEMORY_CACHE[mem_key] = coerced
+                _memory_cache_put(mem_key, coerced)
                 return coerced
 
     disk = read_tick_cache(c6, trade_date)
     if disk is not None and len(disk) > 0:
         if use_memory_cache:
-            _MEMORY_CACHE[mem_key] = disk
+            _memory_cache_put(mem_key, disk)
         return disk
 
     if allow_on_demand:
@@ -706,7 +771,7 @@ def load_tick_data(
             disk = ensure_tick_dataframe(c6, d, **kw)
             if disk is not None and len(disk) > 0:
                 if use_memory_cache:
-                    _MEMORY_CACHE[mem_key] = disk
+                    _memory_cache_put(mem_key, disk)
                 return disk
 
     if not allow_xtdata_fallback:
@@ -720,7 +785,7 @@ def load_tick_data(
 
     write_tick_cache(c6, trade_date, data)
     if use_memory_cache:
-        _MEMORY_CACHE[mem_key] = data
+        _memory_cache_put(mem_key, data)
     return data
 
 
@@ -748,18 +813,21 @@ def load_ticks_for_codes(
     for c6 in codes:
         mem_key = (c6, d_obj.isoformat())
         if use_memory_cache:
-            cached = _MEMORY_CACHE.get(mem_key)
+            cached = _memory_cache_get(mem_key)
             if cached is not None and len(cached) > 0:
+                if _is_tick_prepared(cached):
+                    result[c6] = cached
+                    continue
                 coerced = prepare_tick_for_use(cached)
                 if coerced is not None and len(coerced) > 0:
-                    _MEMORY_CACHE[mem_key] = coerced
+                    _memory_cache_put(mem_key, coerced)
                     result[c6] = coerced
                     continue
 
         disk = read_tick_cache(c6, trade_date)
         if disk is not None and len(disk) > 0:
             if use_memory_cache:
-                _MEMORY_CACHE[mem_key] = disk
+                _memory_cache_put(mem_key, disk)
             result[c6] = disk
             continue
         missing.append(c6)
@@ -808,7 +876,7 @@ def load_ticks_for_codes(
                 disk = read_tick_cache(c6, trade_date)
                 if disk is not None and len(disk) > 0:
                     if use_memory_cache:
-                        _MEMORY_CACHE[(c6, d_obj.isoformat())] = disk
+                        _memory_cache_put((c6, d_obj.isoformat()), disk)
                     result[c6] = disk
             missing = list(still_missing) + skipped
         else:
@@ -854,7 +922,7 @@ def load_ticks_for_codes(
                     continue
                 write_tick_cache(c6, trade_date, data)
                 if use_memory_cache:
-                    _MEMORY_CACHE[(c6, d_obj.isoformat())] = data
+                    _memory_cache_put((c6, d_obj.isoformat()), data)
                 result[c6] = data
             missing = still
 

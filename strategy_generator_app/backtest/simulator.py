@@ -1,6 +1,7 @@
 """
 订单模拟：
 - 日频模式：将意图在下一日开盘价处统一成交（原有逻辑，可选）。
+- 同日 OHLC 模式：用当日日线高低收近似触价成交（单点买/卖/定时清仓）。
 - Tick 模式：用当日 tick 数据按规则在首次满足条件时成交（突破价、笼子区间、定时等）。
 """
 
@@ -44,6 +45,194 @@ except Exception:
         @staticmethod
         def get_price_precision(security_code: str) -> int:
             return 2
+
+
+# ---------------------------------------------------------------------------
+# T+1 可卖：当日买入不可卖；下一交易日开盘 available = volume
+# ---------------------------------------------------------------------------
+
+def position_available(pos: Optional[Dict[str, Any]]) -> int:
+    """可卖数量；无 available 字段时兼容旧持仓（视作全部可卖）。"""
+    if not pos:
+        return 0
+    if "available" in pos and pos.get("available") is not None:
+        try:
+            return max(0, int(pos.get("available") or 0))
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return max(0, int(pos.get("volume") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def settle_positions_t1(positions: Dict[str, Dict[str, Any]]) -> None:
+    """新交易日开盘：昨日及更早持仓全部转为可卖。"""
+    for pos in (positions or {}).values():
+        if not isinstance(pos, dict):
+            continue
+        try:
+            vol = max(0, int(pos.get("volume") or 0))
+        except (TypeError, ValueError):
+            vol = 0
+        pos["available"] = vol
+
+
+def init_position_t1(
+    volume: int,
+    cost: float = 0.0,
+    *,
+    available: Optional[int] = None,
+) -> Dict[str, Any]:
+    vol = max(0, int(volume or 0))
+    if available is None:
+        avail = vol
+    else:
+        try:
+            avail = max(0, min(vol, int(available)))
+        except (TypeError, ValueError):
+            avail = vol
+    return {"volume": vol, "cost": float(cost or 0), "available": avail}
+
+
+def apply_buy_fill_t1(
+    positions: Dict[str, Dict[str, Any]],
+    code_6: str,
+    qty: int,
+    fill_px: float,
+) -> None:
+    """买入：总量增加，可卖不变（当日买不可卖）。"""
+    q = max(0, int(qty or 0))
+    if q <= 0:
+        return
+    if code_6 not in positions:
+        positions[code_6] = init_position_t1(0, 0.0, available=0)
+    pos = positions[code_6]
+    if "available" not in pos or pos.get("available") is None:
+        pos["available"] = max(0, int(pos.get("volume") or 0))
+    ov = int(pos.get("volume") or 0)
+    oc = float(pos.get("cost") or 0)
+    nv = ov + q
+    pos["volume"] = nv
+    pos["cost"] = round((ov * oc + float(fill_px) * q) / nv, 2) if nv else 0.0
+
+
+def apply_sell_fill_t1(
+    positions: Dict[str, Dict[str, Any]],
+    code_6: str,
+    want_qty: int,
+) -> int:
+    """卖出：按可卖截断；同时扣减 volume 与 available。返回实际卖出数量。"""
+    pos = positions.get(code_6)
+    if not pos:
+        return 0
+    want = max(0, int(want_qty or 0))
+    if want <= 0:
+        return 0
+    vol = max(0, int(pos.get("volume") or 0))
+    avail = position_available(pos)
+    sold = min(want, avail, vol)
+    if sold <= 0:
+        return 0
+    nv = vol - sold
+    na = avail - sold
+    if nv <= 0:
+        del positions[code_6]
+    else:
+        pos["volume"] = nv
+        pos["available"] = max(0, na)
+    return sold
+
+
+def positions_for_strategy_params(
+    positions: Dict[str, Dict[str, Any]],
+) -> Dict[str, int]:
+    """策略 params['positions']：与实盘一致，传可卖数量。"""
+    out: Dict[str, int] = {}
+    for code_6, pos in (positions or {}).items():
+        av = position_available(pos)
+        if av > 0:
+            out[code_6] = av
+    return out
+
+
+def positions_volume_for_strategy_params(
+    positions: Dict[str, Dict[str, Any]],
+) -> Dict[str, int]:
+    """策略 params['positions_volume']：当前持股数量（含当日买入、T+1 尚不可卖部分）。
+
+    半仓「剩余是否并入」按此字段；半仓股数基数见 positions_baseline。
+    """
+    out: Dict[str, int] = {}
+    for code_6, pos in (positions or {}).items():
+        try:
+            vol = max(0, int((pos or {}).get("volume") or 0))
+        except (TypeError, ValueError):
+            vol = 0
+        if vol > 0:
+            out[code_6] = vol
+    return out
+
+
+def init_positions_baseline_from_positions(
+    positions: Dict[str, Dict[str, Any]],
+) -> Dict[str, int]:
+    """回测起点：尚无卖出时，当前持股≈本轮累计买入，作为总仓位基准。"""
+    return dict(positions_volume_for_strategy_params(positions))
+
+
+def note_buy_fills_on_baseline(
+    baseline: Dict[str, int],
+    trades: Optional[List[Dict[str, Any]]],
+) -> None:
+    """把买入成交累加进总仓位基准。"""
+    for t in trades or []:
+        if not isinstance(t, dict):
+            continue
+        side = str(t.get("side") or "").strip().lower()
+        if side not in ("buy", "买入", "b"):
+            continue
+        code_6 = str(t.get("code") or t.get("stock_code") or "").strip()
+        if "." in code_6:
+            code_6 = code_6.split(".", 1)[0]
+        if code_6.isdigit():
+            code_6 = code_6.zfill(6)
+        try:
+            vol = int(t.get("volume") or 0)
+        except (TypeError, ValueError):
+            vol = 0
+        if not code_6 or vol <= 0:
+            continue
+        baseline[code_6] = int(baseline.get(code_6) or 0) + vol
+
+
+def prune_baseline_if_flat(
+    baseline: Dict[str, int],
+    positions: Dict[str, Dict[str, Any]],
+) -> None:
+    for code_6 in list(baseline.keys()):
+        try:
+            vol = int((positions.get(code_6) or {}).get("volume") or 0)
+        except (TypeError, ValueError):
+            vol = 0
+        if vol < 100:
+            baseline.pop(code_6, None)
+
+
+def positions_baseline_for_strategy_params(
+    baseline: Dict[str, int],
+) -> Dict[str, int]:
+    """策略 params['positions_baseline']：半仓用的总仓位基准。"""
+    out: Dict[str, int] = {}
+    for code_6, v in (baseline or {}).items():
+        try:
+            n = max(0, int(v or 0))
+        except (TypeError, ValueError):
+            n = 0
+        if n >= 100:
+            out[code_6] = n
+    return out
+
 
 try:
     from core.breakthrough_probe_buy import (
@@ -198,27 +387,27 @@ def _apply_smart_sell_backtest_tick(
         tick_dt,
         pre_close=_smart_sell_pre_close_from_row(row_raw),
     )
-    tranche_vol = min(current_tranche_volume(ss), pos["volume"])
+    tranche_vol = min(current_tranche_volume(ss), position_available(pos))
     if tranche_vol > 0 and fill_result:
         fv, fp = fill_result
-        fv = min(int(fv), tranche_vol, pos["volume"])
+        fv = min(int(fv), tranche_vol, position_available(pos))
         if fv > 0:
             record_fill(ss, fv, fp)
             fee = fp * fv * commission
             new_cash += fp * fv - fee
-            new_positions[code_6]["volume"] = pos["volume"] - fv
-            if new_positions[code_6]["volume"] <= 0:
-                del new_positions[code_6]
-                position_after = 0
-            else:
-                position_after = int(new_positions[code_6]["volume"])
+            sold = apply_sell_fill_t1(new_positions, code_6, fv)
+            if sold <= 0:
+                return new_cash
+            position_after = int(
+                (new_positions.get(code_6) or {}).get("volume") or 0
+            )
             _append_smart_sell_trade(
                 trades,
                 date_str=date_str,
                 tick_dt=tick_dt,
                 code_6=code_6,
                 fill_px=fp,
-                sell_vol=fv,
+                sell_vol=sold,
                 commission=commission,
                 rule_type=rule_type,
                 trigger_info=str(ss.get("trigger_info") or "智能卖出"),
@@ -275,6 +464,10 @@ def _append_smart_sell_trade(
     stock_name = (session.get("stock_name") or "").strip()
     if stock_name:
         row["stock_name"] = stock_name
+    if session.get("leg_key"):
+        row["leg_key"] = str(session.get("leg_key"))
+    if session.get("rule_name"):
+        row["rule_name"] = str(session.get("rule_name"))
     trades.append(row)
 
 # tick 表需含 datetime, lastPrice；若有 open 可用于开盘成交
@@ -1685,13 +1878,7 @@ def simulate_fills_with_ticks(
                     if new_cash >= fill_px * volume * (1 + commission):
                         new_cash -= fill_px * volume * (1 + commission)
                         fee = fill_px * volume * commission
-                        if code_6 not in new_positions:
-                            new_positions[code_6] = {"volume": 0, "cost": 0.0}
-                        ov = new_positions[code_6]["volume"]
-                        oc = new_positions[code_6]["cost"]
-                        nv = ov + volume
-                        new_positions[code_6]["volume"] = nv
-                        new_positions[code_6]["cost"] = round((ov * oc + fill_px * volume) / nv, 2) if nv else 0
+                        apply_buy_fill_t1(new_positions, code_6, volume, fill_px)
                         time_str = _fmt_trade_time(tick_dt)
                         buy_row: Dict[str, Any] = {
                             "date": date_str, "time": time_str, "code": code_6, "side": "buy",
@@ -1702,6 +1889,10 @@ def simulate_fills_with_ticks(
                         }
                         if intent_stock_name:
                             buy_row["stock_name"] = intent_stock_name
+                        if intent.get("leg_key"):
+                            buy_row["leg_key"] = str(intent.get("leg_key"))
+                        if intent.get("name"):
+                            buy_row["rule_name"] = str(intent.get("name"))
                         if rule_type == "breakthrough_buy" and tb_metrics:
                             buy_row.update(true_breakthrough_export_fields(tb_metrics))
                         if rule_type == "best_buy" and idx in best_buy_state:
@@ -1709,8 +1900,8 @@ def simulate_fills_with_ticks(
                         trades.append(buy_row)
                         filled = True
             elif rule_type in ("single_sell", "breakthrough_sell", "cage_sell", "best_sell", "scheduled_clear"):
-                pos = new_positions.get(code_6, {"volume": 0, "cost": 0.0})
-                sell_vol = min(volume, pos["volume"])
+                pos = new_positions.get(code_6, {"volume": 0, "cost": 0.0, "available": 0})
+                sell_vol = min(volume, position_available(pos))
                 if sell_vol <= 0:
                     to_remove.append(idx)
                     continue
@@ -1969,6 +2160,12 @@ def simulate_fills_with_ticks(
                 elif rule_type == "scheduled_clear":
                     sched_str = (intent.get("scheduled_clear_time") or "").strip()
                     trigger_px = float(intent.get("price") or 0)
+                    force_clear = bool(intent.get("scheduled_clear_force")) or bool(
+                        intent.get("scheduled_clear_on_hold_day")
+                    )
+                    if not force_clear and trigger_px <= 0:
+                        # 兼容：无触发价且非每日条件 → 无条件
+                        force_clear = not bool(intent.get("scheduled_clear_every_day"))
                     st_sc = scheduled_clear_state.setdefault(idx, {})
                     if st_sc.get("cancelled"):
                         to_remove.append(idx)
@@ -1993,7 +2190,7 @@ def simulate_fills_with_ticks(
                         continue
                     if not st_sc.get("_decided", False):
                         st_sc["_decided"] = True
-                        if trigger_px > 0 and lp >= trigger_px:
+                        if (not force_clear) and trigger_px > 0 and lp >= trigger_px:
                             st_sc["cancelled"] = True
                             to_remove.append(idx)
                             continue
@@ -2001,11 +2198,14 @@ def simulate_fills_with_ticks(
                     if not _check_fill_sell(rule_type, intent, last_price, tick_dt, sched_str):
                         to_remove.append(idx)
                         continue
-                    trigger_info = (
-                        f"定时清仓: at>={sched_str}, 当前价={lp:.2f}<触发价{trigger_px:.2f}"
-                        if trigger_px > 0
-                        else f"定时清仓: at>={sched_str}（无有效触发价，仅按时间）"
-                    )
+                    if force_clear:
+                        trigger_info = f"定时清仓(无条件): at>={sched_str}, 当前价={lp:.2f}"
+                    else:
+                        trigger_info = (
+                            f"定时清仓: at>={sched_str}, 当前价={lp:.2f}<触发价{trigger_px:.2f}"
+                            if trigger_px > 0
+                            else f"定时清仓: at>={sched_str}（无有效触发价，仅按时间）"
+                        )
                 else:
                     if not _check_fill_sell(rule_type, intent, last_price):
                         continue
@@ -2044,6 +2244,10 @@ def simulate_fills_with_ticks(
                         smart_sell_state[idx] = ss
                         if intent_stock_name:
                             ss["stock_name"] = intent_stock_name
+                        if intent.get("leg_key"):
+                            ss["leg_key"] = str(intent.get("leg_key"))
+                        if intent.get("name"):
+                            ss["rule_name"] = str(intent.get("name"))
                         new_cash = _apply_smart_sell_backtest_tick(
                             ss,
                             row_raw=row_raw,
@@ -2063,24 +2267,28 @@ def simulate_fills_with_ticks(
                         if is_session_complete(ss):
                             to_remove.append(idx)
                         continue
-                fee = fill_px * sell_vol * commission
-                new_cash += fill_px * sell_vol - fee
-                new_positions[code_6]["volume"] = pos["volume"] - sell_vol
-                if new_positions[code_6]["volume"] <= 0:
-                    del new_positions[code_6]
-                    position_after = 0
-                else:
-                    position_after = int(new_positions[code_6]["volume"])
+                sold = apply_sell_fill_t1(new_positions, code_6, sell_vol)
+                if sold <= 0:
+                    continue
+                fee = fill_px * sold * commission
+                new_cash += fill_px * sold - fee
+                position_after = int(
+                    (new_positions.get(code_6) or {}).get("volume") or 0
+                )
                 time_str = _fmt_trade_time(tick_dt)
                 sell_row: Dict[str, Any] = {
                     "date": date_str, "time": time_str, "code": code_6, "side": "sell",
-                    "price": round(fill_px, 2), "volume": sell_vol,
-                    "amount": round(fill_px * sell_vol, 2), "commission": round(fee, 2),
+                    "price": round(fill_px, 2), "volume": sold,
+                    "amount": round(fill_px * sold, 2), "commission": round(fee, 2),
                     "rule_type": rule_type, "position_after": position_after,
                     "trigger_info": trigger_info,
                 }
                 if intent_stock_name:
                     sell_row["stock_name"] = intent_stock_name
+                if intent.get("leg_key"):
+                    sell_row["leg_key"] = str(intent.get("leg_key"))
+                if intent.get("name"):
+                    sell_row["rule_name"] = str(intent.get("name"))
                 if rule_type == "best_sell" and idx in best_sell_state:
                     sell_row["tick_idx"] = int(best_sell_state[idx].get("tick_idx") or 0)
                 trades.append(sell_row)
@@ -2154,6 +2362,11 @@ def simulate_fills_with_ticks(
                 continue
 
         trigger_px = float(intent.get("price") or 0)
+        force_clear = bool(intent.get("scheduled_clear_force")) or bool(
+            intent.get("scheduled_clear_on_hold_day")
+        )
+        if not force_clear and trigger_px <= 0:
+            force_clear = not bool(intent.get("scheduled_clear_every_day"))
         chosen = None
         for row in code_ticks:
             if len(row) < 7:
@@ -2173,8 +2386,8 @@ def simulate_fills_with_ticks(
             lp = float(px2 or 0)
             if lp <= 0:
                 continue
-            # 与 stock_chart_widget 一致：定时后首笔有效 tick，须 current < trigger 才成交；否则放弃本条
-            if trigger_px > 0 and lp >= trigger_px:
+            # 条件清仓：定时后首笔有效 tick，须 current < trigger；无条件清仓：到点即卖
+            if (not force_clear) and trigger_px > 0 and lp >= trigger_px:
                 removed_indices.add(idx)
                 chosen = None
                 break
@@ -2187,24 +2400,22 @@ def simulate_fills_with_ticks(
 
         _, _, last_px, fill_dt, bid2, ask2 = chosen
         fill_price = _calc_fill_price(code_6, "sell", float(last_px), float(bid2 or 0), float(ask2 or 0))
-        pos = new_positions.get(code_6, {"volume": 0, "cost": 0.0})
+        pos = new_positions.get(code_6, {"volume": 0, "cost": 0.0, "available": 0})
         volume = int(intent.get("volume") or 0)
-        sell_vol = min(volume, int(pos.get("volume") or 0))
+        sell_vol = min(volume, position_available(pos))
         if sell_vol <= 0:
             continue
-        fee = float(fill_price) * sell_vol * commission
-        new_cash += float(fill_price) * sell_vol - fee
-        new_positions[code_6]["volume"] = int(pos["volume"]) - sell_vol
-        if new_positions[code_6]["volume"] <= 0:
-            del new_positions[code_6]
-            position_after = 0
-        else:
-            position_after = int(new_positions[code_6]["volume"])
+        sold = apply_sell_fill_t1(new_positions, code_6, sell_vol)
+        if sold <= 0:
+            continue
+        fee = float(fill_price) * sold * commission
+        new_cash += float(fill_price) * sold - fee
+        position_after = int((new_positions.get(code_6) or {}).get("volume") or 0)
         time_str = _fmt_trade_time(fill_dt)
         sched_row: Dict[str, Any] = {
             "date": date_str, "time": time_str, "code": code_6, "side": "sell",
-            "price": round(float(fill_price), 2), "volume": sell_vol,
-            "amount": round(float(fill_price) * sell_vol, 2), "commission": round(fee, 2),
+            "price": round(float(fill_price), 2), "volume": sold,
+            "amount": round(float(fill_price) * sold, 2), "commission": round(fee, 2),
             "rule_type": rule_type, "position_after": position_after,
             "trigger_info": (
                 f"定时清仓补充撮合: at>={sched_str}, 当前价={float(last_px):.2f}<触发价{trigger_px:.2f}"
@@ -2215,6 +2426,10 @@ def simulate_fills_with_ticks(
         intent_stock_name = (intent.get("stock_name") or "").strip()
         if intent_stock_name:
             sched_row["stock_name"] = intent_stock_name
+        if intent.get("leg_key"):
+            sched_row["leg_key"] = str(intent.get("leg_key"))
+        if intent.get("name"):
+            sched_row["rule_name"] = str(intent.get("name"))
         trades.append(sched_row)
         removed_indices.add(idx)
 
@@ -2298,23 +2513,18 @@ def simulate_fills(
             if amount + fee > new_cash:
                 continue
             new_cash -= amount + fee
-            if code_6 not in new_positions:
-                new_positions[code_6] = {"volume": 0, "cost": 0.0}
-            old_vol = new_positions[code_6]["volume"]
-            old_cost = new_positions[code_6]["cost"]
-            new_vol = old_vol + volume
-            new_cost = (old_vol * old_cost + amount) / new_vol if new_vol else 0
-            new_positions[code_6]["volume"] = new_vol
-            new_positions[code_6]["cost"] = round(new_cost, 2)
+            apply_buy_fill_t1(new_positions, code_6, volume, fill_price)
             trades.append({
                 "code": code_6, "side": "buy", "price": fill_price, "volume": volume,
                 "amount": amount, "commission": fee, "rule_type": rule_type,
                 "position_after": int(new_positions[code_6]["volume"]),
                 **({"stock_name": intent_stock_name} if intent_stock_name else {}),
+                **({"leg_key": str(intent.get("leg_key"))} if intent.get("leg_key") else {}),
+                **({"rule_name": str(intent.get("name"))} if intent.get("name") else {}),
             })
         elif rule_type in ("single_sell", "breakthrough_sell", "cage_sell", "best_sell", "scheduled_clear"):
-            pos = new_positions.get(code_6, {"volume": 0, "cost": 0.0})
-            sell_vol = min(volume, pos["volume"])
+            pos = new_positions.get(code_6, {"volume": 0, "cost": 0.0, "available": 0})
+            sell_vol = min(volume, position_available(pos))
             if sell_vol <= 0:
                 continue
             trig_px = float(intent.get("price") or 0)
@@ -2329,23 +2539,272 @@ def simulate_fills(
                 trig = float(intent.get("price") or 0)
                 if trig > 0 and not (float(fill_price) < trig):
                     continue
-            sell_amount = fill_price * sell_vol
+            sold = apply_sell_fill_t1(new_positions, code_6, sell_vol)
+            if sold <= 0:
+                continue
+            sell_amount = fill_price * sold
             fee = sell_amount * commission
             new_cash += sell_amount - fee
-            new_positions[code_6]["volume"] = pos["volume"] - sell_vol
-            if new_positions[code_6]["volume"] <= 0:
-                del new_positions[code_6]
-                position_after = 0
-            else:
-                position_after = int(new_positions[code_6]["volume"])
+            position_after = int((new_positions.get(code_6) or {}).get("volume") or 0)
             trades.append({
-                "code": code_6, "side": "sell", "price": fill_price, "volume": sell_vol,
+                "code": code_6, "side": "sell", "price": fill_price, "volume": sold,
                 "amount": sell_amount, "commission": fee, "rule_type": rule_type,
                 "position_after": position_after,
                 **({"stock_name": intent_stock_name} if intent_stock_name else {}),
+                **({"leg_key": str(intent.get("leg_key"))} if intent.get("leg_key") else {}),
+                **({"rule_name": str(intent.get("name"))} if intent.get("name") else {}),
             })
 
     return trades, new_cash, new_positions
+
+
+def _same_day_ohlc_sell_kind(intent: Dict[str, Any]) -> str:
+    """日线同日卖出分类（勿用「涨停」子串，以免误伤「近10日涨停价半仓」）。"""
+    rt = (intent.get("rule_type") or "").strip()
+    name = str(intent.get("name") or "")
+    leg = str(intent.get("leg_key") or "")
+    force = bool(intent.get("scheduled_clear_force")) or bool(
+        intent.get("scheduled_clear_on_hold_day")
+    )
+    if rt == "scheduled_clear":
+        return "force" if force else "ma20_1455"
+    if rt != "single_sell":
+        return "other"
+    if "涨停即清仓" in name:
+        return "limit_up_clear"
+    if "OPEN50" in leg or "开盘涨幅" in name:
+        return "open50"
+    if "LU10" in leg or "近10日涨停价" in name:
+        return "lu10"
+    return "single_up"
+
+
+def _same_day_ohlc_sell_rank(intent: Dict[str, Any]) -> Tuple[int, float]:
+    """同日卖出顺序（对齐上涨路径 open→high，尾盘再清仓）：
+
+    1. 盘中向上单点（OPEN50 / LU10 / 其它触价卖）：按触发价升序
+    2. 涨停即清仓（通常触发价最高）
+    3. 1455 破 MA20
+    4. 第 N 日强清
+    """
+    kind = _same_day_ohlc_sell_kind(intent)
+    px = float(intent.get("price") or intent.get("trigger_price") or 0)
+    if kind in ("open50", "lu10", "single_up"):
+        # 触发价升序：先碰到较低的半仓腿
+        return (0, px if px > 0 else 0.0)
+    if kind == "limit_up_clear":
+        return (1, px if px > 0 else 1e18)
+    if kind == "ma20_1455":
+        return (2, 0.0)
+    if kind == "force":
+        return (3, 0.0)
+    return (0, px if px > 0 else 0.0)
+
+
+def simulate_fills_same_day_ohlc(
+    intents: List[Dict[str, Any]],
+    ohlc_by_code: Dict[str, Dict[str, float]],
+    fill_day: date,
+    cash: float,
+    positions: Dict[str, Dict[str, Any]],
+    commission: float = 0.0003,
+) -> tuple[List[Dict[str, Any]], float, Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    同日日线撮合（对齐单点买/卖 + scheduled_clear）：
+    - single_buy：low <= 触发价 → 成交价 min(open, 触发价)
+    - single_sell：high >= 触发价 → 成交价 max(open, 触发价)
+      同日多腿：按触发价升序（OPEN→LU→涨停清仓），再处理 1455/强清
+    - scheduled_clear 条件清仓（1455 破线）：close < 触发价 → 成交价 close
+    - scheduled_clear 强清：到持仓日 → 成交价 close
+    弹性/笼子/突破等非单点规则本路径不撮合（保留在 remaining）。
+    """
+    trades: List[Dict[str, Any]] = []
+    new_cash = cash
+    new_positions = {k: dict(v) for k, v in positions.items()}
+    remaining: List[Dict[str, Any]] = []
+    day_s = fill_day.strftime("%Y-%m-%d") if fill_day else ""
+
+    buy_types = ("single_buy",)
+    sell_types = ("single_sell", "scheduled_clear")
+
+    buys: List[Dict[str, Any]] = []
+    sells: List[Dict[str, Any]] = []
+    for intent in intents or []:
+        rt = (intent.get("rule_type") or "").strip()
+        if rt in buy_types:
+            buys.append(intent)
+        elif rt in sell_types:
+            sells.append(intent)
+        else:
+            remaining.append(intent)
+
+    def _bar(code_6: str) -> Optional[Dict[str, float]]:
+        b = ohlc_by_code.get(code_6) or {}
+        if not isinstance(b, dict):
+            return None
+        try:
+            o = float(b.get("open") or 0)
+            h = float(b.get("high") or 0)
+            low_v = float(b.get("low") or 0)
+            cl = float(b.get("close") or 0)
+        except (TypeError, ValueError):
+            return None
+        if cl <= 0 and o <= 0:
+            return None
+        if o <= 0:
+            o = cl
+        if cl <= 0:
+            cl = o
+        if h <= 0:
+            h = max(o, cl)
+        if low_v <= 0:
+            low_v = min(o, cl)
+        return {"open": o, "high": h, "low": low_v, "close": cl}
+
+    for intent in buys:
+        code_6 = _code6(intent.get("stock_code") or "")
+        volume = int(intent.get("volume") or 0)
+        if not code_6 or volume <= 0:
+            continue
+        bar = _bar(code_6)
+        if not bar:
+            remaining.append(intent)
+            continue
+        trig = float(intent.get("price") or 0)
+        if trig <= 0:
+            remaining.append(intent)
+            continue
+        if float(bar["low"]) - 1e-9 > trig:
+            remaining.append(intent)
+            continue
+        fill_px = min(float(bar["open"]), trig)
+        if fill_px <= 0:
+            remaining.append(intent)
+            continue
+        try:
+            precision = SecurityTypeUtil.get_price_precision(code_6)
+            fill_px = round(fill_px, precision)
+        except Exception:
+            fill_px = round(fill_px, 2)
+        amount = fill_px * volume
+        fee = amount * commission
+        if amount + fee > new_cash:
+            remaining.append(intent)
+            continue
+        new_cash -= amount + fee
+        apply_buy_fill_t1(new_positions, code_6, volume, fill_px)
+        intent_stock_name = (intent.get("stock_name") or "").strip()
+        trigger_info = (
+            f"日线单点买入: low={bar['low']:.2f}<=触发价={trig:.2f} "
+            f"成交={fill_px:.2f}(=min(open={bar['open']:.2f},触发价))"
+        )
+        trades.append({
+            "code": code_6,
+            "side": "buy",
+            "price": fill_px,
+            "volume": volume,
+            "amount": amount,
+            "commission": fee,
+            "rule_type": "single_buy",
+            "position_after": int(new_positions[code_6]["volume"]),
+            "date": day_s,
+            # 开盘已在线下→按开盘；盘中触线→记 10:00（日线无精确时点）
+            "time": (
+                "09:30:00"
+                if abs(fill_px - float(bar["open"])) <= 1e-9
+                else "10:00:00"
+            ),
+            "trigger_info": trigger_info,
+            **({"stock_name": intent_stock_name} if intent_stock_name else {}),
+            **({"leg_key": str(intent.get("leg_key"))} if intent.get("leg_key") else {}),
+            **({"rule_name": str(intent.get("name"))} if intent.get("name") else {}),
+        })
+
+    sells_sorted = sorted(sells, key=_same_day_ohlc_sell_rank)
+    for intent in sells_sorted:
+        code_6 = _code6(intent.get("stock_code") or "")
+        volume = int(intent.get("volume") or 0)
+        rt = (intent.get("rule_type") or "").strip()
+        if not code_6 or volume <= 0:
+            continue
+        bar = _bar(code_6)
+        if not bar:
+            remaining.append(intent)
+            continue
+        pos = new_positions.get(code_6, {"volume": 0, "cost": 0.0, "available": 0})
+        sell_vol = min(volume, position_available(pos))
+        if sell_vol <= 0:
+            remaining.append(intent)
+            continue
+        trig = float(intent.get("price") or 0)
+        force = bool(intent.get("scheduled_clear_force")) or bool(
+            intent.get("scheduled_clear_on_hold_day")
+        )
+        fill_px = 0.0
+        trigger_info = ""
+        if rt == "single_sell":
+            if trig <= 0 or float(bar["high"]) + 1e-9 < trig:
+                remaining.append(intent)
+                continue
+            fill_px = max(float(bar["open"]), trig)
+            trigger_info = (
+                f"日线单点卖出: high={bar['high']:.2f}>=触发价={trig:.2f} "
+                f"成交={fill_px:.2f}(=max(open={bar['open']:.2f},触发价))"
+            )
+        elif rt == "scheduled_clear":
+            if force:
+                fill_px = float(bar["close"])
+                trigger_info = f"日线定时强清: 收盘价={fill_px:.2f}"
+            else:
+                if trig <= 0:
+                    remaining.append(intent)
+                    continue
+                # 1455 破线 ≈ 收盘跌破触发价
+                if float(bar["close"]) + 1e-9 >= trig:
+                    # 当日放弃（与 tick：价>=触发价则不卖）一致
+                    continue
+                fill_px = float(bar["close"])
+                trigger_info = (
+                    f"日线定时清仓(收盘破线): close={fill_px:.2f}<触发价={trig:.2f}"
+                )
+        else:
+            remaining.append(intent)
+            continue
+        if fill_px <= 0:
+            remaining.append(intent)
+            continue
+        try:
+            precision = SecurityTypeUtil.get_price_precision(code_6)
+            fill_px = round(fill_px, precision)
+        except Exception:
+            fill_px = round(fill_px, 2)
+        sold = apply_sell_fill_t1(new_positions, code_6, sell_vol)
+        if sold <= 0:
+            remaining.append(intent)
+            continue
+        sell_amount = fill_px * sold
+        fee = sell_amount * commission
+        new_cash += sell_amount - fee
+        position_after = int((new_positions.get(code_6) or {}).get("volume") or 0)
+        intent_stock_name = (intent.get("stock_name") or "").strip()
+        trades.append({
+            "code": code_6,
+            "side": "sell",
+            "price": fill_px,
+            "volume": sold,
+            "amount": sell_amount,
+            "commission": fee,
+            "rule_type": rt,
+            "position_after": position_after,
+            "date": day_s,
+            "time": "15:00:00" if rt == "scheduled_clear" else "09:30:00",
+            "trigger_info": trigger_info,
+            **({"stock_name": intent_stock_name} if intent_stock_name else {}),
+            **({"leg_key": str(intent.get("leg_key"))} if intent.get("leg_key") else {}),
+            **({"rule_name": str(intent.get("name"))} if intent.get("name") else {}),
+        })
+
+    return trades, new_cash, new_positions, remaining
 
 
 def next_day_open_prices(

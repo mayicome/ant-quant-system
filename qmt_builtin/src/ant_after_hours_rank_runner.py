@@ -220,6 +220,8 @@ def _load_universe(xtdata, limit: int = 0, ContextInfo=None) -> List[str]:
         "\u6caa\u6df1A\u80a1",  # 沪深A股
         "\u4e0a\u8bc1A\u80a1",  # 上证A股
         "\u6df1\u8bc1A\u80a1",  # 深证A股
+        "\u4eac\u5e02A\u80a1",  # 京市A股
+        "\u6caa\u6df1\u4eacA\u80a1",  # 沪深京A股
     )
     owners = []  # type: List[Tuple[str, Any]]
     if ContextInfo is not None:

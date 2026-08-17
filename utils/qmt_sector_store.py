@@ -31,11 +31,14 @@ EXCLUDE_SUBSTR = (
 MARKET_SECTOR_EXACT = frozenset(
     {
         "沪深A股",
+        "沪深京A股",
         "沪深B股",
         "上证A股",
         "上证B股",
         "深证A股",
         "深证B股",
+        "京市A股",
+        "北交所",
         "创业板",
         "科创板",
         "上期所",
@@ -49,6 +52,13 @@ MARKET_SECTOR_EXACT = frozenset(
 )
 
 _UNIVERSE_SECTOR = "沪深A股"
+_UNIVERSE_SECTORS = (
+    "沪深A股",
+    "上证A股",
+    "深证A股",
+    "京市A股",
+    "沪深京A股",
+)
 # 虚拟板块：不在任何 SW/GN 等 UI 板块成分中的 A 股（展示名；旧名「未归属板块」仍识别）
 UNCLASSIFIED_SECTOR = "不属于任何板块的股票"
 _UNCLASSIFIED_ALIASES = frozenset(
@@ -210,14 +220,26 @@ class QmtSectorStore:
                 return self._universe
 
         try:
-            raw = self.xtdata().get_stock_list_in_sector(_UNIVERSE_SECTOR) or []
+            raw = []
+            seen_raw = set()
+            for sec in _UNIVERSE_SECTORS:
+                try:
+                    part = self.xtdata().get_stock_list_in_sector(sec) or []
+                except Exception as e:
+                    logger.error("get_stock_list_in_sector(%s) 失败: %s", sec, e)
+                    part = []
+                for c in part:
+                    key = str(c or "").strip()
+                    if key and key not in seen_raw:
+                        seen_raw.add(key)
+                        raw.append(key)
         except Exception as e:
-            logger.error("get_stock_list_in_sector(%s) 失败: %s", _UNIVERSE_SECTOR, e)
+            logger.error("get_stock_list_in_sector(universe) 失败: %s", e)
             raw = []
         uni = {code_to_6(c) for c in raw if code_to_6(c)}
         if uni:
             self._universe = uni
-            logger.info("沪深A股 universe: %d", len(self._universe))
+            logger.info("沪深京A股 universe: %d", len(self._universe))
             return self._universe
 
         uni = self._universe_from_file()

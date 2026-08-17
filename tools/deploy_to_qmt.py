@@ -27,6 +27,8 @@ MODULE_FILES = (
     "ant_server_chan.py",
     "ant_account_snapshot.py",
     "ant_passorder.py",
+    "ant_position_entry_dates.py",
+    "ant_filled_legs.py",
     "ant_cancel_request.py",
 )
 # 不复制 rules_io.py 等兼容层；仅主程序仓库内使用

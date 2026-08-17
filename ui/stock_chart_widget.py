@@ -3434,6 +3434,27 @@ class StockChartWidget(QWidget):
                 )
             except Exception:
                 pass
+            try:
+                from utils.position_entry_dates import note_fill_from_order
+
+                note_fill_from_order(
+                    stock_code=getattr(self, "stock_code", "") or "",
+                    rule=rule,
+                    order_rec=order_rec,
+                    skip_reason="",
+                )
+            except Exception:
+                pass
+            try:
+                from utils.filled_legs import note_from_rule_fill
+
+                note_from_rule_fill(
+                    stock_code=getattr(self, "stock_code", "") or "",
+                    rule=rule,
+                    order_rec=order_rec,
+                )
+            except Exception:
+                pass
             self._save_rules()
             self.update_chart()
             if self.logger:
@@ -3482,6 +3503,30 @@ class StockChartWidget(QWidget):
         ep = str(order_rec.get("executed_endpoint") or "").strip()
         if ep in ("low", "high"):
             rule["executed_endpoint"] = ep
+
+        # 实盘建仓日：首次买入成交写入；卖出后无仓则清除
+        try:
+            from utils.position_entry_dates import note_fill_from_order
+
+            note_fill_from_order(
+                stock_code=getattr(self, "stock_code", "") or "",
+                rule=rule,
+                order_rec=order_rec,
+                skip_reason=str(skip_reason or ""),
+            )
+        except Exception:
+            pass
+        if not skip_reason:
+            try:
+                from utils.filled_legs import note_from_rule_fill
+
+                note_from_rule_fill(
+                    stock_code=getattr(self, "stock_code", "") or "",
+                    rule=rule,
+                    order_rec=order_rec,
+                )
+            except Exception:
+                pass
 
         trade_info = {
             "type": "buy" if "buy" in rtype else "sell",

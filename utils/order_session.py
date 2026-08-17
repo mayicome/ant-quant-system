@@ -82,24 +82,33 @@ def is_current_session_order(
     order_at: Any = None,
     updated_at: Any = None,
     now: Optional[datetime] = None,
+    allow_undated: bool = True,
+    use_updated_at: bool = False,
 ) -> bool:
     """
     是否属于当前应展示的委托。
 
     规则：
     - 能解析出日期：须为「今日」；或「上一交易日 15:00 后」（夜市挂单窗口）
-    - 解析不出日期（仅 HH:MM:SS）：放行（通常来自当日 query，日期已被剥掉）
+    - 解析不出日期（仅 HH:MM:SS）：
+      - allow_undated=True：放行（MiniQMT 当日 query 常见只剩时分秒）
+      - allow_undated=False：丢弃（大 QMT 柜台快照可能含多日，无日期不可信）
+    - updated_at 默认不参与判断（多为快照刷新时间，不是委托日）
     """
     now = now or datetime.now()
     today = now.date()
 
+    candidates = [order_at, at, order_time]
+    if use_updated_at:
+        candidates.append(updated_at)
+
     dt = None
-    for raw in (order_at, at, order_time, updated_at):
+    for raw in candidates:
         dt = parse_order_datetime(raw)
         if dt is not None:
             break
     if dt is None:
-        return True
+        return bool(allow_undated)
 
     d = dt.date()
     if d == today:
@@ -129,8 +138,11 @@ def is_current_session_order(
     return False
 
 
-def filter_order_records(records):
-    """过滤 list[dict] 订单记录，保留当前会话。"""
+def filter_order_records(records, *, allow_undated: bool = False):
+    """过滤 list[dict] 订单记录，保留当前会话。
+
+    默认 allow_undated=False：柜台/本地快照应带完整日期；无日期视为跨日残留。
+    """
     out = []
     for rec in records or []:
         if not isinstance(rec, dict):
@@ -139,7 +151,8 @@ def filter_order_records(records):
             order_time=rec.get("order_time"),
             at=rec.get("at"),
             order_at=rec.get("order_at"),
-            updated_at=rec.get("updated_at"),
+            allow_undated=allow_undated,
+            use_updated_at=False,
         ):
             out.append(rec)
     return out

@@ -545,11 +545,39 @@ def _tick_time_lag_sec(tick_hhmmss: Any, now: Optional[datetime] = None) -> Opti
 
 
 def _in_quote_watch_window(now: Optional[datetime] = None) -> bool:
+    """连续竞价时段才盯行情推送；开盘/午后开盘后约 90 秒宽限。
+
+    午休 11:30–13:00 无推送是正常的。若 13:00 整点立刻用「距上次推送」判滞后，
+    会把午休 90 分钟当成故障闪一下告警（已解除），故与 builtin_price_feed 对齐做宽限。
+    """
     now = now or datetime.now()
     t = now.time()
-    return (dt_time(9, 30) <= t <= dt_time(11, 30)) or (
-        dt_time(13, 0) <= t <= dt_time(15, 0)
-    )
+    in_morning = dt_time(9, 30) <= t <= dt_time(11, 30)
+    in_afternoon = dt_time(13, 0) <= t <= dt_time(15, 0)
+    if not (in_morning or in_afternoon):
+        return False
+    # 9:30 / 13:00 开段后约 90 秒：订阅与首笔推送尚未到达属正常
+    if dt_time(9, 30) <= t < dt_time(9, 31, 30):
+        return False
+    if dt_time(13, 0) <= t < dt_time(13, 1, 30):
+        return False
+    return True
+
+
+def _quote_recv_lag_sec(recv_dt: datetime, now: Optional[datetime] = None) -> float:
+    """推送滞后秒数；跨过午休时扣掉 11:30–13:00，避免把休市算进故障时长。"""
+    now = now or datetime.now()
+    age = max(0.0, (now - recv_dt).total_seconds())
+    if now.date() != recv_dt.date():
+        return age
+    lunch_start = datetime.combine(now.date(), dt_time(11, 30))
+    lunch_end = datetime.combine(now.date(), dt_time(13, 0))
+    lunch_sec = (lunch_end - lunch_start).total_seconds()
+    if recv_dt <= lunch_start and now >= lunch_end:
+        age = max(0.0, age - lunch_sec)
+    elif lunch_start < recv_dt < lunch_end and now >= lunch_end:
+        age = max(0.0, (now - lunch_end).total_seconds())
+    return age
 
 
 def _fmt_bytes(n: Optional[int]) -> str:
@@ -640,7 +668,7 @@ def _collect_results() -> Dict[str, Any]:
                 else:
                     dt = None
                 if dt is not None:
-                    recv_age = max(0.0, (now - dt).total_seconds())
+                    recv_age = _quote_recv_lag_sec(dt, now)
             except Exception:
                 recv_age = None
         if recv_age is not None and recv_age >= float(QUOTE_LAG_ALERT_SEC):

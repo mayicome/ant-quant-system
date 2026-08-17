@@ -60,6 +60,18 @@ def _rule_executed(rule: Dict[str, Any]) -> bool:
     return bool(reason)
 
 
+def _rule_meta(task_id: str, rule: Dict[str, Any]) -> Dict[str, Any]:
+    """武装任务 metadata：规则名 + 可选腿键（供成交后写 filled_legs）。"""
+    meta: Dict[str, Any] = {
+        "parent_task_id": task_id,
+        "rule_name": str(rule.get("name") or ""),
+    }
+    lk = str(rule.get("leg_key") or "").strip()
+    if lk:
+        meta["leg_key"] = lk
+    return meta
+
+
 def _rule_early_order_enabled(rule: dict, global_default: bool) -> bool:
     """规则级提前下单快照；缺字段时用全局默认（兼容旧规则）。"""
     if isinstance(rule, dict) and "early_order_enabled" in rule:
@@ -205,10 +217,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "trigger_price": trigger,
                             "enabled": True,
                             "max_volume": volume,
-                            "metadata": {
-                                "parent_task_id": task_id,
-                                "rule_name": str(rule.get("name") or ""),
-                            },
+                            "metadata": _rule_meta(task_id, rule),
                         }
                     )
                 )
@@ -249,10 +258,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "scheduled_clear_effective_date": eff,
                             "enabled": True,
                             "max_volume": volume,
-                            "metadata": {
-                                "parent_task_id": task_id,
-                                "rule_name": str(rule.get("name") or ""),
-                            },
+                            "metadata": _rule_meta(task_id, rule),
                         }
                     )
                 )
@@ -300,10 +306,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "enabled": True,
                             "max_volume": vol_pg,
                             "early_order_enabled": eo,
-                            "metadata": {
-                                "parent_task_id": task_id,
-                                "rule_name": str(rule.get("name") or ""),
-                            },
+                            "metadata": _rule_meta(task_id, rule),
                         }
                     )
                 )
@@ -336,10 +339,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "trigger_price": price_low,
                             "enabled": not _rule_executed(rule),
                             "max_volume": volume,
-                            "metadata": {
-                                "parent_task_id": task_id,
-                                "rule_name": str(rule.get("name") or ""),
-                            },
+                            "metadata": _rule_meta(task_id, rule),
                         }
                     )
                 )
@@ -363,10 +363,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                     "enabled": not _rule_executed(rule),
                     "max_volume": volume,
                     "early_order_enabled": eo,
-                    "metadata": {
-                        "parent_task_id": task_id,
-                        "rule_name": str(rule.get("name") or ""),
-                    },
+                    "metadata": _rule_meta(task_id, rule),
                 }
                 if rule.get("wait_unseal"):
                     armed_row["wait_unseal"] = True
@@ -400,10 +397,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "enabled": not _rule_executed(rule),
                             "max_volume": volume,
                             "early_order_enabled": eo,
-                            "metadata": {
-                                "parent_task_id": task_id,
-                                "rule_name": str(rule.get("name") or ""),
-                            },
+                            "metadata": _rule_meta(task_id, rule),
                         }
                     )
                 )
@@ -427,10 +421,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "dynamic_thresholds": rule.get("dynamic_thresholds"),
                             "enabled": not _rule_executed(rule),
                             "max_volume": volume,
-                            "metadata": {
-                                "parent_task_id": task_id,
-                                "rule_name": str(rule.get("name") or ""),
-                            },
+                            "metadata": _rule_meta(task_id, rule),
                         }
                     )
                 )
@@ -454,10 +445,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "dynamic_thresholds": rule.get("dynamic_thresholds"),
                             "enabled": not _rule_executed(rule),
                             "max_volume": volume,
-                            "metadata": {
-                                "parent_task_id": task_id,
-                                "rule_name": str(rule.get("name") or ""),
-                            },
+                            "metadata": _rule_meta(task_id, rule),
                         }
                     )
                 )
@@ -476,10 +464,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "break_above_trigger_done": False,
                             "enabled": not _rule_executed(rule),
                             "max_volume": volume,
-                            "metadata": {
-                                "parent_task_id": task_id,
-                                "rule_name": str(rule.get("name") or ""),
-                            },
+                            "metadata": _rule_meta(task_id, rule),
                         }
                     )
                 )
@@ -514,10 +499,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                         if rule.get("band_accept_low") is not None
                         else rule.get("accept_band_low"),
                         "max_volume": volume,
-                        "metadata": {
-                            "parent_task_id": task_id,
-                            "rule_name": str(rule.get("name") or ""),
-                        },
+                        "metadata": _rule_meta(task_id, rule),
                     }
                 )
             )

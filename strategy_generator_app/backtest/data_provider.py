@@ -146,6 +146,13 @@ def _find_high_column(data: Any) -> Optional[str]:
     return None
 
 
+def _find_low_column(data: Any) -> Optional[str]:
+    for name in ("low", "最低价", "Low", "LOW"):
+        if name in getattr(data, "columns", []):
+            return name
+    return None
+
+
 def _prior_n_trading_day_high(
     highs: Any,
     n: int = 4,
@@ -636,6 +643,78 @@ def get_historical_prices_for_morning(
     return result
 
 
+def get_daily_ohlc_for_codes(
+    stock_codes_6: List[str],
+    as_of_date: date,
+) -> Dict[str, Dict[str, float]]:
+    """同日日线撮合用：返回 {code6: {open, high, low, close}}；缺 K 线则跳过该代码。"""
+    out: Dict[str, Dict[str, float]] = {}
+    if not stock_codes_6:
+        return out
+    seen = set()
+    codes: List[str] = []
+    for c in stock_codes_6:
+        c6 = _norm_code6(c)
+        if not c6 or c6 in seen:
+            continue
+        seen.add(c6)
+        codes.append(c6)
+    for code_6 in codes:
+        df, _src = _load_daily_df(code_6, as_of_date)
+        if df is None or (hasattr(df, "empty") and df.empty):
+            continue
+        df = _sort_daily_df(df)
+        try:
+            if "date" in getattr(df, "columns", []):
+                row_df = df[df["date"] == as_of_date]
+                if row_df is None or row_df.empty:
+                    continue
+                row = row_df.iloc[-1]
+            else:
+                row = df.iloc[-1]
+        except Exception:
+            continue
+        open_col = _find_open_column(df)
+        high_col = _find_high_column(df)
+        low_col = _find_low_column(df)
+        close_col = _find_close_column(df)
+        if not close_col:
+            continue
+        try:
+            import pandas as pd
+
+            def _f(col: Optional[str]) -> float:
+                if not col:
+                    return 0.0
+                v = row[col] if col in row.index else None
+                if v is None or (hasattr(pd, "isna") and pd.isna(v)):
+                    return 0.0
+                f = float(v)
+                return f if f > 0 and not math.isnan(f) else 0.0
+
+            o = _f(open_col)
+            h = _f(high_col)
+            low_v = _f(low_col)
+            cl = _f(close_col)
+            if cl <= 0:
+                continue
+            if o <= 0:
+                o = cl
+            if h <= 0:
+                h = max(o, cl)
+            if low_v <= 0:
+                low_v = min(o, cl)
+            out[code_6] = {
+                "open": float(o),
+                "high": float(h),
+                "low": float(low_v),
+                "close": float(cl),
+            }
+        except Exception:
+            continue
+    return out
+
+
 def load_tick_data_for_date(
     stock_code_6: str,
     trade_date: date,
@@ -843,12 +922,22 @@ def load_ticks_for_codes(
 def clear_tick_memory_cache(trade_date: Optional[date] = None) -> int:
     """
     释放 tick 进程内内存缓存（按日或全部）。
-    回测应在每个交易日撮合结束后调用，避免跨日囤积。
     """
     fn = _tick_cache_attr("clear_tick_memory_cache")
     if not callable(fn):
         return 0
     try:
         return int(fn(trade_date) or 0)
+    except Exception:
+        return 0
+
+
+def trim_tick_memory_cache(max_entries: Optional[int] = None) -> int:
+    """裁剪 tick LRU 内存缓存。"""
+    fn = _tick_cache_attr("trim_tick_memory_cache")
+    if not callable(fn):
+        return 0
+    try:
+        return int(fn(max_entries) or 0)
     except Exception:
         return 0

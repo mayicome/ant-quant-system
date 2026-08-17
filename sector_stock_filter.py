@@ -690,10 +690,14 @@ def _enabled_rules_ctx_needs(enabled_rules: List[Dict[str, object]]) -> Dict[str
     """根据启用规则代码推断本轮需要哪些 ctx / 东财臂 / Elig 收窄。
 
     选股阶段只加载规则判断所需上下文；净流入展示等在命中后再补。
+
+    规则可写 ``USE_EM_CANDIDATE_POOL = False``：仍注入 ctx['em_board_hot'] 供诊断列，
+    但不把候选收窄到东财热门池（用于全市场盘中/涨停标注类规则）。
     """
     need_inflow = False
     need_hot_theme = False
     need_em = False
+    em_narrow_pool = False
     arms: Set[str] = set()
     elig_bands: List[Tuple[int, int]] = []
     em_top_ns: List[int] = []
@@ -701,13 +705,32 @@ def _enabled_rules_ctx_needs(enabled_rules: List[Dict[str, object]]) -> Dict[str
     em_min_members: List[int] = []
     for r in enabled_rules or []:
         code = str(r.get("code") or "")
-        if "inflow_rank" in code:
+        code_compact = re.sub(r"\s+", "", code)
+        # 仅匹配 ctx 键，避免误伤 utils.main_force_inflow_rank 等模块名
+        if re.search(
+            r"""(?:ctx\s*(?:\[|\.get\s*\()\s*['"]inflow_rank['"])"""
+            r"""|(?:['"]inflow_rank['"]\s*\])""",
+            code,
+        ):
             need_inflow = True
-        if "hot_theme" in code:
+        if re.search(
+            r"""(?:ctx\s*(?:\[|\.get\s*\()\s*['"]hot_theme['"])"""
+            r"""|(?:['"]hot_theme['"]\s*\])""",
+            code,
+        ):
             need_hot_theme = True
-        if "em_board_hot" not in code:
-            continue
+        if not re.search(
+            r"""(?:ctx\s*(?:\[|\.get\s*\()\s*['"]em_board_hot['"])"""
+            r"""|(?:['"]em_board_hot['"]\s*\])""",
+            code,
+        ):
+            # 兼容旧写法：裸字符串 em_board_hot（非模块路径）
+            if "em_board_hot" not in code:
+                continue
         need_em = True
+        # 默认：引用东财热门即按热门池收窄；显式关闭则仅加载不收窄
+        if "USE_EM_CANDIDATE_POOL=False" not in code_compact:
+            em_narrow_pool = True
         if (
             "today_pool_codes" in code
             or "today_code_hits" in code
@@ -756,6 +779,7 @@ def _enabled_rules_ctx_needs(enabled_rules: List[Dict[str, object]]) -> Dict[str
         "inflow": need_inflow,
         "hot_theme": need_hot_theme,
         "em": need_em,
+        "em_narrow_pool": bool(em_narrow_pool),
         "em_arms": arms,
         "elig_bands": elig_bands,
         "em_top_n": max(em_top_ns) if em_top_ns else 50,
@@ -2256,7 +2280,34 @@ class SectorStockFilterThread(QThread):
     def run(self):
         """运行筛选（单日或区间内每个交易日；区间内每只股票只下载一次日线）"""
         rule_counts: Dict[str, int] = {}
-        
+        run_t0 = time.perf_counter()
+        run_started_at = datetime.now()
+        timing_emitted = False
+
+        def _emit_run_timing(*, stopped: bool = False) -> None:
+            nonlocal timing_emitted
+            if timing_emitted:
+                return
+            timing_emitted = True
+            ended_at = datetime.now()
+            elapsed = max(0.0, time.perf_counter() - run_t0)
+            if elapsed < 60.0:
+                cost = f"{elapsed:.1f}秒"
+            elif elapsed < 3600.0:
+                m = int(elapsed // 60)
+                s = elapsed - m * 60
+                cost = f"{m}分{s:.1f}秒"
+            else:
+                h = int(elapsed // 3600)
+                m = int((elapsed % 3600) // 60)
+                s = elapsed - h * 3600 - m * 60
+                cost = f"{h}小时{m}分{s:.1f}秒"
+            tag = "已停止" if stopped else "结束"
+            self.debug_info.emit(
+                f"选股{tag}：开始 {run_started_at.strftime('%Y-%m-%d %H:%M:%S')}，"
+                f"结束 {ended_at.strftime('%Y-%m-%d %H:%M:%S')}，用时 {cost}"
+            )
+
         try:
             self._diag_snippets: List[str] = []
             # 大批量筛选时，日志/进度信号可能海量触发，导致 Qt 主线程事件队列堆积“卡住”
@@ -2274,14 +2325,25 @@ class SectorStockFilterThread(QThread):
             # 检查输入参数
             if not self.stock_list:
                 self.error_occurred.emit("股票列表为空，无法筛选")
+                _emit_run_timing()
                 self.finished.emit(rule_counts)
                 return
             
             enabled_rules = [r for r in (self.rules or []) if bool(r.get("enabled", True))]
             if not enabled_rules:
                 self.error_occurred.emit("未启用任何选股规则")
+                _emit_run_timing()
                 self.finished.emit(rule_counts)
                 return
+
+            rule_label = "、".join(
+                str(r.get("name") or "未命名") for r in enabled_rules[:5]
+            )
+            if len(enabled_rules) > 5:
+                rule_label += f" 等{len(enabled_rules)}条"
+            self.debug_info.emit(
+                f"选股开始：{run_started_at.strftime('%Y-%m-%d %H:%M:%S')}（{rule_label}）"
+            )
 
             compiled_rules: Dict[str, object] = {}
             for r in enabled_rules:
@@ -2305,12 +2367,14 @@ class SectorStockFilterThread(QThread):
             else:
                 if _as is None:
                     self.error_occurred.emit("批量区间选股时，起始日不能为「今天」未指定状态，请选具体起始日期")
+                    _emit_run_timing()
                     self.finished.emit(rule_counts)
                     return
                 lo, hi = (_as, _as_end) if _as <= _as_end else (_as_end, _as)
                 screen_as_of_list = get_trading_dates_in_range_sorted(lo, hi)
                 if not screen_as_of_list:
                     self.error_occurred.emit("所选区间内没有交易日，请调整起止日期")
+                    _emit_run_timing()
                     self.finished.emit(rule_counts)
                     return
                 fetch_through = hi
@@ -2335,6 +2399,7 @@ class SectorStockFilterThread(QThread):
                         f"无法获取足够的交易日（{dlabel}，需要至少{_calendar_need}个交易日；"
                         f"请检查各规则代码顶部的 N / N_MODE3 是否过大）"
                     )
+                    _emit_run_timing()
                     self.finished.emit(rule_counts)
                     return
 
@@ -2373,6 +2438,7 @@ class SectorStockFilterThread(QThread):
             need_inflow = bool(ctx_needs.get("inflow"))
             need_hot_theme = bool(ctx_needs.get("hot_theme"))
             need_em = bool(ctx_needs.get("em"))
+            em_narrow_pool = bool(ctx_needs.get("em_narrow_pool"))
             em_arms: Set[str] = set(ctx_needs.get("em_arms") or [])
             elig_bands: List[Tuple[int, int]] = list(ctx_needs.get("elig_bands") or [])
             em_top_n = int(ctx_needs.get("em_top_n") or 50)
@@ -2383,15 +2449,28 @@ class SectorStockFilterThread(QThread):
                 "上下文按需加载："
                 + f"净流入={'是' if need_inflow else '否(选后补)'}"
                 + f" 热门题材={'是' if need_hot_theme else '否'}"
-                + f" 东财热门={'是(' + ','.join(sorted(em_arms)) + ')' if need_em else '否'}"
+                + (
+                    (
+                        " 东财热门=诊断列("
+                        + ",".join(sorted(em_arms))
+                        + ";不收窄"
+                        + ")"
+                    )
+                    if need_em and not em_narrow_pool
+                    else (
+                        " 东财热门=是(" + ",".join(sorted(em_arms)) + ")"
+                        if need_em
+                        else " 东财热门=否"
+                    )
+                )
                 + (
                     f" TopN={em_top_n} RS_K={em_rs_top_k} 成分≥{em_min_members}"
-                    if need_em
+                    if need_em and em_narrow_pool
                     else ""
                 )
                 + (
                     f" Elig收窄={elig_bands}"
-                    if elig_bands
+                    if elig_bands and em_narrow_pool
                     else ""
                 )
             )
@@ -2510,7 +2589,14 @@ class SectorStockFilterThread(QThread):
                     hot_theme_cache[key] = {}
 
                 if need_em:
-                    if load_em_board_hot_map is None:
+                    # 「今天」盘中本就没有完整收盘榜；规则又声明不收窄热门池时，
+                    # 连续热门只是诊断列 → 不加载、也不报「不可用」吓人。
+                    is_live_today = (
+                        as_of_d is None or as_of_d == date.today()
+                    )
+                    if (not em_narrow_pool) and is_live_today:
+                        em_board_hot_cache[key] = {}
+                    elif load_em_board_hot_map is None:
                         em_board_hot_cache[key] = {}
                     else:
                         try:
@@ -2524,7 +2610,10 @@ class SectorStockFilterThread(QThread):
                             )
                         except Exception as e:
                             emh = {"error": str(e), "pool_codes": set(), "code_hits": {}}
-                            self.debug_info.emit(f"加载东财连续热门失败 {key}: {e}")
+                            if em_narrow_pool:
+                                self.debug_info.emit(
+                                    f"加载东财连续热门失败 {key}: {e}"
+                                )
                         em_board_hot_cache[key] = emh if isinstance(emh, dict) else {}
                         em_err = str((emh or {}).get("error") or "").strip()
                         pool_n = len((emh or {}).get("pool_codes") or [])
@@ -2538,15 +2627,20 @@ class SectorStockFilterThread(QThread):
                         today_con_n = len((emh or {}).get("today_concepts") or [])
                         mv_n = len((emh or {}).get("float_mv_yi") or {})
                         prev_ds = str((emh or {}).get("prev_date") or "")
-                        em_day_cands = _em_candidate_codes6(
-                            emh if isinstance(emh, dict) else {},
-                            arms=em_arms,
-                            elig_bands=elig_bands,
-                        )
-                        day_cands |= em_day_cands
+                        if em_narrow_pool:
+                            em_day_cands = _em_candidate_codes6(
+                                emh if isinstance(emh, dict) else {},
+                                arms=em_arms,
+                                elig_bands=elig_bands,
+                            )
+                            day_cands |= em_day_cands
                         if em_err:
-                            self.debug_info.emit(f"选股日 {key} 东财热门不可用：{em_err}")
-                        else:
+                            # 仅当热门池会收窄候选时才报；诊断列缺失不打扰
+                            if em_narrow_pool:
+                                self.debug_info.emit(
+                                    f"选股日 {key} 东财热门不可用：{em_err}"
+                                )
+                        elif em_narrow_pool:
                             arm_txt = ",".join(sorted(em_arms)) if em_arms else "all"
                             parts = [f"臂={arm_txt}"]
                             if "continuous" in em_arms:
@@ -2572,7 +2666,12 @@ class SectorStockFilterThread(QThread):
                 else:
                     em_board_hot_cache[key] = {}
 
-                if need_em or need_hot_theme:
+                # 热门题材仍按题材成员收窄；东财热门默认收窄，规则声明
+                # USE_EM_CANDIDATE_POOL=False 时仅注入 ctx、不收窄底座。
+                narrow_to_day_cands = bool(need_hot_theme) or (
+                    bool(need_em) and bool(em_narrow_pool)
+                )
+                if narrow_to_day_cands:
                     day_stocks: List[str] = []
                     seen_sc: Set[str] = set()
                     for c6 in sorted(day_cands):
@@ -2588,6 +2687,11 @@ class SectorStockFilterThread(QThread):
                         self.debug_info.emit(f"选股日 {key} 候选为空，跳过筛选")
                 else:
                     day_stocks = list(unique_stocks)
+                    if need_em and not em_narrow_pool:
+                        self.debug_info.emit(
+                            f"选股日 {key} 使用全市场底座 {len(day_stocks)} 只"
+                            "（规则关闭东财热门池收窄）"
+                        )
 
                 day_n = len(day_stocks)
                 self.debug_info.emit(
@@ -2663,7 +2767,14 @@ class SectorStockFilterThread(QThread):
                         }
                         try:
                             rule_calls += 1
-                            ok, extra = fn(stock_code, stock_name, sectors, dd, as_of_d, ctx)
+                            # 界面「今天」时 as_of_d 为 None；规则内前N日/均线窗口必须收到具体日期，
+                            # 否则 _as_date(None) 会得到空窗口，误报「无前10日涨幅数据」。
+                            as_of_for_rule = (
+                                as_of_d if as_of_d is not None else date.today()
+                            )
+                            ok, extra = fn(
+                                stock_code, stock_name, sectors, dd, as_of_for_rule, ctx
+                            )
                         except Exception as e:
                             err = str(e)
                             extra = {"_error": err}
@@ -2807,11 +2918,13 @@ class SectorStockFilterThread(QThread):
                 if enabled_rules and not compiled_rules:
                     lines.insert(1, "  • 所有启用规则的代码编译失败，请查看上方「编译失败」提示。")
                 self.debug_info.emit("\n".join(lines))
-            
+
+            _emit_run_timing(stopped=not self.is_running)
             self.finished.emit(rule_counts)
             
         except Exception as e:
             self.error_occurred.emit(f"筛选过程出错: {str(e)}")
+            _emit_run_timing()
             self.finished.emit(rule_counts)
 
 
@@ -2906,7 +3019,38 @@ class SectorStockFilterDialog(QDialog):
                 adder = InflowAdder()
                 dmap = adder._load_inflow_file(date_ref, base_dir=hist)
                 info = dmap.get(code6) if dmap else None
-                merged["主力净流入"] = (info or {}).get("display", "") if info else ""
+                display = (info or {}).get("display", "") if info else ""
+                if display:
+                    merged["主力净流入"] = display
+                    # 规则侧曾因 cwd/路径写过「无主力净流入CSV」，补全成功后清掉误报备注
+                    remark = str(merged.get("主力净流入备注") or "").strip()
+                    if remark in (
+                        "无主力净流入CSV",
+                        "主力净流入CSV读失败",
+                        "主力净流入表无有效金额",
+                    ) or remark.startswith("加载主力净流入失败"):
+                        merged["主力净流入备注"] = ""
+                    # 同步万元与条件列，避免列表有展示值但条件/备注仍空白或误报
+                    wan_empty = merged.get("主力净流入_万元") in ("", None)
+                    if wan_empty:
+                        yuan = (info or {}).get("value")
+                        if yuan is not None:
+                            try:
+                                wan = float(yuan) / 1e4
+                                merged["主力净流入_万元"] = round(wan, 2)
+                                thr = merged.get("MIN_INFLOW_WAN")
+                                try:
+                                    thr_f = float(thr) if thr not in ("", None) else 3000.0
+                                except (TypeError, ValueError):
+                                    thr_f = 3000.0
+                                if "条件_主力净流入>=3000万" in merged or "条件_主力净流入>=5000万" in merged:
+                                    for ck in list(merged.keys()):
+                                        if str(ck).startswith("条件_主力净流入"):
+                                            merged[ck] = bool(wan >= thr_f)
+                            except (TypeError, ValueError):
+                                pass
+                elif not merged.get("主力净流入"):
+                    merged["主力净流入"] = ""
             except Exception:
                 logger.debug("补全主力净流入失败", exc_info=True)
 

@@ -42,6 +42,9 @@ class BuiltinPricePoller(QObject):
         self._last_account_emit = 0.0
         self._seen_order_keys: set = set()
         self._order_status_seen: dict = {}
+        # 柜台快照偶发漏单时，连续缺席 N 轮才从表删除，避免 6↔4 闪烁
+        self._order_miss_counts: dict = {}
+        self._order_miss_drop_after = 3
         # 大 QMT 健康：行情/账户滞后早发现（不依赖打开 QMT 界面）
         self._health_alert = ""
         self._health_last_log_ts = 0.0
@@ -283,13 +286,39 @@ class BuiltinPricePoller(QObject):
                     break
             recv_age = self._parse_iso_age_sec(quotes_recv, now)
             if recv_age is not None:
-                # 须晚于 QMT full_tick 补种阈值(约18s)，否则补种前先误报
+                # 跨午休扣掉 11:30–13:00；与监控器一致，避免刚开盘把休市当故障
+                try:
+                    from utils.qmt_status_snapshot import _quote_recv_lag_sec
+
+                    recv_dt = now - timedelta(seconds=float(recv_age))
+                    recv_age = _quote_recv_lag_sec(recv_dt, now)
+                except Exception:
+                    pass
+                # 须晚于 QMT full_tick 补种频率(约18s)，否则补种前先误报
                 lag_thr = 25.0 if in_auction else 50.0
                 if recv_age >= lag_thr:
                     quote_alert = "行情推送停约%d秒" % int(recv_age)
                     if in_auction:
                         quote_alert = "集合竞价" + quote_alert
             # 尚无墙钟字段（旧 results / 策略未热更）：不按 timetag 误报
+
+        # 2b) 交易所时间戳粘滞：推送墙钟仍在刷新，但 last_tick_time 全员停住
+        # （状态栏「实时 HH:MM:SS」吃这个字段；旧逻辑故意不看 sticky timetag，导致晚1小时也不报警）
+        tick_time_alert = ""
+        if prices and not in_match_quiet and not in_auction:
+            freshest_lag: Optional[float] = None
+            for snap in (prices or {}).values():
+                if not isinstance(snap, dict):
+                    continue
+                lag = self._tick_time_lag_sec(str(snap.get("last_tick_time") or ""), now)
+                if lag is None:
+                    continue
+                if freshest_lag is None or lag < freshest_lag:
+                    freshest_lag = lag
+            # 连续竞价下，组合内「最新」成交时戳仍落后过久 → 显示滞后且策略事件时间不可信
+            tick_thr = 90.0
+            if freshest_lag is not None and freshest_lag >= tick_thr:
+                tick_time_alert = "行情时间戳停约%d秒" % int(freshest_lag)
 
         # 3) 账户快照停滞（交易连接卡但行情可能还在）
         account_alert = ""
@@ -315,7 +344,7 @@ class BuiltinPricePoller(QObject):
             if in_auction:
                 writer_alert = "集合竞价" + writer_alert
 
-        parts = [p for p in (writer_alert, quote_alert, account_alert) if p]
+        parts = [p for p in (writer_alert, quote_alert, tick_time_alert, account_alert) if p]
         if not parts:
             self._set_health_alert("")
             return
@@ -336,10 +365,12 @@ class BuiltinPricePoller(QObject):
             open_px = float(snap.get("today_open") or 0)
             hi_px = float(snap.get("today_high") or 0)
             lo_px = float(snap.get("today_low") or 0)
+            last_close = float(snap.get("last_close") or 0)
             intraday = {
                 "open": open_px,
                 "high": hi_px,
                 "low": lo_px,
+                "last_close": last_close,
             }
 
             prev = self._last_prices.get(stock_code)
@@ -347,7 +378,7 @@ class BuiltinPricePoller(QObject):
             prev_id = self._last_intraday.get(stock_code) or {}
             intraday_changed = any(
                 abs(float(prev_id.get(k) or 0) - float(intraday.get(k) or 0)) > 1e-9
-                for k in ("open", "high", "low")
+                for k in ("open", "high", "low", "last_close")
             )
 
             if price_changed:
@@ -357,6 +388,11 @@ class BuiltinPricePoller(QObject):
                 self._last_intraday[stock_code] = dict(intraday)
 
             tm.latest_prices[stock_code] = price
+            if last_close > 0 and hasattr(tm, "update_pre_close_price"):
+                try:
+                    tm.update_pre_close_price(stock_code, last_close)
+                except Exception:
+                    pass
 
             precision = SecurityTypeUtil.get_price_precision(stock_code)
             format_str = f".{precision}f"
@@ -558,6 +594,7 @@ class BuiltinPricePoller(QObject):
                 self._orders_ui_bootstrapped = True
                 self._orders_ui_session = session_key
                 self._order_status_seen = {}
+                self._order_miss_counts = {}
                 ext = self._resolve_ui_ext()
                 if ext is not None and hasattr(ext, "tableWidget_3") and ext.tableWidget_3:
                     ext.tableWidget_3.setRowCount(0)
@@ -572,6 +609,13 @@ class BuiltinPricePoller(QObject):
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"[builtin_price] 应用订单失败: {e}")
+
+        # 柜台快照过滤后：删掉表中已不在当日会话集合的合同号行（跨日残留）
+        try:
+            self._sweep_stale_broker_order_rows(display)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"[builtin_price] 清理跨日订单行失败: {e}")
 
         # 柜台合同号已入表后，清掉仍残留的 PO「待查」占位行（同一笔）
         try:
@@ -1072,6 +1116,9 @@ class BuiltinPricePoller(QObject):
             "price": px,
             "volume": vol,
             "order_time": order_time,
+            "order_at": str(rec.get("order_at") or rec.get("at") or "").strip(),
+            "at": str(rec.get("at") or rec.get("order_at") or "").strip(),
+            "session_strict": True,
             "reason": strategy_name,
             "order_status": order_status,
             "trade_volume": traded_vol,
@@ -1149,6 +1196,68 @@ class BuiltinPricePoller(QObject):
             if oid.startswith("PO") or not is_unique_broker_sysid(oid):
                 # 无真实柜台合同号的本地行不进订单列表
                 drop_rows.append(row)
+        for row in reversed(drop_rows):
+            try:
+                table.removeRow(row)
+            except Exception:
+                pass
+
+    def _sweep_stale_broker_order_rows(self, display_recs=None) -> None:
+        """删除订单表中不在本轮会话快照内的柜台合同号行。
+
+        柜台/DEAL 合并偶发漏单时，连续缺席若干轮才删，避免列表条数来回跳。
+        """
+        from core.execution_record_manager import is_unique_broker_sysid
+
+        ext = self._resolve_ui_ext()
+        table = getattr(ext, "tableWidget_3", None) if ext is not None else None
+        if table is None or table.rowCount() <= 0:
+            return
+
+        live_sysids = set()
+        for rec in display_recs or []:
+            if not isinstance(rec, dict):
+                continue
+            sid = str(rec.get("order_sysid") or "").strip()
+            if is_unique_broker_sysid(sid):
+                live_sysids.add(sid)
+
+        # 本轮尚无任何柜台单时不整表清空（避免查询空闪断抹掉列表）
+        if not live_sysids:
+            return
+
+        miss = getattr(self, "_order_miss_counts", None)
+        if not isinstance(miss, dict):
+            miss = {}
+            self._order_miss_counts = miss
+        drop_after = int(getattr(self, "_order_miss_drop_after", 3) or 3)
+
+        # 本轮仍在的合同号清零缺席计数
+        for sid in list(miss.keys()):
+            if sid in live_sysids:
+                miss.pop(sid, None)
+
+        drop_rows = []
+        for row in range(table.rowCount()):
+            oid = ""
+            try:
+                oid = table.item(row, 0).text().strip() if table.item(row, 0) else ""
+            except Exception:
+                oid = ""
+            if not is_unique_broker_sysid(oid):
+                continue
+            if oid in live_sysids:
+                continue
+            miss[oid] = int(miss.get(oid) or 0) + 1
+            if miss[oid] < drop_after:
+                continue
+            drop_rows.append(row)
+            miss.pop(oid, None)
+            try:
+                self._order_status_seen.pop("sys:%s" % oid, None)
+                self._order_status_seen.pop(oid, None)
+            except Exception:
+                pass
         for row in reversed(drop_rows):
             try:
                 table.removeRow(row)
@@ -1473,7 +1582,7 @@ class BuiltinPricePoller(QObject):
         return {
             "stock_code": stock_code,
             "lastPrice": float(price),
-            "lastClose": 0,
+            "lastClose": float(iday.get("last_close") or 0),
             "open": float(iday.get("open") or 0),
             "high": float(iday.get("high") or 0),
             "low": float(iday.get("low") or 0),

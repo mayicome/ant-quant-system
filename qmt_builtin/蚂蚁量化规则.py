@@ -8,7 +8,7 @@ import os
 import sys
 import time
 
-ENTRY_VERSION = "20260805.01"
+ENTRY_VERSION = "20260811.04"
 _shadow = None
 _ACCOUNT_SNAPSHOT_MOD = None
 _ENTRY_ACCOUNT_SKIP = ""
@@ -20,6 +20,7 @@ _ENTRY_ORDER_DEAL_INTERVAL_SEC = 12.0
 # ���� download_history_data��ÿ����ֻ bind/log һ�Σ����� handlebar ��·��ˢ����
 _DOWNLOAD_HISTORY_BOUND = False
 _DOWNLOAD_HISTORY_MISS_LOGGED = False
+_BJ_SECTOR_PROBE_DONE = False
 
 
 def _plog(msg):
@@ -240,10 +241,116 @@ def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, accoun
     return best
 
 
+def _probe_bj_sectors_once(ContextInfo):
+    """һ����̽�Ȿ�� QMT ������������Ƿ���ã����д�� data/bj_sector_probe.json��"""
+    global _BJ_SECTOR_PROBE_DONE
+    if _BJ_SECTOR_PROBE_DONE:
+        return
+    _BJ_SECTOR_PROBE_DONE = True
+    try:
+        import json
+        from datetime import datetime
+
+        try:
+            from ant_qmt_paths import DATA_DIR
+        except Exception:
+            try:
+                from qmt_builtin.ant_qmt_paths import DATA_DIR
+            except Exception:
+                DATA_DIR = os.path.join(_qmt_python_dir(), "data")
+
+        owners = []
+        if ContextInfo is not None:
+            owners.append(("ctx", ContextInfo))
+        try:
+            import builtins
+
+            owners.append(("builtins", builtins))
+        except Exception:
+            pass
+
+        sector_candidates = (
+            "\u4eac\u5e02A\u80a1",  # ����A��
+            "\u6caa\u6df1\u4eacA\u80a1",  # ���A��
+            "\u5317\u4ea4\u6240",  # ������
+            "\u5317\u4ea4\u6240A\u80a1",  # ������A��
+            "BJ",
+            "\u4eacA\u80a1",  # ��A��
+            "\u6caa\u6df1A\u80a1",  # ����A�ɣ����գ�
+        )
+        sector_counts = {}
+        samples = {}
+        for sec in sector_candidates:
+            best_n = -1
+            best_sample = []
+            src = ""
+            for label, owner in owners:
+                fn = getattr(owner, "get_stock_list_in_sector", None)
+                if not callable(fn):
+                    continue
+                try:
+                    raw = fn(sec) or []
+                except Exception:
+                    continue
+                try:
+                    n = len(raw)
+                except Exception:
+                    n = 0
+                if n > best_n:
+                    best_n = n
+                    src = label
+                    try:
+                        best_sample = [str(x) for x in list(raw)[:8]]
+                    except Exception:
+                        best_sample = []
+            sector_counts[sec] = {"n": max(0, best_n), "source": src}
+            samples[sec] = best_sample
+
+        matched_names = []
+        for label, owner in owners:
+            fn = getattr(owner, "get_sector_list", None)
+            if not callable(fn):
+                continue
+            try:
+                sl = fn() or []
+            except Exception:
+                continue
+            for s in sl:
+                t = str(s)
+                if any(k in t for k in ("\u4eac", "\u5317\u4ea4", "BJ", "bj")):
+                    if t not in matched_names:
+                        matched_names.append(t)
+            if matched_names:
+                break
+
+        payload = {
+            "probed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "entry_version": ENTRY_VERSION,
+            "matched_sector_names": matched_names,
+            "sector_counts": sector_counts,
+            "samples": samples,
+        }
+        out_path = os.path.join(str(DATA_DIR), "bj_sector_probe.json")
+        tmp = out_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, out_path)
+        jing = sector_counts.get("\u4eac\u5e02A\u80a1", {}).get("n", 0)
+        hsj = sector_counts.get("\u6caa\u6df1\u4eacA\u80a1", {}).get("n", 0)
+        print(
+            "[���׺���] ���������̽�� ����A��=%s ���A��=%s matched=%s -> %s"
+            % (jing, hsj, len(matched_names), out_path),
+            flush=True,
+        )
+    except Exception as e:
+        print("[���׺���] ���������̽��ʧ��: %s" % e, flush=True)
+
+
 def _entry_sync_account_snapshot(ContextInfo):
-    """?? QMT ???/????????????????? get_trade_detail_data??"""
+    """�� QMT �˻�/�ֲ�/ί��д�� results������ get_trade_detail_data����"""
     global _ENTRY_ACCOUNT_SKIP, _LAST_ENTRY_ACCOUNT_SYNC, _LAST_ENTRY_ORDER_DEAL_SYNC
     try:
+        _probe_bj_sectors_once(ContextInfo)
         now = time.time()
         if now - _LAST_ENTRY_ACCOUNT_SYNC < float(_ENTRY_ACCOUNT_INTERVAL_SEC):
             return

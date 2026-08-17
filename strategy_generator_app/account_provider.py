@@ -275,6 +275,86 @@ def get_positions_with_volume() -> Dict[str, int]:
     return out
 
 
+def get_positions_baseline() -> Dict[str, int]:
+    """
+    返回 { 6位代码: 总仓位基准 }（本轮累计买入；半仓用）。
+    按当前总持仓相对上次快照增量维护，见 utils.position_baseline。
+    """
+    try:
+        from utils.position_baseline import sync_baselines_from_volumes
+    except ImportError:
+        from position_baseline import sync_baselines_from_volumes  # type: ignore
+    return sync_baselines_from_volumes(get_positions_total_volume())
+
+
+def get_positions_total_volume() -> Dict[str, int]:
+    """
+    返回 { 6位代码: 当前持股数量 }（含当日买入、T+1 尚不可卖）。
+    取不到 volume 字段时回退 can_use_volume。
+    """
+    out: Dict[str, int] = {}
+    _, path_qmt, account_id, qmt_mode = _read_account_ini()
+    if qmt_mode in ("builtin", "standalone") and not path_qmt:
+        try:
+            from utils.ant_rules_io_ext import default_paths, load_account_positions_snapshot
+
+            _, results_path = default_paths(repo_root())
+            _, pos_map = load_account_positions_snapshot(results_path)
+            for code, row in (pos_map or {}).items():
+                raw = str(code or "").strip()
+                c = (raw.split(".")[0] if "." in raw else raw).strip()
+                if len(c) >= 6:
+                    c = c[:6]
+                elif c:
+                    c = c.zfill(6)
+                if not c:
+                    continue
+                if isinstance(row, dict):
+                    total = int(row.get("volume") or row.get("can_use_volume") or 0)
+                    avail = int(row.get("can_use_volume") or 0)
+                else:
+                    total = int(getattr(row, "volume", 0) or getattr(row, "can_use_volume", 0) or 0)
+                    avail = int(getattr(row, "can_use_volume", 0) or 0)
+                if total < avail:
+                    total = avail
+                if total > 0:
+                    out[c] = out.get(c, 0) + total
+        except Exception:
+            pass
+        return out
+    trader, account = _get_trader_and_account()
+    if trader is None or account is None:
+        return out
+    try:
+        position_list = None
+        for attempt in range(3):
+            position_list = trader.query_stock_positions(account)
+            if position_list:
+                break
+            if attempt < 2:
+                time.sleep(1)
+        if not position_list:
+            return out
+        for pos in position_list:
+            raw = getattr(pos, "stock_code", None) or ""
+            c = (raw.split(".")[0] if "." in raw else raw).strip()
+            if len(c) >= 6:
+                c = c[:6]
+            elif len(c) > 0:
+                c = c.zfill(6)
+            avail = int(getattr(pos, "can_use_volume", 0) or 0)
+            total = int(getattr(pos, "volume", 0) or 0)
+            if total < avail:
+                total = avail
+            if c and total > 0:
+                out[c] = out.get(c, 0) + total
+    except Exception:
+        pass
+    finally:
+        _safe_stop(trader)
+    return out
+
+
 def get_positions_with_volume_debug() -> Tuple[Dict[str, int], str]:
     """
     带诊断信息的注入持仓查询。

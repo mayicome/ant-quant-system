@@ -797,6 +797,58 @@ def _attach_event_context_to_order(record: dict, ev: dict) -> None:
         lp = 0.0
     if lp > 0:
         record.setdefault("last_price", lp)
+    # 已执行分支：事件/任务上的腿键、规则名
+    for src_key, dst_key in (
+        ("leg_key", "leg_key"),
+        ("rule_name", "rule_name"),
+        ("name", "rule_name"),
+    ):
+        val = str(ev.get(src_key) or "").strip()
+        if val and not str(record.get(dst_key) or "").strip():
+            record[dst_key] = val
+    _enrich_order_leg_from_task(record, str(ev.get("task_id") or record.get("task_id") or ""))
+
+
+def _enrich_order_leg_from_task(record: dict, task_id: str = "") -> None:
+    """从 runner 任务或 rules_armed 补 leg_key / rule_name。"""
+    if not isinstance(record, dict):
+        return
+    tid = str(task_id or record.get("task_id") or "").strip()
+    if record.get("leg_key") and record.get("rule_name"):
+        return
+    task = None
+    if tid and _RUNNER is not None:
+        try:
+            for t in list(getattr(_RUNNER, "tasks", None) or []):
+                if not isinstance(t, dict):
+                    continue
+                if str(t.get("task_id") or "").strip() == tid:
+                    task = t
+                    break
+        except Exception:
+            task = None
+    if isinstance(task, dict):
+        meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        if not record.get("leg_key"):
+            lk = str(task.get("leg_key") or meta.get("leg_key") or "").strip()
+            if lk:
+                record["leg_key"] = lk
+        if not record.get("rule_name"):
+            rn = str(meta.get("rule_name") or "").strip()
+            if rn:
+                record["rule_name"] = rn
+    if record.get("leg_key") and record.get("rule_name"):
+        return
+    try:
+        import ant_filled_legs as _fl
+
+        info = _fl.lookup_leg_from_armed(tid)
+        if info.get("leg_key") and not record.get("leg_key"):
+            record["leg_key"] = info["leg_key"]
+        if info.get("rule_name") and not record.get("rule_name"):
+            record["rule_name"] = info["rule_name"]
+    except Exception:
+        pass
 
 
 def _finalize_buy_block_skip(
@@ -1550,6 +1602,7 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             sysid = _find_early_order_sysid(tid, gi_raw)
             if sysid:
                 record["order_sysid"] = sysid
+            _enrich_order_leg_from_task(record, tid)
             po.append_order_record(_RESULTS, record)
             if gi_raw is not None:
                 try:

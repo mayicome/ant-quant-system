@@ -1530,7 +1530,13 @@ class ShadowTickRunner:
 
     @staticmethod
     def _format_tick_time(raw: Any) -> str:
-        """只格式化 timetag（如 '20240620 14:13:30'）→ HH:MM:SS；不解析 time 毫秒戳。"""
+        """只格式化 timetag → HH:MM:SS；不解析 time 毫秒戳。
+
+        支持：
+        - '20240620 14:13:30' / '2024-06-20 14:13:30' / ISO
+        - '14:13:30'
+        - '20240620141330' / '20240620 141330'（无冒号）
+        """
         if raw is None:
             return ""
         s = str(raw).strip()
@@ -1542,10 +1548,20 @@ class ShadowTickRunner:
                 part = s.replace("T", " ").split()[-1]
                 if len(part) >= 8 and part[2] == ":":
                     return part[:8]
+                # "141330" / "141330000"
+                digits = "".join(c for c in part if c.isdigit())
+                if len(digits) >= 6:
+                    return "%s:%s:%s" % (digits[0:2], digits[2:4], digits[4:6])
             except Exception:
                 pass
         if len(s) >= 8 and s[2] == ":":
             return s[:8]
+        # "20240620141330" / 纯数字时分秒
+        digits = "".join(c for c in s if c.isdigit())
+        if len(digits) >= 14:
+            return "%s:%s:%s" % (digits[8:10], digits[10:12], digits[12:14])
+        if len(digits) == 6:
+            return "%s:%s:%s" % (digits[0:2], digits[2:4], digits[4:6])
         return ""
 
     @staticmethod

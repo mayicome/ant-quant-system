@@ -343,6 +343,9 @@ def submit_strategy_backfill(
     force: bool = False,
     limit: int = 0,
     merge: bool = True,
+    suffix: str = "",
+    codes: Optional[List[str]] = None,
+    source: str = "backfill_tick_history",
 ) -> Dict[str, Any]:
     """写入 manual_request.json，供大 QMT 策略用 ContextInfo 执行。"""
     fresh = [str(d).replace("-", "").replace("/", "")[:8] for d in days]
@@ -356,15 +359,22 @@ def submit_strategy_backfill(
                 seen.add(d)
                 planned.append(d)
 
-    payload = {
+    payload: Dict[str, Any] = {
         "days": planned,
         "force": bool(force),
         "limit": int(limit or 0),
-        "source": "backfill_tick_history",
+        "source": str(source or "backfill_tick_history"),
         "requested_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         # 明确不走 miniQMT
         "enable_xtdata_download": False,
     }
+    suf = str(suffix or "").strip()
+    if suf:
+        if not suf.startswith("."):
+            suf = "." + suf
+        payload["suffix"] = suf.upper()
+    if codes:
+        payload["codes"] = [str(c).strip() for c in codes if str(c).strip()]
     _atomic_write_json(_MANUAL_REQUEST, payload)
     return payload
 
@@ -511,6 +521,7 @@ def _run_via_strategy(
     day_timeout: int,
     poll_interval: int,
     require_alive: bool,
+    suffix: str = "",
 ) -> int:
     alive, detail = _strategy_alive()
     if not alive:
@@ -526,17 +537,20 @@ def _run_via_strategy(
         print("[backfill_tick] 大 QMT 策略心跳正常（%s）" % detail)
 
     since = time.time()
-    payload = submit_strategy_backfill(planned, force=force, limit=limit, merge=True)
+    payload = submit_strategy_backfill(
+        planned, force=force, limit=limit, merge=True, suffix=suffix
+    )
     print(
         "[backfill_tick] 已提交策略执行，用 ContextInfo 拉 tick：\n"
         "[backfill_tick]   文件: %s\n"
         "[backfill_tick]   队列: %s\n"
-        "[backfill_tick]   force=%s limit=%s"
+        "[backfill_tick]   force=%s limit=%s suffix=%s"
         % (
             _MANUAL_REQUEST,
             ",".join(payload.get("days") or []),
             payload.get("force"),
             payload.get("limit"),
+            payload.get("suffix") or "-",
         )
     )
 
@@ -692,6 +706,12 @@ def main() -> int:
         type=int,
         default=0,
         help="每只日只同步前 N 只股票（试跑用；0=全A）",
+    )
+    ap.add_argument(
+        "--suffix",
+        type=str,
+        default="",
+        help="仅同步指定后缀（如 .BJ=北交所子集回补）",
     )
     ap.add_argument(
         "--pickup-timeout",
@@ -851,13 +871,21 @@ def main() -> int:
             print("[backfill_tick] 策略未在跑，中止提交（或加 --no-require-strategy）")
             return 6
         payload = submit_strategy_backfill(
-            planned, force=bool(args.force), limit=int(args.limit or 0), merge=True
+            planned,
+            force=bool(args.force),
+            limit=int(args.limit or 0),
+            merge=True,
+            suffix=str(args.suffix or ""),
         )
         print(
             "[backfill_tick] 已提交策略执行，用 ContextInfo 拉…\n"
             "[backfill_tick]   %s\n"
-            "[backfill_tick]   days=%s"
-            % (_MANUAL_REQUEST, ",".join(payload.get("days") or []))
+            "[backfill_tick]   days=%s suffix=%s"
+            % (
+                _MANUAL_REQUEST,
+                ",".join(payload.get("days") or []),
+                payload.get("suffix") or "-",
+            )
         )
         return 0
 
@@ -870,6 +898,7 @@ def main() -> int:
         day_timeout=int(args.day_timeout),
         poll_interval=int(args.poll_interval),
         require_alive=not bool(args.no_require_strategy),
+        suffix=str(args.suffix or ""),
     )
 
 

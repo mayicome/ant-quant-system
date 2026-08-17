@@ -48,6 +48,7 @@ class MainLineGroupDialog(QDialog):
         self.setWindowTitle("蚂蚁量化 - 主线分组（独立版）")
         self.resize(920, 700)
         self._history_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history_data")
+        self._archive_dir = os.path.join(self._history_dir, "存档")
         self._auto_run = bool(auto_run)
         self._last_leader_text_path: str = ""
 
@@ -190,19 +191,42 @@ class MainLineGroupDialog(QDialog):
             pass
         return code_to_name, code_to_concepts, concept_to_codes
 
+    def _daily_change_clean_search_dirs(self) -> List[str]:
+        """优先 history_data 根目录，其次存档（赚钱指数导出后可能被挪到存档）。"""
+        dirs = [self._history_dir]
+        arch = getattr(self, "_archive_dir", None) or os.path.join(self._history_dir, "存档")
+        if os.path.isdir(arch):
+            dirs.append(arch)
+        return dirs
+
     def _find_daily_change_clean_by_date(self, d8: str) -> Optional[str]:
         ds = f"{d8[:4]}-{d8[4:6]}-{d8[6:8]}"
-        fp = os.path.join(self._history_dir, f"daily_change_clean_{ds}.xlsx")
-        return fp if os.path.exists(fp) else None
+        name = f"daily_change_clean_{ds}.xlsx"
+        for d in self._daily_change_clean_search_dirs():
+            fp = os.path.join(d, name)
+            if os.path.exists(fp):
+                return fp
+        # 兼容无横杠文件名
+        name2 = f"daily_change_clean_{d8}.xlsx"
+        for d in self._daily_change_clean_search_dirs():
+            fp = os.path.join(d, name2)
+            if os.path.exists(fp):
+                return fp
+        return None
 
     def _find_latest_daily_change_clean_file(self) -> Optional[str]:
-        if not os.path.isdir(self._history_dir):
-            return None
-        names = [n for n in os.listdir(self._history_dir) if n.startswith("daily_change_clean_") and n.endswith(".xlsx")]
-        if not names:
-            return None
-        names.sort()
-        return os.path.join(self._history_dir, names[-1])
+        best_name = None
+        best_path = None
+        for d in self._daily_change_clean_search_dirs():
+            if not os.path.isdir(d):
+                continue
+            for n in os.listdir(d):
+                if not (n.startswith("daily_change_clean_") and n.endswith(".xlsx")):
+                    continue
+                if best_name is None or n > best_name:
+                    best_name = n
+                    best_path = os.path.join(d, n)
+        return best_path
 
     def _list_recent_concept_summary_files(self) -> List[Tuple[str, str]]:
         from utils.concept_path import list_concept_summary_files
@@ -434,7 +458,12 @@ class MainLineGroupDialog(QDialog):
 
         daily_fp = self._find_daily_change_clean_by_date(latest_d8) or self._find_latest_daily_change_clean_file()
         if not daily_fp:
-            return None, "未找到 daily_change_clean_*.xlsx 文件。"
+            return (
+                None,
+                "未找到 daily_change_clean_*.xlsx。\n"
+                "请先在收盘后跑「赚钱指数」导出该文件（会写到 history_data/，之后可能进存档）。\n"
+                f"已查目录：history_data 与 history_data/存档；目标交易日 {latest_d8}。",
+            )
         try:
             daily_df = pd.read_excel(daily_fp)
         except Exception as e:

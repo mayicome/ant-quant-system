@@ -23,12 +23,14 @@ CACHE_MAX_AGE_DAYS = 7
 ENABLE_XTDATA_SECTOR_DOWNLOAD = False
 
 UI_SECTOR_PREFIXES = ("SW1", "GN", "SW2", "SW3")
-# 板块名用 unicode 转义，避免源文件编码损坏导致空股票池
+# 板块名用 unicode 转义，避免源文件编码损坏导致空股票池；含北交所
 UNIVERSE_SECTOR = "\u6caa\u6df1A\u80a1"  # 沪深A股
 UNIVERSE_SECTORS = (
     "\u6caa\u6df1A\u80a1",  # 沪深A股
     "\u4e0a\u8bc1A\u80a1",  # 上证A股
     "\u6df1\u8bc1A\u80a1",  # 深证A股
+    "\u4eac\u5e02A\u80a1",  # 京市A股
+    "\u6caa\u6df1\u4eacA\u80a1",  # 沪深京A股
 )
 
 EXCLUDE_SUBSTR = (
@@ -48,11 +50,14 @@ EXCLUDE_SUBSTR = (
 MARKET_SECTOR_EXACT = frozenset(
     {
         "沪深A股",
+        "沪深京A股",
         "沪深B股",
         "上证A股",
         "上证B股",
         "深证A股",
         "深证B股",
+        "京市A股",
+        "北交所",
         "创业板",
         "科创板",
         "上期所",

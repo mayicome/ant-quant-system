@@ -9,12 +9,13 @@ try:
 except Exception:
     PROJECT_ROOT = ""
 
-ACCOUNT_SNAPSHOT_VERSION = "20260803.01"
+ACCOUNT_SNAPSHOT_VERSION = "20260811.04"
 
 _CACHED_ACCOUNT = None
 _CACHED_POSITIONS = {}
 _CACHED_ORDERS = {}  # order_sysid -> parsed
 _DIAG_DONE = False
+_BJ_SECTOR_PROBE_DONE = False
 
 # 持仓空但股票市值明显偏高 → 可疑（真空仓：市值≈0，不告警）
 _POSITION_ALERT_MV_THRESHOLD = 5000.0
@@ -100,6 +101,10 @@ _KNOWN_DETAIL_ATTRS = (
     "m_strOrderTime",
     "m_nOrderTime",
     "m_nInsertTime",
+    "m_strInsertDate",
+    "m_strOrderDate",
+    "m_nOrderDate",
+    "m_nInsertDate",
     "m_strTradeTime",
     "m_nTradeTime",
     "m_nOffsetFlag",
@@ -130,6 +135,8 @@ _KNOWN_DETAIL_ATTRS = (
     "direction",
     "opt_name",
     "price_type",
+    "order_date",
+    "insert_date",
 )
 
 
@@ -193,6 +200,10 @@ def _object_row(item):
         ("m_nInsertTime", "order_time"),
         ("m_strTradeTime", "order_time"),
         ("m_nTradeTime", "order_time"),
+        ("m_strInsertDate", "order_date"),
+        ("m_strOrderDate", "order_date"),
+        ("m_nOrderDate", "order_date"),
+        ("m_nInsertDate", "order_date"),
         ("m_nOffsetFlag", "offset_flag"),
         ("m_nDirection", "direction"),
         ("m_strOptName", "opt_name"),
@@ -696,29 +707,81 @@ def _normalize_order_time(raw):
     return s
 
 
-def _extract_order_at(raw):
-    """尽量保留完整委托时间（ISO），供跨日过滤；失败返回空串。"""
+def _normalize_order_date(raw):
+    """QMT 委托日期 → YYYY-MM-DD；失败返回空串。"""
     if raw is None:
         return ""
     try:
+        if isinstance(raw, datetime):
+            return raw.strftime("%Y-%m-%d")
+        if isinstance(raw, date):
+            return raw.strftime("%Y-%m-%d")
+        if isinstance(raw, (int, float)):
+            n = int(raw)
+            if n <= 0:
+                return ""
+            s = str(n)
+            if len(s) >= 8:
+                s = s[:8]
+                return "%s-%s-%s" % (s[0:4], s[4:6], s[6:8])
+            return ""
+        s = str(raw).strip()
+        if not s or s in ("0", "None", "none"):
+            return ""
+        if "T" in s:
+            return s[:10]
+        if " " in s and "-" in s:
+            return s[:10]
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if len(digits) >= 8:
+            digits = digits[:8]
+            return "%s-%s-%s" % (digits[0:4], digits[4:6], digits[6:8])
+    except Exception:
+        return ""
+    return ""
+
+
+def _extract_order_at(raw, date_raw=None):
+    """尽量保留完整委托时间（ISO），供跨日过滤；失败返回空串。
+
+    QMT 常见拆成 m_strInsertDate + m_strInsertTime，需合并。
+    """
+    if raw is None and date_raw is None:
+        return ""
+    try:
+        # 已有完整时间戳 / 字符串
         if isinstance(raw, (int, float)):
             n = float(raw)
             if n > 1e12:
                 return datetime.fromtimestamp(n / 1000.0).strftime("%Y-%m-%dT%H:%M:%S")
             if n > 1e9:
                 return datetime.fromtimestamp(n).strftime("%Y-%m-%dT%H:%M:%S")
+            # 纯 HHMMSS：若有独立日期则合并
+            time_part = _normalize_order_time(raw)
+            date_part = _normalize_order_date(date_raw)
+            if date_part and time_part and ":" in time_part:
+                return "%sT%s" % (date_part, time_part[:8])
             return ""
-        s = str(raw).strip()
-        if not s or s in ("0", "None", "none"):
+        s = str(raw).strip() if raw is not None else ""
+        if s and s not in ("0", "None", "none"):
+            if "T" in s:
+                return s.replace("Z", "").split("+")[0][:19]
+            if " " in s and "-" in s and ":" in s:
+                return s[:19].replace(" ", "T")
+            digits = "".join(ch for ch in s if ch.isdigit())
+            if len(digits) >= 14:
+                dt = datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
+                return dt.strftime("%Y-%m-%dT%H:%M:%S")
+            # 仅时间：合并日期
+            time_part = _normalize_order_time(s)
+            date_part = _normalize_order_date(date_raw)
+            if date_part and time_part and ":" in time_part:
+                return "%sT%s" % (date_part, time_part[:8])
             return ""
-        if "T" in s:
-            return s.replace("Z", "").split("+")[0][:19]
-        if " " in s and "-" in s and ":" in s:
-            return s[:19].replace(" ", "T")
-        digits = "".join(ch for ch in s if ch.isdigit())
-        if len(digits) >= 14:
-            dt = datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
-            return dt.strftime("%Y-%m-%dT%H:%M:%S")
+        # 仅有日期字段
+        date_part = _normalize_order_date(date_raw)
+        if date_part:
+            return "%sT00:00:00" % date_part
     except Exception:
         return ""
     return ""
@@ -745,18 +808,18 @@ def _parse_session_date(raw):
 
 
 def _is_session_order_rec(rec):
-    """当前会话委托：今日，或昨日/上交易日 15:00 后的夜市单。无日期则放行。"""
+    """当前会话委托：今日，或上一交易日 15:00 后的夜市单。无日期则丢弃。"""
     if not isinstance(rec, dict):
         return False
     raw = rec.get("order_at") or rec.get("at") or ""
     d = _parse_session_date(raw)
     if d is None:
-        # 仅有 order_time=HH:MM:SS 时无法判日，放行
-        return True
+        # 柜台快照无委托日 → 当作跨日残留，不入列表/缓存
+        return False
     today = datetime.now().date()
     if d == today:
         return True
-    # 夜市窗口：上一自然日 15:00 后
+    # 夜市窗口：上一自然日 / 上一交易日 15:00 后，且尚未进入下一交易日盘中
     try:
         tpart = str(raw)
         if "T" in tpart:
@@ -768,11 +831,24 @@ def _is_session_order_rec(rec):
         after_close = False
         if len(hhmm) >= 5 and hhmm[2] == ":":
             after_close = hhmm >= "15:00:00"
-        if d == today - timedelta(days=1) and after_close:
+        if not after_close:
+            return False
+        now = datetime.now()
+        if d == today - timedelta(days=1):
             return True
-        # 跨周末：最多回溯 3 天内的 15:00 后单
-        if after_close and 0 < (today - d).days <= 3:
-            return True
+        # 跨周末：仅保留「上一交易日」夜市单，开盘后丢掉
+        last_td = None
+        try:
+            from utils.trading_day import last_tradeday_on_or_before, is_tradeday
+
+            last_td = last_tradeday_on_or_before(today - timedelta(days=1))
+            if last_td and d == last_td:
+                if not is_tradeday(today) or now.time() < dt_time(9, 15):
+                    return True
+        except Exception:
+            # QMT 内可能无 utils：最多回溯到上周五（3 个自然日）
+            if 0 < (today - d).days <= 3 and now.time() < dt_time(9, 15):
+                return True
     except Exception:
         pass
     return False
@@ -788,6 +864,70 @@ def _prune_cached_orders():
         if _is_session_order_rec(rec):
             keep[sid] = rec
     _CACHED_ORDERS = keep
+
+
+def _prefer_richer_order(old, new):
+    """合并两笔同合同号委托：保留日期/时间等字段，状态取更新的。
+
+    DEAL 行常缺 m_strInsertDate，若直接覆盖 ORDER 会导致 order_at 丢失，
+    随后被会话过滤丢掉，UI 在「全日单」与「仅未成单」之间闪烁。
+    """
+    if not isinstance(new, dict):
+        return old if isinstance(old, dict) else {}
+    if not isinstance(old, dict):
+        return dict(new)
+    out = dict(old)
+    for k, v in new.items():
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        out[k] = v
+    # 显式保住日期时间
+    for k in ("order_at", "at", "order_time", "order_date"):
+        nv = new.get(k)
+        ov = old.get(k)
+        if (nv is None or (isinstance(nv, str) and not str(nv).strip())) and ov not in (None, ""):
+            out[k] = ov
+    try:
+        ns = int(new.get("broker_status") or 0)
+        os_ = int(old.get("broker_status") or 0)
+        if ns >= os_:
+            for k in ("broker_status", "broker_status_text", "traded_volume", "traded_price", "volume"):
+                if new.get(k) is not None and new.get(k) != "":
+                    out[k] = new[k]
+        else:
+            for k in ("broker_status", "broker_status_text", "traded_volume", "traded_price"):
+                if old.get(k) is not None and old.get(k) != "":
+                    out[k] = old[k]
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+def _upsert_cached_orders(parsed_list):
+    """将本轮解析结果并入缓存（不因柜台漏返回而删掉已有当日单）。"""
+    global _CACHED_ORDERS
+    for bo in parsed_list or []:
+        if not isinstance(bo, dict):
+            continue
+        if not _is_session_order_rec(bo):
+            # 无日期的新行：若缓存已有同合同号带日期版本，合并保留
+            sid = str(bo.get("order_sysid") or "").strip()
+            if not sid:
+                continue
+            old = _CACHED_ORDERS.get(sid)
+            if old and _is_session_order_rec(old):
+                merged = _prefer_richer_order(old, bo)
+                if _is_session_order_rec(merged):
+                    _CACHED_ORDERS[sid] = merged
+            continue
+        sid = str(bo.get("order_sysid") or "").strip()
+        if not sid:
+            continue
+        _CACHED_ORDERS[sid] = _prefer_richer_order(_CACHED_ORDERS.get(sid), bo)
+    _prune_cached_orders()
+    return list((_CACHED_ORDERS or {}).values())
 
 
 def _to_int(val, default=None):
@@ -946,8 +1086,23 @@ def _parse_order_row(row, account_id=""):
         "OrderTime",
         default="",
     )
+    raw_date = _pick(
+        row,
+        "order_date",
+        "insert_date",
+        "m_strInsertDate",
+        "m_strOrderDate",
+        "m_nOrderDate",
+        "m_nInsertDate",
+        "InsertDate",
+        "OrderDate",
+        default="",
+    )
     order_time = _normalize_order_time(raw_time)
-    order_at = _extract_order_at(raw_time)
+    order_at = _extract_order_at(raw_time, raw_date)
+    if not order_at:
+        # 兜底：仅有日期时也写入，便于会话过滤
+        order_at = _extract_order_at(None, raw_date)
     stock_name = str(
         _pick(
             row,
@@ -1061,6 +1216,44 @@ def _match_broker_order(local, broker_orders):
     return None
 
 
+def _note_filled_leg_from_local_order(loc):
+    """柜台回填为已成时，把腿写入 filled_legs.json。"""
+    if not isinstance(loc, dict):
+        return
+    # 补全 leg_key / rule_name（下单时可能只有 task_id）
+    if not loc.get("leg_key") or not loc.get("rule_name"):
+        try:
+            import ant_filled_legs as _fl
+
+            info = _fl.lookup_leg_from_armed(loc.get("task_id"))
+            if info.get("leg_key") and not loc.get("leg_key"):
+                loc["leg_key"] = info["leg_key"]
+            if info.get("rule_name") and not loc.get("rule_name"):
+                loc["rule_name"] = info["rule_name"]
+        except Exception:
+            try:
+                from qmt_builtin.src import ant_filled_legs as _fl
+
+                info = _fl.lookup_leg_from_armed(loc.get("task_id"))
+                if info.get("leg_key") and not loc.get("leg_key"):
+                    loc["leg_key"] = info["leg_key"]
+                if info.get("rule_name") and not loc.get("rule_name"):
+                    loc["rule_name"] = info["rule_name"]
+            except Exception:
+                pass
+    try:
+        import ant_filled_legs as _fl
+
+        _fl.note_from_order_record(loc)
+    except Exception:
+        try:
+            from qmt_builtin.src import ant_filled_legs as _fl
+
+            _fl.note_from_order_record(loc)
+        except Exception:
+            pass
+
+
 def merge_broker_orders_into_results(results, broker_orders):
     """写入 broker_orders，并回填本地 passorder 记录的真实状态。"""
     if not isinstance(results, dict):
@@ -1126,9 +1319,12 @@ def merge_broker_orders_into_results(results, broker_orders):
                     internal = "submitted"
                 else:
                     internal = str(loc.get("status") or "submitted")
+                prev_status = str(loc.get("status") or "")
                 if loc.get("status") != internal:
                     loc["status"] = internal
                     changed = True
+                if internal == "filled" and prev_status != "filled":
+                    _note_filled_leg_from_local_order(loc)
             continue
         pool = []
         for bo in broker_orders:
@@ -1185,9 +1381,12 @@ def merge_broker_orders_into_results(results, broker_orders):
             internal = "submitted"
         else:
             internal = str(loc.get("status") or "submitted")
+        prev_status = str(loc.get("status") or "")
         if loc.get("status") != internal:
             loc["status"] = internal
             changed = True
+        if internal == "filled" and prev_status != "filled":
+            _note_filled_leg_from_local_order(loc)
     if changed:
         results["updated_at"] = _now_iso()
     return changed
@@ -1221,22 +1420,20 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
         parsed["broker_status"] = 56
         parsed["broker_status_text"] = "已成"
         like_orders.append(parsed)
-    # merge with existing broker_orders (prefer keeping richer ORDER rows)
+    # merge with existing broker_orders（保留 ORDER 上的 order_at，避免 DEAL 缺日期把单刷没）
     existing = list(results.get("broker_orders") or [])
     by_sys = {}
     for bo in existing + like_orders:
+        if not isinstance(bo, dict):
+            continue
         sid = str(bo.get("order_sysid") or "").strip()
         key = sid or ("tmp|%s|%s|%s" % (bo.get("stock_code"), bo.get("price"), bo.get("volume")))
-        old = by_sys.get(key)
-        if old is None:
-            by_sys[key] = bo
-            continue
-        # prefer higher status / more traded
-        try:
-            if int(bo.get("broker_status") or 0) >= int(old.get("broker_status") or 0):
-                by_sys[key] = bo
-        except (TypeError, ValueError):
-            by_sys[key] = bo
+        by_sys[key] = _prefer_richer_order(by_sys.get(key), bo)
+    # 同步回内存缓存，防止下一轮 ORDER 漏返回时丢已成单
+    try:
+        _upsert_cached_orders(list(by_sys.values()))
+    except Exception:
+        pass
     return merge_broker_orders_into_results(results, list(by_sys.values()))
 
 
@@ -1251,8 +1448,11 @@ def on_order_callback(ContextInfo, orderInfo):
         aid = str(_resolve_account_id(ContextInfo) or "").strip()
         parsed = _parse_order_row(orderInfo, aid)
         sysid = str(parsed.get("order_sysid") or "").strip()
-        if sysid:
+        if sysid and _is_session_order_rec(parsed):
             _CACHED_ORDERS[sysid] = parsed
+        elif sysid:
+            # 跨日残留：确保不留在缓存
+            _CACHED_ORDERS.pop(sysid, None)
     except Exception as e:
         print("[交易核心] order_callback 错误: %s" % e)
 
@@ -1264,8 +1464,11 @@ def apply_order_callback_to_results(results, orderInfo, account_id=""):
     aid = str(account_id or "").strip()
     parsed = _parse_order_row(orderInfo, aid)
     sysid = str(parsed.get("order_sysid") or "").strip()
-    if sysid:
+    if sysid and _is_session_order_rec(parsed):
         _CACHED_ORDERS[sysid] = parsed
+    elif sysid:
+        _CACHED_ORDERS.pop(sysid, None)
+    _prune_cached_orders()
     broker_list = list((_CACHED_ORDERS or {}).values())
     found = False
     for i, bo in enumerate(broker_list):
@@ -1273,7 +1476,7 @@ def apply_order_callback_to_results(results, orderInfo, account_id=""):
             broker_list[i] = parsed
             found = True
             break
-    if not found and (sysid or parsed.get("stock_code")):
+    if not found and (sysid or parsed.get("stock_code")) and _is_session_order_rec(parsed):
         broker_list.append(parsed)
     return merge_broker_orders_into_results(results, broker_list)
 
@@ -1324,10 +1527,22 @@ def on_position_callback(ContextInfo, positionInfo):
             return
         if vol <= 0:
             _CACHED_POSITIONS.pop(code, None)
-            return
-        parsed = _parse_position_rows([row], aid)
-        if parsed:
-            _CACHED_POSITIONS.update(parsed)
+        else:
+            parsed = _parse_position_rows([row], aid)
+            if parsed:
+                _CACHED_POSITIONS.update(parsed)
+        try:
+            import ant_position_entry_dates as _ped
+
+            _ped.sync_from_positions(_CACHED_POSITIONS)
+        except Exception:
+            pass
+        try:
+            import ant_filled_legs as _fl
+
+            _fl.sync_clear_from_positions(_CACHED_POSITIONS)
+        except Exception:
+            pass
     except Exception as e:
         print("[交易核心] position_callback 错误: %s" % e)
 
@@ -1346,6 +1561,30 @@ def _apply_parsed_positions(results, positions):
     _CACHED_POSITIONS.clear()
     if pos:
         _CACHED_POSITIONS.update(pos)
+    # 建仓日：随持仓快照维护，不依赖外部主程序
+    try:
+        import ant_position_entry_dates as _ped
+
+        _ped.sync_from_positions(pos)
+    except Exception:
+        try:
+            from qmt_builtin.src import ant_position_entry_dates as _ped
+
+            _ped.sync_from_positions(pos)
+        except Exception:
+            pass
+    # 持仓归零时清除已执行腿，便于下次再买再卖
+    try:
+        import ant_filled_legs as _fl
+
+        _fl.sync_clear_from_positions(pos)
+    except Exception:
+        try:
+            from qmt_builtin.src import ant_filled_legs as _fl
+
+            _fl.sync_clear_from_positions(pos)
+        except Exception:
+            pass
     return True
 
 
@@ -1581,8 +1820,123 @@ def _update_position_alert(results, positions_parsed, extra=None):
 
 
 
+def _probe_bj_sectors_once(ContextInfo):
+    """一次性探测本机 QMT 北交所板块是否可用，写入 data/bj_sector_probe.json。"""
+    global _BJ_SECTOR_PROBE_DONE
+    if _BJ_SECTOR_PROBE_DONE:
+        return
+    _BJ_SECTOR_PROBE_DONE = True
+    try:
+        import json
+
+        data_dir = ""
+        try:
+            from ant_qmt_paths import DATA_DIR
+
+            data_dir = str(DATA_DIR or "")
+        except Exception:
+            pass
+        if not data_dir and PROJECT_ROOT:
+            data_dir = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data")
+        if not data_dir:
+            data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+        owners = []
+        if ContextInfo is not None:
+            owners.append(("ctx", ContextInfo))
+        try:
+            import builtins
+
+            owners.append(("builtins", builtins))
+        except Exception:
+            pass
+
+        sector_candidates = (
+            "\u4eac\u5e02A\u80a1",  # 京市A股
+            "\u6caa\u6df1\u4eacA\u80a1",  # 沪深京A股
+            "\u5317\u4ea4\u6240",  # 北交所
+            "\u5317\u4ea4\u6240A\u80a1",  # 北交所A股
+            "BJ",
+            "\u4eacA\u80a1",  # 京A股
+            "\u6caa\u6df1A\u80a1",  # 沪深A股（对照）
+        )
+        sector_counts = {}
+        samples = {}
+        for sec in sector_candidates:
+            best_n = -1
+            best_sample = []
+            src = ""
+            for label, owner in owners:
+                fn = getattr(owner, "get_stock_list_in_sector", None)
+                if not callable(fn):
+                    continue
+                try:
+                    raw = fn(sec) or []
+                except Exception:
+                    continue
+                try:
+                    n = len(raw)
+                except Exception:
+                    n = 0
+                if n > best_n:
+                    best_n = n
+                    src = label
+                    try:
+                        best_sample = [str(x) for x in list(raw)[:8]]
+                    except Exception:
+                        best_sample = []
+            sector_counts[sec] = {"n": max(0, best_n), "source": src}
+            samples[sec] = best_sample
+
+        matched_names = []
+        for label, owner in owners:
+            fn = getattr(owner, "get_sector_list", None)
+            if not callable(fn):
+                continue
+            try:
+                sl = fn() or []
+            except Exception:
+                continue
+            for s in sl:
+                t = str(s)
+                if any(k in t for k in ("\u4eac", "\u5317\u4ea4", "BJ", "bj")):
+                    if t not in matched_names:
+                        matched_names.append(t)
+            if matched_names:
+                break
+
+        payload = {
+            "probed_at": _now_iso(),
+            "snapshot_version": ACCOUNT_SNAPSHOT_VERSION,
+            "matched_sector_names": matched_names,
+            "sector_counts": sector_counts,
+            "samples": samples,
+        }
+        out_path = os.path.join(data_dir, "bj_sector_probe.json")
+        parent = os.path.dirname(out_path)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent)
+        tmp = out_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, out_path)
+        jing = int((sector_counts.get("\u4eac\u5e02A\u80a1") or {}).get("n") or 0)
+        hsj = int((sector_counts.get("\u6caa\u6df1\u4eacA\u80a1") or {}).get("n") or 0)
+        print(
+            "[交易核心] 北交所板块探测 京市A股=%s 沪深京A股=%s matched=%s"
+            % (jing, hsj, len(matched_names))
+        )
+    except Exception as e:
+        print("[交易核心] 北交所板块探测失败: %s" % e)
+
+
 def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id="", order_raw=None, deal_raw=None):
     """入口文件已调用 get_trade_detail_data，此处仅解析写入 results。"""
+    global _CACHED_ORDERS
+    try:
+        _probe_bj_sectors_once(ContextInfo)
+    except Exception:
+        pass
     if not isinstance(results, dict):
         return False, "results_not_dict"
     aid = str(account_id or _resolve_account_id(ContextInfo)).strip()
@@ -1631,16 +1985,13 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
     if order_raw is None and _CACHED_ORDERS:
         broker_orders = list(_CACHED_ORDERS.values())
     else:
-        broker_orders = _parse_order_rows(order_rows, aid)
-        for bo in broker_orders:
-            sid = str(bo.get("order_sysid") or "").strip()
-            if sid and _is_session_order_rec(bo):
-                _CACHED_ORDERS[sid] = bo
-        _prune_cached_orders()
-        if not broker_orders and _CACHED_ORDERS:
-            broker_orders = list(_CACHED_ORDERS.values())
+        parsed_orders = _parse_order_rows(order_rows, aid)
+        if parsed_orders:
+            # 并入缓存，勿整表替换：柜台偶发漏返回时保留已见当日单
+            broker_orders = _upsert_cached_orders(parsed_orders)
         else:
-            broker_orders = [bo for bo in broker_orders if _is_session_order_rec(bo)]
+            _prune_cached_orders()
+            broker_orders = list(_CACHED_ORDERS.values()) if _CACHED_ORDERS else []
     # 空列表也写入，避免主程序误以为「尚未查询」
     if merge_broker_orders_into_results(results, broker_orders):
         wrote = True
@@ -1695,6 +2046,7 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
 
 def sync_account_snapshot_to_results(ContextInfo, results, account_id=""):
     """将资金/持仓/委托写入 results。"""
+    global _CACHED_ORDERS
     if not isinstance(results, dict):
         return False, "results_not_dict"
     aid = _resolve_account_id(ContextInfo, account_id)
@@ -1753,12 +2105,11 @@ def sync_account_snapshot_to_results(ContextInfo, results, account_id=""):
     )
 
     broker_orders = _parse_order_rows(order_rows, aid)
-    for bo in broker_orders:
-        sid = str(bo.get("order_sysid") or "").strip()
-        if sid:
-            _CACHED_ORDERS[sid] = bo
-    if not broker_orders and _CACHED_ORDERS:
-        broker_orders = list(_CACHED_ORDERS.values())
+    if broker_orders:
+        broker_orders = _upsert_cached_orders(broker_orders)
+    else:
+        _prune_cached_orders()
+        broker_orders = list(_CACHED_ORDERS.values()) if _CACHED_ORDERS else []
     if merge_broker_orders_into_results(results, broker_orders):
         wrote = True
     results["order_query"] = {

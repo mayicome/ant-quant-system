@@ -64,7 +64,7 @@ def _load_universe(limit: int = 0) -> List[str]:
     import xtquant.xtdata as xtdata
 
     codes: List[str] = []
-    for sector in ("沪深A股", "上证A股", "深证A股"):
+    for sector in ("沪深A股", "上证A股", "深证A股", "京市A股", "沪深京A股"):
         try:
             part = xtdata.get_stock_list_in_sector(sector) or []
             codes.extend([str(c).strip() for c in part if c])
@@ -373,13 +373,15 @@ def _code_parts(code: str) -> Tuple[str, str]:
     if "." in c:
         num, mkt = c.split(".", 1)
         return mkt, num
-    if c.startswith(("5", "6", "9")):
+    if c.startswith("6") or c.startswith("5"):
         return "SH", c
+    if c.startswith(("4", "8")) or c.startswith("920"):
+        return "BJ", c
     return "SZ", c
 
 
 def _qmt_tick_day_file(data_dir: str, code: str, day: str) -> str:
-    """QMT 本地 tick：{datadir}/{SH|SZ}/0/{6位}/{YYYYMMDD}.dat"""
+    """QMT 本地 tick：{datadir}/{SH|SZ|BJ}/0/{6位}/{YYYYMMDD}.dat"""
     mkt, num = _code_parts(code)
     return os.path.join(data_dir, mkt, "0", num, f"{day}.dat")
 

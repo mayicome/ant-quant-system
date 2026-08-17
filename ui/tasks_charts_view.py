@@ -553,6 +553,29 @@ class TasksChartsView(QWidget):
                 ep = str(order_rec.get("executed_endpoint") or "").strip()
                 if ep in ("low", "high"):
                     hit["executed_endpoint"] = ep
+                # 实盘建仓日：首次买入成交写入；卖出后无仓则清除
+                try:
+                    from utils.position_entry_dates import note_fill_from_order
+
+                    note_fill_from_order(
+                        stock_code=code6 or stock_code,
+                        rule=hit,
+                        order_rec=order_rec,
+                        skip_reason=str(skip_reason or ""),
+                    )
+                except Exception:
+                    pass
+                if not skip_reason:
+                    try:
+                        from utils.filled_legs import note_from_rule_fill
+
+                        note_from_rule_fill(
+                            stock_code=code6 or stock_code,
+                            rule=hit,
+                            order_rec=order_rec,
+                        )
+                    except Exception:
+                        pass
             params["rules"] = rules
             task["params"] = params
             try:
@@ -2702,10 +2725,15 @@ class TasksChartsView(QWidget):
         return snap
 
     def _restore_chart_run_states(self, snap: dict) -> None:
-        """重排后按快照恢复运行态；若误触暂停则拉回运行中。"""
+        """重排后按快照恢复运行态；若误触暂停则拉回运行中。
+
+        注意：快照为「未运行」时，不得覆盖 TaskManager 里已在跑的任务
+        （预约重载：先 start_all 再 load_tasks 时，旧图快照全是未运行）。
+        """
         if not snap:
             return
         cache = getattr(self, '_chart_cache', None) or {}
+        running_tasks = getattr(self.task_manager, 'running_tasks', {}) if self.task_manager else {}
         for stock_code, (was_running, was_paused) in snap.items():
             cached = cache.get(stock_code)
             if not isinstance(cached, dict):
@@ -2713,6 +2741,9 @@ class TasksChartsView(QWidget):
             chart = cached.get('chart')
             if not chart:
                 continue
+            task_id = getattr(chart, 'task_id', None)
+            in_tm = bool(task_id and task_id in running_tasks)
+
             # 重排前是运行中，重排后若变成暂停/未运行 → 视为误触，恢复 UI（并尽量重启 TM）
             if was_running and not was_paused:
                 now_running = bool(getattr(chart, 'task_running', False)) and not bool(
@@ -2720,9 +2751,7 @@ class TasksChartsView(QWidget):
                 )
                 if now_running:
                     continue
-                task_id = getattr(chart, 'task_id', None)
                 if self.task_manager and task_id:
-                    in_tm = task_id in getattr(self.task_manager, 'running_tasks', {})
                     if not in_tm:
                         try:
                             # 误触 pause 会 stop_task；尝试重新启动
@@ -2739,10 +2768,59 @@ class TasksChartsView(QWidget):
                 except Exception:
                     pass
             else:
+                # 快照未运行，但 TM 已在跑 / 组件已标运行 → 保留运行态，勿刷回未运行
+                if in_tm or (
+                    bool(getattr(chart, 'task_running', False))
+                    and not bool(getattr(chart, 'task_paused', False))
+                ):
+                    try:
+                        chart.set_task_status(True, False)
+                        if getattr(chart, 'task', None) and isinstance(chart.task.get('params'), dict):
+                            chart.task['params']['task_running'] = True
+                            chart.task['params']['task_paused'] = False
+                    except Exception:
+                        pass
+                    continue
                 try:
                     chart.set_task_status(was_running, was_paused)
                 except Exception:
                     pass
+
+    def sync_charts_with_running_tasks(self) -> int:
+        """按 TaskManager.running_tasks 同步当前缓存/本页图表的运行态。返回同步为运行中的数量。"""
+        if not self.task_manager:
+            return 0
+        running_tasks = getattr(self.task_manager, 'running_tasks', {}) or {}
+        synced = 0
+        seen = set()
+        for source in (
+            getattr(self, 'chart_widgets', None) or {},
+            getattr(self, '_chart_cache', None) or {},
+        ):
+            for stock_code, chart_data in list(source.items()):
+                if stock_code in seen:
+                    continue
+                chart = chart_data.get('chart') if isinstance(chart_data, dict) else chart_data
+                if not chart:
+                    continue
+                seen.add(stock_code)
+                task_id = getattr(chart, 'task_id', None)
+                task = getattr(chart, 'task', None)
+                if not isinstance(task, dict):
+                    task = self.task_manager.tasks.get(task_id) if task_id else None
+                try:
+                    running, paused = self._resolve_task_run_state(task_id, task or {}, chart)
+                    chart.set_task_status(running, paused)
+                    if running and not paused:
+                        synced += 1
+                        if isinstance(getattr(chart, 'task', None), dict):
+                            params = chart.task.get('params')
+                            if isinstance(params, dict):
+                                params['task_running'] = True
+                                params['task_paused'] = False
+                except Exception as e:
+                    self.logger.warning(f"同步图表运行态失败 {stock_code}: {e}")
+        return synced
 
     def _detach_grid_widgets(self, stock_codes) -> None:
         """从 grid 卸下容器（先卸再改列宽，避免第 4 列被压成 0 宽时误触按钮）。"""

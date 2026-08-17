@@ -987,7 +987,7 @@ def rule_code_recent_limit_up_in_hot_theme(
     """
     return f'''# 近{int(lookback_days)}日有涨停 + 当日十大热门板块或概念
 # 依赖引擎 ctx["hot_theme"]（涨停日数据 sector_plate_stats / concept_stats 前 TOP_N + QMT 归属扩展）
-LOOKBACK_DAYS = {int(lookback_days)}  # 近 N 个交易日（含选股日）内至少 1 次涨停
+LOOKBACK_DAYS = {int(lookback_days)}  # 近 N 个交易日（不含选股日）内至少 1 次涨停
 TOP_N = {int(top_n)}  # 与引擎加载的 top_n 对齐（仅展示）
 N = LOOKBACK_DAYS  # 供引擎日历预检
 
@@ -1022,10 +1022,12 @@ def _is_limit_up_on_row(prev_close, close_price, limit_ratio):
 
 
 def _find_recent_limit_ups(stock_code, stock_name, daily_data, as_of_date, lookback):
-    """返回近 lookback 个交易日内的涨停日列表（新→旧）。"""
+    """返回选股日前 lookback 个交易日内的涨停日列表（新→旧，不含选股日）。"""
     if daily_data is None or getattr(daily_data, "empty", True):
         return []
     dd = _dates_up_to(daily_data, as_of_date)
+    if as_of_date is not None:
+        dd = dd[dd["date"] < as_of_date]
     if dd.empty or "date" not in dd.columns or "close" not in dd.columns:
         return []
     dates = list(dd["date"].tolist())
@@ -1114,7 +1116,7 @@ def rule_code_em_continuous_hot_rs_top20(
 # 合格 TopN：按排名遍历全日榜，跳过成分股数 < MIN_MEMBERS 的标签，取满 TOP_N；连续热门=D∩D-1
 # 依赖引擎 ctx["em_board_hot"]（D 与 D-1 东财 industry 必齐；concept 可选缺则概念侧为空 + QMT/all_a_stock_info 归属 + 组内 RS）
 # 不要求近期涨停；不做涨停后第1-2日禁入；无回撤过滤；无 MA5>MA10 硬条件（仅输出均线）
-# 分析字段：近 RS_LOOKBACK 日涨停板数量、最近涨停板距 as_of 几个交易日（0=当日）
+# 分析字段：近 RS_LOOKBACK 日涨停板数量（不含当日）、最近涨停板距 as_of 几个交易日（1=上一交易日）
 TOP_N = {int(top_n)}
 RS_TOP_K = {int(rs_top_k)}
 RS_LOOKBACK = {int(rs_lookback)}
@@ -1182,28 +1184,32 @@ def _is_limit_up_on_row(prev_close, close_price, limit_ratio):
 
 
 def _recent_lu_stats(stock_code, stock_name, daily_data, as_of_date, lookback):
-    """近 lookback 个交易日（含 as_of）涨停次数，及最近一次涨停距 as_of 的交易日偏移。
+    """近 lookback 个交易日（不含 as_of）涨停次数，及最近一次涨停距 as_of 的交易日偏移。
 
-    偏移：0=as_of 当日涨停，1=上一交易日，…；窗口内无涨停则返回 ""。
+    偏移：1=上一交易日，2=再上一交易日，…；窗口内无涨停则返回 ""。
     """
     if daily_data is None or getattr(daily_data, "empty", True):
         return 0, ""
     dd = daily_data.sort_values("date")
     if as_of_date is not None:
-        dd = dd[dd["date"] <= as_of_date]
-    if dd.empty or "date" not in dd.columns or "close" not in dd.columns:
+        dd_full = dd[dd["date"] <= as_of_date]
+        prev_dd = dd_full[dd_full["date"] < as_of_date]
+    else:
+        dd_full = dd
+        prev_dd = dd.iloc[:-1] if len(dd) > 0 else dd
+    if prev_dd.empty or "date" not in prev_dd.columns or "close" not in prev_dd.columns:
         return 0, ""
-    dates = list(dd["date"].tolist())
+    dates = list(prev_dd["date"].tolist())
     if not dates:
         return 0, ""
     lb = max(1, int(lookback))
     window = dates[-lb:] if len(dates) >= lb else dates
     lu_offsets = []
     for i, trade_date in enumerate(window):
-        sub = dd[dd["date"] == trade_date]
+        sub = prev_dd[prev_dd["date"] == trade_date]
         if sub.empty:
             continue
-        prev = dd[dd["date"] < trade_date]
+        prev = dd_full[dd_full["date"] < trade_date]
         if prev.empty:
             continue
         prev_close = float(prev.iloc[-1]["close"])
@@ -1211,8 +1217,8 @@ def _recent_lu_stats(stock_code, stock_name, daily_data, as_of_date, lookback):
         limit_ratio = _limit_ratio(stock_code, stock_name, trade_date)
         ok, _ = _is_limit_up_on_row(prev_close, close_price, limit_ratio)
         if ok:
-            # 窗口末日 = as_of → offset 0
-            lu_offsets.append(len(window) - 1 - i)
+            # 窗口末日=上一交易日 → offset 1
+            lu_offsets.append(len(window) - i)
     count = len(lu_offsets)
     days_ago = min(lu_offsets) if lu_offsets else ""
     return count, days_ago
@@ -1396,20 +1402,24 @@ def _recent_lu_stats(stock_code, stock_name, daily_data, as_of_date, lookback):
         return 0, ""
     dd = daily_data.sort_values("date")
     if as_of_date is not None:
-        dd = dd[dd["date"] <= as_of_date]
-    if dd.empty or "date" not in dd.columns or "close" not in dd.columns:
+        dd_full = dd[dd["date"] <= as_of_date]
+        prev_dd = dd_full[dd_full["date"] < as_of_date]
+    else:
+        dd_full = dd
+        prev_dd = dd.iloc[:-1] if len(dd) > 0 else dd
+    if prev_dd.empty or "date" not in prev_dd.columns or "close" not in prev_dd.columns:
         return 0, ""
-    dates = list(dd["date"].tolist())
+    dates = list(prev_dd["date"].tolist())
     if not dates:
         return 0, ""
     lb = max(1, int(lookback))
     window = dates[-lb:] if len(dates) >= lb else dates
     lu_offsets = []
     for i, trade_date in enumerate(window):
-        sub = dd[dd["date"] == trade_date]
+        sub = prev_dd[prev_dd["date"] == trade_date]
         if sub.empty:
             continue
-        prev = dd[dd["date"] < trade_date]
+        prev = dd_full[dd_full["date"] < trade_date]
         if prev.empty:
             continue
         prev_close = float(prev.iloc[-1]["close"])
@@ -1417,7 +1427,7 @@ def _recent_lu_stats(stock_code, stock_name, daily_data, as_of_date, lookback):
         limit_ratio = _limit_ratio(stock_code, stock_name, trade_date)
         ok, _ = _is_limit_up_on_row(prev_close, close_price, limit_ratio)
         if ok:
-            lu_offsets.append(len(window) - 1 - i)
+            lu_offsets.append(len(window) - i)
     count = len(lu_offsets)
     days_ago = min(lu_offsets) if lu_offsets else ""
     return count, days_ago
@@ -1746,20 +1756,24 @@ def _recent_lu_stats(stock_code, stock_name, daily_data, as_of_date, lookback):
         return 0, ""
     dd = daily_data.sort_values("date")
     if as_of_date is not None:
-        dd = dd[dd["date"] <= as_of_date]
-    if dd.empty or "date" not in dd.columns or "close" not in dd.columns:
+        dd_full = dd[dd["date"] <= as_of_date]
+        prev_dd = dd_full[dd_full["date"] < as_of_date]
+    else:
+        dd_full = dd
+        prev_dd = dd.iloc[:-1] if len(dd) > 0 else dd
+    if prev_dd.empty or "date" not in prev_dd.columns or "close" not in prev_dd.columns:
         return 0, ""
-    dates = list(dd["date"].tolist())
+    dates = list(prev_dd["date"].tolist())
     if not dates:
         return 0, ""
     lb = max(1, int(lookback))
     window = dates[-lb:] if len(dates) >= lb else dates
     lu_offsets = []
     for i, trade_date in enumerate(window):
-        sub = dd[dd["date"] == trade_date]
+        sub = prev_dd[prev_dd["date"] == trade_date]
         if sub.empty:
             continue
-        prev = dd[dd["date"] < trade_date]
+        prev = dd_full[dd_full["date"] < trade_date]
         if prev.empty:
             continue
         prev_close = float(prev.iloc[-1]["close"])
@@ -1767,7 +1781,7 @@ def _recent_lu_stats(stock_code, stock_name, daily_data, as_of_date, lookback):
         limit_ratio = _limit_ratio(stock_code, stock_name, trade_date)
         ok, _ = _is_limit_up_on_row(prev_close, close_price, limit_ratio)
         if ok:
-            lu_offsets.append(len(window) - 1 - i)
+            lu_offsets.append(len(window) - i)
     count = len(lu_offsets)
     days_ago = min(lu_offsets) if lu_offsets else ""
     return count, days_ago

@@ -151,23 +151,98 @@ def _row_time_to_date(ts) -> Optional[date]:
 def _prev_trading_day_close_from_daily_df(df, today: date) -> Optional[float]:
     """
     上一完整交易日的日线收盘价（用于集合竞价/9:30 前）。
-    从后往前找第一根「日期 < 今天」的 K 线；若最后一根已是昨日或更早则直接取该根收盘；
-    若全是今日（仅一根当日 K）则无法区分，返回 None。
+    仅当末日（或今日前最近一根）正好是「上一交易日」才返回；偏旧则 None，交给 live lastClose。
     """
     if df is None or len(df) < 1:
         return None
+    prev_td = _previous_tradeday_date(today)
     try:
         for i in range(len(df) - 1, -1, -1):
             td = _row_time_to_date(df.iloc[i].get("time"))
             if td is None:
                 continue
-            if td < today:
+            if td == today:
+                continue
+            if td == prev_td:
                 return float(df.iloc[i]["close"])
-        if len(df) >= 2:
-            return float(df.iloc[-2]["close"])
+            # 比上一交易日更早 → daily_cache 落后
+            if td < prev_td:
+                return None
     except Exception:
         return None
     return None
+
+
+def _previous_tradeday_date(today: date) -> date:
+    try:
+        from utils.trading_day import previous_tradeday
+
+        return previous_tradeday(today)
+    except Exception:
+        d = today - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d
+
+
+def _fetch_live_last_close(stock_code: str) -> float:
+    """盘中从 results.json 取 QMT lastClose，纠正偏旧 daily_cache 昨收。"""
+    code = str(stock_code or "").strip().upper()
+    if not code:
+        return 0.0
+    c6 = "".join(ch for ch in code if ch.isdigit())[:6]
+    variants = {code}
+    if c6:
+        variants.add(c6)
+        variants.add(f"{c6}.SH" if c6.startswith(("5", "6", "9")) else f"{c6}.SZ")
+
+    try:
+        from utils.ant_rules_io_ext import default_paths, load_json
+
+        root = os.path.dirname(os.path.abspath(__file__))
+        _, results_path = default_paths(root)
+        if not os.path.isfile(results_path):
+            return 0.0
+        data = load_json(results_path)
+        stocks = (data or {}).get("stocks") if isinstance(data, dict) else {}
+        if not isinstance(stocks, dict):
+            return 0.0
+        for key in variants:
+            bucket = stocks.get(key) or stocks.get(str(key).upper())
+            if not isinstance(bucket, dict):
+                continue
+            for fk in ("last_close", "lastClose", "pre_close", "preClose"):
+                try:
+                    v = float(bucket.get(fk) or 0)
+                except (TypeError, ValueError):
+                    v = 0.0
+                if v > 0:
+                    return v
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _resolve_intraday_prev_close(
+    df,
+    today: date,
+    latest_close: float,
+    latest_date: Optional[date],
+    stock_code: str,
+) -> float:
+    """盘中昨收：日线末日须等于上一交易日；否则用 live lastClose，再退回日线末日。"""
+    prev_td = _previous_tradeday_date(today)
+    if latest_date is not None and latest_date == today and len(df) >= 2:
+        try:
+            return float(df.iloc[-2]["close"])
+        except Exception:
+            pass
+    if latest_date is not None and latest_date == prev_td:
+        return float(latest_close)
+    live = _fetch_live_last_close(stock_code)
+    if live > 0:
+        return float(live)
+    return float(latest_close)
 
 
 class KeyPriceCalculator:
@@ -964,7 +1039,10 @@ class KeyPriceCalculator:
                 if pc is not None and pc > 0:
                     prev_close = float(pc)
                 else:
-                    if not _builtin_price_feed():
+                    live_pc = _fetch_live_last_close(stock_code)
+                    if live_pc > 0:
+                        prev_close = float(live_pc)
+                    elif not _builtin_price_feed():
                         try:
                             import xtquant.xtdata as xtdata
                             fc = stock_code if "." in stock_code else None
@@ -989,10 +1067,11 @@ class KeyPriceCalculator:
                         except Exception:
                             pass
             elif is_trading_day and datetime_time(9, 30) <= current_time < REFERENCE_SWITCH_TIME:
-                if is_latest_data_today and len(df) >= 2:
-                    prev_close = float(df.iloc[-2]['close'])
-                else:
-                    prev_close = float(latest_close)
+                # 旧逻辑在「末日≠今天」时直接用末日收盘当昨收，daily_cache 落后多日会算错
+                # （603137：缓存停在 8/13 的 28.98，真实昨收 8/14 的 26.08）
+                prev_close = _resolve_intraday_prev_close(
+                    df, today, float(latest_close), latest_date, stock_code
+                )
             elif is_after_close_period:
                 # 收盘后～次日早盘前（不含已在 1 中处理的交易日 9:30 前）
                 if is_trading_day and REFERENCE_SWITCH_TIME <= current_time:

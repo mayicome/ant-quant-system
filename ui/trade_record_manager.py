@@ -4,13 +4,30 @@ from datetime import datetime, timedelta
 from PyQt5.QtWidgets import (QTableWidgetItem, QPushButton, QWidget, QHBoxLayout, 
                              QVBoxLayout, QLabel, QMessageBox, QSizePolicy)
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QColor, QBrush
 from utils.logger import Logger
 from my_function import get_stock_name, load_all_stocks_info
 import traceback
 
 # 订单列表操作按钮统一字体（与表格 12pt 雅黑一致，避免「已结束」变小字）
 _OP_BTN_FONT = "font-family: 'Microsoft YaHei'; font-size: 11pt; font-weight: bold;"
+
+# 订单状态文字色：已报蓝 / 已成黑 / 已撤灰
+_ORDER_STATUS_COLOR_REPORTED = QColor(21, 101, 192)   # 已报
+_ORDER_STATUS_COLOR_FILLED = QColor(33, 33, 33)       # 已成（近黑，保证可读）
+_ORDER_STATUS_COLOR_CANCELLED = QColor(158, 158, 158) # 已撤
+
+
+def _order_status_text_color(status_text: str) -> QColor:
+    """按委托状态返回文字颜色。"""
+    s = str(status_text or "")
+    if any(k in s for k in ("已撤", "部撤", "废单")):
+        return _ORDER_STATUS_COLOR_CANCELLED
+    if "已成" in s:
+        return _ORDER_STATUS_COLOR_FILLED
+    if any(k in s for k in ("已报", "未报", "待报", "已确认", "部成")):
+        return _ORDER_STATUS_COLOR_REPORTED
+    return _ORDER_STATUS_COLOR_FILLED
 
 
 def _op_btn_style(bg: str, hover: str = "", pressed: str = "") -> str:
@@ -150,15 +167,19 @@ class TradeRecordManager:
             if not trade_info.get('is_real_order', False):
                 return
 
-            # UI 兜底：跨日委托不进表（有完整日期时才拦；仅 HH:MM:SS 放行）
+            # UI 兜底：跨日委托不进表
+            # - session_strict=True（大 QMT 柜台快照）：无完整日期也丢弃
+            # - 默认（MiniQMT 当日 query）：仅 HH:MM:SS 时放行
             try:
                 from utils.order_session import is_current_session_order
 
+                strict = bool(trade_info.get("session_strict"))
                 if not is_current_session_order(
                     order_time=trade_info.get('order_time'),
                     at=trade_info.get('at') or trade_info.get('order_at'),
                     order_at=trade_info.get('order_at'),
-                    updated_at=trade_info.get('updated_at'),
+                    allow_undated=not strict,
+                    use_updated_at=False,
                 ):
                     return
             except Exception:
@@ -271,8 +292,9 @@ class TradeRecordManager:
                     #self.logger.info(f"插入新行，订单号: {trade_info.get('order_id')}")
                     # 新订单插入到第一行
                     table.insertRow(0)
+                    status_col = trade_info.get('type', '未知类型')+" - "+order_status
                     for col, value in enumerate(table_items):
-                        item = self.create_table_item(value)
+                        item = self.create_table_item(value, status_text=status_col)
                         table.setItem(0, col, item)
                     #self.logger.info(f"新行索引: 0")
                     
@@ -420,8 +442,9 @@ class TradeRecordManager:
                 new_row = table.rowCount()
                 table.insertRow(new_row)
                 # 添加数据项
+                status_text = row_data['items'][6] if len(row_data['items']) > 6 else ''
                 for col, value in enumerate(row_data['items']):
-                    item = self.create_table_item(value)
+                    item = self.create_table_item(value, status_text=status_text)
                     table.setItem(new_row, col, item)
                 # 重新创建操作控件
                 order_id = row_data['items'][0]
@@ -517,18 +540,29 @@ class TradeRecordManager:
         
         return -1  # 没有找到匹配的行，需要插入新行
 
-    def create_table_item(self, value, align_center=True):
-        """创建表格项并设置对齐；悬停显示全文（名称列过长时用）。"""
+    def create_table_item(self, value, align_center=True, status_text=None):
+        """创建表格项并设置对齐；悬停显示全文（名称列过长时用）。
+
+        status_text: 若提供，按订单状态着色（已报蓝 / 已成黑 / 已撤灰）。
+        """
         text = str(value)
         item = QTableWidgetItem(text)
         if align_center:
             item.setTextAlignment(Qt.AlignCenter)
         if text:
             item.setToolTip(text)
+        if status_text is not None:
+            item.setForeground(QBrush(_order_status_text_color(status_text)))
         return item
 
     def update_existing_row(self, table, row, items):
         """更新现有行（名称列：已有正常简称时不被「未知名称」覆盖）"""
+        status_text = ""
+        try:
+            if len(items) > 6:
+                status_text = str(items[6] or "")
+        except Exception:
+            status_text = ""
         for col, value in enumerate(items):
             if col == 2:
                 try:
@@ -543,15 +577,21 @@ class TradeRecordManager:
                         continue
                 except Exception:
                     pass
-            item = self.create_table_item(value)
+            item = self.create_table_item(value, status_text=status_text)
             table.setItem(row, col, item)
 
     def insert_new_row(self, table, items):
         """插入新行"""
         new_row = table.rowCount()
         table.insertRow(new_row)
+        status_text = ""
+        try:
+            if len(items) > 6:
+                status_text = str(items[6] or "")
+        except Exception:
+            status_text = ""
         for col, value in enumerate(items):
-            item = self.create_table_item(value)
+            item = self.create_table_item(value, status_text=status_text)
             table.setItem(new_row, col, item)
 
     def create_operation_widget(self, order_status):

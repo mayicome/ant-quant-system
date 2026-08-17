@@ -153,6 +153,22 @@ def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
         out["fill_at_limit_up"] = bool(raw.get("fill_at_limit_up"))
     if "open_buy_ask" in raw:
         out["open_buy_ask"] = bool(raw.get("open_buy_ask"))
+    # 已执行分支：腿键随武装任务下发
+    meta = out.get("metadata") if isinstance(out.get("metadata"), dict) else {}
+    lk = str(raw.get("leg_key") or meta.get("leg_key") or "").strip()
+    if lk:
+        out["leg_key"] = lk
+        meta = dict(meta)
+        meta["leg_key"] = lk
+        out["metadata"] = meta
+    rn = str(meta.get("rule_name") or "").strip()
+    if not rn:
+        # 兼容顶层 rule_name
+        rn = str(raw.get("rule_name") or "").strip()
+        if rn:
+            meta = dict(meta)
+            meta["rule_name"] = rn
+            out["metadata"] = meta
     try:
         lu = float(raw.get("limit_up") or 0)
         if lu > 0:
@@ -426,6 +442,21 @@ def extract_tick_open(row: Dict[str, Any]) -> float:
     return 0.0
 
 
+def extract_tick_last_close(row: Dict[str, Any]) -> float:
+    """昨收 / 前收（QMT lastClose）。"""
+    for key in ("lastClose", "preClose", "pre_close", "last_close", "prevClose"):
+        raw = row.get(key)
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def extract_tick_high_low(row: Dict[str, Any]) -> Tuple[float, float]:
     hi = lo = 0.0
     for key in ("high", "highPrice", "todayHigh"):
@@ -478,6 +509,7 @@ def update_price_snapshot(
             "last_price": 0.0,
             "last_tick_time": "",
             "quote_recv_at": "",
+            "last_close": 0.0,
             "today_open": 0.0,
             "today_high": 0.0,
             "today_low": 0.0,
@@ -503,6 +535,10 @@ def update_price_snapshot(
         changed = True
 
     row = tick_row if isinstance(tick_row, dict) else {}
+    last_close = extract_tick_last_close(row) if row else 0.0
+    if last_close > 0 and abs(float(bucket.get("last_close") or 0) - last_close) > 1e-9:
+        bucket["last_close"] = float(last_close)
+        changed = True
     open_px = extract_tick_open(row) if row else 0.0
     if open_px > 0 and float(bucket.get("today_open") or 0) <= 0:
         bucket["today_open"] = open_px
@@ -619,6 +655,7 @@ def load_results_prices(path: str) -> Dict[str, Dict[str, Any]]:
                 bucket.get("quote_recv_at") or data.get("quotes_recv_at") or ""
             ),
             "quotes_recv_at": str(data.get("quotes_recv_at") or ""),
+            "last_close": float(bucket.get("last_close") or 0),
             "today_open": float(bucket.get("today_open") or 0),
             "today_high": float(bucket.get("today_high") or 0),
             "today_low": float(bucket.get("today_low") or 0),

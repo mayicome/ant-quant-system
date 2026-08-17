@@ -79,6 +79,28 @@ def backtest_window_from_selection_day(
     return start, end, hint
 
 
+def sim_hold_days_covering_entry_window(
+    entry_window_trading_days: int,
+    sell_hold_trading_days: int,
+) -> int:
+    """覆盖「最晚买入日 + 成交后持有」的总长度（entry + hold − 1）。
+
+    批量回测已改为：仿真长度=策略「运行交易日数」，持有留给下一轮；
+    本函数保留给需要「一枪打满运行+持有」的调用方。
+    """
+    try:
+        ew = int(entry_window_trading_days)
+    except (TypeError, ValueError):
+        ew = 1
+    try:
+        sh = int(sell_hold_trading_days)
+    except (TypeError, ValueError):
+        sh = 1
+    ew = max(1, ew)
+    sh = max(1, sh)
+    return max(sh, ew + sh - 1)
+
+
 def trading_day_window_from_start(
     start: date, hold_trading_days: int
 ) -> Tuple[Optional[date], Optional[date], str]:

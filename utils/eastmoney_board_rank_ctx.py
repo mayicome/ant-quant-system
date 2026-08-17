@@ -163,6 +163,65 @@ def board_rank_csv_paths(
     }
 
 
+def board_fund_flow_csv_paths(
+    as_of: DateLike,
+    *,
+    rank_dir: Optional[str] = None,
+) -> Dict[str, str]:
+    """返回某日 industry/concept 资金流 CSV 路径（不一定存在）。"""
+    ds = _dashed(as_of) or ""
+    base = rank_dir or default_board_rank_dir()
+    return {
+        "industry": os.path.join(base, f"industry_fund_flow_{ds}.csv"),
+        "concept": os.path.join(base, f"concept_fund_flow_{ds}.csv"),
+    }
+
+
+def _load_fund_flow_net_ratio_map(path: str) -> Dict[str, float]:
+    """名称 → 今日主力净流入-净占比（%）。"""
+    out: Dict[str, float] = {}
+    if not path or not os.path.isfile(path):
+        return out
+    try:
+        df = _read_csv(path)
+    except Exception:
+        return out
+    if df is None or df.empty:
+        return out
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    name_col = None
+    for c in ("名称", "板块名称"):
+        if c in df.columns:
+            name_col = c
+            break
+    if name_col is None:
+        for c in df.columns:
+            if "名称" in str(c):
+                name_col = c
+                break
+    ratio_col = "今日主力净流入-净占比" if "今日主力净流入-净占比" in df.columns else None
+    if ratio_col is None:
+        for c in df.columns:
+            if "主力净流入" in str(c) and "占比" in str(c):
+                ratio_col = c
+                break
+    if name_col is None or ratio_col is None:
+        return out
+    for _, row in df.iterrows():
+        name = str(row.get(name_col) or "").strip()
+        if not name or name in out:
+            continue
+        try:
+            v = row.get(ratio_col)
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                continue
+            out[name] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _read_csv(path: str) -> pd.DataFrame:
     last_err: Exception | None = None
     for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
@@ -173,10 +232,11 @@ def _read_csv(path: str) -> pd.DataFrame:
     raise RuntimeError(f"无法读取 {path}: {last_err}")
 
 
-def _load_rank_ordered(path: str) -> List[Tuple[str, int]]:
-    """全日榜按涨跌幅顺序：[(板块名称, 排名), ...]，排名 1=最强。
+def _load_rank_chg_ordered(path: str) -> List[Tuple[str, int, Optional[float]]]:
+    """全日榜按涨跌幅顺序：[(板块名称, 排名, 涨跌幅%), ...]，排名 1=最强。
 
     优先「排名」列升序；否则按「涨跌幅」降序并赋 1..N。
+    涨跌幅列优先「涨跌幅」，其次「今日涨跌幅」。
     """
     if not path or not os.path.isfile(path):
         return []
@@ -194,18 +254,28 @@ def _load_rank_ordered(path: str) -> List[Tuple[str, int]]:
     if name_col is None:
         return []
 
+    chg_col = None
+    for c in ("涨跌幅", "今日涨跌幅"):
+        if c in df.columns:
+            chg_col = c
+            break
+
     if "排名" in df.columns:
         df["_rank"] = pd.to_numeric(df["排名"], errors="coerce")
         work = df.dropna(subset=["_rank"]).sort_values("_rank", ascending=True, kind="mergesort")
-    elif "涨跌幅" in df.columns:
-        df["_chg"] = pd.to_numeric(df["涨跌幅"], errors="coerce")
+    elif chg_col is not None:
+        df["_chg"] = pd.to_numeric(df[chg_col], errors="coerce")
         work = df.dropna(subset=["_chg"]).sort_values("_chg", ascending=False, kind="mergesort")
         work = work.reset_index(drop=True)
         work["_rank"] = work.index + 1
     else:
         return []
 
-    out: List[Tuple[str, int]] = []
+    if chg_col is not None and "_chg" not in work.columns:
+        work = work.copy()
+        work["_chg"] = pd.to_numeric(work[chg_col], errors="coerce")
+
+    out: List[Tuple[str, int, Optional[float]]] = []
     seen: Set[str] = set()
     for _, row in work.iterrows():
         name = str(row.get(name_col) or "").strip()
@@ -217,9 +287,34 @@ def _load_rank_ordered(path: str) -> List[Tuple[str, int]]:
             continue
         if rk < 1:
             continue
+        chg: Optional[float] = None
+        if "_chg" in work.columns:
+            try:
+                v = row.get("_chg")
+                if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                    chg = float(v)
+            except (TypeError, ValueError):
+                chg = None
         seen.add(name)
-        out.append((name, rk))
+        out.append((name, rk, chg))
     return out
+
+
+def _load_rank_ordered(path: str) -> List[Tuple[str, int]]:
+    """全日榜按涨跌幅顺序：[(板块名称, 排名), ...]，排名 1=最强。"""
+    return [(n, rk) for n, rk, _chg in _load_rank_chg_ordered(path)]
+
+
+def _load_rank_chg_maps(path: str) -> Tuple[Dict[str, int], Dict[str, float]]:
+    """板块名称 → 原始排名 / 涨跌幅%。"""
+    rank: Dict[str, int] = {}
+    chg: Dict[str, float] = {}
+    for name, rk, pct in _load_rank_chg_ordered(path):
+        if name not in rank:
+            rank[name] = int(rk)
+        if pct is not None and name not in chg:
+            chg[name] = float(pct)
+    return rank, chg
 
 
 def _load_rank_map(path: str, *, top_n: int) -> Dict[str, int]:
@@ -440,6 +535,150 @@ def _resolve_members_for_tag(
         members |= set(qmt_tag_to_codes.get(k) or [])
     members |= set(qmt_tag_to_codes.get(tag_name) or [])
     return {_norm_code6(c) for c in members if _norm_code6(c)}
+
+
+def build_code_owned_board_rank_maps(
+    as_of: DateLike,
+    *,
+    rank_dir: Optional[str] = None,
+    info_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """按东财当日行业/概念涨幅榜 + 成分归属，为每只股票找名次最好的行业与概念。
+
+    与选股规则里「标签名精确撞榜」不同：这里用 all_a_stock_info / QMT 成分反查，
+    因此「食品加工」等个股标签也能挂到东财行业板（如畜禽饲料）上。
+
+    Returns:
+        {
+          \"error\": str,
+          \"code_best_industry\": {code6: {\"rank\", \"name\", \"chg\", \"flow_ratio\"}},
+          \"code_best_concept\": 同上,
+          \"code_industry_hits\": {code6: [(rank, name, chg), ...] 升序},
+          \"code_concept_hits\": 同上,
+        }
+    """
+    out: Dict[str, Any] = {
+        "error": "",
+        "code_best_industry": {},
+        "code_best_concept": {},
+        "code_industry_hits": {},
+        "code_concept_hits": {},
+    }
+    as_of_d = _to_date(as_of)
+    if as_of_d is None:
+        out["error"] = "无效日期"
+        return out
+
+    try:
+        from utils.em_board_exclude import is_excluded_em_board
+    except Exception:
+        def is_excluded_em_board(_n: str) -> bool:
+            return False
+
+    paths = board_rank_csv_paths(as_of_d, rank_dir=rank_dir)
+    ind_rank, ind_chg = _load_rank_chg_maps(paths.get("industry") or "")
+    con_rank, con_chg = _load_rank_chg_maps(paths.get("concept") or "")
+    if not ind_rank and not con_rank:
+        out["error"] = "无东财行业/概念涨幅榜"
+        return out
+
+    ind_flow: Dict[str, float] = {}
+    con_flow: Dict[str, float] = {}
+    try:
+        fpaths = board_fund_flow_csv_paths(as_of_d, rank_dir=rank_dir)
+        ind_flow = _load_fund_flow_net_ratio_map(fpaths.get("industry") or "")
+        con_flow = _load_fund_flow_net_ratio_map(fpaths.get("concept") or "")
+    except Exception:
+        pass
+
+    info_tag_to_codes, _code_to_tags = _load_stock_info_tag_index(info_path)
+    store = None
+    try:
+        from utils.qmt_sector_store import get_qmt_sector_store
+
+        store = get_qmt_sector_store()
+    except Exception:
+        store = None
+    qmt_tag_to_codes = _build_qmt_tag_to_codes(store)
+
+    def _fill(
+        rank_map: Dict[str, int],
+        chg_map: Dict[str, Any],
+        flow_map: Dict[str, float],
+        *,
+        kind: str,
+        best_key: str,
+        hits_key: str,
+    ) -> None:
+        best_map: Dict[str, Dict[str, Any]] = out[best_key]
+        hits_map: Dict[str, List[Tuple[int, str, Optional[float]]]] = out[hits_key]
+        for name, rk in (rank_map or {}).items():
+            nm = str(name or "").strip()
+            if not nm or is_excluded_em_board(nm):
+                continue
+            try:
+                rki = int(rk)
+            except (TypeError, ValueError):
+                continue
+            if rki < 1:
+                continue
+            members = _resolve_members_for_tag(
+                nm,
+                kind=kind,
+                info_tag_to_codes=info_tag_to_codes,
+                qmt_tag_to_codes=qmt_tag_to_codes,
+            )
+            if not members:
+                continue
+            chg_raw = (chg_map or {}).get(nm)
+            try:
+                chg_v = None if chg_raw is None else float(chg_raw)
+            except (TypeError, ValueError):
+                chg_v = None
+            flow_raw = (flow_map or {}).get(nm)
+            try:
+                flow_v = None if flow_raw is None else float(flow_raw)
+            except (TypeError, ValueError):
+                flow_v = None
+            for c6 in members:
+                hits_map.setdefault(c6, []).append((rki, nm, chg_v))
+                prev = best_map.get(c6)
+                if prev is None or rki < int(prev.get("rank") or 10**9):
+                    best_map[c6] = {
+                        "rank": rki,
+                        "name": nm,
+                        "chg": chg_v,
+                        "flow_ratio": flow_v,
+                    }
+        for c6, rows in hits_map.items():
+            rows.sort(key=lambda x: (int(x[0]), str(x[1])))
+            # 同名去重保最优
+            seen: Set[str] = set()
+            dedup: List[Tuple[int, str, Optional[float]]] = []
+            for rki, nm, chg_v in rows:
+                if nm in seen:
+                    continue
+                seen.add(nm)
+                dedup.append((rki, nm, chg_v))
+            hits_map[c6] = dedup
+
+    _fill(
+        ind_rank,
+        ind_chg,
+        ind_flow,
+        kind="sector",
+        best_key="code_best_industry",
+        hits_key="code_industry_hits",
+    )
+    _fill(
+        con_rank,
+        con_chg,
+        con_flow,
+        kind="concept",
+        best_key="code_best_concept",
+        hits_key="code_concept_hits",
+    )
+    return out
 
 
 def _build_qmt_tag_to_codes(store) -> Dict[str, Set[str]]:

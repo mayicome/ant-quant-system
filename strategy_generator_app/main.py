@@ -43,7 +43,6 @@ from contextlib import redirect_stdout
 from dataclasses import asdict
 from datetime import datetime, date, timedelta, time as dt_time
 from typing import Optional, Dict, List, Tuple, Any
-from collections import defaultdict
 
 from PyQt5.QtWidgets import (
     QApplication,
@@ -106,6 +105,7 @@ from config.strategy_config import (
     PARAM_FIXED_N,
     PARAM_MIN_ORDER_AMOUNT,
     PARAM_GENERATE_TOP_N,
+    PARAM_ENTRY_WINDOW_TRADING_DAYS,
     apply_generate_top_n,
     normalize_generate_top_n,
     strategy_uses_scheduled_clear,
@@ -121,6 +121,8 @@ from account_provider import (
     get_positions,
     get_positions_with_volume,
     get_positions_with_volume_debug,
+    get_positions_total_volume,
+    get_positions_baseline,
     get_positions_for_backtest,
 )
 from strategy_runner import run_user_strategy
@@ -490,20 +492,40 @@ def _find_stock_code_column_for_import(df) -> Optional[Any]:
     return None
 
 
-def _read_tabular_file(file_path: str, ext: str):
-    """Excel / CSV 读成 DataFrame；CSV 多编码尝试。"""
+def _read_tabular_file(file_path: str, ext: str, usecols=None):
+    """Excel / CSV 读成 DataFrame；CSV 多编码尝试。usecols 可只读需要的列以加速。"""
     import pandas as pd
 
+    kw = {"header": 0}
+    if usecols is not None:
+        kw["usecols"] = usecols
     if ext in (".xlsx", ".xls"):
-        return pd.read_excel(file_path, header=0)
+        return pd.read_excel(file_path, **kw)
     if ext == ".csv":
         last_err = None
         for enc in ("utf-8-sig", "utf-8", "gbk"):
             try:
-                return pd.read_csv(file_path, encoding=enc, header=0)
+                return pd.read_csv(file_path, encoding=enc, **kw)
             except Exception as e:
                 last_err = e
         raise ValueError(f"无法读取 CSV（已尝试 utf-8-sig/utf-8/gbk）：{last_err}")
+    raise ValueError("不支持的扩展名")
+
+
+def _read_tabular_header_only(file_path: str, ext: str):
+    """只读表头，用于先识别列再按需 usecols 全量读取。"""
+    import pandas as pd
+
+    if ext in (".xlsx", ".xls"):
+        return pd.read_excel(file_path, header=0, nrows=0)
+    if ext == ".csv":
+        last_err = None
+        for enc in ("utf-8-sig", "utf-8", "gbk"):
+            try:
+                return pd.read_csv(file_path, encoding=enc, header=0, nrows=0)
+            except Exception as e:
+                last_err = e
+        raise ValueError(f"无法读取 CSV 表头：{last_err}")
     raise ValueError("不支持的扩展名")
 
 
@@ -775,25 +797,58 @@ def _load_task_buy_dates_by_code(project_root: str, codes: List[str]) -> Dict[st
     return out
 
 
+def _load_prefer_entry_buy_dates(project_root: str, codes: List[str]) -> Dict[str, date]:
+    """卖出 N 日起算：优先实盘建仓日 position_entry_dates，其次任务 buy_date。"""
+    want = {_normalize_code(c) for c in (codes or []) if _normalize_code(c)}
+    out: Dict[str, date] = {}
+    try:
+        from utils.position_entry_dates import load_as_dates
+
+        for c6, d in (load_as_dates(project_root) or {}).items():
+            if c6 in want and d is not None:
+                out[c6] = d
+    except Exception:
+        pass
+    if len(out) >= len(want):
+        return out
+    task_dates = _load_task_buy_dates_by_code(project_root, list(want))
+    for c6, d in task_dates.items():
+        if c6 not in out and d is not None:
+            out[c6] = d
+    return out
+
+
 def _inject_code_sell_day_index(params: Dict[str, Any], codes: List[str], project_root: str) -> None:
     """
-    写入 params['code_sell_day_index']：各股从 buy_date 起第几个卖出交易日（含今日）。
+    写入 params['code_sell_day_index']：各股从建仓日/buy_date 起第几个卖出交易日（含今日）。
     供「末交易日 14:56 定时清仓」等策略在实盘运行日判定是否生成清仓规则。
     """
     if not params.get("scheduled_clear_on_sell_day") and not params.get("sell_hold_trading_days"):
-        return
+        # 仍注入建仓日映射，便于策略/调试读取
+        pass
     try:
         from trading_calendar import first_trading_day_on_or_after, get_trading_dates_in_range_sorted
     except Exception:
         return
-    buy_dates = _load_task_buy_dates_by_code(project_root, codes)
+    buy_dates = _load_prefer_entry_buy_dates(project_root, codes)
+    try:
+        from utils.position_entry_dates import load_all
+
+        params["position_entry_dates"] = load_all(project_root)
+    except Exception:
+        params["position_entry_dates"] = {
+            c: d.isoformat() for c, d in buy_dates.items()
+        }
     today = date.today()
     out: Dict[str, int] = {}
     for code in codes or []:
         code_6 = _normalize_code(code)
         if not code_6:
             continue
-        bd = buy_dates.get(code_6) or today
+        bd = buy_dates.get(code_6)
+        if bd is None:
+            out[code_6] = 0
+            continue
         start = first_trading_day_on_or_after(bd)
         if not start or today < start:
             out[code_6] = 0
@@ -804,7 +859,10 @@ def _inject_code_sell_day_index(params: Dict[str, Any], codes: List[str], projec
 
 
 def _merge_hold_trading_days_into_params(params: Dict[str, Any], hold_n: int) -> None:
-    """用界面「持有交易日数」覆盖末日出清 N（scheduled_clear_on_sell_day）；实盘与回测各自注入。"""
+    """用界面「持有交易日数」覆盖末日出清 N（scheduled_clear_on_sell_day）；实盘与回测各自注入。
+
+    语义：成交后持有 N 个交易日（含买入当日）再定时清仓；不是整段仿真长度。
+    """
     try:
         n = int(hold_n)
     except (TypeError, ValueError):
@@ -813,6 +871,20 @@ def _merge_hold_trading_days_into_params(params: Dict[str, Any], hold_n: int) ->
         return
     params["scheduled_clear_on_sell_day"] = n
     params["sell_hold_trading_days"] = n
+
+
+def _entry_window_trading_days_from_params(params: Optional[Dict[str, Any]]) -> int:
+    """策略运行交易日数 params.entry_window_trading_days；缺省 1。"""
+    try:
+        n = int((params or {}).get("entry_window_trading_days") or 1)
+    except (TypeError, ValueError):
+        n = 1
+    return max(1, n)
+
+
+def _batch_sim_days(entry_window: int) -> int:
+    """批量仿真长度 = 策略「运行交易日数」。"""
+    return max(1, int(entry_window or 1))
 
 
 def _merge_scheduled_clear_time_into_params(params: Dict[str, Any], time_str: str) -> None:
@@ -914,6 +986,79 @@ def _parse_cell_to_date(val) -> Optional[date]:
     return None
 
 
+def _first_buy_dates_from_trades(trades: Optional[List[dict]]) -> Dict[str, date]:
+    """从回测成交中取各股首次买入日（最早一笔 buy）。"""
+    out: Dict[str, date] = {}
+    for t in trades or []:
+        if str((t or {}).get("side") or "").strip().lower() != "buy":
+            continue
+        code_6 = _normalize_code_6((t or {}).get("code") or (t or {}).get("stock_code"))
+        if not code_6:
+            continue
+        bd = _parse_cell_to_date((t or {}).get("date") or (t or {}).get("trade_date"))
+        if bd is None:
+            continue
+        prev = out.get(code_6)
+        if prev is None or bd < prev:
+            out[code_6] = bd
+    return out
+
+
+def _compact_buy_fills_from_trades(trades: Optional[List[dict]]) -> List[dict]:
+    """导出接续用的买入成交（按笔；接续卖出按日注入仓位）。"""
+    out: List[dict] = []
+    for t in trades or []:
+        if str((t or {}).get("side") or "").strip().lower() != "buy":
+            continue
+        code_6 = _normalize_code_6((t or {}).get("code") or (t or {}).get("stock_code"))
+        if not code_6:
+            continue
+        bd = _parse_cell_to_date((t or {}).get("date") or (t or {}).get("trade_date"))
+        if bd is None:
+            continue
+        try:
+            vol = int((t or {}).get("volume") or 0)
+        except (TypeError, ValueError):
+            vol = 0
+        if vol <= 0:
+            continue
+        try:
+            price = float((t or {}).get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        try:
+            amount = float((t or {}).get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount <= 0 and price > 0:
+            amount = round(price * vol, 2)
+        try:
+            commission = float((t or {}).get("commission") or 0)
+        except (TypeError, ValueError):
+            commission = 0.0
+        if price <= 0:
+            continue
+        tm = str((t or {}).get("time") or "").strip() or "09:30:00"
+        row = {
+            "code": code_6,
+            "date": bd.isoformat(),
+            "time": tm,
+            "volume": vol,
+            "price": price,
+            "amount": round(amount, 2),
+            "commission": round(commission, 2),
+            "side": "buy",
+        }
+        rn = str((t or {}).get("rule_name") or "").strip()
+        if rn:
+            row["rule_name"] = rn
+        lk = str((t or {}).get("leg_key") or "").strip()
+        if lk:
+            row["leg_key"] = lk
+        out.append(row)
+    return out
+
+
 def group_codes_by_selection_date_from_file(file_path: str) -> Tuple[Dict[date, List[str]], str]:
     """
     从板块筛选等导出的 Excel/CSV 中按「选股日」分组股票代码。
@@ -931,15 +1076,19 @@ def group_codes_and_clip_strength_by_selection_date(
     strength_by_day[d][code6] = {"合格榜内序位": ..., "合格榜标签内RS排名": ...}
     供 clip_equity 按强度分取票（与导出强度序一致；无 max_per_tag）。
     """
+    import pandas as pd
+
     file_path = os.path.abspath(file_path)
     if not os.path.isfile(file_path):
         raise ValueError("文件不存在")
     ext = os.path.splitext(file_path)[1].lower()
     if ext not in (".xlsx", ".xls", ".csv"):
         raise ValueError("请使用 Excel（.xlsx）或 CSV 文件")
-    df = _read_tabular_file(file_path, ext)
-    if df.empty:
+
+    header_df = _read_tabular_header_only(file_path, ext)
+    if header_df is None or len(list(header_df.columns)) == 0:
         raise ValueError("表格为空")
+
     date_candidates = (
         "选股日",
         "screen_as_of",
@@ -949,50 +1098,260 @@ def group_codes_and_clip_strength_by_selection_date(
         "交易日期",
         "trade_date",
     )
-    dc = _find_column_by_header_candidates(df, date_candidates)
+    dc = _find_column_by_header_candidates(header_df, date_candidates)
     if not dc:
-        for orig, norm in _df_header_pairs(df):
+        for orig, norm in _df_header_pairs(header_df):
             if "选股日" in norm or "screen_as_of" in norm.lower():
                 dc = orig
                 break
-    cc = _find_stock_code_column_for_import(df)
+    cc = _find_stock_code_column_for_import(header_df)
     if not dc:
         raise ValueError("未找到日期列（需要「选股日」或 screen_as_of 等列）")
     if not cc:
         raise ValueError("未找到股票代码列（需要「股票代码」等列）")
-    elig_col = _find_column_by_header_candidates(df, ("合格榜内序位",))
-    rs_col = _find_column_by_header_candidates(df, ("合格榜标签内RS排名",))
-    by_date: Dict[date, List[str]] = defaultdict(list)
-    strength_by_day: Dict[date, Dict[str, Dict[str, object]]] = defaultdict(dict)
-    seen = set()
-    for _, row in df.iterrows():
-        d = _parse_cell_to_date(row.get(dc))
-        code = _normalize_code_6(row.get(cc))
-        if not d or not code:
-            continue
-        key = (d, code)
-        if key in seen:
-            continue
-        seen.add(key)
-        by_date[d].append(code)
-        meta: Dict[str, object] = {}
-        if elig_col:
-            meta["合格榜内序位"] = row.get(elig_col)
-        if rs_col:
-            meta["合格榜标签内RS排名"] = row.get(rs_col)
-        if meta:
-            strength_by_day[d][code] = meta
-    if not by_date:
+    elig_col = _find_column_by_header_candidates(header_df, ("合格榜内序位",))
+    rs_col = _find_column_by_header_candidates(header_df, ("合格榜标签内RS排名",))
+
+    usecols = [dc, cc]
+    if elig_col:
+        usecols.append(elig_col)
+    if rs_col:
+        usecols.append(rs_col)
+    # 去重且保序
+    seen_cols = set()
+    usecols_u = []
+    for c in usecols:
+        if c not in seen_cols:
+            seen_cols.add(c)
+            usecols_u.append(c)
+
+    df = _read_tabular_file(file_path, ext, usecols=usecols_u)
+    if df.empty:
+        raise ValueError("表格为空")
+
+    dates = pd.to_datetime(df[dc], errors="coerce")
+    codes = df[cc].map(_normalize_code_6)
+    work = pd.DataFrame({"_d": dates, "_c": codes})
+    if elig_col:
+        work["_elig"] = df[elig_col].values
+    if rs_col:
+        work["_rs"] = df[rs_col].values
+    work = work.dropna(subset=["_d"])
+    work = work[work["_c"].astype(str).str.len() > 0]
+    if work.empty:
         raise ValueError("没有有效行（日期或代码为空）")
-    ordered = dict(sorted(by_date.items()))
-    strength_ordered = {d: dict(strength_by_day.get(d) or {}) for d in ordered}
+    work["_d"] = work["_d"].dt.date
+    work = work.drop_duplicates(subset=["_d", "_c"], keep="first")
+
+    by_date: Dict[date, List[str]] = {}
+    strength_by_day: Dict[date, Dict[str, Dict[str, object]]] = {}
+    for d, g in work.groupby("_d", sort=True):
+        code_list = g["_c"].tolist()
+        by_date[d] = code_list
+        if elig_col or rs_col:
+            day_map: Dict[str, Dict[str, object]] = {}
+            elig_vals = g["_elig"].tolist() if elig_col else None
+            rs_vals = g["_rs"].tolist() if rs_col else None
+            for i, c6 in enumerate(code_list):
+                meta: Dict[str, object] = {}
+                if elig_vals is not None:
+                    v = elig_vals[i]
+                    if v is not None and str(v) != "" and not (isinstance(v, float) and pd.isna(v)):
+                        meta["合格榜内序位"] = v
+                if rs_vals is not None:
+                    v = rs_vals[i]
+                    if v is not None and str(v) != "" and not (isinstance(v, float) and pd.isna(v)):
+                        meta["合格榜标签内RS排名"] = v
+                if meta:
+                    day_map[str(c6)] = meta
+            if day_map:
+                strength_by_day[d] = day_map
+
     hint = (
-        f"日期列「{dc}」，代码列「{cc}」，共 {len(ordered)} 个交易日、"
-        f"{sum(len(v) for v in ordered.values())} 条记录"
+        f"日期列「{dc}」，代码列「{cc}」，共 {len(by_date)} 个交易日、"
+        f"{sum(len(v) for v in by_date.values())} 条记录"
     )
     if elig_col and rs_col:
         hint += "；含合格榜内序位/标签内RS（供 clip 强度分）"
-    return ordered, strength_ordered, hint
+    return by_date, strength_by_day, hint
+
+
+def _entry_window_status_for_sel_date(
+    sel_d: date,
+    *,
+    entry_window: int = 10,
+    as_of: Optional[date] = None,
+) -> str:
+    """选股日对应入场窗口状态：未开窗 / 进行中 / 已结束 / 无开窗日 / 无交易日历。"""
+    as_of = as_of or date.today()
+    ew = max(1, int(entry_window or 1))
+    try:
+        from trading_calendar import (
+            next_trading_day_after,
+            get_trading_dates_in_range_sorted,
+        )
+    except Exception:
+        return "无交易日历"
+    start = next_trading_day_after(sel_d)
+    if start is None:
+        return "无开窗日"
+    if as_of < start:
+        return "未开窗"
+    days = get_trading_dates_in_range_sorted(start, as_of) or []
+    idx = len(days)
+    if idx < 1:
+        return "未开窗"
+    if idx > ew:
+        return "已结束"
+    return "进行中"
+
+
+def _selection_window_ended(
+    sel_s: str,
+    entry_window: int,
+    as_of: Optional[date] = None,
+) -> bool:
+    """选股日对应窗口是否已结束（相对 as_of，默认今天）。"""
+    s = str(sel_s or "").strip()[:10]
+    if len(s) < 10:
+        return True
+    sel_d = _parse_cell_to_date(s)
+    if sel_d is None:
+        return True
+    return _entry_window_status_for_sel_date(
+        sel_d, entry_window=entry_window, as_of=as_of
+    ) == "已结束"
+
+
+def _selection_date_should_replace(
+    sel_s: str,
+    entry_window: int,
+    as_of: Optional[date] = None,
+) -> bool:
+    """旧选股日是否应被新选股日替换。
+
+    仅「进行中」保留；「已结束」「未开窗」及无效状态都改用新的，给后续入选更多机会。
+    """
+    s = str(sel_s or "").strip()[:10]
+    if len(s) < 10:
+        return True
+    sel_d = _parse_cell_to_date(s)
+    if sel_d is None:
+        return True
+    status = _entry_window_status_for_sel_date(
+        sel_d, entry_window=entry_window, as_of=as_of
+    )
+    return status != "进行中"
+
+
+def _pick_effective_selection_date(
+    candidates: List[str],
+    *,
+    entry_window: int,
+    as_of: Optional[date] = None,
+) -> Optional[str]:
+    """同代码多个选股日：仅进行中保留当前；已结束/未开窗则改用更新的。"""
+    dates = sorted({str(x or "").strip()[:10] for x in (candidates or []) if str(x or "").strip()[:10]})
+    dates = [d for d in dates if len(d) >= 10]
+    if not dates:
+        return None
+    chosen = dates[0]
+    for ds in dates[1:]:
+        if _selection_date_should_replace(chosen, entry_window, as_of):
+            chosen = ds
+    return chosen
+
+
+def _resolve_selection_dates_by_code(
+    by_day: Dict[date, List[str]],
+    *,
+    entry_window: int = 10,
+    as_of: Optional[date] = None,
+) -> Dict[str, str]:
+    """按选股日分组结果，为每只股票选出有效选股日（仅进行中保留早的，否则改用新的）。"""
+    buckets: Dict[str, List[str]] = {}
+    for d, day_codes in (by_day or {}).items():
+        ds = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
+        for c6 in day_codes or []:
+            c6 = _normalize_code(c6)
+            if not c6:
+                continue
+            buckets.setdefault(c6, []).append(ds)
+    out: Dict[str, str] = {}
+    for c6, cands in buckets.items():
+        picked = _pick_effective_selection_date(
+            cands, entry_window=entry_window, as_of=as_of
+        )
+        if picked:
+            out[c6] = picked
+    return out
+
+
+def _merge_selection_date_with_existing(
+    existing: Dict[str, str],
+    incoming: Dict[str, str],
+    *,
+    entry_window: int,
+    as_of: Optional[date] = None,
+) -> Tuple[Dict[str, str], int, int, List[str]]:
+    """合并选股日映射。
+
+    - 池内无旧选股日：用新的
+    - 旧窗口进行中：保留旧的
+    - 旧窗口已结束/未开窗：改用新的
+
+    返回 (合并后映射, 新写入数, 因非进行中而更新数, 被更新选股日的代码列表)。
+    """
+    out: Dict[str, str] = {}
+    for k, v in (existing or {}).items():
+        c6 = _normalize_code(k)
+        if c6:
+            out[c6] = str(v or "").strip()[:10]
+    wrote = 0
+    refreshed = 0
+    refreshed_codes: List[str] = []
+    for c6, new_ds in (incoming or {}).items():
+        c6 = _normalize_code(c6)
+        new_ds = str(new_ds or "").strip()[:10]
+        if not c6 or len(new_ds) < 10:
+            continue
+        old = out.get(c6) or ""
+        if len(old) < 10:
+            out[c6] = new_ds
+            wrote += 1
+            continue
+        if _selection_date_should_replace(old, entry_window, as_of):
+            out[c6] = new_ds
+            if old != new_ds:
+                refreshed += 1
+                refreshed_codes.append(c6)
+        # else: 进行中，保留 old
+    return out, wrote, refreshed, refreshed_codes
+
+
+def _drop_filled_legs_for_codes(filled_legs: Any, codes: List[str]) -> List[str]:
+    """从 _filled_legs 中去掉指定代码的腿记录（选股日重开窗时用）。"""
+    drop = {_normalize_code(c) for c in (codes or []) if _normalize_code(c)}
+    if not drop:
+        return [str(x) for x in (filled_legs or []) if x]
+    kept: List[str] = []
+    for raw in filled_legs or []:
+        s = str(raw or "")
+        if not s:
+            continue
+        if ":" in s:
+            left = _normalize_code(s.split(":", 1)[0])
+            if left in drop:
+                continue
+        kept.append(s)
+    return kept
+
+
+def _earliest_selection_date_by_code(
+    by_day: Dict[date, List[str]],
+) -> Dict[str, str]:
+    """兼容旧调用：无窗口信息时退化为取最早选股日。"""
+    return _resolve_selection_dates_by_code(by_day, entry_window=10**9)
 
 
 def _inject_clip_strength_into_prices(
@@ -1018,6 +1377,88 @@ def _inject_clip_strength_into_prices(
             p["合格榜标签内RS排名"] = meta.get("合格榜标签内RS排名")
         n += 1
     return n
+
+
+def _strategy_wants_ma_touch_import_scan(cfg: Any) -> bool:
+    """跌MA10 等策略：导入后扫描「选股日后已触达 MA」。"""
+    if cfg is None:
+        return False
+    sp = getattr(cfg, "strategy_params", None) or {}
+    if not isinstance(sp, dict):
+        sp = {}
+    if "scan_already_touched_ma_on_import" in sp:
+        v = sp.get("scan_already_touched_ma_on_import")
+        if isinstance(v, str):
+            return v.strip().lower() not in ("0", "false", "no", "off")
+        return bool(v)
+    name = str(getattr(cfg, "name", "") or "").strip()
+    return name in ("买：跌MA10",) or "跌MA10" in name
+
+
+def _scan_pool_already_touched_ma10(
+    cfg: Any,
+    *,
+    entry_window: int,
+    before_date: Optional[date] = None,
+) -> List[Dict[str, str]]:
+    """返回 [{code, selection_date, touch_date}, ...]。"""
+    sp = getattr(cfg, "strategy_params", None) or {}
+    if not isinstance(sp, dict):
+        sp = {}
+    sel_map = sp.get("selection_date_by_code") or {}
+    codes = list(getattr(cfg, "stock_codes", None) or [])
+    try:
+        from utils.first_ma_touch import scan_codes_already_touched_ma
+
+        rows = scan_codes_already_touched_ma(
+            sel_map,
+            before_date=before_date or date.today(),
+            entry_window=entry_window,
+            ma_period=10,
+            codes=codes,
+        )
+        return [r for r in (rows or []) if isinstance(r, dict)]
+    except Exception:
+        return []
+
+
+class AlreadyTouchedMa10Dialog(QDialog):
+    """导入后展示「选股日后已触达 MA10」的股票，可选从池中删除。"""
+
+    def __init__(self, parent=None, rows: Optional[List[Dict[str, str]]] = None):
+        super().__init__(parent)
+        self.setWindowTitle("已触达 MA10（非首次）")
+        self._rows = list(rows or [])
+        self.remove_requested = False
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"以下 {len(self._rows)} 只在选股日之后已经跌破过 MA10（第一次已过）。\n"
+                "可从股票池删除；也可关闭后自行在池中删。"
+            )
+        )
+        from PyQt5.QtWidgets import QListWidget, QListWidgetItem
+
+        self.list_w = QListWidget()
+        for r in self._rows:
+            c6 = str(r.get("code") or "")
+            sel = str(r.get("selection_date") or "")
+            touch = str(r.get("touch_date") or "")
+            self.list_w.addItem(QListWidgetItem(f"{c6}    选股日 {sel}    首次触达 {touch}"))
+        layout.addWidget(self.list_w)
+        btns = QHBoxLayout()
+        del_btn = QPushButton("从池中删除这些股票")
+        keep_btn = QPushButton("先留着（我手动删）")
+        del_btn.clicked.connect(self._on_remove)
+        keep_btn.clicked.connect(self.reject)
+        btns.addWidget(del_btn)
+        btns.addWidget(keep_btn)
+        layout.addLayout(btns)
+        self.resize(520, 420)
+
+    def _on_remove(self):
+        self.remove_requested = True
+        self.accept()
 
 
 def _unique_traded_rows_for_selection_copy(trades: List[dict]) -> List[dict]:
@@ -1401,11 +1842,17 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
         self.detail_tabs = QTabWidget()
 
-        # 股票池 Tab：列表结构，支持排序、删除
+        # 股票池 Tab：带状态的表格（选股日 / 入场进度 / 已执行分支），便于审核删票
         self.pool_tab_widget = QWidget()
         pool_tab_layout = QVBoxLayout(self.pool_tab_widget)
         pool_tab_layout.setContentsMargins(12, 12, 12, 12)
-        pool_tab_layout.addWidget(QLabel("本策略股票池（勾选后点「删除选中的股票」可删除多项）："))
+        pool_tab_layout.addWidget(
+            QLabel(
+                "本策略股票池（勾选后可删）。列：选股日、入场进度（选股日T+1起第几天/运行交易日数）、"
+                "窗口状态、已执行分支（params._filled_legs + data/filled_legs.json + 当日任务已成交规则）。"
+                "导入时：仅「进行中」保留原选股日；「已结束」「未开窗」改用新选股日并清除该票旧已执行分支。"
+            )
+        )
         add_row = QHBoxLayout()
         self.pool_add_edit = QLineEdit()
         self.pool_add_edit.setPlaceholderText("输入股票代码，可多个用逗号或空格分隔")
@@ -1418,17 +1865,48 @@ class StrategyGeneratorMainWindow(QMainWindow):
         pool_tab_layout.addLayout(add_row)
         self.pool_select_all_cb = QCheckBox("全选")
         self.pool_select_all_cb.stateChanged.connect(self._on_pool_select_all_cb_changed)
-        pool_tab_layout.addWidget(self.pool_select_all_cb)
-        self.pool_list = QListWidget()
+        self.pool_refresh_status_btn = QPushButton("刷新状态")
+        self.pool_refresh_status_btn.setToolTip(
+            "按当前策略参数 selection_date_by_code、运行交易日数，以及当日任务已执行分支重算进度。"
+        )
+        self.pool_refresh_status_btn.clicked.connect(self._on_pool_refresh_status)
+        pool_sel_row = QHBoxLayout()
+        pool_sel_row.addWidget(self.pool_select_all_cb)
+        pool_sel_row.addWidget(self.pool_refresh_status_btn)
+        pool_sel_row.addStretch()
+        pool_tab_layout.addLayout(pool_sel_row)
+        self.pool_list = QTableWidget()
+        self.pool_list.setColumnCount(7)
+        self.pool_list.setHorizontalHeaderLabels(
+            ["选", "代码", "名称", "选股日", "入场进度", "窗口", "已执行分支"]
+        )
+        self.pool_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.pool_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.pool_list.setAlternatingRowColors(True)
+        self.pool_list.verticalHeader().setVisible(False)
+        self.pool_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        hdr = self.pool_list.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(6, QHeaderView.Stretch)
         pool_tab_layout.addWidget(self.pool_list)
         pool_btn_row = QHBoxLayout()
         self.pool_import_btn = QPushButton("导入…")
-        self.pool_import_btn.setToolTip("从文件并入本策略股票池（已存在的不会重复添加，不清空现有股票）")
+        self.pool_import_btn.setToolTip(
+            "从选股文件并入本策略股票池；若含「选股日」列，会写入 selection_date_by_code。\n"
+            "同代码：仅窗口「进行中」保留原选股日；「已结束」「未开窗」则改用新选股日。\n"
+            "已存在的代码不会重复添加，不清空现有股票。"
+        )
         self.pool_import_btn.clicked.connect(self._on_import_pool_codes)
         self.pool_import_positions_btn = QPushButton("一键导入持仓")
-        self.pool_import_positions_btn.setToolTip("从 QMT 当前持仓导入到本策略股票池（已存在的不会重复添加）")
+        self.pool_import_positions_btn.setToolTip(
+            "买入策略：持仓代码并入股票池。\n"
+            "卖出策略：以 QMT 当前持仓为准重建股票池，并核对/补全建仓日（无建仓日须补记）。"
+        )
         self.pool_import_positions_btn.clicked.connect(self._on_import_positions)
         self.pool_sort_btn = QPushButton("按代码排序")
         self.pool_sort_btn.clicked.connect(self._on_pool_sort_by_code)
@@ -1436,6 +1914,11 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_restore_btn.clicked.connect(self._on_pool_restore_order)
         self.pool_del_batch_btn = QPushButton("删除选中的股票")
         self.pool_del_batch_btn.clicked.connect(self._on_pool_delete_batch)
+        self.pool_del_ended_btn = QPushButton("删除已结束")
+        self.pool_del_ended_btn.setToolTip(
+            "删除窗口状态为「已结束」的股票（按当前运行交易日数与选股日计算），并自动保存。"
+        )
+        self.pool_del_ended_btn.clicked.connect(self._on_pool_delete_ended)
         self.pool_clear_all_btn = QPushButton("删除所有股票")
         self.pool_clear_all_btn.clicked.connect(self._on_pool_clear_all)
         self.pool_copy_btn = QPushButton("复制")
@@ -1451,6 +1934,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         pool_btn_row.addWidget(self.pool_sort_btn)
         pool_btn_row.addWidget(self.pool_restore_btn)
         pool_btn_row.addWidget(self.pool_del_batch_btn)
+        pool_btn_row.addWidget(self.pool_del_ended_btn)
         pool_btn_row.addWidget(self.pool_clear_all_btn)
         pool_btn_row.addStretch()
         pool_tab_layout.addLayout(pool_btn_row)
@@ -1505,6 +1989,17 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.param_min_order_amount_spin.setSuffix(" 元")
         self.param_min_order_amount_spin.setValue(5000)
         params_form.addRow("每笔最小交易金额：", self.param_min_order_amount_spin)
+        self.param_entry_window_spin = QSpinBox()
+        self.param_entry_window_spin.setRange(1, 120)
+        self.param_entry_window_spin.setValue(1)
+        self.param_entry_window_spin.setSuffix(" 天")
+        self.param_entry_window_spin.setToolTip(
+            "本策略运行交易日数（修改后自动保存到策略参数，换策略/重启不丢）。\n"
+            "买入策略：入场窗口长度（选股日 T+1 起连续 N 天）；批量回测仿真长度同此值。\n"
+            "卖出策略（马总等）：实盘「生成策略」注入第 N 日无条件清仓；破 MA20 每天挂，不受本值限制。\n"
+            "与回测页「下一轮接续→持有交易日数」独立，互不覆盖。"
+        )
+        params_form.addRow("运行交易日数：", self.param_entry_window_spin)
         params_layout.addLayout(params_form)
         params_save_btn = QPushButton("保存参数")
         params_save_btn.clicked.connect(self._on_save_params)
@@ -1518,7 +2013,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "涨停板, 跌停板, 今开盘, 今日最高, 今日最低, 5日/10日/…(均线重合点), "
             "昨MA5/昨MA10/昨MA20/…(上一完整交易日收盘真均线), 布林带上轨, 布林带下轨, 前高, 前低 等。\n"
             "get_name(code) 取名称；account={\"total_asset\": 总资金, \"cash\": 可用资金}；params 为「策略参数」Tab 中配置（如 buy_amount_per_stock、min_order_amount），无需改代码即可调整。\n"
-            "返回 list[dict]，每个 dict 为一条意图：含 stock_code, stock_name, rule_type，及规则参数（如 price/volume、trigger_price/rise_percent 等）。"
+            "返回 list[dict]，每个 dict 为一条意图：含 stock_code, stock_name, rule_type，及规则参数（如 price/volume、trigger_price/rise_percent 等）。\n"
+            "params 还可含 entry_window_trading_days（运行交易日数，界面可改；批量仿真长度）。"
         )
         api_label.setWordWrap(True)
         params_layout.addWidget(api_label)
@@ -1539,6 +2035,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.param_clip_u_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
         self.param_fixed_n_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
         self.param_min_order_amount_spin.valueChanged.connect(lambda: self._mark_dirty("params"))
+        # 运行交易日数：改完即落盘（与「只生成前 N」类似），避免刷新状态看到 1/5、重启又变回 1/10
+        self.param_entry_window_spin.valueChanged.connect(self._on_entry_window_changed)
         self.logic_code_edit.textChanged.connect(lambda: self._mark_dirty("logic"))
         self._on_sizing_mode_changed()
 
@@ -1560,22 +2058,23 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         preview_layout.addWidget(self.preview_table)
         preview_btn_row = QHBoxLayout()
+        # 持有天数改由「参数与逻辑 → 运行交易日数」统一保存；此处不再单独填，避免每天运行改错
         self.live_hold_days_label = QLabel("持有交易日数：")
         self.live_hold_trading_days_spin = QSpinBox()
         self.live_hold_trading_days_spin.setRange(1, 120)
         self.live_hold_trading_days_spin.setValue(1)
+        self.live_hold_days_label.setVisible(False)
+        self.live_hold_trading_days_spin.setVisible(False)
         self.live_hold_trading_days_spin.setToolTip(
-            "仅对会生成 scheduled_clear 的卖出策略生效（策略代码含 rule_type: scheduled_clear）。"
-            "买入策略（名称以「买」开头）不会注入、也不会生成定时清仓。"
+            "已废弃：请改用「参数与逻辑」页的「运行交易日数」。"
         )
-        preview_btn_row.addWidget(self.live_hold_days_label)
-        preview_btn_row.addWidget(self.live_hold_trading_days_spin)
         self.live_clear_label = QLabel("定时清仓：")
         self.live_scheduled_clear_time = QTimeEdit()
         self.live_scheduled_clear_time.setDisplayFormat("HH:mm:ss")
         self.live_scheduled_clear_time.setTime(QTime(14, 56, 0))
         self.live_scheduled_clear_time.setToolTip(
-            "仅卖出策略（代码中生成 scheduled_clear 规则）使用；买入策略不显示、不注入。"
+            "仅卖出策略（代码中生成 scheduled_clear 规则）使用；买入策略不显示、不注入。\n"
+            "清仓第几天见「参数与逻辑」→「运行交易日数」。"
         )
         preview_btn_row.addWidget(self.live_clear_label)
         preview_btn_row.addWidget(self.live_scheduled_clear_time)
@@ -1711,7 +2210,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.backtest_initial_cash.setRange(1000, 999999999)
         self.backtest_initial_cash.setDecimals(0)
         self.backtest_initial_cash.setSuffix(" 元")
-        self.backtest_initial_cash.setValue(1000000)
+        self.backtest_initial_cash.setValue(100000000)
         backtest_form.addRow("初始资金：", self.backtest_initial_cash)
         # 初始持仓：支持「资金+股票」一起回测，仅限当前策略股票池内的标的
         backtest_layout.addWidget(QLabel("初始持仓（可选）：回测开始时除初始资金外已有的股票，仅限当前策略股票池内的标的；用于「资金+持仓」回测。"))
@@ -1782,20 +2281,20 @@ class StrategyGeneratorMainWindow(QMainWindow):
         backtest_layout.addLayout(backtest_chain_row)
         sell_chain_row = QHBoxLayout()
         sell_chain_row.addWidget(QLabel("下一轮接续（需先载入上一轮批量）："))
-        self.sell_chain_from_t1_cb = QCheckBox("起算：从上一轮结束后的下一交易日起（避免重叠）")
+        self.sell_chain_from_t1_cb = QCheckBox("选股日起算用 T+1（无首次买入日时的回退）")
         self.sell_chain_from_t1_cb.setChecked(True)
         self.sell_chain_from_t1_cb.setToolTip(
-            "说明：本轮区间会先按选股日规则计算（T 或 T+1 起算），\n"
-            "但若与上一轮回测区间重叠，会自动顺延到「上一轮结束后的下一交易日」。\n"
-            "此项勾选时：选股日起算按 T+1；不勾选：按 T 当日。"
+            "有首次买入日（新导出快照）时：卖出从各股首次买入的下一交易日起，本项不参与。\n"
+            "仅当旧 JSON 无 entry_date/first_buy_dates 时回退：\n"
+            "勾选按选股日 T+1、不勾选按 T 当日；若仍与上轮买入窗重叠，则顺延到上轮 end 次日。"
         )
         self.sell_chain_hold_spin = QSpinBox()
         self.sell_chain_hold_spin.setRange(1, 120)
         self.sell_chain_hold_spin.setValue(2)
         self.sell_chain_hold_spin.setToolTip(
-            "下一轮回测区间的长度：从本轮回测「起始交易日」起，连续模拟的交易日个数（含首尾），"
-            "与首轮「批量回测」里「持有交易日数」含义相同。"
-            "若按选股日算出的起点仍落在上轮区间内，会自动顺延到上轮结束日的下一交易日，再数满这么多天。"
+            "下一轮接续专用：持有交易日数（含首次买入日），同时作为定时清仓 N。\n"
+            "只由本框控制，不会被「参数与逻辑→运行交易日数」或换策略改掉。\n"
+            "卖出撮合从「首次买入后的下一交易日」开始；仿真区间覆盖最早卖出日至最晚清仓日。"
         )
         self.sell_chain_run_btn = QPushButton("运行下一轮批量回测")
         self.sell_chain_run_btn.setEnabled(False)
@@ -1904,16 +2403,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "勾选：回测从选股日 T 的下一个交易日起算（适合 T 日盘后选股、T+1 实盘）。"
             "不勾选：从选股日 T 当日（若为非交易日则顺延）起算。"
         )
-        self.backtest_batch_hold_days_spin = QSpinBox()
-        self.backtest_batch_hold_days_spin.setRange(1, 120)
-        self.backtest_batch_hold_days_spin.setValue(1)
-        self.backtest_batch_hold_days_spin.setToolTip(
-            "首轮「批量回测(选股文件)」专用：从起始交易日起连续持有的交易日个数。"
-            "下一轮接续请用上方「下一轮接续」里的持有交易日数；末日出清 N 在接续时随区间自动对齐。"
-        )
         batch_opts_row.addWidget(self.backtest_batch_from_t1_cb)
-        batch_opts_row.addWidget(QLabel("持有交易日数："))
-        batch_opts_row.addWidget(self.backtest_batch_hold_days_spin)
         batch_opts_row.addStretch()
         backtest_layout.addLayout(batch_opts_row)
         backtest_btn_row1 = QHBoxLayout()
@@ -1922,7 +2412,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.backtest_batch_file_btn = QPushButton("批量回测(选股文件)…")
         self.backtest_batch_file_btn.setToolTip(
             "选择板块筛选导出的、含「选股日」列的 Excel/CSV：按每个选股日单独用当日股票池跑回测。"
-            "回测区间由上方「T+1」「持有交易日数」决定。"
+            "区间：T+1/T 起，长度=策略参数「运行交易日数」。"
+            "卖出轮用「下一轮接续」里的持有交易日数。"
             "若勾选「分时段组合回测」，则与单次回测相同：时段1=左侧当前策略，时段2=下方所选策略，"
             "且要求第二段运行开始=第一段运行结束。使用当前初始资金；批量时忽略初始持仓表。"
         )
@@ -2042,7 +2533,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.merge_use_nth_cb = QCheckBox("使用选股日后第 N 个交易日盯市")
         self.merge_use_nth_cb.setChecked(False)
         self.merge_use_nth_cb.setToolTip(
-            "不勾选：未清仓按卖出明细 CSV 中的 end_date 列收盘价盯市（与回测区间一致）。"
+            "不勾选：未清仓按各票日线「最后可得交易日」收盘价盯市（数据不全时用本地能取到的最近收盘）。"
             "勾选：按选股日后第 N 个交易日（旧版逻辑）。"
         )
 
@@ -2084,7 +2575,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.backtest_result_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         backtest_layout.addWidget(self.backtest_result_text)
         self.backtest_trades_table = QTableWidget()
-        self.backtest_trades_table.setColumnCount(20)
+        self.backtest_trades_table.setColumnCount(22)
         self.backtest_trades_table.setHorizontalHeaderLabels(
             [
                 "日期",
@@ -2097,6 +2588,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 "数量",
                 "金额",
                 "交易后持仓",
+                "规则名",
+                "腿键",
                 "触发信息",
                 "start_date",
                 "end_date",
@@ -2293,70 +2786,553 @@ class StrategyGeneratorMainWindow(QMainWindow):
         return False
 
     def _get_pool_codes_from_list(self):
-        """从股票池列表按当前顺序取出代码列表"""
+        """从股票池表格按当前顺序取出代码列表"""
         codes = []
-        for i in range(self.pool_list.count()):
-            item = self.pool_list.item(i)
-            if item:
-                c = item.data(Qt.UserRole) or ""
-                if c:
-                    codes.append(c)
+        t = self.pool_list
+        for i in range(t.rowCount()):
+            it = t.item(i, 1)
+            if it is None:
+                it = t.item(i, 0)
+            c = ""
+            if it is not None:
+                c = (it.data(Qt.UserRole) or it.text() or "").strip()
+            c = _normalize_code(c)
+            if c:
+                codes.append(c)
         return codes
 
-    def _fill_pool_list(self, codes, set_original=True):
-        """用代码列表填充股票池列表（显示 代码+名称），每项带复选框，可选是否记为原始顺序"""
+    def _pool_stock_name(self, code_6: str) -> str:
+        fn = _get_stock_name_fn()
+        if not fn:
+            return ""
+        try:
+            name = fn(code_6) or ""
+        except Exception:
+            name = ""
+        if name == "未知名称":
+            return ""
+        return str(name)
+
+    def _current_strategy_is_sell_pool(self) -> bool:
+        sid = self._get_selected_strategy_id()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        if not cfg:
+            return False
+        return strategy_uses_positions(
+            cfg.strategy_code or "",
+            cfg.strategy_params,
+            getattr(cfg, "name", "") or "",
+        )
+
+    def _refresh_pool_column_headers(self) -> None:
+        """买入池：选股日/入场；卖出池：建仓日/持有。"""
+        if not getattr(self, "pool_list", None):
+            return
+        if self._current_strategy_is_sell_pool():
+            labels = ["选", "代码", "名称", "建仓日", "持有进度", "窗口", "已执行分支"]
+        else:
+            labels = ["选", "代码", "名称", "选股日", "入场进度", "窗口", "已执行分支"]
+        self.pool_list.setHorizontalHeaderLabels(labels)
+
+    def _pool_hold_progress(
+        self, code_6: str, entry_map: Dict[str, str], hold_n: int
+    ) -> Tuple[str, str, str]:
+        """卖出持有进度（建仓日起含当日）。返回 (建仓日, 进度, 窗口)。"""
+        raw = entry_map.get(code_6) or ""
+        ent_s = str(raw or "").strip()[:10]
+        if len(ent_s) < 10:
+            return ("", "—", "无建仓日")
+        ent_d = self._parse_iso_date_val(ent_s) if hasattr(self, "_parse_iso_date_val") else None
+        if ent_d is None:
+            ent_d = _parse_cell_to_date(ent_s)
+        if ent_d is None:
+            return (ent_s, "—", "建仓日无效")
+        try:
+            from trading_calendar import (
+                first_trading_day_on_or_after,
+                get_trading_dates_in_range_sorted,
+            )
+        except Exception:
+            return (ent_s, "—", "无交易日历")
+        start = first_trading_day_on_or_after(ent_d)
+        if start is None:
+            return (ent_s, "—", "无开窗日")
+        today = date.today()
+        hn = max(1, int(hold_n or 1))
+        if today < start:
+            return (ent_s, f"0/{hn}", "未开窗")
+        days = get_trading_dates_in_range_sorted(start, today) or []
+        idx = len(days)
+        if idx < 1:
+            return (ent_s, f"0/{hn}", "未开窗")
+        if idx > hn:
+            return (ent_s, f"{hn}/{hn}", "已结束")
+        return (ent_s, f"{idx}/{hn}", "进行中")
+
+    def _prompt_missing_entry_dates(self, codes: List[str]) -> int:
+        """弹窗为缺失建仓日的持仓补日期；返回新写入只数。"""
+        try:
+            from utils.position_entry_dates import missing_entry_codes, set_entry_date
+        except Exception:
+            return 0
+        miss = missing_entry_codes(codes)
+        if not miss:
+            return 0
+        dlg = QDialog(self)
+        dlg.setWindowTitle("补全建仓日")
+        dlg.resize(480, min(520, 120 + 28 * len(miss)))
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(
+            QLabel(
+                "以下持仓尚无建仓日（常见于手动/外部买入）。\n"
+                "请确认首次买入日期后确定；默认今天。卖出第 N 日清仓依赖此日期。"
+            )
+        )
+        table = QTableWidget(len(miss), 3)
+        table.setHorizontalHeaderLabels(["代码", "名称", "建仓日(YYYY-MM-DD)"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        today_s = date.today().isoformat()
+        for i, c6 in enumerate(miss):
+            table.setItem(i, 0, QTableWidgetItem(c6))
+            table.setItem(i, 1, QTableWidgetItem(self._pool_stock_name(c6)))
+            table.setItem(i, 2, QTableWidgetItem(today_s))
+        layout.addWidget(table)
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("确定写入")
+        cancel_btn = QPushButton("跳过")
+        btns.addStretch()
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+        written = {"n": 0}
+
+        def _ok():
+            n = 0
+            for i, c6 in enumerate(miss):
+                it = table.item(i, 2)
+                ds = (it.text() if it else "").strip()[:10]
+                if set_entry_date(c6, ds, overwrite=True):
+                    n += 1
+            written["n"] = n
+            dlg.accept()
+
+        ok_btn.clicked.connect(_ok)
+        cancel_btn.clicked.connect(dlg.reject)
+        dlg.exec_()
+        return int(written["n"])
+
+    def _pool_filled_legs_by_code(
+        self, codes: List[str], *, include_task_file: bool = True
+    ) -> Dict[str, set]:
+        """已执行分支：策略 params._filled_legs + data/filled_legs.json +（可选）当日 current_tasks 已成交规则名/腿键。
+
+        include_task_file=False 时跳过读 Excel，导入大量代码时显著加速。
+        """
+        want = {_normalize_code(c) for c in (codes or []) if _normalize_code(c)}
+        out: Dict[str, set] = {c: set() for c in want}
+
+        def _add_leg(code_6: str, token: str) -> None:
+            c6 = _normalize_code(code_6)
+            if not c6 or c6 not in out:
+                return
+            s = str(token or "")
+            su = s.upper().replace(" ", "")
+            for leg in ("OPEN50_REST", "OPEN50", "LU10", "MA5", "MA10", "MA20"):
+                if leg in su or leg in s:
+                    out[c6].add(leg)
+            if "破MA20" in s or "破 MA20" in s:
+                out[c6].add("破MA20")
+            if "无条件清仓" in s or "末日" in s or "强制清仓" in s:
+                out[c6].add("末日清仓")
+
+        sid = self._get_selected_strategy_id()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        sp = (cfg.strategy_params if cfg else None) or {}
+        for raw in sp.get("_filled_legs") or []:
+            s = str(raw or "")
+            if ":" in s:
+                left, right = s.split(":", 1)
+                _add_leg(left, right)
+                _add_leg(left, s)
+
+        # 实盘落盘：QMT 成交写入的 filled_legs.json
+        try:
+            from utils.filled_legs import load_legs_by_code
+
+            for c6, lids in (load_legs_by_code(self._project_root()) or {}).items():
+                if c6 not in out:
+                    continue
+                for lid in lids or []:
+                    _add_leg(c6, str(lid))
+        except Exception:
+            pass
+
+        if not include_task_file:
+            return out
+
+        try:
+            from task_builder import get_tasks_file_path
+        except Exception:
+            return out
+        path = get_tasks_file_path(self._project_root())
+        if not os.path.isfile(path):
+            return out
+        try:
+            import pandas as pd
+
+            df = pd.read_excel(path)
+        except Exception:
+            return out
+        if df is None or getattr(df, "empty", True):
+            return out
+        # 先按代码过滤，避免全表逐行解析 params JSON
+        if "stock_code" in df.columns:
+            try:
+                code_norm = df["stock_code"].map(lambda x: _normalize_code(str(x or "")))
+                mask = code_norm.isin(want)
+                df = df.loc[mask].copy()
+                df["_code6"] = code_norm.loc[mask].values
+            except Exception:
+                df["_code6"] = df["stock_code"].map(lambda x: _normalize_code(str(x or "")))
+        for row in df.itertuples(index=False):
+            code_6 = getattr(row, "_code6", None) or _normalize_code(
+                str(getattr(row, "stock_code", "") or "")
+            )
+            if not code_6 or code_6 not in out:
+                continue
+            params_raw = getattr(row, "params", None)
+            rules = []
+            if isinstance(params_raw, dict):
+                rules = params_raw.get("rules") or []
+            elif isinstance(params_raw, str) and params_raw.strip():
+                obj = None
+                try:
+                    obj = json.loads(params_raw)
+                except Exception:
+                    try:
+                        import ast
+
+                        obj = ast.literal_eval(params_raw)
+                    except Exception:
+                        obj = None
+                if isinstance(obj, dict):
+                    rules = obj.get("rules") or []
+            if not isinstance(rules, list):
+                continue
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                done = bool(
+                    rule.get("executed")
+                    or rule.get("scheduled_clear_executed")
+                    or rule.get("order_id")
+                )
+                if not done:
+                    continue
+                _add_leg(code_6, str(rule.get("leg_key") or ""))
+                _add_leg(code_6, str(rule.get("name") or ""))
+        return out
+
+    def _pool_entry_progress(
+        self, code_6: str, sel_map: Dict[str, str], entry_window: int
+    ) -> Tuple[str, str, str]:
+        """返回 (选股日, 入场进度, 窗口状态)。"""
+        raw = sel_map.get(code_6) or sel_map.get(code_6.lstrip("0")) or ""
+        sel_s = str(raw or "").strip()[:10]
+        if len(sel_s) < 10:
+            return ("", "—", "无选股日")
+        sel_d = self._parse_iso_date_val(sel_s) if hasattr(self, "_parse_iso_date_val") else None
+        if sel_d is None:
+            sel_d = _parse_cell_to_date(sel_s)
+        if sel_d is None:
+            return (sel_s, "—", "选股日无效")
+        try:
+            from trading_calendar import (
+                next_trading_day_after,
+                get_trading_dates_in_range_sorted,
+            )
+        except Exception:
+            return (sel_s, "—", "无交易日历")
+        start = next_trading_day_after(sel_d)
+        if start is None:
+            return (sel_s, "—", "无开窗日")
+        today = date.today()
+        ew = max(1, int(entry_window or 1))
+        if today < start:
+            return (sel_s, f"0/{ew}", "未开窗")
+        days = get_trading_dates_in_range_sorted(start, today) or []
+        idx = len(days)
+        if idx < 1:
+            return (sel_s, f"0/{ew}", "未开窗")
+        if idx > ew:
+            return (sel_s, f"{ew}/{ew}", "已结束")
+        return (sel_s, f"{idx}/{ew}", "进行中")
+
+    def _append_pool_table_row(
+        self,
+        code: str,
+        *,
+        sel_map: Optional[Dict[str, str]] = None,
+        entry_window: Optional[int] = None,
+        filled_by_code: Optional[Dict[str, set]] = None,
+        checked: bool = False,
+        row: Optional[int] = None,
+        name_fn=None,
+        progress_cache: Optional[Dict[str, Tuple[str, str]]] = None,
+        sell_mode: bool = False,
+    ) -> None:
+        code_6 = _normalize_code(code)
+        if not code_6:
+            return
+        if sel_map is None or entry_window is None or filled_by_code is None:
+            sid = self._get_selected_strategy_id()
+            cfg = self._find_strategy_by_id(sid) if sid else None
+            sp = (cfg.strategy_params if cfg else None) or {}
+            if sel_map is None:
+                if sell_mode:
+                    try:
+                        from utils.position_entry_dates import load_all
+
+                        sel_map = dict(load_all(self._project_root()) or {})
+                    except Exception:
+                        sel_map = {}
+                else:
+                    raw_map = sp.get("selection_date_by_code") or {}
+                    sel_map = {}
+                    if isinstance(raw_map, dict):
+                        for k, v in raw_map.items():
+                            c6 = _normalize_code(k)
+                            if c6:
+                                sel_map[c6] = str(v or "").strip()[:10]
+            if entry_window is None:
+                if getattr(self, "param_entry_window_spin", None) is not None:
+                    entry_window = max(1, int(self.param_entry_window_spin.value()))
+                else:
+                    entry_window = _entry_window_trading_days_from_params(sp)
+            if filled_by_code is None:
+                filled_by_code = self._pool_filled_legs_by_code([code_6])
+
+        raw_sel = (sel_map or {}).get(code_6) or ""
+        sel_key = str(raw_sel or "").strip()[:10]
+        cache_key = ("S:" if sell_mode else "B:") + sel_key
+        if progress_cache is not None and sel_key and cache_key in progress_cache:
+            prog, win = progress_cache[cache_key]
+            sel_s = sel_key
+        else:
+            if sell_mode:
+                sel_s, prog, win = self._pool_hold_progress(
+                    code_6, sel_map or {}, int(entry_window or 1)
+                )
+            else:
+                sel_s, prog, win = self._pool_entry_progress(
+                    code_6, sel_map or {}, int(entry_window or 1)
+                )
+            if progress_cache is not None and sel_s:
+                progress_cache[cache_key] = (prog, win)
+
+        legs = sorted((filled_by_code or {}).get(code_6) or [])
+        leg_txt = ",".join(legs) if legs else "—"
+        if name_fn is not None:
+            try:
+                name = name_fn(code_6) or ""
+            except Exception:
+                name = ""
+            if name == "未知名称":
+                name = ""
+        else:
+            name = self._pool_stock_name(code_6)
+
+        t = self.pool_list
+        if row is None:
+            r = t.rowCount()
+            t.insertRow(r)
+        else:
+            r = int(row)
+        chk = QTableWidgetItem("")
+        chk.setFlags(
+            (chk.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            & ~Qt.ItemIsEditable
+        )
+        chk.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        chk.setData(Qt.UserRole, code_6)
+        t.setItem(r, 0, chk)
+        code_item = QTableWidgetItem(code_6)
+        code_item.setData(Qt.UserRole, code_6)
+        t.setItem(r, 1, code_item)
+        t.setItem(r, 2, QTableWidgetItem(str(name or "")))
+        t.setItem(r, 3, QTableWidgetItem(sel_s or "—"))
+        t.setItem(r, 4, QTableWidgetItem(prog))
+        t.setItem(r, 5, QTableWidgetItem(win))
+        t.setItem(r, 6, QTableWidgetItem(leg_txt))
+
+    def _fill_pool_list(self, codes, set_original=True, load_task_legs: bool = True):
+        """用代码列表填充股票池状态表，每行可勾选。
+
+        load_task_legs=False：跳过读当日任务 Excel（导入大批量时用；可后再点「刷新状态」）。
+        """
         self.pool_select_all_cb.blockSignals(True)
         self.pool_select_all_cb.setChecked(False)
         self.pool_select_all_cb.blockSignals(False)
-        self.pool_list.clear()
+        self._refresh_pool_column_headers()
+        norm_codes = []
+        for code in codes or []:
+            c6 = _normalize_code(code)
+            if c6:
+                norm_codes.append(c6)
         if set_original:
-            self._pool_original_order = list(codes)
-        for code in codes:
-            code = (code or "").strip()
-            if len(code) < 6:
-                code = code.zfill(6)
-            item = QListWidgetItem(_code_display_text(code))
-            item.setData(Qt.UserRole, code)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            self.pool_list.addItem(item)
+            self._pool_original_order = list(norm_codes)
+
+        sid = self._get_selected_strategy_id()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        sp = (cfg.strategy_params if cfg else None) or {}
+        sell_mode = self._current_strategy_is_sell_pool()
+        sel_map: Dict[str, str] = {}
+        if sell_mode:
+            try:
+                from utils.position_entry_dates import load_all
+
+                sel_map = dict(load_all(self._project_root()) or {})
+            except Exception:
+                sel_map = {}
+        else:
+            raw_map = sp.get("selection_date_by_code") or {}
+            if isinstance(raw_map, dict):
+                for k, v in raw_map.items():
+                    c6 = _normalize_code(k)
+                    if c6:
+                        sel_map[c6] = str(v or "").strip()[:10]
+        # 入场/持有窗口：旋钮优先（加载策略时已先写入旋钮再填表）
+        entry_window = _entry_window_trading_days_from_params(sp)
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            try:
+                entry_window = max(1, int(self.param_entry_window_spin.value()))
+            except (TypeError, ValueError):
+                pass
+        filled = self._pool_filled_legs_by_code(
+            norm_codes, include_task_file=bool(load_task_legs)
+        )
+        name_fn = _get_stock_name_fn()
+        progress_cache: Dict[str, Tuple[str, str]] = {}
+
+        t = self.pool_list
+        t.setUpdatesEnabled(False)
+        try:
+            t.setRowCount(len(norm_codes))
+            for r, code_6 in enumerate(norm_codes):
+                self._append_pool_table_row(
+                    code_6,
+                    sel_map=sel_map,
+                    entry_window=entry_window,
+                    filled_by_code=filled,
+                    row=r,
+                    name_fn=name_fn,
+                    progress_cache=progress_cache,
+                    sell_mode=sell_mode,
+                )
+        finally:
+            t.setUpdatesEnabled(True)
+
+    def _on_pool_refresh_status(self):
+        codes = self._get_pool_codes_from_list()
+        self._fill_pool_list(codes, set_original=False)
 
     def _clear_time_str_from_qtime(self, time_edit: QTimeEdit) -> str:
         t = time_edit.time()
         return f"{t.hour():02d}:{t.minute():02d}:{t.second():02d}"
 
+    def _persist_entry_window_to_current_strategy(self) -> None:
+        """把「运行交易日数」写回当前策略并落盘，重启后仍生效。"""
+        if getattr(self, "_loading_strategy", True):
+            return
+        if getattr(self, "param_entry_window_spin", None) is None:
+            return
+        sid = self._get_selected_strategy_id()
+        if not sid:
+            return
+        cfg = self._find_strategy_by_id(sid)
+        if not cfg:
+            return
+        try:
+            n = max(1, int(self.param_entry_window_spin.value()))
+        except (TypeError, ValueError):
+            return
+        sp = dict(cfg.strategy_params or {})
+        if int(sp.get(PARAM_ENTRY_WINDOW_TRADING_DAYS) or 0) == n:
+            return
+        sp[PARAM_ENTRY_WINDOW_TRADING_DAYS] = n
+        cfg.strategy_params = sp
+        try:
+            save_strategy(cfg)
+        except Exception:
+            return
+        # 同步快照中的该字段，避免仅改 N 时仍提示「未保存」
+        try:
+            if isinstance(self._last_saved_snapshot, dict):
+                sp_snap = dict(self._last_saved_snapshot.get("strategy_params") or {})
+                sp_snap[PARAM_ENTRY_WINDOW_TRADING_DAYS] = n
+                self._last_saved_snapshot["strategy_params"] = sp_snap
+        except Exception:
+            pass
+
+    def _on_entry_window_changed(self, *_args) -> None:
+        """运行交易日数变更：自动保存，并刷新股票池入场进度分母。"""
+        if getattr(self, "_loading_strategy", True):
+            return
+        self._persist_entry_window_to_current_strategy()
+        try:
+            codes = self._get_pool_codes_from_list()
+            if codes:
+                self._fill_pool_list(codes, set_original=False, load_task_legs=False)
+        except Exception:
+            pass
+
     def _apply_live_runtime_strategy_params(
         self, params: Dict[str, Any], cfg: Optional["StrategyConfig"] = None
     ) -> None:
-        """实盘运行前：仅对含 scheduled_clear 的卖出策略注入持有天数与清仓时间。"""
+        """实盘运行前：仅对含 scheduled_clear 的卖出策略注入持有天数与清仓时间。
+
+        持有天数取「参数与逻辑」里的运行交易日数（表单优先，与策略一并保存），
+        不再使用「生成策略」页已隐藏的持有天数框。
+        """
         if cfg is None:
             return
         if not strategy_uses_scheduled_clear(
             cfg.strategy_code or "", cfg.strategy_params, getattr(cfg, "name", "") or ""
         ):
             return
-        if hasattr(self, "live_hold_trading_days_spin"):
-            _merge_hold_trading_days_into_params(params, self.live_hold_trading_days_spin.value())
+        hold_n = _entry_window_trading_days_from_params(params)
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            try:
+                hold_n = max(1, int(self.param_entry_window_spin.value()))
+            except (TypeError, ValueError):
+                pass
+        _merge_hold_trading_days_into_params(params, hold_n)
         if hasattr(self, "live_scheduled_clear_time"):
             _merge_scheduled_clear_time_into_params(
                 params, self._clear_time_str_from_qtime(self.live_scheduled_clear_time)
             )
 
     def _refresh_live_scheduled_clear_controls(self, cfg: Optional["StrategyConfig"] = None) -> None:
-        """买入策略隐藏实盘「持有交易日数/定时清仓」控件。"""
-        show = False
+        """买入策略隐藏「定时清仓」时刻；持有天数已并入「运行交易日数」，始终隐藏。"""
+        show_time = False
         if cfg is not None:
-            show = strategy_uses_scheduled_clear(
+            show_time = strategy_uses_scheduled_clear(
                 cfg.strategy_code or "", cfg.strategy_params, getattr(cfg, "name", "") or ""
             )
         for w in (
             getattr(self, "live_hold_days_label", None),
             getattr(self, "live_hold_trading_days_spin", None),
+        ):
+            if w is not None:
+                w.setVisible(False)
+        for w in (
             getattr(self, "live_clear_label", None),
             getattr(self, "live_scheduled_clear_time", None),
         ):
             if w is not None:
-                w.setVisible(show)
+                w.setVisible(show_time)
 
     def _apply_sell_chain_scheduled_clear_time(self, target: Any) -> None:
         """下一轮接续回测：仅对含 scheduled_clear 的策略段写入清仓时间。"""
@@ -2441,6 +3417,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
             out[PARAM_CLIP_U] = U
         elif mode == "fixed_n_equity":
             out[PARAM_FIXED_N] = int(self.param_fixed_n_spin.value())
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            out[PARAM_ENTRY_WINDOW_TRADING_DAYS] = max(
+                1, int(self.param_entry_window_spin.value())
+            )
         return out
 
     def _merge_strategy_params_from_form(self, base: Optional[dict] = None) -> dict:
@@ -2531,6 +3511,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if getattr(self, "param_fixed_n_spin", None) is not None:
             self.param_fixed_n_spin.setValue(int(params.get(PARAM_FIXED_N, 5) or 5))
         self.param_min_order_amount_spin.setValue(float(params.get(PARAM_MIN_ORDER_AMOUNT, 5000)))
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            raw_ew = params.get(PARAM_ENTRY_WINDOW_TRADING_DAYS)
+            try:
+                ew = int(raw_ew) if raw_ew is not None and str(raw_ew).strip() != "" else 1
+            except (TypeError, ValueError):
+                ew = 1
+            self.param_entry_window_spin.blockSignals(True)
+            self.param_entry_window_spin.setValue(max(1, ew))
+            self.param_entry_window_spin.blockSignals(False)
         self._load_generate_top_n_to_form(params)
         self._on_sizing_mode_changed()
 
@@ -2588,6 +3577,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     cfg.strategy_params = self._merge_strategy_params_from_form(
                         cfg.strategy_params
                     )
+                    self._prune_selection_date_map_for_pool(cfg, cfg.stock_codes)
                     cfg.strategy_code = self.logic_code_edit.toPlainText().strip()
                     save_strategy(cfg)
         if prev_sid:
@@ -2778,7 +3768,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sid = (selected_id or "").strip() or self._get_selected_strategy_id()
         if not sid:
             self.pool_select_all_cb.setChecked(False)
-            self.pool_list.clear()
+            self.pool_list.setRowCount(0)
             self.logic_code_edit.clear()
             self._load_params_to_form({})
             self._pool_original_order = []
@@ -2795,7 +3785,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         cfg = self._find_strategy_by_id(sid)
         if not cfg:
             self.pool_select_all_cb.setChecked(False)
-            self.pool_list.clear()
+            self.pool_list.setRowCount(0)
             self.logic_code_edit.clear()
             self._load_params_to_form({})
             self._pool_original_order = []
@@ -2810,8 +3800,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
             self._refresh_sell_chain_scheduled_clear_controls(None)
             return
         self._loading_strategy = True
-        self._fill_pool_list(cfg.stock_codes, set_original=True)
+        # 先加载参数（含运行交易日数），再填股票池进度，避免分母先按默认 1 显示成 1/1
         self._load_params_to_form(cfg.strategy_params or {})
+        self._fill_pool_list(cfg.stock_codes, set_original=True)
         code = (cfg.strategy_code or "").strip()
         self.logic_code_edit.setPlainText(code if code else _default_strategy_code())
         self._last_saved_snapshot = self._take_snapshot()
@@ -2827,6 +3818,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self._refresh_schedule_controls_from_cfg(cfg)
         self._refresh_live_scheduled_clear_controls(cfg)
         self._refresh_sell_chain_scheduled_clear_controls(cfg)
+        try:
+            if self._current_strategy_is_sell_pool():
+                self.pool_import_positions_btn.setText("同步持仓")
+            else:
+                self.pool_import_positions_btn.setText("一键导入持仓")
+        except Exception:
+            pass
     def _refresh_schedule_controls_from_cfg(self, cfg: StrategyConfig | None) -> None:
         """根据当前策略刷新「定时生成」控件状态。"""
         if not hasattr(self, "schedule_gen_datetime"):
@@ -3008,6 +4006,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             return
         cfg.stock_codes = self._get_pool_codes_from_list()
         cfg.strategy_params = self._merge_strategy_params_from_form(cfg.strategy_params)
+        self._prune_selection_date_map_for_pool(cfg, cfg.stock_codes)
         cfg.strategy_code = self.logic_code_edit.toPlainText().strip()
         save_strategy(cfg)
         self._load_strategies_into_list(reselect_id=sid)
@@ -3030,8 +4029,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not cfg:
             return
         self._loading_strategy = True
-        self._fill_pool_list(cfg.stock_codes, set_original=True)
         self._load_params_to_form(cfg.strategy_params or {})
+        self._fill_pool_list(cfg.stock_codes, set_original=True)
         code = (cfg.strategy_code or "").strip()
         self.logic_code_edit.setPlainText(code if code else _default_strategy_code())
         self._loading_strategy = False
@@ -3039,6 +4038,23 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self._dirty_sections.clear()
         self._refresh_dirty_ui()
         QMessageBox.information(self, "完成", "已放弃本次修改，已恢复为上次保存的状态。")
+
+    def _prune_selection_date_map_for_pool(self, cfg, codes: Optional[List[str]] = None) -> None:
+        """股票池删除后同步裁剪 params.selection_date_by_code，避免残留幽灵选股日。"""
+        if cfg is None:
+            return
+        sp = cfg.strategy_params if isinstance(cfg.strategy_params, dict) else {}
+        raw = sp.get("selection_date_by_code")
+        if not isinstance(raw, dict) or not raw:
+            return
+        keep = {_normalize_code(c) for c in (codes if codes is not None else (cfg.stock_codes or [])) if _normalize_code(c)}
+        new_map: Dict[str, str] = {}
+        for k, v in raw.items():
+            c6 = _normalize_code(k)
+            if c6 and c6 in keep:
+                new_map[c6] = str(v or "").strip()[:10]
+        sp["selection_date_by_code"] = new_map
+        cfg.strategy_params = sp
 
     def _save_pool_codes_silent(self) -> bool:
         """静默保存当前策略股票池，不弹成功提示；成功返回 True。"""
@@ -3049,6 +4065,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not cfg:
             return False
         cfg.stock_codes = self._get_pool_codes_from_list()
+        self._prune_selection_date_map_for_pool(cfg, cfg.stock_codes)
         save_strategy(cfg)
         self._pool_original_order = list(cfg.stock_codes)
         self._refresh_strategy_row_count_text(sid)
@@ -3091,7 +4108,11 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.information(self, "粘贴", "粘贴完成：这些股票已在当前策略股票池中，无新增。")
 
     def _on_import_pool_codes(self):
-        """从 Excel/CSV/TXT 文件导入股票代码（并入现有列表，去重，不清空）"""
+        """从 Excel/CSV/TXT 文件导入股票代码（并入现有列表，去重，不清空）。
+
+        若文件含「选股日」列：同步写入 params.selection_date_by_code（同代码多日取最早）。
+        优化：文件只解析一次、策略只保存一次、填表跳过读当日任务 Excel。
+        """
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择要导入的文件",
@@ -3100,50 +4121,204 @@ class StrategyGeneratorMainWindow(QMainWindow):
         )
         if not path or not os.path.isfile(path):
             return
-        codes = _parse_codes_from_file(path)
+
+        sid = self._get_selected_strategy_id()
+        if not sid:
+            QMessageBox.information(self, "提示", "请先在左侧选择一个策略。")
+            return
+        cfg = self._find_strategy_by_id(sid)
+        if not cfg:
+            QMessageBox.warning(self, "警告", "未找到所选策略。")
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        date_note = ""
+        strength_note = ""
+        codes: List[str] = []
+        incoming_dates: Dict[str, str] = {}
+        merged_strength: Dict[str, Dict[str, object]] = {}
+        added = 0
+        err: Optional[BaseException] = None
+        touched_rows: List[Dict[str, str]] = []
+        try:
+            if getattr(self, "param_entry_window_spin", None) is not None:
+                entry_window = max(1, int(self.param_entry_window_spin.value()))
+            else:
+                entry_window = _entry_window_trading_days_from_params(cfg.strategy_params)
+
+            ext = os.path.splitext(path)[1].lower()
+            if ext in (".xlsx", ".xls", ".csv"):
+                try:
+                    by_day, strength_by_day, _hint = group_codes_and_clip_strength_by_selection_date(
+                        path
+                    )
+                    # 文件内同代码多日：进行中保留早的，已结束改用新的
+                    incoming_dates = _resolve_selection_dates_by_code(
+                        by_day, entry_window=entry_window
+                    )
+                    # 保序并集：按选股日升序遍历
+                    seen = set()
+                    for d in sorted(by_day.keys()):
+                        for c6 in by_day.get(d) or []:
+                            c6 = _normalize_code(c6)
+                            if c6 and c6 not in seen:
+                                seen.add(c6)
+                                codes.append(c6)
+                    for day_map in (strength_by_day or {}).values():
+                        for c6, meta in (day_map or {}).items():
+                            c6 = _normalize_code(c6)
+                            if c6 and isinstance(meta, dict):
+                                merged_strength[c6] = meta
+                    if merged_strength:
+                        strength_note = f"；已写入 clip 强度 {len(merged_strength)} 只"
+                except ValueError:
+                    codes = _parse_codes_from_file(path)
+                    date_note = "；文件无选股日列，进度将显示「无选股日」"
+            else:
+                codes = _parse_codes_from_file(path)
+
+            if not codes:
+                return
+
+            existing = self._get_pool_codes_from_list()
+            existing_set = set(existing)
+            new_codes = [c for c in codes if c not in existing_set]
+            merged = list(existing) + new_codes
+            added = len(new_codes)
+
+            sp = dict(cfg.strategy_params or {})
+            if incoming_dates:
+                prev_map = dict(sp.get("selection_date_by_code") or {})
+                merged_dates, wrote_n, refreshed_n, refreshed_codes = _merge_selection_date_with_existing(
+                    prev_map,
+                    incoming_dates,
+                    entry_window=entry_window,
+                )
+                sp["selection_date_by_code"] = merged_dates
+                if refreshed_codes:
+                    sp["_filled_legs"] = _drop_filled_legs_for_codes(
+                        sp.get("_filled_legs"), refreshed_codes
+                    )
+                parts = []
+                if wrote_n:
+                    parts.append(f"新写 {wrote_n}")
+                if refreshed_n:
+                    parts.append(f"未开窗/已结束改新 {refreshed_n}")
+                kept = max(0, len(incoming_dates) - wrote_n - refreshed_n)
+                if kept:
+                    parts.append(f"进行中保留 {kept}")
+                date_note = ("；选股日 " + "，".join(parts)) if parts else "；已同步选股日"
+            if merged_strength:
+                prev = dict(sp.get("clip_strength_by_code") or {})
+                prev.update(merged_strength)
+                sp["clip_strength_by_code"] = prev
+
+            cfg.stock_codes = list(merged)
+            cfg.strategy_params = sp
+            self._prune_selection_date_map_for_pool(cfg, cfg.stock_codes)
+            save_strategy(cfg)
+            self._pool_original_order = list(cfg.stock_codes)
+            self._refresh_strategy_row_count_text(sid)
+            self._dirty_sections.discard("pool")
+            self._refresh_dirty_ui()
+            if not self._dirty_sections:
+                self._last_saved_snapshot = self._take_snapshot()
+
+            # 一次填表；导入时不读 current_tasks（避免二次 Excel 拖慢）
+            self._fill_pool_list(merged, set_original=True, load_task_legs=False)
+
+            # 跌MA10：导入后扫描「选股日后已触达」，供手动删池（不在生成任务时扫）
+            if _strategy_wants_ma_touch_import_scan(cfg) and (
+                sp.get("selection_date_by_code") or incoming_dates
+            ):
+                touched_rows = _scan_pool_already_touched_ma10(
+                    cfg, entry_window=entry_window, before_date=date.today()
+                )
+                if touched_rows:
+                    strength_note += f"；选股日后已触达MA10 {len(touched_rows)} 只"
+        except Exception as e:
+            err = e
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if err is not None:
+            QMessageBox.critical(self, "导入失败", str(err))
+            return
         if not codes:
             QMessageBox.warning(self, "导入结果", "未能从该文件中解析出有效的 6 位股票代码。")
             return
-        added = self._merge_codes_into_pool(codes)
-        # 若含合格榜字段：写入 clip_strength_by_code，供 clip 按强度分取票
-        strength_note = ""
-        try:
-            ext = os.path.splitext(path)[1].lower()
-            if ext in (".xlsx", ".xls", ".csv"):
-                _, strength_by_day, _ = group_codes_and_clip_strength_by_selection_date(path)
-                merged_strength: Dict[str, Dict[str, object]] = {}
-                for day_map in strength_by_day.values():
-                    for c6, meta in (day_map or {}).items():
-                        if c6 and isinstance(meta, dict):
-                            merged_strength[c6] = meta
-                if merged_strength:
-                    sid = self._get_selected_strategy_id()
-                    cfg = self._find_strategy_by_id(sid) if sid else None
-                    if cfg is not None:
-                        sp = dict(cfg.strategy_params or {})
-                        prev = dict(sp.get("clip_strength_by_code") or {})
-                        prev.update(merged_strength)
-                        sp["clip_strength_by_code"] = prev
-                        cfg.strategy_params = sp
-                        save_strategy(cfg)
-                        strength_note = f"；已写入 clip 强度 {len(merged_strength)} 只"
-        except Exception:
-            strength_note = ""
         if added > 0:
             msg = f"已从文件并入 {added} 只股票并自动保存"
             if added < len(codes):
                 msg += f"（文件解析 {len(codes)} 只，其余已在池中或重复）"
-            msg += f"{strength_note}。"
+            msg += f"{date_note}{strength_note}。"
             QMessageBox.information(self, "导入结果", msg)
         else:
             QMessageBox.information(
                 self,
                 "导入结果",
-                f"导入完成：这些股票已在当前策略股票池中，无新增{strength_note}。",
+                f"导入完成：这些股票已在当前策略股票池中，无新增{date_note}{strength_note}。",
             )
 
+        # 导入结果确认后再弹出已触达列表，方便删池
+        if touched_rows:
+            dlg = AlreadyTouchedMa10Dialog(self, touched_rows)
+            dlg.exec_()
+            if dlg.remove_requested:
+                drop = {str(r.get("code") or "") for r in touched_rows}
+                keep = [c for c in self._get_pool_codes_from_list() if c not in drop]
+                self._fill_pool_list(keep, set_original=True, load_task_legs=False)
+                self._save_pool_codes_silent()
+                QMessageBox.information(
+                    self,
+                    "已删除",
+                    f"已从股票池删除 {len(drop)} 只「选股日后已触达 MA10」的股票。",
+                )
+
     def _on_import_positions(self):
-        """从 QMT 当前持仓一键导入到本策略股票池（已存在的不会重复添加）"""
+        """从 QMT 当前持仓导入到本策略股票池。
+
+        买入策略：并入（去重）。
+        卖出策略：以当前持仓（可用>=100）重建池，核对建仓日并提示补全。
+        """
+        sell_mode = self._current_strategy_is_sell_pool()
+        if sell_mode:
+            try:
+                positions, _dbg = get_positions_with_volume_debug()
+            except Exception:
+                positions = {}
+            codes = [
+                _normalize_code(c)
+                for c, v in (positions or {}).items()
+                if _normalize_code(c) and int(v or 0) >= 100
+            ]
+            codes = sorted(set(codes))
+            if not codes:
+                QMessageBox.warning(
+                    self,
+                    "同步持仓",
+                    "未获取到可用>=100股的持仓。请确认：\n"
+                    "1. 大 QMT 模型交易已运行「蚂蚁量化规则」；\n"
+                    "2. data/config.ini 已配置 account_id（builtin 下 path_qmt 可留空）。",
+                )
+                return
+            try:
+                from utils.position_entry_dates import reconcile_with_positions
+
+                reconcile_with_positions(positions or {}, project_root=self._project_root())
+            except Exception:
+                pass
+            wrote = self._prompt_missing_entry_dates(codes)
+            self._fill_pool_list(codes, set_original=True, load_task_legs=True)
+            self._save_pool_codes_silent()
+            extra = f"；新补建仓日 {wrote} 只" if wrote else ""
+            QMessageBox.information(
+                self,
+                "同步持仓",
+                f"已按 QMT 持仓重建卖出股票池 {len(codes)} 只并自动保存{extra}。",
+            )
+            return
+
         position_codes = get_positions()
         if not position_codes:
             QMessageBox.warning(
@@ -3257,6 +4432,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         eq = result.get("equity_curve") or []
         last_day = eq[-1].get("date", "") if eq else ""
         fp = result.get("final_positions") or {}
+        first_buys = _first_buy_dates_from_trades(result.get("trades") or [])
         positions_out = {}
         for k, v in fp.items():
             code_6 = (k or "").strip().replace(".", "")[:6]
@@ -3264,10 +4440,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 code_6 = code_6.zfill(6)
             if len(code_6) != 6:
                 continue
-            positions_out[code_6] = {
+            entry = {
                 "volume": int((v or {}).get("volume") or 0),
                 "cost": float((v or {}).get("cost") or 0),
             }
+            bd = first_buys.get(code_6)
+            if bd is not None:
+                entry["entry_date"] = bd.isoformat()
+            positions_out[code_6] = entry
+        first_buy_out = {c: d.isoformat() for c, d in first_buys.items()}
         lp = result.get("last_prices") or {}
         last_prices_out = {}
         for k, v in lp.items():
@@ -3292,6 +4473,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "seg2_strategy_name": (cfg_b_dual.name if cfg_b_dual else None),
             "final_cash": float(result.get("final_cash") or 0),
             "positions": positions_out,
+            "first_buy_dates": first_buy_out,
+            "buy_fills": _compact_buy_fills_from_trades(result.get("trades") or []),
             "last_mark_prices": last_prices_out,
         }
         return out
@@ -3383,6 +4566,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
     def _codes_from_export_positions(self, seg: dict) -> List[str]:
         out: List[str] = []
+        seen: set = set()
         for k, p in (seg.get("positions") or {}).items():
             try:
                 vol = int((p or {}).get("volume") or 0)
@@ -3393,12 +4577,135 @@ class StrategyGeneratorMainWindow(QMainWindow):
             code_6 = (str(k) or "").strip().replace(".", "")[:6]
             if len(code_6) < 6 and code_6:
                 code_6 = code_6.zfill(6)
-            if len(code_6) == 6:
+            if len(code_6) == 6 and code_6 not in seen:
+                seen.add(code_6)
+                out.append(code_6)
+        for f in seg.get("buy_fills") or []:
+            if not isinstance(f, dict):
+                continue
+            code_6 = _normalize_code_6(f.get("code") or f.get("stock_code"))
+            if code_6 and code_6 not in seen:
+                try:
+                    vol = int(f.get("volume") or 0)
+                except (TypeError, ValueError):
+                    vol = 0
+                if vol <= 0:
+                    continue
+                seen.add(code_6)
                 out.append(code_6)
         return out
 
+    def _prepare_chained_injection(
+        self, seg: dict, start_d: date
+    ) -> Tuple[float, Dict[str, Dict[str, Any]], Optional[List[dict]], Dict[str, date], str]:
+        """
+        接续卖出资金/持仓：
+        - 有 buy_fills：起点现金 = final_cash + 卖出窗内及之后买入占用的资金；
+          窗前买入并入 initial_positions（可卖）；窗内买入按日注入。
+        - 无 buy_fills：回退期末持仓一锅端（旧 JSON）。
+        """
+        fills_raw = seg.get("buy_fills")
+        fb_all = self._first_buy_dates_from_segment(seg)
+        if not isinstance(fills_raw, list) or not fills_raw:
+            return (
+                float(seg.get("final_cash") or 0),
+                self._initial_positions_dict_from_segment(seg),
+                None,
+                fb_all,
+                "期末持仓一锅端(无buy_fills，请重新导出买入批量JSON)",
+            )
+
+        pre_vol: Dict[str, int] = {}
+        pre_cost_amt: Dict[str, float] = {}
+        scheduled: List[dict] = []
+        cash_add = 0.0
+        fb_from_fills: Dict[str, date] = {}
+
+        for f in fills_raw:
+            if not isinstance(f, dict):
+                continue
+            code_6 = _normalize_code_6(f.get("code") or f.get("stock_code"))
+            bd = self._parse_iso_date_val(f.get("date") or f.get("trade_date"))
+            if not code_6 or bd is None:
+                continue
+            try:
+                vol = int(f.get("volume") or 0)
+            except (TypeError, ValueError):
+                vol = 0
+            if vol <= 0:
+                continue
+            try:
+                price = float(f.get("price") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            try:
+                amount = float(f.get("amount") or 0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            if amount <= 0 and price > 0:
+                amount = price * vol
+            try:
+                commission = float(f.get("commission") or 0)
+            except (TypeError, ValueError):
+                commission = 0.0
+            if price <= 0:
+                continue
+            prev_fb = fb_from_fills.get(code_6)
+            if prev_fb is None or bd < prev_fb:
+                fb_from_fills[code_6] = bd
+            tm = str(f.get("time") or "").strip() or "09:30:00"
+            fill_row = {
+                "code": code_6,
+                "date": bd.isoformat(),
+                "time": tm,
+                "volume": vol,
+                "price": price,
+                "amount": round(amount, 2),
+                "commission": round(commission, 2),
+                "side": "buy",
+            }
+            rn = str(f.get("rule_name") or "").strip()
+            if rn:
+                fill_row["rule_name"] = rn
+            lk = str(f.get("leg_key") or "").strip()
+            if lk:
+                fill_row["leg_key"] = lk
+            if bd < start_d:
+                pre_vol[code_6] = int(pre_vol.get(code_6) or 0) + vol
+                pre_cost_amt[code_6] = float(pre_cost_amt.get(code_6) or 0) + float(amount)
+                # 已并入 initial_positions：仅补成交流水，避免重复加仓
+                fill_row["blotter_only"] = True
+                scheduled.append(fill_row)
+            else:
+                scheduled.append(fill_row)
+                cash_add += float(amount) + float(commission)
+
+        init_pos: Dict[str, Dict[str, Any]] = {}
+        for code_6, vol in pre_vol.items():
+            if vol <= 0:
+                continue
+            cost_amt = float(pre_cost_amt.get(code_6) or 0)
+            cost = round(cost_amt / vol, 4) if vol else 0.0
+            ed = fb_all.get(code_6) or fb_from_fills.get(code_6)
+            row: Dict[str, Any] = {"volume": int(vol), "cost": cost}
+            if ed is not None:
+                row["entry_date"] = ed.isoformat()
+            init_pos[code_6] = row
+
+        hints = dict(fb_from_fills)
+        hints.update(fb_all)
+        icash = float(seg.get("final_cash") or 0) + cash_add
+        n_blotter = sum(1 for x in scheduled if x.get("blotter_only"))
+        n_inj = len(scheduled) - n_blotter
+        note = (
+            f"按买入成交按日注入(窗前持仓{len(init_pos)}只/窗前流水{n_blotter}笔/"
+            f"待注入{n_inj}笔,现金加回{cash_add:,.0f})"
+        )
+        return icash, init_pos, scheduled if scheduled else [], hints, note
+
     def _initial_positions_dict_from_segment(self, seg: dict) -> Dict[str, Dict[str, Any]]:
         initial_positions: Dict[str, Dict[str, Any]] = {}
+        fb_map = seg.get("first_buy_dates") or {}
         for k, p in (seg.get("positions") or {}).items():
             code_6 = (str(k) or "").strip().replace(".", "")[:6]
             if len(code_6) < 6 and code_6:
@@ -3414,20 +4721,64 @@ class StrategyGeneratorMainWindow(QMainWindow):
             except (TypeError, ValueError):
                 cost = 0.0
             if vol > 0:
-                initial_positions[code_6] = {"volume": vol, "cost": cost}
+                row: Dict[str, Any] = {"volume": vol, "cost": cost}
+                ed = (
+                    self._parse_iso_date_val((p or {}).get("entry_date"))
+                    or self._parse_iso_date_val((p or {}).get("first_buy_date"))
+                    or self._parse_iso_date_val((p or {}).get("buy_date"))
+                    or self._parse_iso_date_val(fb_map.get(code_6))
+                )
+                if ed is not None:
+                    row["entry_date"] = ed.isoformat()
+                initial_positions[code_6] = row
         return initial_positions
+
+    def _first_buy_dates_from_segment(self, seg: dict) -> Dict[str, date]:
+        """接续卖出：各仍持仓股票的首次买入日。"""
+        out: Dict[str, date] = {}
+        fb_map = seg.get("first_buy_dates") or {}
+        for k, raw in fb_map.items():
+            code_6 = (str(k) or "").strip().replace(".", "")[:6]
+            if len(code_6) < 6 and code_6:
+                code_6 = code_6.zfill(6)
+            bd = self._parse_iso_date_val(raw)
+            if code_6 and len(code_6) == 6 and bd is not None:
+                out[code_6] = bd
+        for k, p in (seg.get("positions") or {}).items():
+            code_6 = (str(k) or "").strip().replace(".", "")[:6]
+            if len(code_6) < 6 and code_6:
+                code_6 = code_6.zfill(6)
+            if len(code_6) != 6:
+                continue
+            try:
+                vol = int((p or {}).get("volume") or 0)
+            except (TypeError, ValueError):
+                vol = 0
+            if vol <= 0:
+                continue
+            ed = (
+                self._parse_iso_date_val((p or {}).get("entry_date"))
+                or self._parse_iso_date_val((p or {}).get("first_buy_date"))
+                or self._parse_iso_date_val((p or {}).get("buy_date"))
+                or out.get(code_6)
+            )
+            if ed is not None:
+                out[code_6] = ed
+        # 仅保留仍有持仓的代码
+        held = set(self._initial_positions_dict_from_segment(seg).keys())
+        return {c: d for c, d in out.items() if c in held}
 
     def _compute_chained_round_window(
         self, seg: dict, from_t1: bool, hold_n: int
     ) -> Tuple[Optional[date], Optional[date], str]:
         """
-        按选股日起算本轮回测区间。
+        接续卖出回测区间：
 
-        若按选股日得到的起点 s_req 与「上一轮」导出区间 [start,end] 在日历上重叠
-        （s_req <= end），则顺延起点：使用 max(s_req, 上一轮回测 start 的下一交易日)，
-        再由此起算持有窗口。这样与批量导出里「每档 backtest_range.start 逐日推进」一致
-        （例如上一轮首日 4/2，则本轮从 4/3 起），而不会误用「end 的下一日」把起点甩到
-        整段持有结束之后（例如 end=4/10 周五时误到 4/13）。
+        优先：按各股「首次买入日」——卖出从买入后下一交易日起，持有 N 日自买入日起算（含买入日）。
+        仿真窗口 = 最早卖出起始日 ～ 最晚清仓日。
+
+        若导出快照无首次买入日（旧 JSON）：回退为选股日起算；若与上轮区间重叠，
+        则顺延到「上一轮 end 的下一交易日」再数持有天数。
         """
         try:
             from strategy_generator_app.trading_calendar import (
@@ -3441,6 +4792,28 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 next_trading_day_after,
                 trading_day_window_from_start,
             )
+        first_buys = self._first_buy_dates_from_segment(seg)
+        if first_buys:
+            starts: List[date] = []
+            ends: List[date] = []
+            for _c, fb in first_buys.items():
+                ns = next_trading_day_after(fb)
+                if ns is None:
+                    return None, None, f"无法计算 {_c} 首次买入日后的下一交易日"
+                _s, e_hold, wmsg = trading_day_window_from_start(fb, hold_n)
+                if e_hold is None:
+                    return None, None, wmsg or f"{_c} 自买入日持有窗口不足"
+                starts.append(ns)
+                # hold_n=1 时清仓日落在买入日，卖出窗至少覆盖买入次日
+                ends.append(e_hold if e_hold >= ns else ns)
+            s_eff = min(starts)
+            e_eff = max(ends)
+            note = (
+                f"按首次买入次日接续：{s_eff}～{e_eff}"
+                f"（{len(first_buys)}只，持有{hold_n}日自买入日起算）"
+            )
+            return s_eff, e_eff, note
+
         sel = self._parse_iso_date_val(seg.get("batch_selection_date"))
         br = seg.get("backtest_range") or {}
         prior_start = self._parse_iso_date_val(br.get("start"))
@@ -3448,25 +4821,26 @@ class StrategyGeneratorMainWindow(QMainWindow):
             br.get("last_equity_date")
         )
         if not sel or prior_start is None or prior_end is None:
-            return None, None, "缺少选股日或上一轮回测区间(start/end)"
+            return None, None, "缺少选股日或上一轮回测区间(start/end)；且无首次买入日"
         s_req, e_req, msg = backtest_window_from_selection_day(
             sel, start_next_trading_day=from_t1, hold_trading_days=hold_n
         )
         if s_req is None:
             return None, None, msg
         if s_req <= prior_end:
-            n_after_prior_start = next_trading_day_after(prior_start)
-            if n_after_prior_start is None:
-                return None, None, "无法计算上一轮回测首日之后的交易日"
-            ns = s_req if s_req > n_after_prior_start else n_after_prior_start
+            n_after_prior_end = next_trading_day_after(prior_end)
+            if n_after_prior_end is None:
+                return None, None, "无法计算上一轮回测结束后的下一交易日"
+            ns = s_req if s_req > n_after_prior_end else n_after_prior_end
             s_eff, e_eff, w2 = trading_day_window_from_start(ns, hold_n)
             if s_eff is None:
                 return None, None, w2 or "本轮回测区间不足"
             note = (
-                f"与导出区间重叠，起点取 max(选股窗口首{s_req}, 上轮start次交易日{n_after_prior_start})→{s_eff}"
+                f"无首次买入日，回退：与导出区间重叠，起点取 max(选股窗口首{s_req}, "
+                f"上轮end次交易日{n_after_prior_end})→{s_eff}"
             )
             return s_eff, e_eff, note
-        return s_req, e_req, ""
+        return s_req, e_req, "无首次买入日，按选股日起算"
 
     def _pick_batch_segment_payload(
         self,
@@ -3669,10 +5043,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
             ]
 
         if segments_dual:
+            for _seg in segments_dual:
+                _sp = dict(_seg.get("strategy_params") or {})
+                _merge_hold_trading_days_into_params(_sp, hold_n)
+                _seg["strategy_params"] = _sp
             self._apply_sell_chain_scheduled_clear_time(segments_dual)
         elif strategy_uses_scheduled_clear(
             run_code, run_params, getattr(cfg, "name", "") or ""
         ):
+            _merge_hold_trading_days_into_params(run_params, hold_n)
             self._apply_sell_chain_scheduled_clear_time(run_params)
 
         self.sell_chain_run_btn.setEnabled(False)
@@ -3696,7 +5075,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
             all_chain_trades: List[dict] = []
             hdr = (
                 f"下一轮批量：共 {len(segs)} 档 | "
-                f"{'起算T+1' if from_t1 else '起算T当日'} 持有 {hold_n} 个交易日（与导出区间重叠时按「上轮 start 次日」与选股窗口对齐顺延）"
+                f"{'起算T+1' if from_t1 else '起算T当日'} 持有 {hold_n} 个交易日"
+                f"（与上轮区间重叠时顺延到「上轮 end 次交易日」再持有，避免先卖后买）"
             )
             if use_dual and cfg_b_dual:
                 hdr += f" | 分时段（时段1「{cfg.name}」+ 时段2「{cfg_b_dual.name}」）"
@@ -3717,11 +5097,35 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     start_d, end_d, note = self._compute_chained_round_window(
                         seg, from_t1, hold_n
                     )
-                    icash = float(seg.get("final_cash") or 0)
-                    init_pos = self._initial_positions_dict_from_segment(seg)
+                    if start_d is not None:
+                        (
+                            icash,
+                            init_pos,
+                            sched_fills,
+                            fb_hints,
+                            inj_note,
+                        ) = self._prepare_chained_injection(seg, start_d)
+                        if inj_note:
+                            note = f"{note}；{inj_note}" if note else inj_note
+                    else:
+                        icash = float(seg.get("final_cash") or 0)
+                        init_pos = self._initial_positions_dict_from_segment(seg)
+                        sched_fills = None
+                        fb_hints = {}
                     codes = self._codes_from_export_positions(seg)
                     prepared_chain.append(
-                        (seg, sel_s, start_d, end_d, note, icash, init_pos, codes)
+                        (
+                            seg,
+                            sel_s,
+                            start_d,
+                            end_d,
+                            note,
+                            icash,
+                            init_pos,
+                            codes,
+                            sched_fills,
+                            fb_hints,
+                        )
                     )
                     if start_d is None or end_d is None:
                         continue
@@ -3764,6 +5168,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     icash,
                     init_pos,
                     codes,
+                    sched_fills,
+                    fb_hints,
                 ) in enumerate(prepared_chain):
                     slot_lo = 12.0 + 88.0 * i / n_seg
                     slot_hi = 12.0 + 88.0 * (i + 1) / n_seg
@@ -3813,12 +5219,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
                                 initial_positions=init_pos if init_pos else None,
                                 carry_over_pending_intents=carry_over_dual,
                                 progress=bt_sub,
+                                scheduled_buy_fills=sched_fills,
+                                first_buy_date_hints=fb_hints or None,
                             )
                         else:
                             bt_params = dict(run_params)
                             if strategy_uses_scheduled_clear(
                                 run_code, bt_params, getattr(cfg, "name", "") or ""
                             ):
+                                _merge_hold_trading_days_into_params(bt_params, hold_n)
                                 self._apply_sell_chain_scheduled_clear_time(bt_params)
                             else:
                                 strip_scheduled_clear_params(bt_params)
@@ -3837,6 +5246,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
                                 strategy_run_end_time=strategy_run_end_time,
                                 initial_positions=init_pos if init_pos else None,
                                 progress=bt_sub,
+                                scheduled_buy_fills=sched_fills,
+                                first_buy_date_hints=fb_hints or None,
                             )
                     except Exception as e:
                         lines.append(f"{sel_s} | 回测异常：{e}")
@@ -4015,20 +5426,18 @@ class StrategyGeneratorMainWindow(QMainWindow):
         """将代码合并到当前策略股票池，返回新加入数量"""
         existing = set(self._get_pool_codes_from_list())
         added = 0
+        batch = []
         for code in codes:
-            code = (code or "").strip()
-            if len(code) < 6:
-                code = code.zfill(6)
-            if len(code) != 6 or code in existing:
+            code_6 = _normalize_code(code)
+            if not code_6 or code_6 in existing:
                 continue
-            item = QListWidgetItem(_code_display_text(code))
-            item.setData(Qt.UserRole, code)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            self.pool_list.addItem(item)
-            existing.add(code)
+            batch.append(code_6)
+            existing.add(code_6)
             added += 1
         if added > 0:
+            filled = self._pool_filled_legs_by_code(batch)
+            for code_6 in batch:
+                self._append_pool_table_row(code_6, filled_by_code=filled)
             self._save_pool_codes_silent()
         return added
 
@@ -4142,20 +5551,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not codes:
             QMessageBox.warning(self, "提示", "未解析到有效的 6 位股票代码。")
             return
-        existing = set(self._get_pool_codes_from_list())
-        added = 0
-        for code in codes:
-            if code and code not in existing:
-                item = QListWidgetItem(_code_display_text(code))
-                item.setData(Qt.UserRole, code)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
-                self.pool_list.addItem(item)
-                existing.add(code)
-                added += 1
+        added = self._merge_codes_into_pool(codes)
         self.pool_add_edit.clear()
         if added > 0:
-            self._save_pool_codes_silent()
             QMessageBox.information(self, "添加", f"已添加并自动保存 {added} 只。")
         else:
             QMessageBox.information(self, "添加", "这些代码已在列表中，未重复添加。")
@@ -4377,6 +5775,52 @@ class StrategyGeneratorMainWindow(QMainWindow):
             except Exception as e:
                 params["positions"] = {}
                 positions_debug_info = f"注入持仓查询异常: {type(e).__name__}: {e}"
+            try:
+                params["positions_volume"] = get_positions_total_volume()
+            except Exception:
+                params["positions_volume"] = dict(params.get("positions") or {})
+            try:
+                params["positions_baseline"] = get_positions_baseline()
+            except Exception:
+                params["positions_baseline"] = dict(params.get("positions_volume") or {})
+            try:
+                from utils.position_entry_dates import reconcile_with_positions
+
+                cleared = reconcile_with_positions(
+                    params.get("positions") or {}, project_root=root
+                )
+                if cleared:
+                    self._append_run_log(
+                        "建仓日已清除（可用<100）: " + ",".join(cleared[:30])
+                        + ("…" if len(cleared) > 30 else "")
+                    )
+            except Exception:
+                pass
+            # 实盘已执行腿：注入 params._filled_legs，供策略跨日跳过已成分支
+            try:
+                from utils.filled_legs import load_leg_keys, reconcile_with_positions as _recon_legs
+
+                cleared_legs = _recon_legs(
+                    params.get("positions") or {}, project_root=root
+                )
+                if cleared_legs:
+                    self._append_run_log(
+                        "已执行腿已清除（可用<100）: " + ",".join(cleared_legs[:30])
+                        + ("…" if len(cleared_legs) > 30 else "")
+                    )
+                disk_legs = set(load_leg_keys(root) or [])
+                cur = params.get("_filled_legs") or []
+                if isinstance(cur, dict):
+                    merged = set(str(k) for k, v in cur.items() if v) | disk_legs
+                else:
+                    merged = set(str(x) for x in cur if x) | disk_legs
+                params["_filled_legs"] = sorted(merged)
+                if disk_legs:
+                    self._append_run_log(
+                        f"已注入实盘已执行腿 {len(disk_legs)} 条（data/filled_legs.json）"
+                    )
+            except Exception:
+                pass
 
             def _norm_code_6(code: str) -> str:
                 s = (code or "").strip().split(".")[0]
@@ -4546,15 +5990,25 @@ class StrategyGeneratorMainWindow(QMainWindow):
             cfg = self._find_strategy_by_id(sid) if sid else None
             sell_hold_n = None
             if cfg:
-                sp = cfg.strategy_params or {}
-                raw_n = sp.get("scheduled_clear_on_sell_day") or sp.get("sell_hold_trading_days")
+                sp = dict(cfg.strategy_params or {})
+                # 与实盘注入一致：优先已写入的 hold，否则用运行交易日数
+                raw_n = (
+                    sp.get("scheduled_clear_on_sell_day")
+                    or sp.get("sell_hold_trading_days")
+                    or sp.get("entry_window_trading_days")
+                )
+                if getattr(self, "param_entry_window_spin", None) is not None:
+                    try:
+                        raw_n = max(1, int(self.param_entry_window_spin.value()))
+                    except (TypeError, ValueError):
+                        pass
                 if raw_n is not None:
                     try:
                         sell_hold_n = int(raw_n)
                     except (TypeError, ValueError):
                         sell_hold_n = None
             codes = [(it.get("stock_code") or "").strip() for it in intents]
-            buy_dates = _load_task_buy_dates_by_code(root, codes)
+            buy_dates = _load_prefer_entry_buy_dates(root, codes)
             merged_tasks = build_tasks_from_intents(
                 intents,
                 buy_dates_by_code=buy_dates,
@@ -4628,17 +6082,23 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 table.setItem(i, 7, QTableWidgetItem(str(t.get("volume", "") or "")))
                 table.setItem(i, 8, QTableWidgetItem(str(t.get("amount", "") or "")))
                 table.setItem(i, 9, QTableWidgetItem(str(t.get("position_after", "") or "")))
-                table.setItem(i, 10, QTableWidgetItem(str(t.get("trigger_info", "") or "")))
-                table.setItem(i, 11, QTableWidgetItem(str(t.get("start_date", "") or "")))
-                table.setItem(i, 12, QTableWidgetItem(str(t.get("end_date", "") or "")))
+                table.setItem(i, 10, QTableWidgetItem(str(t.get("rule_name", "") or "")))
+                table.setItem(i, 11, QTableWidgetItem(str(t.get("leg_key", "") or "")))
+                table.setItem(i, 12, QTableWidgetItem(str(t.get("trigger_info", "") or "")))
+                table.setItem(i, 13, QTableWidgetItem(str(t.get("start_date", "") or "")))
+                table.setItem(i, 14, QTableWidgetItem(str(t.get("end_date", "") or "")))
                 for j, key in enumerate(tb_cols):
-                    table.setItem(i, 13 + j, QTableWidgetItem(str(t.get(key, "") or "")))
+                    table.setItem(i, 15 + j, QTableWidgetItem(str(t.get(key, "") or "")))
         finally:
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
 
-    def _refresh_cfg_from_disk(self, sid: str):
-        """回测前从磁盘重载该 id 的策略并写回 self._strategies，使手改 JSON 的 strategy_params 立即参与回测。"""
+    def _refresh_cfg_from_disk(self, sid: str, sync_editor: bool = False):
+        """回测前从磁盘重载该 id 的策略并写回 self._strategies，使手改 JSON 的 strategy_params 立即参与回测。
+
+        sync_editor=True：若当前选中的就是该策略，同步编辑器里的策略代码/参数，避免 install 脚本
+        已更新磁盘、但界面仍跑旧代码（例如禁止 import os 导致卖出整天 0 意图）。
+        """
         sid = (sid or "").strip()
         if not sid:
             return None
@@ -4653,19 +6113,32 @@ class StrategyGeneratorMainWindow(QMainWindow):
             if c.id == sid:
                 lst[i] = cfg_new
                 break
+        if (
+            sync_editor
+            and self._get_selected_strategy_id() == sid
+            and hasattr(self, "logic_code_edit")
+        ):
+            disk_code = (cfg_new.strategy_code or "").strip()
+            edit_code = (self.logic_code_edit.toPlainText() or "").strip()
+            if disk_code and disk_code != edit_code:
+                self._loading_strategy = True
+                try:
+                    self.logic_code_edit.setPlainText(disk_code)
+                    self._load_params_to_form(cfg_new.strategy_params or {})
+                finally:
+                    self._loading_strategy = False
         return cfg_new
 
     def _strategy_inputs_for_run(self, cfg: StrategyConfig) -> Tuple[str, Dict[str, Any]]:
-        """回测/运行：参数从磁盘 strategy_params 读取；逻辑优先用当前编辑器内容（与界面一致）。"""
+        """回测/运行：从磁盘刷新策略；参数=磁盘 strategy_params ∪ 表单；代码以磁盘为准（与 install/JSON 一致）。"""
         sid = (getattr(cfg, "id", "") or "").strip()
-        disk = self._refresh_cfg_from_disk(sid)
+        disk = self._refresh_cfg_from_disk(sid, sync_editor=True)
         if disk is not None:
             cfg = disk
-        if self._get_selected_strategy_id() == sid and hasattr(self, "logic_code_edit"):
+        code = (cfg.strategy_code or "").strip()
+        if not code and self._get_selected_strategy_id() == sid and hasattr(self, "logic_code_edit"):
             code = (self.logic_code_edit.toPlainText() or "").strip()
-        else:
-            code = (cfg.strategy_code or "").strip()
-        params = {**(cfg.strategy_params or {}), **self._params_from_form()}
+        params = self._merge_strategy_params_from_form(cfg.strategy_params or {})
         return code, params
 
     def _tp10_effective_params_hint(self, code: str, params: Dict[str, Any]) -> str:
@@ -5468,6 +6941,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             _ensure_repo_root_on_sys_path()
             from tools.merge_backtest_trades_by_selection import (
                 aggregate,
+                build_position_corrected_ledger,
                 _build_prices_by_mark_date,
                 apply_mark_and_returns,
                 apply_selection_file_fields,
@@ -5481,7 +6955,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         try:
             rows = aggregate(Path(buy_path), Path(sell_path))
             prices_by_mark, price_warn = _build_prices_by_mark_date(
-                rows, mark_n=mark_n, use_nth_trading_day=use_nth
+                rows,
+                mark_n=mark_n,
+                use_nth_trading_day=use_nth,
+                use_last_available=not use_nth,
             )
             apply_mark_and_returns(
                 rows,
@@ -5489,6 +6966,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 price_warn,
                 mark_n=mark_n,
                 use_nth_trading_day=use_nth,
+                use_last_available=not use_nth,
             )
             sel_hint = ""
             if sel_path and os.path.isfile(sel_path):
@@ -5523,12 +7001,33 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
             out_path_abs = os.path.abspath(out_path)
             os.makedirs(os.path.dirname(out_path_abs), exist_ok=True)
+            ledger_df = None
+            ledger_n = 0
+            try:
+                ledger_rows = build_position_corrected_ledger(
+                    Path(buy_path), Path(sell_path)
+                )
+                if ledger_rows:
+                    ledger_df = pd.DataFrame(ledger_rows)
+                    ledger_n = len(ledger_rows)
+            except Exception as e:
+                ledger_df = None
+                ledger_n = -1
+                ledger_err = f"{type(e).__name__}: {e}"
+            else:
+                ledger_err = ""
             with pd.ExcelWriter(out_path_abs, engine="openpyxl") as w:
                 df.to_excel(w, index=False, sheet_name="汇总")
+                if ledger_df is not None and not ledger_df.empty:
+                    ledger_df.to_excel(w, index=False, sheet_name="成交流水(持仓已校正)")
 
             self._last_merge_out_path = out_path_abs
             self.merge_open_btn.setEnabled(True)
             msg = f"已生成汇总：{out_path_abs}\n共 {len(rows)} 行"
+            if ledger_n > 0:
+                msg += f"\n已附「成交流水(持仓已校正)」{ledger_n} 行（买卖合并重算交易后持仓）"
+            elif ledger_n < 0 and ledger_err:
+                msg += f"\n⚠ 成交流水未生成：{ledger_err}"
             if not use_nth:
                 msg += "\n盯市：未清仓按卖出明细中的 end_date 收盘价"
             else:
@@ -5615,12 +7114,17 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "没有可回测的交易日。")
             return
         from_t1 = self.backtest_batch_from_t1_cb.isChecked()
-        hold_n = self.backtest_batch_hold_days_spin.value()
+        # 表单「运行交易日数」等参与本轮批量（未点保存也生效；不落盘）
+        cfg.strategy_params = self._merge_strategy_params_from_form(cfg.strategy_params or {})
+        _sp0 = cfg.strategy_params or {}
+        entry_w = _entry_window_trading_days_from_params(_sp0)
+        sim_hold = _batch_sim_days(entry_w)
         mode_txt = (
-            f"从选股日下一交易日（T+1）起连续 {hold_n} 个交易日"
+            f"从选股日下一交易日（T+1）起连续 {sim_hold} 个交易日"
             if from_t1
-            else f"从选股日当日起连续 {hold_n} 个交易日"
+            else f"从选股日当日起连续 {sim_hold} 个交易日"
         )
+        mode_txt += f"（运行交易日数 {entry_w}）"
         initial_cash = self.backtest_initial_cash.value()
         gen_t = self.backtest_generation_time.time()
         run_start_t = self.backtest_run_start_time.time()
@@ -5680,6 +7184,18 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     "name": f"时段2·{cfg_b.name}",
                 },
             ]
+            for _seg in segments_dual:
+                _sp = _seg.get("strategy_params") or {}
+                _ew = _entry_window_trading_days_from_params(_sp)
+                if _ew > entry_w:
+                    entry_w = _ew
+            sim_hold = _batch_sim_days(entry_w)
+            mode_txt = (
+                f"从选股日下一交易日（T+1）起连续 {sim_hold} 个交易日"
+                if from_t1
+                else f"从选股日当日起连续 {sim_hold} 个交易日"
+            )
+            mode_txt += f"（运行交易日数 {entry_w}）"
             mode_txt += f"；分时段组合（时段1「{cfg.name}」+ 时段2「{cfg_b.name}」）"
 
         reply = QMessageBox.question(
@@ -5724,7 +7240,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
             all_batch_trades: List[dict] = []
             lines = [
                 f"批量回测文件：{path}\n{hint}\n"
-                f"规则：{'T+1 起' if from_t1 else 'T 当日起'}，持有 {hold_n} 个交易日"
+                f"规则：{'T+1 起' if from_t1 else 'T 当日起'}，仿真 {sim_hold} 个交易日"
+                f"（运行交易日数 {entry_w}）"
                 f"{'；分时段组合' if use_dual else ''}\n",
                 "=" * 60,
             ]
@@ -5742,7 +7259,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     start_d, end_d, _w = backtest_window_from_selection_day(
                         d,
                         start_next_trading_day=from_t1,
-                        hold_trading_days=hold_n,
+                        hold_trading_days=sim_hold,
                     )
                     prepared.append((d, codes, start_d, end_d, _w))
                     if start_d is None or end_d is None:
@@ -5823,6 +7340,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                                 initial_positions=None,
                                 carry_over_pending_intents=carry_over_dual,
                                 progress=bt_sub,
+                                clear_ticks_on_finish=False,
                             )
                         else:
                             sp_run = dict(cfg.strategy_params or {})
@@ -5843,6 +7361,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                                 strategy_run_end_time=strategy_run_end_time,
                                 initial_positions=None,
                                 progress=bt_sub,
+                                clear_ticks_on_finish=False,
                             )
                         metrics = compute_metrics(
                             result.get("equity_curve") or [],
@@ -5921,6 +7440,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
                         lines.append(f"{d} | [{start_d}~{end_d}] 失败：{ex}")
             finally:
                 try:
+                    from strategy_generator_app.backtest.data_provider import (
+                        clear_tick_memory_cache as _clr_ticks,
+                    )
+
+                    _clr_ticks(None)
+                except Exception:
+                    pass
+                try:
                     bt_progress("批量回测完成", 100)
                     bt_dlg.setValue(100)
                     bt_dlg.close()
@@ -5964,8 +7491,11 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     "source_strategy_id": cfg.id,
                     "source_strategy_name": cfg.name,
                     "selection_file": path,
-                    "batch_rule": f"{'T+1' if from_t1 else 'T当日'}，持有{hold_n}个交易日"
-                    + (f"；分时段+{cfg_b_dual.name}" if use_dual and cfg_b_dual else ""),
+                    "batch_rule": (
+                        f"{'T+1' if from_t1 else 'T当日'}，仿真{sim_hold}日"
+                        f"（运行交易日数{entry_w}）"
+                        + (f"；分时段+{cfg_b_dual.name}" if use_dual and cfg_b_dual else "")
+                    ),
                     "segments": segment_payloads,
                 }
                 self._last_batch_bundle_strategy_id = cfg.id
@@ -6041,32 +7571,94 @@ class StrategyGeneratorMainWindow(QMainWindow):
     def _on_pool_select_all_cb_changed(self, state):
         """表格上方的「全选」复选框：勾选则全选列表项，取消勾选则清除选中"""
         checked = state == Qt.Checked
-        for i in range(self.pool_list.count()):
-            item = self.pool_list.item(i)
-            if item:
+        t = self.pool_list
+        for i in range(t.rowCount()):
+            item = t.item(i, 0)
+            if item is not None:
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
 
     def _on_pool_delete_batch(self):
         """删除所有打勾的项（删除选中的股票）"""
+        t = self.pool_list
         rows_to_remove = []
-        for i in range(self.pool_list.count()):
-            item = self.pool_list.item(i)
-            if item and item.checkState() == Qt.Checked:
+        for i in range(t.rowCount()):
+            item = t.item(i, 0)
+            if item is not None and item.checkState() == Qt.Checked:
                 rows_to_remove.append(i)
         if not rows_to_remove:
             QMessageBox.information(self, "提示", "请先勾选要删除的项，再点击「删除选中的股票」。")
             return
         for row in sorted(rows_to_remove, reverse=True):
-            self.pool_list.takeItem(row)
+            t.removeRow(row)
+        self.pool_select_all_cb.blockSignals(True)
+        self.pool_select_all_cb.setChecked(False)
+        self.pool_select_all_cb.blockSignals(False)
         self._save_pool_codes_silent()
+
+    def _on_pool_delete_ended(self):
+        """删除窗口状态为「已结束」的股票并自动保存。"""
+        codes = self._get_pool_codes_from_list()
+        if not codes:
+            QMessageBox.information(self, "提示", "当前股票池已为空。")
+            return
+
+        sid = self._get_selected_strategy_id()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        sp = (cfg.strategy_params if cfg else None) or {}
+        sell_mode = self._current_strategy_is_sell_pool()
+        sel_map: Dict[str, str] = {}
+        if sell_mode:
+            try:
+                from utils.position_entry_dates import load_all
+
+                sel_map = dict(load_all(self._project_root()) or {})
+            except Exception:
+                sel_map = {}
+        else:
+            raw_map = sp.get("selection_date_by_code") or {}
+            if isinstance(raw_map, dict):
+                for k, v in raw_map.items():
+                    c6 = _normalize_code(k)
+                    if c6:
+                        sel_map[c6] = str(v or "").strip()[:10]
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            entry_window = max(1, int(self.param_entry_window_spin.value()))
+        else:
+            entry_window = _entry_window_trading_days_from_params(sp)
+
+        keep: List[str] = []
+        removed: List[str] = []
+        for c6 in codes:
+            if sell_mode:
+                _sel, _prog, win = self._pool_hold_progress(c6, sel_map, entry_window)
+            else:
+                _sel, _prog, win = self._pool_entry_progress(c6, sel_map, entry_window)
+            if win == "已结束":
+                removed.append(c6)
+            else:
+                keep.append(c6)
+
+        if not removed:
+            QMessageBox.information(self, "删除已结束", "当前没有窗口为「已结束」的股票。")
+            return
+
+        self._fill_pool_list(keep, set_original=True, load_task_legs=False)
+        self._save_pool_codes_silent()
+        QMessageBox.information(
+            self,
+            "删除已结束",
+            f"已删除 {len(removed)} 只已结束股票，剩余 {len(keep)} 只，已自动保存。",
+        )
 
     def _on_pool_clear_all(self):
         """清空当前策略股票池中的所有股票"""
-        if self.pool_list.count() == 0:
+        if self.pool_list.rowCount() == 0:
             QMessageBox.information(self, "提示", "当前股票池已为空。")
             return
-        self.pool_list.clear()
-        self.pool_select_all_cb.setCheckState(Qt.Unchecked)
+        self.pool_list.setRowCount(0)
+        self.pool_select_all_cb.blockSignals(True)
+        self.pool_select_all_cb.setChecked(False)
+        self.pool_select_all_cb.blockSignals(False)
         self._save_pool_codes_silent()
 
     def _select_strategy_in_list(self, strategy_id: str):
@@ -6263,7 +7855,7 @@ def main():
         splash = None
 
     window = StrategyGeneratorMainWindow()
-    window.resize(1100, 700)
+    window.resize(1920, 1000)
 
     if splash is not None:
         try:

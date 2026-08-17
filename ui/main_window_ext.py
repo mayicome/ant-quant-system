@@ -401,7 +401,8 @@ class MainWindowExt(Ui_mainWindow):
         self.schedule_reload_dt_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.schedule_reload_dt_edit.setDateTime(_default_schedule_reload_qdatetime())
         self.schedule_reload_dt_edit.setToolTip(
-            "缺省为下一交易日 09:28:00（本地）；到点后自动执行：重新加载任务 + 自动启动"
+            "缺省为下一交易日 09:28:00（本地）；到点后自动执行：重新加载任务 + 自动启动；"
+            "若当日任务表仍为空则每 5 秒重试，直到有任务或手动清除预约"
         )
         self.schedule_reload_dt_edit.setFixedWidth(170)
         self.schedule_reload_save_btn = QPushButton("预约")
@@ -436,7 +437,7 @@ class MainWindowExt(Ui_mainWindow):
 
         self.schedule_reload_timer = QTimer()
         self.schedule_reload_timer.timeout.connect(self._check_scheduled_reload)
-        self.schedule_reload_timer.start(1000)
+        self.schedule_reload_timer.start(5000)
         self._load_scheduled_reload_from_disk()
         # 部分环境在首帧前交易日历未就绪，延迟再刷一次缺省时间，避免仍显示旧逻辑「+1 小时」
         QTimer.singleShot(300, partial(self._reapply_schedule_reload_default_display))
@@ -4365,6 +4366,7 @@ class MainWindowExt(Ui_mainWindow):
     def _on_clear_scheduled_reload(self):
         """清除一次性预约"""
         self._scheduled_reload_run_at = None
+        self._scheduled_reload_did_force_load = False
         self._persist_scheduled_reload(None)
         self.schedule_reload_status.setText("未预约")
         self.schedule_reload_status.setStyleSheet(self._schedule_reload_status_base_style + "color: #666;")
@@ -4389,6 +4391,7 @@ class MainWindowExt(Ui_mainWindow):
                 )
                 ok = self._run_scheduled_reload_and_start_once()
                 if not ok:
+                    # 尚无任务等：保留预约，按定时器间隔继续重试
                     self._scheduled_reload_run_at = planned
                     self._persist_scheduled_reload(planned)
                     self.schedule_reload_status.setText(f"已预约 {planned.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -4398,9 +4401,11 @@ class MainWindowExt(Ui_mainWindow):
                     return
                 self._scheduled_reload_run_at = None
                 self._persist_scheduled_reload(None)
+                self._scheduled_reload_did_force_load = False
                 self.schedule_reload_status.setText("已执行")
                 self.schedule_reload_status.setStyleSheet(self._schedule_reload_status_base_style + "color: #2e7d32;")
             except Exception as exec_err:
+                # 启动阶段异常：保留预约以便重试，但不再每次 force_reload（见 _scheduled_reload_did_force_load）
                 self._scheduled_reload_run_at = planned
                 self._persist_scheduled_reload(planned)
                 self.schedule_reload_status.setText("执行失败")
@@ -4423,24 +4428,47 @@ class MainWindowExt(Ui_mainWindow):
             self.logger.warning("[定时重载] task_manager 未初始化，取消本次执行")
             return False
         self.logger.info("[定时重载] 开始执行：重新加载任务 + 启动全部任务")
-        # 必须从磁盘强制重载：否则 _tasks_loaded 为 True 时 load_tasks 会直接 return，列表与文件不一致
-        self.task_manager.load_tasks(force_reload=True)
+        # 同一预约多次重试时：只首次 force_reload，避免反复把状态打成「未运行」
+        already_reloaded = bool(getattr(self, "_scheduled_reload_did_force_load", False))
+        if not already_reloaded:
+            # 必须从磁盘强制重载：否则 _tasks_loaded 为 True 时 load_tasks 会直接 return，列表与文件不一致
+            self.task_manager.load_tasks(force_reload=True)
+            self._scheduled_reload_did_force_load = True
+        n_tasks = len(getattr(self.task_manager, "tasks", {}) or {})
+        if n_tasks <= 0:
+            self.logger.info("[定时重载] 当日任务表为空，保留预约稍后重试")
+            # 空表允许下次再 force_reload（文件可能稍后才写入）
+            self._scheduled_reload_did_force_load = False
+            return False
+        # 强制重建表格，避免防抖把刷新跳过导致 start_all 扫到旧表
+        try:
+            self._last_refresh_time = 0
+            self._is_refreshing = False
+        except Exception:
+            pass
         self.refresh_task_table()
         tcv = getattr(self, "tasks_charts_view", None)
-        if tcv:
+        if tcv and not already_reloaded:
             try:
                 tcv.load_tasks()
             except Exception as e:
                 self.logger.error(f"[定时重载] 刷新图表任务视图失败: {e}", exc_info=True)
-        QApplication.processEvents()
-        self.start_all_tasks()
-        self.refresh_task_table()
+        started, failed = self.start_all_tasks()
+        self.logger.info(f"[定时重载] 启动结果: 成功={started} 失败={failed}")
         if tcv:
             try:
-                tcv.load_tasks()
+                n = tcv.sync_charts_with_running_tasks()
+                self.logger.info(f"[定时重载] 已同步图表运行态: {n}")
             except Exception as e:
-                self.logger.error(f"[定时重载] 启动后刷新图表任务视图失败: {e}", exc_info=True)
+                self.logger.error(f"[定时重载] 同步图表运行态失败: {e}", exc_info=True)
+        try:
+            self._last_refresh_time = 0
+            self._is_refreshing = False
+        except Exception:
+            pass
+        self.refresh_task_table()
         self.logger.info("[定时重载] 执行完成")
+        self._scheduled_reload_did_force_load = False
         return True
 
     def start_all_tasks(self):
@@ -4448,9 +4476,12 @@ class MainWindowExt(Ui_mainWindow):
 
         规则买入（无持仓）也必须能启动；旧逻辑要求「可用持仓>0」会把
         纯 single_buy 等任务在定时重载后漏掉，只显示未运行。
+
+        优先按 task_manager.tasks 启动（不依赖表格行是否已刷完），
+        再回退扫 tableWidget_2。返回 (started_count, failed_count)。
         """
         if not self.task_manager:
-            return
+            return 0, 0
 
         buy_rule_types = {
             "single_buy",
@@ -4461,55 +4492,94 @@ class MainWindowExt(Ui_mainWindow):
             "night_buy",
         }
 
-        for row in range(self.tableWidget_2.rowCount()):
-            stock_code_item = self.tableWidget_2.item(row, 0)
-            if not stock_code_item:
-                continue
-            stock_code = stock_code_item.text()
-            task_id = stock_code_item.data(Qt.UserRole)
-            if not stock_code:
-                continue
-
-            # 有买入类规则：无持仓也要启动
-            should_start = False
-            task = self.task_manager.tasks.get(task_id) if task_id else None
-            if isinstance(task, dict):
-                params = task.get("params") if isinstance(task.get("params"), dict) else {}
-                rules = params.get("rules") or []
-                if isinstance(rules, list):
-                    for r in rules:
-                        if not isinstance(r, dict):
-                            continue
-                        rt = str(r.get("type") or r.get("rule_type") or "").strip()
-                        if rt in buy_rule_types:
-                            should_start = True
-                            break
-                strategy = str(task.get("strategy") or "")
-                if "夜市买入" in strategy or "买入" in strategy:
-                    should_start = True
-
-            # 无买入规则时：仍要求可用持仓>0（卖出类）
-            if not should_start:
-                volume_item = self.tableWidget_2.item(row, 2)
-                if not volume_item:
-                    continue
-                volume_text = volume_item.text() or ""
-                try:
-                    volume_match = re.search(r"(\d+)", volume_text)
-                    if not volume_match or int(volume_match.group(1)) <= 0:
-                        self.logger.info(
-                            f"[启动全部] 跳过 {stock_code}：无买入规则且可用持仓为0"
-                        )
+        def _task_should_start(task):
+            if not isinstance(task, dict):
+                return False
+            params = task.get("params") if isinstance(task.get("params"), dict) else {}
+            rules = params.get("rules") or []
+            if isinstance(rules, list):
+                for r in rules:
+                    if not isinstance(r, dict):
                         continue
-                except Exception:
-                    continue
-                should_start = True
-
-            if should_start:
+                    rt = str(r.get("type") or r.get("rule_type") or "").strip()
+                    if rt in buy_rule_types:
+                        return True
+            strategy = str(task.get("strategy") or "")
+            if "夜市买入" in strategy or "买入" in strategy:
+                return True
+            # 无买入规则：卖出类需有可用持仓
+            try:
+                vol = int(task.get("volume") or task.get("init_volume") or 0)
+            except (TypeError, ValueError):
+                vol = 0
+            if vol > 0:
+                return True
+            code = str(task.get("stock_code") or "")
+            if code and self.position_manager:
                 try:
-                    self.start_task(row)
-                except Exception as e:
-                    self.logger.error(f"[启动全部] 启动 {stock_code} 失败: {e}", exc_info=True)
+                    return int(self.position_manager.get_available_volume(code) or 0) > 0
+                except Exception:
+                    return False
+            return False
+
+        started = 0
+        failed = 0
+        started_ids = set()
+
+        # 1) 主路径：直接扫任务管理器（预约重载最可靠）
+        # 注意：必须 list((d or {}).items())，不能写 list(d or {}).items()
+        # （后者会先把 dict 变成 key 列表，再调 .items() 直接报错）
+        tasks_map = getattr(self.task_manager, "tasks", None) or {}
+        if not isinstance(tasks_map, dict):
+            self.logger.error(
+                f"[启动全部] task_manager.tasks 类型异常: {type(tasks_map).__name__}，跳过启动"
+            )
+            return 0, 0
+        for task_id, task in list(tasks_map.items()):
+            if not _task_should_start(task):
+                continue
+            stock_code = str(task.get("stock_code") or "")
+            try:
+                ok = self.task_manager.start_task(task_id)
+                if ok:
+                    started += 1
+                    started_ids.add(task_id)
+                else:
+                    failed += 1
+                    self.logger.error(f"[启动全部] 启动失败: {stock_code} id={task_id}")
+            except Exception as e:
+                failed += 1
+                self.logger.error(f"[启动全部] 启动 {stock_code} 异常: {e}", exc_info=True)
+
+        # 2) 同步表格行状态（已启动的标成运行中）
+        try:
+            for row in range(self.tableWidget_2.rowCount()):
+                stock_code_item = self.tableWidget_2.item(row, 0)
+                if not stock_code_item:
+                    continue
+                task_id = stock_code_item.data(Qt.UserRole)
+                if task_id in started_ids:
+                    try:
+                        status_item = self.tableWidget_2.item(row, 6)
+                        if status_item:
+                            status_item.setText("运行中")
+                            status_item.setForeground(Qt.red)
+                        operation_widget = self.create_operation_buttons(row)
+                        self.tableWidget_2.setCellWidget(row, 7, operation_widget)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self.logger.warning(f"[启动全部] 同步表格状态失败: {e}")
+
+        # 3) 同步图表按钮
+        tcv = getattr(self, "tasks_charts_view", None)
+        if tcv and hasattr(tcv, "sync_charts_with_running_tasks"):
+            try:
+                tcv.sync_charts_with_running_tasks()
+            except Exception as e:
+                self.logger.warning(f"[启动全部] 同步图表失败: {e}")
+
+        return started, failed
 
     def stop_all_tasks(self):
         """暂停所有任务"""

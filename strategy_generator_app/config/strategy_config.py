@@ -72,7 +72,12 @@ PARAM_SIZING_MODE = "sizing_mode"                     # fixed | clip_equity | fi
 PARAM_CLIP_L = "clip_L"                               # clip(S,L,U) 下限
 PARAM_CLIP_U = "clip_U"                               # clip(S,L,U) 上限（兼当日最多买入只数）
 PARAM_FIXED_N = "fixed_n"                             # fixed_n_equity：最多买 N 只；仓位=权益/min(N,进档)
-ALLOWED_PARAM_KEYS = (PARAM_BUY_AMOUNT_PER_STOCK, PARAM_MIN_ORDER_AMOUNT)
+PARAM_ENTRY_WINDOW_TRADING_DAYS = "entry_window_trading_days"  # 策略运行交易日数（批量仿真长度；默认 1）
+ALLOWED_PARAM_KEYS = (
+    PARAM_BUY_AMOUNT_PER_STOCK,
+    PARAM_MIN_ORDER_AMOUNT,
+    PARAM_ENTRY_WINDOW_TRADING_DAYS,
+)
 # 可选扩展键：仅当 JSON/导入里显式出现时保留；不写进默认表，避免影响未配置策略的回测行为
 OPTIONAL_STRATEGY_PARAM_KEYS = (
     "limit_up_clear_on_sell_day",
@@ -100,6 +105,14 @@ OPTIONAL_STRATEGY_PARAM_KEYS = (
     "open_rel_ma5_lo",
     "open_rel_ma5_hi",
     "require_ma5_lt_ma10_lt_ma20",
+    # 马总逻辑1 三腿买入 / 卖出开盘涨幅
+    "rise_percent",
+    "drop_percent",
+    "open_gain_main",
+    "open_gain_growth",
+    "selection_date_by_code",
+    "_filled_legs",
+    "ex_div_lookback",
 )
 
 
@@ -204,6 +217,7 @@ def _default_strategy_params() -> Dict[str, Any]:
     return {
         PARAM_BUY_AMOUNT_PER_STOCK: 50000,
         PARAM_MIN_ORDER_AMOUNT: 5000,
+        PARAM_ENTRY_WINDOW_TRADING_DAYS: 1,
     }
 
 

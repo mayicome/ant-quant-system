@@ -166,14 +166,20 @@ def resolve_scheduled_clear_effective_date(
     """
     解析定时清仓生效交易日：
     1) 意图/规则已显式指定 scheduled_clear_effective_date；
-    2) 末日出清：buy_date + 第 N 个交易日（与策略 scheduled_clear_on_sell_day 一致）；
-    3) 否则按生成时刻锚定（15:00 前后 / 是否交易日）。
+    2) 每日条件清仓（scheduled_clear_every_day）：按生成时刻锚定（今日/下一交易日）；
+    3) 末日出清：buy_date + 第 N 个交易日（scheduled_clear_sell_day_index / on_sell_day）；
+    4) 否则按生成时刻锚定。
     """
     explicit = (intent.get("scheduled_clear_effective_date") or "").strip()
     if explicit:
         return explicit
 
     when = generated_at or datetime.now()
+
+    # 每日挂：不绑第 N 日，生效日=生成锚定日（实盘靠 every_day 标志每天可触发）
+    if _truthy_flag(intent.get("scheduled_clear_every_day")):
+        return _effective_date_from_generation_anchor(when)
+
     sell_n = intent.get("scheduled_clear_sell_day_index")
     if sell_n is None:
         sell_n = intent.get("scheduled_clear_on_sell_day") or intent.get("sell_hold_trading_days")
@@ -190,6 +196,15 @@ def resolve_scheduled_clear_effective_date(
             pass
 
     return _effective_date_from_generation_anchor(when)
+
+
+def _truthy_flag(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
 
 
 def _scheduled_clear_effective_date_str() -> str:
@@ -256,6 +271,12 @@ def _make_rule_dict(
     def i(key: str, default: int = 0) -> int:
         return int(intent.get(key, default) or 0)
 
+    def _finish(out: Dict[str, Any]) -> Dict[str, Any]:
+        lk = str(intent.get("leg_key") or "").strip()
+        if lk:
+            out["leg_key"] = lk
+        return out
+
     if rule_type == "breakthrough_buy":
         out = {
             "id": rule_id,
@@ -320,7 +341,7 @@ def _make_rule_dict(
                 out[dst] = float(intent.get(src))
             except (TypeError, ValueError):
                 pass
-        return out
+        return _finish(out)
     if rule_type == "single_sell":
         out = {
             "id": rule_id,
@@ -332,7 +353,7 @@ def _make_rule_dict(
         }
         if isinstance(intent.get("activation"), dict):
             out["activation"] = dict(intent["activation"])
-        return out
+        return _finish(out)
     if rule_type == "breakthrough_sell":
         out = {
             "id": rule_id,
@@ -344,9 +365,9 @@ def _make_rule_dict(
         }
         if isinstance(intent.get("activation"), dict):
             out["activation"] = dict(intent["activation"])
-        return out
+        return _finish(out)
     if rule_type == "scheduled_clear":
-        return {
+        out = {
             "id": rule_id,
             "type": "scheduled_clear",
             "enabled": True,
@@ -359,8 +380,25 @@ def _make_rule_dict(
                 intent, buy_date=buy_date, generated_at=generated_at
             ),
         }
+        if _truthy_flag(intent.get("scheduled_clear_every_day")):
+            out["scheduled_clear_every_day"] = True
+        if _truthy_flag(intent.get("scheduled_clear_force")) or _truthy_flag(
+            intent.get("scheduled_clear_on_hold_day")
+        ):
+            out["scheduled_clear_force"] = True
+        sell_n = intent.get("scheduled_clear_sell_day_index")
+        if sell_n is None:
+            sell_n = intent.get("scheduled_clear_on_sell_day") or intent.get(
+                "sell_hold_trading_days"
+            )
+        if sell_n is not None:
+            try:
+                out["scheduled_clear_sell_day_index"] = int(sell_n)
+            except (TypeError, ValueError):
+                pass
+        return _finish(out)
     if rule_type == "cage_buy":
-        return {
+        return _finish({
             "id": rule_id,
             "type": "cage_buy",
             "enabled": True,
@@ -373,9 +411,9 @@ def _make_rule_dict(
                 str(intent.get("stock_code") or ""),
                 intent.get("wall_thickness", DEFAULT_CAGE_WALL_THICKNESS),
             ),
-        }
+        })
     if rule_type == "cage_sell":
-        return {
+        return _finish({
             "id": rule_id,
             "type": "cage_sell",
             "enabled": True,
@@ -388,7 +426,7 @@ def _make_rule_dict(
                 str(intent.get("stock_code") or ""),
                 intent.get("wall_thickness", DEFAULT_CAGE_WALL_THICKNESS),
             ),
-        }
+        })
     if rule_type == "best_buy":
         out = {
             "id": rule_id,
@@ -421,7 +459,7 @@ def _make_rule_dict(
                 out["limit_up"] = round(lu, 4)
         except (TypeError, ValueError):
             pass
-        return out
+        return _finish(out)
     if rule_type == "best_sell":
         out = {
             "id": rule_id,
@@ -441,7 +479,7 @@ def _make_rule_dict(
                 out["room_blend_start"] = float(rbs)
             except (TypeError, ValueError):
                 pass
-        return out
+        return _finish(out)
     # single_buy 默认（含开盘买入：wait_unseal / fill_at_limit_up）
     out = {
         "id": rule_id,
@@ -465,7 +503,7 @@ def _make_rule_dict(
             out["limit_up"] = round(lu, 4)
     except (TypeError, ValueError):
         pass
-    return out
+    return _finish(out)
 
 
 def _init_volume_and_cost(intent: Dict[str, Any]) -> tuple:
@@ -566,7 +604,27 @@ def build_tasks_from_intents(
         for it in group:
             row = dict(it)
             if (row.get("rule_type") or "").strip() == "scheduled_clear":
-                if sell_hold_trading_days is not None and row.get("scheduled_clear_sell_day_index") is None:
+                every_day = _truthy_flag(row.get("scheduled_clear_every_day"))
+                force_hold = _truthy_flag(row.get("scheduled_clear_force")) or _truthy_flag(
+                    row.get("scheduled_clear_on_hold_day")
+                )
+                # 每日条件清仓：不套用全局第 N 日
+                if every_day:
+                    row["scheduled_clear_every_day"] = True
+                    row.pop("scheduled_clear_sell_day_index", None)
+                elif force_hold:
+                    # 第 N 日无条件清仓：套用全局持有天数
+                    row["scheduled_clear_force"] = True
+                    if (
+                        sell_hold_trading_days is not None
+                        and row.get("scheduled_clear_sell_day_index") is None
+                    ):
+                        row["scheduled_clear_sell_day_index"] = sell_hold_trading_days
+                elif (
+                    sell_hold_trading_days is not None
+                    and row.get("scheduled_clear_sell_day_index") is None
+                ):
+                    # 兼容旧策略：未标注 every_day/force 时仍按第 N 日
                     row["scheduled_clear_sell_day_index"] = sell_hold_trading_days
                 if row.get("buy_date") is None:
                     row["buy_date"] = bd.strftime("%Y-%m-%d")

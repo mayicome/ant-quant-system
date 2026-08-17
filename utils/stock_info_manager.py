@@ -29,6 +29,8 @@ def _normalize_qmt_symbol(symbol: str) -> Optional[str]:
         return None
     if code_6.startswith("6"):
         return f"{code_6}.SH"
+    if code_6.startswith(("4", "8")) or code_6.startswith("920"):
+        return f"{code_6}.BJ"
     return f"{code_6}.SZ"
 
 
@@ -583,11 +585,13 @@ class StockInfoManager:
                 except Exception:
                     pass
 
-                # A股不含 ETF；名称体系要覆盖常用场内基金
+                # A股含北交所；名称体系另覆盖常用场内基金
                 sector_names = (
                     "沪深A股",
                     "上证A股",
                     "深证A股",
+                    "京市A股",
+                    "沪深京A股",
                     "沪深ETF",
                     "沪深基金",
                 )

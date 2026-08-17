@@ -427,3 +427,27 @@ def append_order_record(results: Dict[str, Any], record: Dict[str, Any]) -> None
     if len(orders) > 200:
         results["orders"] = orders[-200:]
     results["updated_at"] = _now_iso()
+    # 买入成交记建仓日（QMT 内完成，不依赖主程序）
+    try:
+        import ant_position_entry_dates as _ped
+
+        _ped.note_from_order_record(record)
+    except Exception:
+        try:
+            from qmt_builtin.src import ant_position_entry_dates as _ped
+
+            _ped.note_from_order_record(record)
+        except Exception:
+            pass
+    # 成交写入已执行分支（买/卖腿）
+    try:
+        import ant_filled_legs as _fl
+
+        _fl.note_from_order_record(record)
+    except Exception:
+        try:
+            from qmt_builtin.src import ant_filled_legs as _fl
+
+            _fl.note_from_order_record(record)
+        except Exception:
+            pass

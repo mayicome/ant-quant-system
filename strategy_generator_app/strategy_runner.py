@@ -6,6 +6,19 @@ account 为 {"total_asset": 总资金, "cash": 可用资金}；params 为策略�
 
 from typing import List, Dict, Any, Callable, Optional, Tuple, Set
 import math
+import hashlib
+
+# 策略源码 -> 已编译的 run 可调用对象（回测按日反复 exec 的主要开销之一）
+_COMPILED_RUN_CACHE: Dict[str, Any] = {}
+_COMPILED_RUN_CACHE_MAX = 32
+
+
+def _strategy_code_cache_key(code_str: str) -> str:
+    return hashlib.sha1((code_str or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+def clear_compiled_strategy_cache() -> None:
+    _COMPILED_RUN_CACHE.clear()
 
 
 def _limits_from_prices(p: Dict[str, Any]) -> Tuple[float, float]:
@@ -287,6 +300,13 @@ def run_user_strategy(
         "copy",
         "time",
         "calendar",
+        # 持仓卖出策略：落盘已卖腿、读 data/daily_cache 近涨停价
+        "os",
+        "pathlib",
+        "utils",
+        "strategy_generator_app",
+        "task_builder",
+        "daily_cache_reader",
     }
 
     def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -325,6 +345,7 @@ def run_user_strategy(
         "hasattr": hasattr,
         "getattr": getattr,
         "bool": bool,
+        "open": open,
         "TypeError": TypeError,
         "ValueError": ValueError,
         "KeyError": KeyError,
@@ -337,13 +358,22 @@ def run_user_strategy(
     # 否则策略末尾若误留「测试用」顶层 run(codes,...) 会在 exec 时多跑一遍，
     # 且可能清空 params["positions"]，导致随后正式调用时全是 可用持仓=0。
     exec_namespace = {"__builtins__": safe_builtins}
-    try:
-        exec(compile(code_str, "<strategy>", "exec"), exec_namespace)
-    except SyntaxError as e:
-        raise RuntimeError(f"策略代码语法错误: {e}") from e
-    run_fn = exec_namespace.get("run")
+    cache_key = _strategy_code_cache_key(code_str)
+    run_fn = _COMPILED_RUN_CACHE.get(cache_key)
     if not callable(run_fn):
-        raise RuntimeError("策略代码中未定义可调用的 run(codes, prices, get_name, account, params)")
+        try:
+            exec(compile(code_str, "<strategy>", "exec"), exec_namespace)
+        except SyntaxError as e:
+            raise RuntimeError(f"策略代码语法错误: {e}") from e
+        run_fn = exec_namespace.get("run")
+        if not callable(run_fn):
+            raise RuntimeError("策略代码中未定义可调用的 run(codes, prices, get_name, account, params)")
+        _COMPILED_RUN_CACHE[cache_key] = run_fn
+        while len(_COMPILED_RUN_CACHE) > _COMPILED_RUN_CACHE_MAX:
+            try:
+                _COMPILED_RUN_CACHE.pop(next(iter(_COMPILED_RUN_CACHE)))
+            except Exception:
+                break
     get_name_fn = get_name or (lambda c: "")
     # 持仓字典单独拷贝，避免 run() 内误改 params["positions"] 影响外层或其它逻辑
     pos_in = params.get("positions") or {}
@@ -609,12 +639,28 @@ def _adjust_sell_volumes_by_min_order_amount(
 
             price_min, need_vol = precomputed.get((code_6, intent_idx), (0.0, 0))
 
-            # 如果无法估价（price_min<=0），保守：不做 min_amount 调整，仅做可用上限截断
-            desired = cur_vol
-            if need_vol > 0:
-                desired = max(cur_vol, need_vol)
+            # 半仓腿已在策略内处理零头/最小金额，避免再抬量破坏「两笔独立半仓+零头并入」
+            if intent.get("half_pair"):
+                desired = min(cur_vol, cap)
+            else:
+                # 如果无法估价（price_min<=0），保守：不做 min_amount 调整，仅做可用上限截断
+                desired = cur_vol
+                if need_vol > 0:
+                    desired = max(cur_vol, need_vol)
+                desired = min(desired, cap)
+                # 卖完后若剩余不够一手或不够最小单笔，并入本次，避免再付一次手续费
+                remain = cap - desired
+                if remain > 0 and remain < 100:
+                    desired = cap
+                elif (
+                    remain >= 100
+                    and price_min > 0
+                    and min_order_amount > 0
+                    and remain * price_min < min_order_amount
+                ):
+                    desired = cap
 
-            desired = min(desired, cap)
+            intents[intent_idx]["volume"] = int(desired)
 
             intent["volume"] = int(desired) if desired > 0 else 0
 

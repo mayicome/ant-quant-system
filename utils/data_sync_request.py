@@ -271,16 +271,21 @@ def count_pending_sync() -> Tuple[int, int]:
 
 
 def _expected_cache_last_date(through_date: date) -> date:
-    """盘中/盘前：期望 CSV 末日为上一交易日（周末回退）；收盘同步后可为 through_date。"""
+    """盘中/盘前：期望 CSV 末日为上一交易日；收盘同步后可为 through_date。"""
     now = datetime.now()
     if through_date < now.date():
         return through_date
     # 15:35 前不指望「今日」K 已完整落盘
     if (now.hour, now.minute) < (15, 35):
-        d = through_date - timedelta(days=1)
-        while d.weekday() >= 5:
-            d -= timedelta(days=1)
-        return d
+        try:
+            from utils.trading_day import previous_tradeday
+
+            return previous_tradeday(through_date)
+        except Exception:
+            d = through_date - timedelta(days=1)
+            while d.weekday() >= 5:
+                d -= timedelta(days=1)
+            return d
     return through_date
 
 
@@ -316,10 +321,15 @@ def _peek_daily_cache_last_date(code: str) -> Optional[date]:
 
 def _daily_cache_ready(code: str, through_date: Optional[date]) -> bool:
     """有可用日线缓存即可（不要求满 120 根；MA120 由策略/计算器自行处理）。"""
+    through_date = _clamp_through_date(through_date) if through_date is not None else None
+    today = date.today()
     # 快路径：文件存在且末日够新 → 视为就绪（轮询用，避免反复读全表）
     if through_date is not None:
         last = _peek_daily_cache_last_date(code)
         if last is not None:
+            # 未来日期 K 线视为损坏，强制重同步
+            if last > today:
+                return False
             expected = _expected_cache_last_date(through_date)
             if last >= expected and last >= through_date - timedelta(days=POOL_MAX_DATE_LAG_DAYS):
                 return True
@@ -336,6 +346,8 @@ def _daily_cache_ready(code: str, through_date: Optional[date]) -> bool:
             last = df["date"].max()
             if hasattr(last, "date") and callable(last.date):
                 last = last.date()
+            if last > today:
+                return False
             expected = _expected_cache_last_date(through_date)
             if last < expected:
                 return False
@@ -355,6 +367,15 @@ def _tick_cache_ready(code_6: str, trade_date: date) -> bool:
     return bool(tick_cache_file_ready(code_6, trade_date))
 
 
+def _clamp_through_date(through_date: Optional[date]) -> date:
+    """回测持有窗口常把 through 推到未来；日线落盘不得晚于今天。"""
+    end_d = through_date or date.today()
+    today = date.today()
+    if end_d > today:
+        return today
+    return end_d
+
+
 def submit_daily_requests(
     codes: Iterable[str],
     *,
@@ -362,7 +383,7 @@ def submit_daily_requests(
 ) -> List[str]:
     """提交日线同步请求；返回本次新提交的完整代码列表。"""
     prune_stale_daily_failures()
-    end_d = through_date or date.today()
+    end_d = _clamp_through_date(through_date)
     end_s = end_d.isoformat()
     data = load_requests()
     daily: Dict[str, Any] = data.setdefault("daily", {})
@@ -565,6 +586,7 @@ def wait_daily_cache(
     full = to_full_stock_code(code)
     if not full:
         return False
+    through_date = _clamp_through_date(through_date)
     if _daily_cache_ready(full, through_date):
         return True
     if _daily_unavailable_today(full, through_date):
@@ -590,7 +612,7 @@ def wait_daily_cache_pool(
     on_progress: PoolProgressFn = None,
 ) -> Tuple[List[str], List[str]]:
     """批量等待股票池日线落盘（共享超时，避免逐只 180s 卡死）。"""
-    end_d = through_date or date.today()
+    end_d = _clamp_through_date(through_date)
     fulls: List[str] = []
     seen: Set[str] = set()
     for raw in codes or []:
@@ -754,6 +776,7 @@ def ensure_daily_dataframe(
     full = to_full_stock_code(stock_code)
     if not full:
         return None
+    through_date = _clamp_through_date(through_date)
     if not _daily_cache_ready(full, through_date):
         ok = wait_daily_cache(
             full,
@@ -764,7 +787,7 @@ def ensure_daily_dataframe(
             logger.warning(
                 "[%s] 日线同步超时（through=%s）；请确认大 QMT 模型交易已启动",
                 full,
-                (through_date or date.today()).isoformat(),
+                through_date.isoformat(),
             )
             return None
     return load_daily_from_cache(full, through_date=through_date)

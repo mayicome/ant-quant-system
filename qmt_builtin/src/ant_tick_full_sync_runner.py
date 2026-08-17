@@ -22,7 +22,7 @@ import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-TICK_FULL_SYNC_VERSION = "20260801.06"
+TICK_FULL_SYNC_VERSION = "20260811.05"
 # 与日线同点：仅作 catch-up 判断；正式启动由 daily_sync 串行触发
 SYNC_HOUR = 15
 SYNC_MINUTE = 35
@@ -242,11 +242,13 @@ def _load_universe_from_file():
 
 def _load_universe(xtdata, limit=0, ContextInfo=None):
     # type: (Any, int, Any) -> List[str]
-    # 板块名 unicode 转义，避免 GBK/编码损坏导致空池
+    # 板块名 unicode 转义，避免 GBK/编码损坏导致空池；含北交所
     sectors = (
         "\u6caa\u6df1A\u80a1",  # 沪深A股
         "\u4e0a\u8bc1A\u80a1",  # 上证A股
         "\u6df1\u8bc1A\u80a1",  # 深证A股
+        "\u4eac\u5e02A\u80a1",  # 京市A股
+        "\u6caa\u6df1\u4eacA\u80a1",  # 沪深京A股
     )
     owners = []  # type: List[Tuple[str, Any]]
     if ContextInfo is not None:
@@ -288,6 +290,56 @@ def _load_universe(xtdata, limit=0, ContextInfo=None):
         out = out[:limit]
     if out:
         _log("股票池来源=%s n=%d" % (src, len(out)))
+    return out
+
+
+def _normalize_suffix(suffix):
+    # type: (Any) -> str
+    s = str(suffix or "").strip().upper()
+    if not s:
+        return ""
+    if not s.startswith("."):
+        s = "." + s
+    return s
+
+
+def _filter_universe(universe, codes=None, suffix=None):
+    # type: (List[str], Optional[Any], Optional[Any]) -> List[str]
+    """按显式 codes 或后缀（如 .BJ）缩小股票池；用于北交所一次性回补。"""
+    out = [str(c).strip() for c in (universe or []) if str(c).strip()]
+    code_list = []  # type: List[str]
+    if isinstance(codes, (list, tuple, set)):
+        code_list = [str(c).strip() for c in codes if str(c).strip()]
+    elif codes not in (None, ""):
+        code_list = [str(codes).strip()]
+    if code_list:
+        want = set()  # type: Set[str]
+        for c in code_list:
+            s = str(c).strip().upper()
+            if not s:
+                continue
+            want.add(s)
+            c6 = _code6(s)
+            if c6:
+                want.add(c6)
+                want.add(_full_from_c6(c6).upper())
+        filtered = []  # type: List[str]
+        for fc in out:
+            full = str(fc).strip().upper()
+            c6 = _code6(full)
+            if full in want or c6 in want:
+                filtered.append(fc)
+        out = filtered
+    suf = _normalize_suffix(suffix)
+    if suf:
+        filtered2 = []  # type: List[str]
+        for fc in out:
+            full = str(fc).strip().upper()
+            if "." not in full:
+                full = _full_from_c6(_code6(full)).upper()
+            if full.endswith(suf):
+                filtered2.append(fc)
+        out = filtered2
     return out
 
 
@@ -354,6 +406,8 @@ def _full_from_c6(c6):
         return ""
     if s.startswith("6"):
         return s + ".SH"
+    if s.startswith(("4", "8")) or s.startswith("920"):
+        return s + ".BJ"
     return s + ".SZ"
 
 
@@ -973,12 +1027,15 @@ def run_tick_full_sync(
     limit=0,
     allow_intraday=False,
     skip_retention_gate=False,
+    codes=None,
+    suffix=None,
 ):
-    # type: (Any, Optional[str], bool, int, bool, bool) -> bool
+    # type: (Any, Optional[str], bool, int, bool, bool, Optional[Any], Optional[Any]) -> bool
     """同步指定日（默认今天）全 A tick 到项目 data/ticks。
 
     allow_intraday=True 仅应急；默认盘中拒绝启动，避免饿死交易/策略取数。
     skip_retention_gate=True：manual_request 显式排队日不按留存窗自动跳过。
+    codes / suffix：缩小股票池（如 suffix=.BJ 仅北交所回补）；子集完成不覆盖全日 done。
     单次最多占用主线程约 _TIME_SLICE_SEC，到期存 progress 退回（可断点续跑）。
     """
     global _BUSY, _LAST_DONE_DAY, _ABORT_HOLD_LOG_TS, _PROTECT_DEFER_LOG_TS
@@ -1032,7 +1089,15 @@ def run_tick_full_sync(
         _log("非交易日（周末）: %s" % day_s)
         return False
 
-    if (not force) and (_LAST_DONE_DAY == day_s or _day_already_done(day_s)):
+    subset_mode = bool(
+        (isinstance(codes, (list, tuple, set)) and len(codes) > 0)
+        or (codes not in (None, "", []) and not isinstance(codes, (list, tuple, set)))
+        or _normalize_suffix(suffix)
+    )
+    # 子集回补（如北交所）即使全日已 done 也要继续补缺票
+    if (not force) and (not subset_mode) and (
+        _LAST_DONE_DAY == day_s or _day_already_done(day_s)
+    ):
         _log("已完成: %s" % day_s)
         return True
 
@@ -1087,6 +1152,18 @@ def run_tick_full_sync(
     except Exception:
         pass
     universe = _load_universe(xtdata, limit=limit, ContextInfo=ContextInfo)
+    if subset_mode:
+        n_before = len(universe or [])
+        universe = _filter_universe(universe, codes=codes, suffix=suffix)
+        _log(
+            "子集过滤 suffix=%s codes=%s %d→%d"
+            % (
+                _normalize_suffix(suffix) or "-",
+                len(codes) if isinstance(codes, (list, tuple, set)) else (1 if codes else 0),
+                n_before,
+                len(universe),
+            )
+        )
     if not universe:
         _log("股票池为空")
         # 写入 run.log，便于盘后排查（此前仅 print，目录空且无 START）
@@ -1098,9 +1175,10 @@ def run_tick_full_sync(
         return False
 
     # 旧版落盘截断在 15:00，升级后需重拉含盘后时段，否则量能读盘 after_vol 全 0
+    # 子集回补不触发旧版全日重拉，避免误删全日 done
     legacy_resync = False
     done_marker = _done_path(day_s)
-    if os.path.isfile(done_marker):
+    if (not subset_mode) and os.path.isfile(done_marker):
         try:
             with open(done_marker, "r") as f:
                 old_done = json.load(f)
@@ -1122,12 +1200,13 @@ def run_tick_full_sync(
     t_start = time.time()
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _log(
-        "开始 day=%s 股票池=%d 版本=%s xtdata_dl=%s builtin_dl=%s "
+        "开始 day=%s 股票池=%d 版本=%s subset=%s xtdata_dl=%s builtin_dl=%s "
         "ctx_sub=%s 主路径=download_history_data+get_market_data_ex at=%s"
         % (
             day_s,
             len(universe),
             TICK_FULL_SYNC_VERSION,
+            "yes" if subset_mode else "no",
             "on" if ENABLE_XTDATA_TICK_DOWNLOAD else "off",
             "on" if ENABLE_BUILTIN_TICK_DOWNLOAD else "off",
             "on" if ENABLE_CTX_TICK_SUBSCRIBE else "off",
@@ -1136,11 +1215,13 @@ def run_tick_full_sync(
     )
     _append_run_log(
         day_s,
-        "START n=%d force=%s 旧版重拉=%s xtdata_dl=%s builtin_dl=%s "
-        "ctx_sub=%s at=%s"
+        "START n=%d force=%s subset=%s suffix=%s 旧版重拉=%s xtdata_dl=%s "
+        "builtin_dl=%s ctx_sub=%s at=%s"
         % (
             len(universe),
             force,
+            "yes" if subset_mode else "no",
+            _normalize_suffix(suffix) or "-",
             legacy_resync,
             "on" if ENABLE_XTDATA_TICK_DOWNLOAD else "off",
             "on" if ENABLE_BUILTIN_TICK_DOWNLOAD else "off",
@@ -1529,15 +1610,84 @@ def run_tick_full_sync(
             _append_run_log(day_s, msg)
             return False
 
-        _mark_done(
-            day_s,
-            ok_total,
-            fail_total,
-            total,
-            elapsed_sec=elapsed,
-            started_at=started_at,
-        )
-        _LAST_DONE_DAY = day_s
+        # 子集回补勿用 ~334 票覆盖全日 done；全日同步照常写 done
+        if subset_mode:
+            prev_full = None  # type: Optional[Dict[str, Any]]
+            if os.path.isfile(done_marker):
+                try:
+                    with open(done_marker, "r") as f:
+                        prev_full = json.load(f) or {}
+                except Exception:
+                    prev_full = None
+            prev_total = int((prev_full or {}).get("total") or 0)
+            keep_full = bool(
+                prev_full
+                and prev_total > total
+                and not (
+                    prev_full.get("skipped_retention")
+                    or prev_full.get("skipped_no_tick")
+                )
+            )
+            if keep_full and isinstance(prev_full, dict):
+                prev_full["bj_subset_ok"] = ok_total
+                prev_full["bj_subset_fail"] = fail_total
+                prev_full["bj_subset_n"] = total
+                prev_full["bj_subset_at"] = datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                prev_full["bj_subset_suffix"] = _normalize_suffix(suffix) or ""
+                try:
+                    with open(done_marker, "w") as f:
+                        json.dump(prev_full, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+            else:
+                _mark_done(
+                    day_s,
+                    ok_total,
+                    fail_total,
+                    total,
+                    elapsed_sec=elapsed,
+                    started_at=started_at,
+                    extra={
+                        "subset": True,
+                        "suffix": _normalize_suffix(suffix) or "",
+                        "subset_n": total,
+                    },
+                )
+            try:
+                sub_path = os.path.join(
+                    _ticks_day_dir(day_s, ensure=True), "_bj_subset_done.json"
+                )
+                with open(sub_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "day": day_s,
+                            "ok": ok_total,
+                            "fail": fail_total,
+                            "total": total,
+                            "suffix": _normalize_suffix(suffix) or "",
+                            "version": TICK_FULL_SYNC_VERSION,
+                            "finished_at": datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            ),
+                        },
+                        f,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+            except Exception:
+                pass
+        else:
+            _mark_done(
+                day_s,
+                ok_total,
+                fail_total,
+                total,
+                elapsed_sec=elapsed,
+                started_at=started_at,
+            )
+            _LAST_DONE_DAY = day_s
         removed = _purge_old_tick_dirs()
         msg = (
             "完成 成功=%d 失败=%d 总数=%d 已清理=%d 耗时=%.1fmin (%.0fs) %s -> %s"
@@ -1685,6 +1835,9 @@ def process_manual_request(ContextInfo=None):
     多日队列（每次只跑队首一日，剩余写回文件，下次 periodic 继续）::
         {"days":["20260728","20260729"],"force":false,"limit":0}
 
+    北交所子集回补（已完成全日的日期也会跑；不覆盖全日 done）::
+        {"days":["20260715","20260716"],"suffix":".BJ","force":false}
+
     盘中（09:00–15:10）默认 defer，不删队列，避免阻塞交易/策略取数。
     可选 `"allow_intraday": true` 应急强跑（不推荐）。
     勿默认开 enable_xtdata_download（miniQMT）。成功拉起后写入
@@ -1748,15 +1901,23 @@ def _process_manual_request_body(ContextInfo=None):
         limit = int(req.get("limit") or 0)
     except (TypeError, ValueError):
         limit = 0
+    req_codes = req.get("codes")
+    req_suffix = req.get("suffix") or req.get("market_suffix")
+    subset_mode = bool(
+        (isinstance(req_codes, (list, tuple, set)) and len(req_codes) > 0)
+        or (req_codes not in (None, "", []) and not isinstance(req_codes, (list, tuple, set)))
+        or _normalize_suffix(req_suffix)
+    )
     if "enable_xtdata_download" in req:
         ENABLE_XTDATA_TICK_DOWNLOAD = bool(req.get("enable_xtdata_download"))
 
     # 队首连消：已完成 / 历史空批跳过 — 一次推进。
     # 留存窗外不再在此自动跳过：manual_request 里的日期是用户显式点名。
+    # 子集回补（如 .BJ）或 force：不因全日 done 跳过。
     skipped_head = []  # type: List[str]
     while days:
         head = days[0]
-        if _day_already_done(head):
+        if (not force) and (not subset_mode) and _day_already_done(head):
             skipped_head.append(head)
             days = days[1:]
             continue
@@ -1808,22 +1969,25 @@ def _process_manual_request_body(ContextInfo=None):
         _clear_abort_hold(day_s)
 
     _log(
-        "手动请求 day=%s 剩余=%d force=%s limit=%s xtdata_dl=%s src=%s"
+        "手动请求 day=%s 剩余=%d force=%s limit=%s suffix=%s xtdata_dl=%s src=%s"
         % (
             day_s,
             len(remaining),
             force,
             limit,
+            _normalize_suffix(req_suffix) or "-",
             "on" if ENABLE_XTDATA_TICK_DOWNLOAD else "off",
             str(req.get("source") or "")[:40],
         )
     )
     _append_run_log(
         day_s,
-        "MANUAL_REQUEST force=%s limit=%s remain=%d xtdata_dl=%s version=%s src=%s"
+        "MANUAL_REQUEST force=%s limit=%s suffix=%s remain=%d xtdata_dl=%s "
+        "version=%s src=%s"
         % (
             force,
             limit,
+            _normalize_suffix(req_suffix) or "-",
             len(remaining),
             "on" if ENABLE_XTDATA_TICK_DOWNLOAD else "off",
             TICK_FULL_SYNC_VERSION,
@@ -1839,6 +2003,8 @@ def _process_manual_request_body(ContextInfo=None):
                     "remaining": remaining,
                     "force": force,
                     "limit": limit,
+                    "suffix": _normalize_suffix(req_suffix) or "",
+                    "subset": subset_mode,
                     "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "version": TICK_FULL_SYNC_VERSION,
                     "source": str(req.get("source") or ""),
@@ -1859,8 +2025,11 @@ def _process_manual_request_body(ContextInfo=None):
         limit=limit,
         allow_intraday=allow_intraday,
         skip_retention_gate=True,
+        codes=req_codes,
+        suffix=req_suffix,
     )
-    finished = bool(ok) or _day_already_done(day_s)
+    # 子集回补：仅以本次 run 返回值为准（全日 done 不代表 BJ 已补完）
+    finished = bool(ok) or ((not subset_mode) and _day_already_done(day_s))
     try:
         if finished:
             if remaining:

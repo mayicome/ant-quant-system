@@ -44,8 +44,41 @@ def resolve_scheduled_clear_effective_date(rule: dict) -> datetime.date:
     return _next_trading_day_date(today)
 
 
+def _scheduled_clear_truthy(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 def scheduled_clear_rule_active_today(rule: dict) -> bool:
+    """每日条件清仓：交易日均生效；否则仅 effective_date 当天。"""
+    if _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
+        today = datetime.now().date()
+        try:
+            from utils.trading_day import is_tradeday
+
+            return bool(is_tradeday(today))
+        except ImportError:
+            return today.weekday() < 5
     return datetime.now().date() == resolve_scheduled_clear_effective_date(rule)
+
+
+def scheduled_clear_is_force(rule: dict) -> bool:
+    """无条件定时清仓（不看现价是否低于触发价）。"""
+    if _scheduled_clear_truthy(rule.get("scheduled_clear_force")):
+        return True
+    if _scheduled_clear_truthy(rule.get("scheduled_clear_on_hold_day")):
+        return True
+    # price<=0 且非每日条件单：视为无条件（兼容）
+    try:
+        px = float(rule.get("price", 0) or 0)
+    except (TypeError, ValueError):
+        px = 0.0
+    if px <= 0 and not _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
+        return True
+    return False
 
 
 def scheduled_clear_execution_in_progress(rule: dict) -> bool:
@@ -165,7 +198,10 @@ class ScheduledClearManager(QObject):
 
             trigger_price = float(rule.get("price", 0) or 0)
             volume = int(rule.get("volume", 0) or 0)
-            if trigger_price <= 0 or volume <= 0:
+            force = scheduled_clear_is_force(rule)
+            if volume <= 0:
+                continue
+            if not force and trigger_price <= 0:
                 continue
 
             if current_time >= rule_time:
@@ -182,16 +218,30 @@ class ScheduledClearManager(QObject):
                             f"已过 {int(time_passed_seconds / 60)} 分钟)，标记为已错过"
                         )
                         rule["pending_tick_execution"] = False
-                        rule["scheduled_clear_executed"] = True
+                        # 每日条件清仓：仅记当日错过，不永久 executed，下一交易日可再挂
+                        if _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
+                            rule["scheduled_clear_missed_date"] = now.date().isoformat()
+                            rule["scheduled_clear_executed"] = False
+                        else:
+                            rule["scheduled_clear_executed"] = True
                         rule["scheduled_clear_order_attempted"] = False
                         self._persist_task_rules(task)
                     continue
+
+                # 每日条件清仓：若今日已记错过，不再重复触发
+                if _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
+                    if str(rule.get("scheduled_clear_missed_date") or "") == now.date().isoformat():
+                        continue
 
                 if not rule.get("pending_tick_execution", False):
                     self.logger.info(
                         f"[{stock_code}] ⏰ [集中调度] 定时清仓规则「{rule_name}」时间已到！"
                         f" 当前: {current_time.strftime('%H:%M:%S')}, 目标: {rule_time.strftime('%H:%M:%S')}, "
-                        f"等待 tick 判断价格 (触发价: {trigger_price:.2f}元)"
+                        + (
+                            "无条件清仓，等待 tick 下单"
+                            if force
+                            else f"等待 tick 判断价格 (触发价: {trigger_price:.2f}元)"
+                        )
                     )
                     rule["pending_tick_execution"] = True
                     self._persist_task_rules(task)
@@ -250,11 +300,22 @@ class ScheduledClearManager(QObject):
 
             rule_name = rule.get("name", "未命名")
             trigger_price = float(rule.get("price", 0) or 0)
+            force = scheduled_clear_is_force(rule)
 
-            if current_price > 0 and current_price < trigger_price:
+            should_sell = False
+            if force:
+                should_sell = current_price > 0
+            elif current_price > 0 and trigger_price > 0 and current_price < trigger_price:
+                should_sell = True
+
+            if should_sell:
                 self.logger.info(
                     f"[{stock_code}] ✅ [集中调度] 执行定时清仓「{rule_name}」"
-                    f" (现价: {current_price:.2f} < 触发价: {trigger_price:.2f})"
+                    + (
+                        f" (无条件, 现价: {current_price:.2f})"
+                        if force
+                        else f" (现价: {current_price:.2f} < 触发价: {trigger_price:.2f})"
+                    )
                 )
                 rule["pending_tick_execution"] = False
                 rule["scheduled_clear_order_attempted"] = True
@@ -273,13 +334,18 @@ class ScheduledClearManager(QObject):
                     continue
                 rule["smart_sell_active"] = False
                 self._execute_rule(task, rule, tick_data, current_price)
-            elif current_price > 0:
+            elif current_price > 0 and not force:
                 self.logger.warning(
                     f"[{stock_code}] ⚠️ [集中调度] 定时清仓「{rule_name}」价格不满足 "
                     f"(现价: {current_price:.2f} >= 触发价: {trigger_price:.2f})，取消执行"
                 )
                 rule["pending_tick_execution"] = False
-                rule["scheduled_clear_executed"] = True
+                # 每日条件清仓：仅取消当日，不永久 executed
+                if _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
+                    rule["scheduled_clear_missed_date"] = datetime.now().date().isoformat()
+                    rule["scheduled_clear_executed"] = False
+                else:
+                    rule["scheduled_clear_executed"] = True
                 self._persist_task_rules(task)
 
     def _get_position_volume(self, stock_code: str) -> int:
