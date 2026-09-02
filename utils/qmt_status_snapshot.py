@@ -97,8 +97,9 @@ TICK_CHAIN_DELAY_SEC = 30
 MARKET_PROTECT_START = dt_time(9, 0)
 MARKET_PROTECT_END = dt_time(15, 30)
 RESULTS_STALE_SEC = 180.0
-# 与 builtin_price_feed 对齐：多只 last_tick_time 中位落后则告警
-QUOTE_LAG_ALERT_SEC = 55.0
+# 大 QMT 补种约 18s 会把墙钟刷掉；告警须更早，否则监控看不到滞后
+QUOTE_LAG_ALERT_SEC = 20.0
+QUOTE_LAG_BUSY_SEC = 12.0
 QUOTE_LAG_SAMPLE_MIN = 3
 MAX_RETRIES = 3
 
@@ -176,6 +177,9 @@ def _collect_ondemand() -> Dict[str, Any]:
     tick_pending = 0
     tick_failed = 0
     tick_by_day: Counter = Counter()
+    tick_fail_by_day: Counter = Counter()
+    tick_fail_by_error: Counter = Counter()
+    tick_fail_samples: List[Dict[str, str]] = []
     if isinstance(daily, dict):
         for meta in daily.values():
             if not isinstance(meta, dict):
@@ -187,9 +191,10 @@ def _collect_ondemand() -> Dict[str, Any]:
             elif st == "failed" or (st == "pending" and retries >= MAX_RETRIES):
                 daily_failed += 1
     if isinstance(tick_root, dict):
-        for days in tick_root.values():
+        for c6, days in tick_root.items():
             if not isinstance(days, dict):
                 continue
+            code6 = "".join(ch for ch in str(c6 or "") if ch.isdigit())[:6].zfill(6)
             for ymd, meta in days.items():
                 if not isinstance(meta, dict):
                     continue
@@ -200,13 +205,31 @@ def _collect_ondemand() -> Dict[str, Any]:
                     tick_by_day[str(ymd)] += 1
                 elif st == "failed" or (st == "pending" and retries >= MAX_RETRIES):
                     tick_failed += 1
+                    err = str(meta.get("last_error") or st or "failed")
+                    tick_fail_by_error[err] += 1
+                    tick_fail_by_day[str(ymd)[:8]] += 1
+                    if len(tick_fail_samples) < 40:
+                        tick_fail_samples.append(
+                            {"code": code6, "day": str(ymd)[:8], "error": err[:80]}
+                        )
     by_day = [{"day": k, "pending": int(v)} for k, v in sorted(tick_by_day.items())]
+    fail_day_top = [
+        {"day": k, "count": int(v)}
+        for k, v in tick_fail_by_day.most_common(5)
+    ]
+    fail_err_top = [
+        {"error": k, "count": int(v)}
+        for k, v in tick_fail_by_error.most_common(5)
+    ]
     return {
         "daily_pending": daily_pending,
         "tick_pending": tick_pending,
         "daily_failed": daily_failed,
         "tick_failed": tick_failed,
         "tick_by_day": by_day,
+        "tick_fail_samples": tick_fail_samples,
+        "tick_fail_day_top": fail_day_top,
+        "tick_fail_err_top": fail_err_top,
         "path": SYNC_REQ_PATH,
         "mtime": _mtime(SYNC_REQ_PATH),
     }
@@ -512,6 +535,23 @@ def _collect_after_rank() -> Dict[str, Any]:
     }
 
 
+def _fmt_tick_fail_summary(ond: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for row in ond.get("tick_fail_err_top") or []:
+        if not isinstance(row, dict):
+            continue
+        parts.append("%s×%s" % (row.get("error") or "?", row.get("count") or 0))
+    err_bit = "；".join(parts[:2]) if parts else ""
+    day_parts = []
+    for row in ond.get("tick_fail_day_top") or []:
+        if not isinstance(row, dict):
+            continue
+        day_parts.append("%s×%s" % (row.get("day") or "?", row.get("count") or 0))
+    day_bit = "主要日 " + " ".join(day_parts[:3]) if day_parts else ""
+    bits = [b for b in (err_bit, day_bit) if b]
+    return "；".join(bits) if bits else "见「按需分时→失败详情」"
+
+
 def _alert(aid: str, text: str) -> Dict[str, str]:
     """结构化告警：id 跨轮询稳定，text 可含动态数值。"""
     return {"id": str(aid), "text": str(text)}
@@ -671,15 +711,35 @@ def _collect_results() -> Dict[str, Any]:
                     recv_age = _quote_recv_lag_sec(dt, now)
             except Exception:
                 recv_age = None
-        if recv_age is not None and recv_age >= float(QUOTE_LAG_ALERT_SEC):
+        if recv_age is not None:
             quote_lag_sec = float(recv_age)
-            alerts.append(
-                _alert(
-                    "quote_lag",
-                    "行情推送停约%.0f秒（results 心跳仍在；请查订阅/补种）"
-                    % recv_age,
+            if recv_age >= float(QUOTE_LAG_ALERT_SEC):
+                alerts.append(
+                    _alert(
+                        "quote_lag",
+                        "行情回调滞后约%.0f秒（文件心跳仍在；交易线程可能被查柜台/补种占满）"
+                        % recv_age,
+                    )
                 )
-            )
+
+    recv_uniq = 0
+    quote_seed_like = False
+    if stocks:
+        recv_set = set()
+        for snap in stocks.values():
+            if not isinstance(snap, dict):
+                continue
+            t = str(snap.get("quote_recv_at") or "").strip()[:19]
+            if t:
+                recv_set.add(t)
+        recv_uniq = len(recv_set)
+        # 订阅回调会把各股墙钟打散到不同秒；整批同一秒且已滞后 = 靠 full_tick 补种
+        quote_seed_like = (
+            len(stocks) >= 8
+            and recv_uniq <= 1
+            and quote_lag_sec is not None
+            and quote_lag_sec >= 8.0
+        )
 
     return {
         "path": RESULTS_PATH,
@@ -689,6 +749,8 @@ def _collect_results() -> Dict[str, Any]:
         "online": online,
         "age_sec": age,
         "quote_lag_sec": quote_lag_sec,
+        "quote_recv_uniq": recv_uniq,
+        "quote_seed_like": quote_seed_like,
         "quotes_recv_at": quotes_recv_at,
         "updated_at": (data.get("updated_at") if isinstance(data, dict) else None) or "",
         "mode": (data.get("mode") if isinstance(data, dict) else None) or "",
@@ -805,6 +867,19 @@ def _infer_activity(
         hint = "策略离线 / 无心跳"
         _last_activity_hint = hint
         return hint
+    q_lag = results.get("quote_lag_sec")
+    try:
+        q_lag_f = float(q_lag) if q_lag is not None else None
+    except (TypeError, ValueError):
+        q_lag_f = None
+    if results.get("quote_seed_like"):
+        hint = "行情靠补种撑着（各股墙钟同一秒，滞后约%.0fs）" % (q_lag_f or 0)
+        _last_activity_hint = hint
+        return hint
+    if q_lag_f is not None and q_lag_f >= float(QUOTE_LAG_BUSY_SEC):
+        hint = "行情回调滞后约%.0fs（交易线程被占用，不是日线队列）" % q_lag_f
+        _last_activity_hint = hint
+        return hint
     if tick_full.get("pause") and tick_full.get("manual_days"):
         hint = "盘后分时已暂停（队列仍保留）"
         _last_activity_hint = hint
@@ -848,7 +923,16 @@ def _infer_activity(
                 hint = "最近日志 " + p
                 _last_activity_hint = hint
                 return hint
-    hint = "空闲（无活跃同步队列）"
+    if (
+        results.get("online")
+        and _in_quote_watch_window()
+        and int(results.get("n_stocks") or 0) > 0
+        and (q_lag_f is None or q_lag_f < float(QUOTE_LAG_BUSY_SEC))
+    ):
+        hint = "盘中行情推送正常"
+        _last_activity_hint = hint
+        return hint
+    hint = "空闲（无日线/分时同步队列）"
     _last_activity_hint = hint
     return hint
 
@@ -859,10 +943,22 @@ def _busy_score(
     tick_full: Dict[str, Any],
     daily: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """0–100 繁忙度粗分。"""
+    """0–100 繁忙度：含盘中行情线程，不只日线/分时队列。"""
     score = 0
     if not results.get("online"):
         return {"score": 0, "label": "离线", "level": "offline"}
+    q_lag = results.get("quote_lag_sec")
+    try:
+        q_lag_f = float(q_lag) if q_lag is not None else None
+    except (TypeError, ValueError):
+        q_lag_f = None
+    if results.get("quote_seed_like"):
+        score = max(score, 65)
+    elif q_lag_f is not None:
+        if q_lag_f >= float(QUOTE_LAG_ALERT_SEC):
+            score = max(score, 75)
+        elif q_lag_f >= float(QUOTE_LAG_BUSY_SEC):
+            score = max(score, 50)
     if daily.get("status") == "running":
         score = max(score, 70)
     if tick_full.get("active_day") and tick_full.get("progress"):
@@ -980,7 +1076,8 @@ def build_snapshot() -> Dict[str, Any]:
         alerts.append(
             _alert(
                 "ondemand_tick_failed",
-                "按需分时失败堆积 %d" % int(ond["tick_failed"]),
+                "按需分时失败堆积 %d（%s）"
+                % (int(ond["tick_failed"]), _fmt_tick_fail_summary(ond)),
             )
         )
     if int(ond.get("tick_pending") or 0) >= 50:

@@ -271,6 +271,7 @@ class BuiltinPricePoller(QObject):
         # 2) 行情推送墙钟：quotes_recv_at（任一 tick/补种刷新），不看 sticky timetag / 价格是否变动
         # 9:25–9:30 撮合静默段：回调可能停；有价则不报推送停（仍报无行情）
         quote_alert = ""
+        quote_recv_age: Optional[float] = None
         if not prices:
             # 集合竞价就要有价，否则策略生成会空窗
             quote_alert = "无行情数据"
@@ -285,6 +286,7 @@ class BuiltinPricePoller(QObject):
                 if quotes_recv:
                     break
             recv_age = self._parse_iso_age_sec(quotes_recv, now)
+            quote_recv_age = recv_age
             if recv_age is not None:
                 # 跨午休扣掉 11:30–13:00；与监控器一致，避免刚开盘把休市当故障
                 try:
@@ -292,6 +294,7 @@ class BuiltinPricePoller(QObject):
 
                     recv_dt = now - timedelta(seconds=float(recv_age))
                     recv_age = _quote_recv_lag_sec(recv_dt, now)
+                    quote_recv_age = recv_age
                 except Exception:
                     pass
                 # 须晚于 QMT full_tick 补种频率(约18s)，否则补种前先误报
@@ -303,22 +306,23 @@ class BuiltinPricePoller(QObject):
             # 尚无墙钟字段（旧 results / 策略未热更）：不按 timetag 误报
 
         # 2b) 交易所时间戳粘滞：推送墙钟仍在刷新，但 last_tick_time 全员停住
-        # （状态栏「实时 HH:MM:SS」吃这个字段；旧逻辑故意不看 sticky timetag，导致晚1小时也不报警）
+        # 直播 tick 常缺 timetag，墙钟新鲜时不当成断连（否则 40+ 任务会连环误报）
         tick_time_alert = ""
         if prices and not in_match_quiet and not in_auction:
-            freshest_lag: Optional[float] = None
-            for snap in (prices or {}).values():
-                if not isinstance(snap, dict):
-                    continue
-                lag = self._tick_time_lag_sec(str(snap.get("last_tick_time") or ""), now)
-                if lag is None:
-                    continue
-                if freshest_lag is None or lag < freshest_lag:
-                    freshest_lag = lag
-            # 连续竞价下，组合内「最新」成交时戳仍落后过久 → 显示滞后且策略事件时间不可信
-            tick_thr = 90.0
-            if freshest_lag is not None and freshest_lag >= tick_thr:
-                tick_time_alert = "行情时间戳停约%d秒" % int(freshest_lag)
+            recv_fresh = quote_recv_age is not None and quote_recv_age < 50.0
+            if not recv_fresh:
+                freshest_lag: Optional[float] = None
+                for snap in (prices or {}).values():
+                    if not isinstance(snap, dict):
+                        continue
+                    lag = self._tick_time_lag_sec(str(snap.get("last_tick_time") or ""), now)
+                    if lag is None:
+                        continue
+                    if freshest_lag is None or lag < freshest_lag:
+                        freshest_lag = lag
+                tick_thr = 90.0
+                if freshest_lag is not None and freshest_lag >= tick_thr:
+                    tick_time_alert = "行情时间戳停约%d秒" % int(freshest_lag)
 
         # 3) 账户快照停滞（交易连接卡但行情可能还在）
         account_alert = ""
@@ -349,10 +353,13 @@ class BuiltinPricePoller(QObject):
             self._set_health_alert("")
             return
         self._set_health_alert("⚠ 大QMT " + "；".join(parts) + "（请检查交易/行情连接）")
+
     def _apply_prices(self, prices: Dict[str, Dict[str, Any]]) -> None:
         tm = self.task_manager
         changed_any = False
         latest_tick_time_str = ""
+        latest_tick_lag: Optional[float] = None
+        quotes_recv_for_bar = ""
 
         for stock_code, snap in prices.items():
             price = float(snap.get("last_price") or 0)
@@ -360,7 +367,14 @@ class BuiltinPricePoller(QObject):
                 continue
             tick_time = str(snap.get("last_tick_time") or "").strip()
             if tick_time:
-                latest_tick_time_str = tick_time
+                lag = self._tick_time_lag_sec(tick_time)
+                if lag is not None and (latest_tick_lag is None or lag < latest_tick_lag):
+                    latest_tick_lag = lag
+                    latest_tick_time_str = tick_time
+            if not quotes_recv_for_bar:
+                quotes_recv_for_bar = str(
+                    snap.get("quotes_recv_at") or snap.get("quote_recv_at") or ""
+                ).strip()
 
             open_px = float(snap.get("today_open") or 0)
             hi_px = float(snap.get("today_high") or 0)
@@ -389,10 +403,12 @@ class BuiltinPricePoller(QObject):
 
             tm.latest_prices[stock_code] = price
             if last_close > 0 and hasattr(tm, "update_pre_close_price"):
-                try:
-                    tm.update_pre_close_price(stock_code, last_close)
-                except Exception:
-                    pass
+                stored = float((getattr(tm, "pre_close_prices", {}) or {}).get(stock_code, 0) or 0)
+                if abs(stored - last_close) > 1e-9:
+                    try:
+                        tm.update_pre_close_price(stock_code, last_close)
+                    except Exception:
+                        pass
 
             precision = SecurityTypeUtil.get_price_precision(stock_code)
             format_str = f".{precision}f"
@@ -404,6 +420,20 @@ class BuiltinPricePoller(QObject):
                 )
                 try:
                     self.qmt_adapter.tick_data_signal.emit(tick_data)
+                except Exception:
+                    pass
+
+        # last_tick_time 粘滞时，状态栏改用 quotes_recv 墙钟，避免「实时」假死
+        if quotes_recv_for_bar:
+            recv_age = self._parse_iso_age_sec(quotes_recv_for_bar)
+            if recv_age is not None and (
+                latest_tick_lag is None or recv_age + 1.0 < float(latest_tick_lag)
+            ):
+                try:
+                    raw = quotes_recv_for_bar.replace("T", " ")[:19]
+                    latest_tick_time_str = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").strftime(
+                        "%H:%M:%S"
+                    )
                 except Exception:
                     pass
 

@@ -281,6 +281,8 @@ class Logger(QObject):
                     return  # 如果已存在相同的处理器，直接返回
             # 如果不存在，才添加新的处理器
             text_handler = TextEditHandler(text_edit)
+            # 界面只显示 INFO 及以上；DEBUG（如每秒昨收刷新）只进文件/控制台
+            text_handler.setLevel(logging.INFO)
             self.logger.addHandler(text_handler)
     
     def close(self):

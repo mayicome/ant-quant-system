@@ -422,6 +422,13 @@ def fetch_and_save(
         _save_csv(industry_ff, industry_ff_path)
         _print_summary("industry_fund_flow", industry_ff, industry_ff_path)
 
+    try:
+        from tools.export_board_rank_to_jsonl import write_daily_board_rank_jsonl
+
+        write_daily_board_rank_jsonl(date_stamp)
+    except Exception as e:
+        print("[board_rank jsonl] export failed:", e)
+
     print("[done] snapshot complete.")
 
 

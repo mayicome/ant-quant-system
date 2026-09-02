@@ -36,8 +36,10 @@ def get_trading_dates_in_range_sorted(start_date: date, end_date: date) -> List[
 
 
 def next_trading_day_after(d: date) -> Optional[date]:
+    # 只需「下一个」交易日：看前后约一个月即可。
+    # 切勿 +400 天——会超出 utils.trading_day 默认缓存末日，触发反复拉 akshare/xtdata。
     lo = d + timedelta(days=1)
-    hi = d + timedelta(days=400)
+    hi = d + timedelta(days=40)
     lst = get_trading_dates_in_range_sorted(lo, hi)
     return lst[0] if lst else None
 
@@ -46,6 +48,12 @@ def first_trading_day_on_or_after(d: date) -> Optional[date]:
     hi = d + timedelta(days=60)
     lst = get_trading_dates_in_range_sorted(d, hi)
     return lst[0] if lst else None
+
+
+def _lookforward_calendar_days(trading_days_needed: int) -> int:
+    """按所需交易日估算自然日跨度；避免 +400 超出日历缓存触发反复联网。"""
+    n = max(1, int(trading_days_needed or 1))
+    return max(45, n * 3 + 30)
 
 
 def backtest_window_from_selection_day(
@@ -67,7 +75,7 @@ def backtest_window_from_selection_day(
     if start is None:
         return None, None, "无法取得回测起始日（请确认交易日历可用）"
 
-    hi = start + timedelta(days=400)
+    hi = start + timedelta(days=_lookforward_calendar_days(hold_trading_days))
     lst = get_trading_dates_in_range_sorted(start, hi)
     if len(lst) < hold_trading_days:
         return (
@@ -106,7 +114,9 @@ def trading_day_window_from_start(
 ) -> Tuple[Optional[date], Optional[date], str]:
     if hold_trading_days < 1:
         return None, None, "持有交易日数须 >= 1"
-    lst = get_trading_dates_in_range_sorted(start, start + timedelta(days=400))
+    lst = get_trading_dates_in_range_sorted(
+        start, start + timedelta(days=_lookforward_calendar_days(hold_trading_days))
+    )
     if len(lst) < hold_trading_days:
         return (
             None,

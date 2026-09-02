@@ -214,68 +214,154 @@ def _load_board_flow_ratio_file(as_of: date) -> Tuple[Dict[str, float], Dict[str
     return ind, con, err
 
 
-def _load_quotes_live() -> Tuple[Dict[str, Dict[str, Any]], str]:
+def _quote_from_push2_row(r: dict) -> Tuple[str, Dict[str, Any]]:
+    """解析东财 push2 diff 单行 → (code6, quote_dict)。"""
+    from utils.main_force_inflow_rank import yuan_to_display
+
+    c6 = _code6(r.get("f12"))
+    if not c6:
+        return "", {}
+    pct = _parse_pct(r.get("f3"))
+    try:
+        price = float(r.get("f2")) if r.get("f2") not in (None, "") else None
+    except (TypeError, ValueError):
+        price = None
+
+    def _fnum(key: str) -> Optional[float]:
+        try:
+            v = r.get(key)
+            if v in (None, ""):
+                return None
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    high = _fnum("f15")
+    low = _fnum("f16")
+    open_px = _fnum("f17")
+    pre_close = _fnum("f18")
+    try:
+        main_yuan = float(r.get("f62") or 0.0)
+    except (TypeError, ValueError):
+        main_yuan = 0.0
+    try:
+        float_cap = float(r.get("f21") or 0.0)
+    except (TypeError, ValueError):
+        float_cap = 0.0
+    if float_cap <= 0:
+        try:
+            float_cap = float(r.get("f20") or 0.0)
+        except (TypeError, ValueError):
+            float_cap = 0.0
+    return c6, {
+        "pct": pct,
+        "price": price,
+        "high": high,
+        "low": low,
+        "open": open_px,
+        "pre_close": pre_close,
+        "inflow_wan": main_yuan / 1e4,
+        "inflow_ratio": _parse_pct(r.get("f184")),
+        "inflow_pct_of_float": (
+            round(main_yuan / float_cap * 100.0, 4) if float_cap > 0 else None
+        ),
+        "inflow_display": yuan_to_display(main_yuan),
+        "name": str(r.get("f14") or "").strip(),
+        "float_mv_yi": (float_cap / 1e8) if float_cap > 0 else None,
+    }
+
+
+def _fetch_quotes_live_min_inflow(min_inflow_wan: float) -> Tuple[List[dict], dict]:
+    """按主力净流入降序翻页，整页均低于 min_inflow_wan 时早停。"""
+    import time as _time
+
+    from utils.eastmoney_fund_flow import _get_json, _session, _UT, _FS, _FIELDS
+
+    session = _session()
+    pz = 100
+    params = {
+        "fid": "f62",
+        "po": "1",
+        "pz": str(pz),
+        "pn": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "ut": _UT,
+        "fs": _FS,
+        "fields": _FIELDS,
+    }
+    rows: List[dict] = []
+    pn = 0
+    stopped_early = False
+    max_pages = 200  # 安全上限，正常在 inflow 跌破阈值时早停
+
+    while pn < max_pages:
+        pn += 1
+        params = dict(params)
+        params["pn"] = str(pn)
+        payload = _get_json(session, params)
+        data = payload.get("data") or {}
+        diff = data.get("diff")
+        page_rows: List[dict] = []
+        if diff:
+            if isinstance(diff, dict):
+                page_rows = list(diff.values())
+            else:
+                page_rows = list(diff)
+        if not page_rows:
+            break
+        page_kept = 0
+        for r in page_rows:
+            try:
+                main_yuan = float(r.get("f62") or 0.0)
+            except (TypeError, ValueError):
+                main_yuan = 0.0
+            inflow_wan = main_yuan / 1e4
+            if inflow_wan + 1e-9 >= float(min_inflow_wan):
+                rows.append(r)
+                page_kept += 1
+        if page_kept == 0:
+            stopped_early = True
+            break
+        if pn < max_pages:
+            _time.sleep(0.08)
+
+    meta = {
+        "total": len(rows),
+        "fetched": len(rows),
+        "pages": pn,
+        "page_size": pz,
+        "stopped_early": stopped_early,
+        "min_inflow_wan": float(min_inflow_wan),
+    }
+    return rows, meta
+
+
+def _load_quotes_live(min_inflow_wan: Optional[float] = None) -> Tuple[Dict[str, Dict[str, Any]], str]:
+    """拉全市场 push2 个股快照；min_inflow_wan 设则按 f62 降序早停（低于阈值后不再翻页）。"""
     from utils.eastmoney_fund_flow import fetch_individual_fund_flow_rows
-    from utils.main_force_inflow_rank import parse_inflow_to_yuan, yuan_to_display
+
+    min_wan = None
+    if min_inflow_wan is not None:
+        try:
+            min_wan = float(min_inflow_wan)
+        except (TypeError, ValueError):
+            min_wan = None
 
     try:
-        rows, meta = fetch_individual_fund_flow_rows()
+        if min_wan is not None and min_wan > 0:
+            rows, meta = _fetch_quotes_live_min_inflow(min_wan)
+        else:
+            rows, meta = fetch_individual_fund_flow_rows()
     except Exception as e:
         return {}, "东财资金流拉取失败:%s" % e
 
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
-        c6 = _code6(r.get("f12"))
-        if not c6:
-            continue
-        pct = _parse_pct(r.get("f3"))
-        try:
-            price = float(r.get("f2")) if r.get("f2") not in (None, "") else None
-        except (TypeError, ValueError):
-            price = None
-
-        def _fnum(key: str) -> Optional[float]:
-            try:
-                v = r.get(key)
-                if v in (None, ""):
-                    return None
-                return float(v)
-            except (TypeError, ValueError):
-                return None
-
-        high = _fnum("f15")
-        low = _fnum("f16")
-        open_px = _fnum("f17")
-        pre_close = _fnum("f18")
-        try:
-            main_yuan = float(r.get("f62") or 0.0)
-        except (TypeError, ValueError):
-            main_yuan = 0.0
-        try:
-            float_cap = float(r.get("f21") or 0.0)
-        except (TypeError, ValueError):
-            float_cap = 0.0
-        if float_cap <= 0:
-            try:
-                float_cap = float(r.get("f20") or 0.0)
-            except (TypeError, ValueError):
-                float_cap = 0.0
-        out[c6] = {
-            "pct": pct,
-            "price": price,
-            "high": high,
-            "low": low,
-            "open": open_px,
-            "pre_close": pre_close,
-            "inflow_wan": main_yuan / 1e4,
-            "inflow_ratio": _parse_pct(r.get("f184")),
-            "inflow_pct_of_float": (
-                round(main_yuan / float_cap * 100.0, 4) if float_cap > 0 else None
-            ),
-            "inflow_display": yuan_to_display(main_yuan),
-            "name": str(r.get("f14") or "").strip(),
-            "float_mv_yi": (float_cap / 1e8) if float_cap > 0 else None,
-        }
+        c6, qd = _quote_from_push2_row(r)
+        if c6 and qd:
+            out[c6] = qd
     if not out:
         return {}, "东财资金流为空(meta=%s)" % meta
     return out, ""
@@ -392,9 +478,11 @@ def load_ma_zong_intraday_bundle(
     force_live: Optional[bool] = None,
     ttl_sec: float = _DEFAULT_TTL_SEC,
     refresh: bool = False,
+    min_inflow_wan: Optional[float] = None,
 ) -> Dict[str, Any]:
     """返回盘中/落地快照 bundle。
 
+    min_inflow_wan: live 模式下按净流入降序早停翻页（策略扫描用，默认 None=全量）。
     force_live:
       None → 选股日=今天则 live，否则 file
       True/False → 强制
@@ -416,7 +504,7 @@ def load_ma_zong_intraday_bundle(
     bundle["fetched_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if use_live:
-        quotes, qerr = _load_quotes_live()
+        quotes, qerr = _load_quotes_live(min_inflow_wan=min_inflow_wan)
         ind, con, ind_chg, con_chg, berr = _load_board_ranks_live()
         ind_fr, con_fr, ferr = _load_board_flow_ratio_live()
         if ferr and not ind_fr and not con_fr:

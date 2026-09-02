@@ -32,6 +32,16 @@ def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _as_int(val: Any, default: int = 0) -> int:
+    """整数解析；0 是合法值，不能用 `x or default`（可用=0 会被当成缺字段）。"""
+    if val is None or val == "":
+        return int(default)
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -705,9 +715,8 @@ def load_account_positions_snapshot(path: str) -> Tuple[Optional[Dict[str, Any]]
         norm = str(code or "").strip().upper()
         if not norm:
             continue
-        vol = int(meta.get("volume") or 0)
-        if vol <= 0:
-            continue
+        vol = _as_int(meta.get("volume"), 0)
+        # 余额 0 也保留（当日已清仓行），仓位条会画成空灰框
         name = str(meta.get("stock_name") or "").strip()
         if (not name or name in ("未知名称", "未知")) and get_name is not None:
             try:
@@ -716,12 +725,22 @@ def load_account_positions_snapshot(path: str) -> Tuple[Optional[Dict[str, Any]]
                 name = name or ""
             if name in ("未知名称", "未知"):
                 name = ""
+        # 可用=0 表示今日买入尚未解锁（T+1），必须保留 0，否则仓位条会全绿
+        raw_can = meta.get("can_use_volume")
+        if raw_can is None or raw_can == "":
+            can_use = vol
+        else:
+            can_use = _as_int(raw_can, 0)
+        if vol > 0:
+            can_use = max(0, min(can_use, vol))
+        else:
+            can_use = 0
         positions[norm] = {
             "account_id": str(meta.get("account_id") or account.get("account_id") or ""),
             "stock_code": norm,
             "stock_name": name,
             "volume": vol,
-            "can_use_volume": int(meta.get("can_use_volume") or vol),
+            "can_use_volume": can_use,
             "open_price": float(meta.get("open_price") or meta.get("cost_price") or 0),
             "market_value": float(meta.get("market_value") or 0),
         }

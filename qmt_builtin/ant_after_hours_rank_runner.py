@@ -9,6 +9,7 @@
 """
 import gc
 import os
+import sys
 import time
 from datetime import date, datetime, time as dt_time
 from typing import Any, Dict, List, Optional, Tuple
@@ -978,6 +979,21 @@ def run_after_hours_rank(
         )
         union_rows = _build_top10_union_cn(top_day, top_auc, top_float)
         _write_csv(os.path.join(out, "top10.csv"), union_rows, TOP10_UNION_FIELDS_CN)
+        try:
+            _proj = os.path.dirname(_data_dir())
+            if _proj not in sys.path:
+                sys.path.insert(0, _proj)
+            from tools.export_after_hours_top_to_jsonl import rebuild_after_hours_top_jsonl
+
+            _meta = rebuild_after_hours_top_jsonl()
+            _log(
+                "[after_hours jsonl] ok days=%s to=%s"
+                % ((_meta or {}).get("days"), (_meta or {}).get("date_to"))
+            )
+            _append_run_log(day, "[after_hours jsonl] ok")
+        except Exception as e:
+            _log("[after_hours jsonl] 写出失败: %s" % e)
+            _append_run_log(day, "[after_hours jsonl] FAIL: %s" % e)
         # 清理旧版分榜文件（若存在）
         for legacy in ("top10_after_vs_day.csv", "top10_after_vs_close_auc.csv"):
             lp = os.path.join(out, legacy)

@@ -93,14 +93,23 @@ def _sanitize_intent_prices(
     code = _normalize_code_6(intent.get("stock_code") or "")
     p = prices.get(code) or {}
     ld, lu = _derive_limits_from_prices_row(code, p)
-    price_rule_types = (
-        "single_buy", "breakthrough_buy", "single_sell", "breakthrough_sell",
-        "scheduled_clear", "night_buy", "night_sell", "best_buy", "best_sell",
-    )
-    rt_peek = (intent.get("rule_type") or "").strip()
+    # 全市场自扫描策略：标的常不在股票池 prices 里，涨跌停需从意图回退
     if ld <= 0 or lu <= 0:
-        if rt_peek in price_rule_types:
-            return None
+        try:
+            lu_i = float(intent.get("limit_up") or intent.get("涨停板") or 0)
+        except (TypeError, ValueError):
+            lu_i = 0.0
+        try:
+            ld_i = float(intent.get("limit_down") or intent.get("跌停板") or 0)
+        except (TypeError, ValueError):
+            ld_i = 0.0
+        if lu_i > 0 and ld_i > 0 and lu_i >= ld_i:
+            ld, lu = ld_i, lu_i
+        elif lu_i > 0:
+            # 仅有涨停上沿时，用半价作跌停下界做钳位（open_buy_ask 触发价=涨停）
+            ld, lu = max(0.01, lu_i * 0.5), lu_i
+    if ld <= 0 or lu <= 0:
+        # 无涨跌停：按文档原样放行（勿丢弃），否则自扫描买入在回测里会整天 0 意图
         return intent
 
     rt = (intent.get("rule_type") or "").strip()

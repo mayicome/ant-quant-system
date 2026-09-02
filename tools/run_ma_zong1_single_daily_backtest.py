@@ -6,14 +6,15 @@
 撮合口径：
   买：low<=MA → min(open, MA)
   卖半仓/涨停：high>=触发价 → max(open, 触发价)
-  1455 破 MA20：close<MA20 → close
+  1455 破 MA20：close<MA20 → close（可用 --no-ma20-clear 关闭）
   第 N 日强清：close
+  成交价/盯市：前复权日线（BACKTEST_FILL_ADJUST=qfq）；策略信号与涨跌停用不复权
 
 用法:
   python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls
   python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls --buy combo
   python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls --buy ma5
-  python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls --buy ma10 --sell-hold 8
+  python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls --buy ma10 --sell-hold 8 --no-ma20-clear
   python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls --buy ma10 --export-above-ma10
   python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls --buy ma10 --sell half
   python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls --buy ma10 --sell full
@@ -29,8 +30,12 @@
   例：N=2 → 买入次日为1、再下一交易日为2 强清。
   底层引擎按「含买入日」计数，本脚本注入时自动 N+1。
 
+--no-ma20-clear：不挂「1455破MA20清仓」（满足条件监控默认开启）。
+
 --export-above-ma10：额外输出选股日收盘>MA10 子集（默认 --buy ma10 开启）。
 统计默认剔除未完成样本（*_已完成.xlsx）；见 --exclude-incomplete。
+
+输出：带时间戳归档文件 + 按选股日合并进 ``*_latest``（缺口跑不会冲掉全历史；监控优先读 latest）。
 """
 from __future__ import annotations
 
@@ -38,8 +43,9 @@ import argparse
 import csv
 import json
 import re
+import shutil
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -73,6 +79,12 @@ BUY_STRATEGIES: Dict[str, Tuple[str, str]] = {
     "跌破ma20": ("strategy_ma20_single", "ma20"),
     "买：跌ma20": ("strategy_ma20_single", "ma20"),
     "strategy_ma20_single": ("strategy_ma20_single", "ma20"),
+    # 布林%b回落：次日开盘买
+    "bb_pctb": ("strategy_bb_pctb_buy", "bb_pctb"),
+    "pctb": ("strategy_bb_pctb_buy", "bb_pctb"),
+    "bb_pctb_buy": ("strategy_bb_pctb_buy", "bb_pctb"),
+    "strategy_bb_pctb_buy": ("strategy_bb_pctb_buy", "bb_pctb"),
+    "买：布林%b回落-次日开盘": ("strategy_bb_pctb_buy", "bb_pctb"),
 }
 
 # 别名 → (策略 id, 输出文件短标签)
@@ -101,6 +113,12 @@ SELL_STRATEGIES: Dict[str, Tuple[str, str]] = {
         "strategy_6e0a11b6",
         "sell_third",
     ),
+    # 布林%b回落卖
+    "bb_pctb": ("strategy_bb_pctb_sell", "bb_pctb_sell"),
+    "pctb": ("strategy_bb_pctb_sell", "bb_pctb_sell"),
+    "bb_pctb_sell": ("strategy_bb_pctb_sell", "bb_pctb_sell"),
+    "strategy_bb_pctb_sell": ("strategy_bb_pctb_sell", "bb_pctb_sell"),
+    "卖：布林%b回落-斜率止损/%b止盈/12日强清": ("strategy_bb_pctb_sell", "bb_pctb_sell"),
 }
 
 STRAT_DIR = ROOT / "strategy_generator_app" / "config" / "strategies"
@@ -142,7 +160,7 @@ def resolve_buy_strategy(spec: str) -> Tuple[str, str]:
             sid = str(d.get("id") or p.stem)
             tag = sid.replace("strategy_", "").replace("_single", "")
             return sid, tag
-    known = "combo, ma5, ma10, ma20（或策略全名/id）"
+    known = "combo, ma5, ma10, ma20, bb_pctb（或策略全名/id）"
     raise SystemExit(f"未知买入策略：{spec!r}。可用：{known}")
 
 
@@ -171,7 +189,7 @@ def resolve_sell_strategy(spec: str) -> Tuple[str, str]:
             sid = str(d.get("id") or p.stem)
             tag = "sell_" + sid.replace("strategy_", "")
             return sid, tag
-    known = "half, full, third（或策略全名/id）"
+    known = "half, full, third, bb_pctb（或策略全名/id）"
     raise SystemExit(f"未知卖出策略：{spec!r}。可用：{known}")
 
 TRADE_CSV_COLS = [
@@ -224,6 +242,17 @@ def _parse_d(v: Any) -> Optional[date]:
         return v.date()
     if isinstance(v, date):
         return v
+    # Excel 序列号（xlwt 把 date 写成 46247 这类整数时）
+    try:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            n = float(v)
+            if n == n and 20000 <= n <= 80000:
+                return (datetime(1899, 12, 30) + timedelta(days=int(n))).date()
+        s = str(v).strip()
+        if s.isdigit() and 20000 <= int(s) <= 80000:
+            return (datetime(1899, 12, 30) + timedelta(days=int(s))).date()
+    except Exception:
+        pass
     try:
         import pandas as pd
 
@@ -358,25 +387,62 @@ def _parse_ymd(v: Any) -> Optional[date]:
 
 
 def resolve_last_available_trade_date() -> Optional[date]:
-    """日线缓存同步日优先，否则交易日历上不晚于今天的最近交易日。"""
+    """日线可用末日：优先缓存同步日，否则最近已收盘交易日（当天 15:00 前不含今天）。"""
     try:
         from utils.daily_cache_reader import get_sync_trade_date
 
         d = get_sync_trade_date()
         if d is not None:
+            # 同步日若被写到未来/今天未收盘，仍截到已收盘
+            closed = _last_closed_trading_day()
+            if closed is not None and d > closed:
+                return closed
             return d
     except Exception:
         pass
-    try:
-        from datetime import timedelta
+    return _last_closed_trading_day()
 
+
+def _last_closed_trading_day(now: Optional[datetime] = None) -> Optional[date]:
+    """最近已收盘交易日（与监控/prepare 一致：15:00 前不算今天）。"""
+    now = now or datetime.now()
+    today = now.date()
+    from datetime import time as dt_time
+
+    hi = today if now.time() >= dt_time(15, 0) else today - timedelta(days=1)
+    try:
         from utils.trading_day import get_trading_dates_in_range_sorted
 
-        today = date.today()
-        lst = get_trading_dates_in_range_sorted(today - timedelta(days=30), today)
-        return lst[-1] if lst else today
+        days = list(get_trading_dates_in_range_sorted(hi - timedelta(days=21), hi) or [])
+        if days:
+            return days[-1]
     except Exception:
-        return date.today()
+        pass
+    d = hi
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def clamp_backtest_window(
+    start_d: date,
+    end_d: date,
+    *,
+    last_close: Optional[date] = None,
+) -> Tuple[Optional[date], Optional[date], str]:
+    """回测窗口截断到已收盘日，避免向 QMT 要未来日线。"""
+    closed = last_close or resolve_last_available_trade_date()
+    if closed is None:
+        return start_d, end_d, ""
+    if start_d > closed:
+        return (
+            None,
+            None,
+            f"窗口起点 {start_d} 晚于已收盘日 {closed}，暂无可回测日线",
+        )
+    if end_d > closed:
+        return start_d, closed, f"末日截断至已收盘 {closed}"
+    return start_d, end_d, ""
 
 
 def annotate_sample_completion(
@@ -440,15 +506,88 @@ def _write_stock_xlsx(path: Path, sdf: "pd.DataFrame") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with __import__("pandas").ExcelWriter(path, engine="openpyxl") as writer:
         sdf.to_excel(writer, index=False)
+
+
+def _sel_day_set(df: "pd.DataFrame") -> set:
+    import pandas as pd
+
+    if df is None or df.empty or "选股日" not in df.columns:
+        return set()
+    s = pd.to_datetime(df["选股日"], errors="coerce").dropna()
+    return {x.date() if hasattr(x, "date") else x for x in s.dt.date.tolist()}
+
+
+def _merge_by_sel_day(old: "pd.DataFrame", new: "pd.DataFrame") -> "pd.DataFrame":
+    """缺口回测写入 latest：去掉旧表中本批选股日，再拼上新行（避免 latest 被窗口跑盖成几天）。"""
+    import pandas as pd
+
+    if new is None or new.empty:
+        return old if old is not None else pd.DataFrame()
+    if old is None or old.empty:
+        return new.copy()
+    win = _sel_day_set(new)
+    if not win or "选股日" not in old.columns:
+        return new.copy()
+    old_sel = pd.to_datetime(old["选股日"], errors="coerce").dt.date
+    kept = old.loc[~old_sel.isin(win)].copy()
+    return pd.concat([kept, new], ignore_index=True, sort=False)
+
+
+def _publish_latest(src: Path, latest: Path, *, merge_sel_day: bool = True) -> None:
+    """写入固定 latest。xlsx/csv 默认按「选股日」与旧 latest 合并，避免缺口跑覆盖掉全历史。"""
+    if src is None or not src.exists():
+        return
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = latest.with_name(latest.name + ".tmp")
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        do_merge = bool(merge_sel_day) and latest.exists() and src.suffix.lower() in (
+            ".xlsx",
+            ".xls",
+            ".csv",
+        )
+        if do_merge:
+            import pandas as pd
+
+            try:
+                if src.suffix.lower() == ".csv":
+                    new_df = pd.read_csv(src, encoding="utf-8-sig")
+                    try:
+                        old_df = pd.read_csv(latest, encoding="utf-8-sig")
+                    except Exception:
+                        old_df = pd.read_csv(latest, encoding="utf-8")
+                    merged = _merge_by_sel_day(old_df, new_df)
+                    merged.to_csv(tmp, index=False, encoding="utf-8-sig")
+                else:
+                    new_df = pd.read_excel(src)
+                    old_df = pd.read_excel(latest)
+                    merged = _merge_by_sel_day(old_df, new_df)
+                    merged.to_excel(tmp, index=False)
+                n_old = 0 if old_df is None or old_df.empty else len(old_df)
+                print(
+                    f"latest ← {latest.name}（按选股日合并：旧{n_old}行 + 新{len(new_df)}行 → {len(merged)}行）"
+                )
+                tmp.replace(latest)
+                return
+            except Exception as ex:
+                print(
+                    f"⚠ latest 合并失败，改为整份覆盖 {latest.name}: {ex}",
+                    file=sys.stderr,
+                )
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except Exception:
+                        pass
+        shutil.copy2(src, tmp)
+        tmp.replace(latest)
+        print(f"latest ← {latest.name}")
+    except Exception as ex:
+        print(f"⚠ 更新 latest 失败 {latest.name}: {ex}", file=sys.stderr)
         try:
-            ws = writer.sheets[list(writer.sheets.keys())[0]]
-            for j, col in enumerate(sdf.columns, 1):
-                if str(col) != "代码":
-                    continue
-                for i in range(2, len(sdf) + 2):
-                    cell = ws.cell(i, j)
-                    cell.number_format = "@"
-                    cell.value = str(cell.value or "")
+            if tmp.exists():
+                tmp.unlink()
         except Exception:
             pass
 
@@ -462,7 +601,7 @@ def export_above_ma10_sheet(sdf: "pd.DataFrame", out_path: Path) -> Tuple[int, i
     import math
 
     import pandas as pd
-    from utils.daily_cache_reader import load_daily_from_cache
+    from utils.daily_cache_reader import load_daily_bars
 
     if sdf is None or sdf.empty:
         raise ValueError("按票表为空，无法导出上MA10")
@@ -503,7 +642,7 @@ def export_above_ma10_sheet(sdf: "pd.DataFrame", out_path: Path) -> Tuple[int, i
         if code and sel is not None and not (isinstance(sel, float)):
             if code not in cache:
                 try:
-                    cache[code] = load_daily_from_cache(code, through_date=None)
+                    cache[code] = load_daily_bars(code, through_date=None)
                 except Exception:
                     cache[code] = None
             dd = cache[code]
@@ -561,17 +700,22 @@ def main() -> int:
     ap.add_argument(
         "--entry-window",
         type=int,
-        default=10,
-        help="买入挂单窗口交易日数（选股日 T+1 起，默认 10）",
+        default=1,
+        help="买入挂单窗口交易日数（选股日 T+1 起，默认 1，配合次日MA10）",
     )
     ap.add_argument(
         "--sell-hold",
         type=int,
-        default=8,
+        default=2,
         help=(
-            "卖出持有交易日数（默认 8）：买入【次日】为第 1 日，第 N 日强清；"
+            "卖出持有交易日数（默认 2）：买入【次日】为第 1 日，第 N 日强清；"
             "与因子分析 hold 表同口径（注入引擎时自动 +1）"
         ),
+    )
+    ap.add_argument(
+        "--no-ma20-clear",
+        action="store_true",
+        help="不挂 1455 破 MA20 清仓（写入 sell_params.disable_ma20_clear）",
     )
     ap.add_argument(
         "--cash",
@@ -637,6 +781,12 @@ def main() -> int:
 
     pair_tag = f"{buy_tag}-{sell_tag}"
 
+    import os
+
+    # 撮合 OHLC / 盯市收盘用前复权；策略信号与涨跌停仍走不复权日线
+    os.environ["BACKTEST_FILL_ADJUST"] = "qfq"
+    print("回测撮合价口径: 前复权 (BACKTEST_FILL_ADJUST=qfq)；选股信号/涨跌停仍用不复权")
+
     sel_path = Path(args.selection)
     if not sel_path.is_file():
         # 相对仓库根再试
@@ -664,6 +814,7 @@ def main() -> int:
     print(
         f"入口窗口={entry_w} 卖持有={sell_hold}（次日=第1日；引擎N={engine_hold_n}） "
         f"fill_mode=same_day_ohlc"
+        + (" 无MA20清仓" if bool(args.no_ma20_clear) else "")
     )
 
     by_day = load_selection_by_day(sel_path)
@@ -694,6 +845,9 @@ def main() -> int:
     sim_days = sim_hold_days_covering_entry_window(entry_w, engine_hold_n)
     # 计划结束日：覆盖「最晚买入 + 次日起持有 N 日」
     calendar_hold_n = entry_w + sell_hold
+    last_close = resolve_last_available_trade_date()
+    if last_close is not None:
+        print(f"日线可用末日（已收盘）：{last_close}")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     buy_rows: List[Dict[str, str]] = []
     sell_rows: List[Dict[str, str]] = []
@@ -706,12 +860,31 @@ def main() -> int:
             print(f"  [{pct:3d}%] {msg}", flush=True)
 
     for i, d in enumerate(days):
-        codes = by_day[d]
+        codes_raw = list(by_day[d] or [])
+        codes: List[str] = []
+        for c in codes_raw:
+            c6 = _norm_code6(c)
+            if c6:
+                codes.append(c6)
         start_d, end_d, hint = backtest_window_from_selection_day(
             d, start_next_trading_day=True, hold_trading_days=sim_days
         )
         sel_s = d.strftime("%Y-%m-%d")
         tag = f"[{i + 1}/{len(days)}] {sel_s} {len(codes)}只"
+        if not codes:
+            print(f"{tag} 跳过：当日池为空")
+            day_summaries.append(
+                {
+                    "选股日": sel_s,
+                    "回测开始": "",
+                    "回测结束": "",
+                    "股票数": 0,
+                    "总收益率%": None,
+                    "成交笔数": 0,
+                    "备注": "当日池为空",
+                }
+            )
+            continue
         if start_d is None or end_d is None:
             print(f"{tag} 跳过：{hint}")
             day_summaries.append(
@@ -726,6 +899,26 @@ def main() -> int:
                 }
             )
             continue
+        start_d, end_d, clamp_msg = clamp_backtest_window(
+            start_d, end_d, last_close=last_close
+        )
+        if start_d is None or end_d is None:
+            tip = clamp_msg or hint
+            print(f"{tag} 跳过：{tip}")
+            day_summaries.append(
+                {
+                    "选股日": sel_s,
+                    "回测开始": "",
+                    "回测结束": "",
+                    "股票数": len(codes),
+                    "总收益率%": None,
+                    "成交笔数": 0,
+                    "备注": tip,
+                }
+            )
+            continue
+        if clamp_msg:
+            hint = f"{hint}；{clamp_msg}"
         start_s = start_d.strftime("%Y-%m-%d")
         end_s = end_d.strftime("%Y-%m-%d")
         print(f"{tag} 窗口 {start_s}~{end_s}（{hint}，仿真{sim_days}日）")
@@ -742,6 +935,13 @@ def main() -> int:
         sell_params["_filled_legs"] = []
         # 供意图/日志辨认用户口径（次日=1）
         sell_params["sell_hold_from_next_day"] = sell_hold
+        if bool(args.no_ma20_clear):
+            sell_params["disable_ma20_clear"] = True
+        # 布林%b卖：持仓满 hold_days 后次日开盘强清（与 --sell-hold 对齐）
+        if str(sell_id).endswith("bb_pctb_sell") or "bb_pctb_sell" in str(sell_tag):
+            sell_params["hold_days"] = int(sell_hold)
+            sell_params.setdefault("ma10_slope_stop", -0.008)
+            sell_params.setdefault("pctb_tp", 0.5)
 
         segments = [
             {
@@ -836,15 +1036,20 @@ def main() -> int:
     write_trades_csv(sell_csv, sell_rows)
     print(f"买入明细：{buy_csv}（{len(buy_rows)} 笔）")
     print(f"卖出明细：{sell_csv}（{len(sell_rows)} 笔）")
+    _publish_latest(buy_csv, out_dir / f"回测成交明细_日线-{pair_tag}买入_latest.csv")
+    _publish_latest(sell_csv, out_dir / f"回测成交明细_日线-{pair_tag}卖出_latest.csv")
 
     import pandas as pd
 
     day_xlsx = out_dir / f"各日选股收益汇总_日线-{pair_tag}-单点_{stamp}.xlsx"
     pd.DataFrame(day_summaries).to_excel(day_xlsx, index=False)
     print(f"按日汇总：{day_xlsx}")
+    _publish_latest(day_xlsx, out_dir / f"各日选股收益汇总_日线-{pair_tag}-单点_latest.xlsx")
 
     # 按选股日+代码收益汇总（复用 merge 工具）
     stock_xlsx = out_dir / f"各日选股收益汇总_日线-{pair_tag}-单点_按票_{stamp}.xlsx"
+    above_xlsx: Optional[Path] = None
+    done_xlsx: Optional[Path] = None
     if buy_rows and sell_rows:
         try:
             from tools.merge_backtest_trades_by_selection import (
@@ -893,6 +1098,10 @@ def main() -> int:
                     lambda x: _norm_code6(x) if _norm_code6(x) else str(x or "")
                 )
             _write_stock_xlsx(stock_xlsx, sdf)
+            _publish_latest(
+                stock_xlsx,
+                out_dir / f"各日选股收益汇总_日线-{pair_tag}-单点_按票_latest.xlsx",
+            )
 
             sdf_done = sdf
             if "样本完成" in sdf.columns:
@@ -901,6 +1110,10 @@ def main() -> int:
                 f"各日选股收益汇总_日线-{pair_tag}-单点_按票_{stamp}_已完成.xlsx"
             )
             _write_stock_xlsx(done_xlsx, sdf_done)
+            _publish_latest(
+                done_xlsx,
+                out_dir / f"各日选股收益汇总_日线-{pair_tag}-单点_按票_已完成_latest.xlsx",
+            )
 
             def _ret_stats(frame: "pd.DataFrame") -> Tuple[int, Optional[float], Optional[float]]:
                 arets = pd.to_numeric(frame.get("收益率pct"), errors="coerce").dropna()
@@ -935,9 +1148,15 @@ def main() -> int:
                 above_xlsx = out_dir / (
                     f"各日选股收益汇总_日线-{pair_tag}-单点_按票_{stamp}_收盘上MA10.xlsx"
                 )
+                latest_above = out_dir / (
+                    f"各日选股收益汇总_日线-{pair_tag}-单点_按票_收盘上MA10_latest.xlsx"
+                )
                 if bool(args.exclude_incomplete):
                     above_xlsx = out_dir / (
                         f"各日选股收益汇总_日线-{pair_tag}-单点_按票_{stamp}_已完成_收盘上MA10.xlsx"
+                    )
+                    latest_above = out_dir / (
+                        f"各日选股收益汇总_日线-{pair_tag}-单点_按票_已完成_收盘上MA10_latest.xlsx"
                     )
                 try:
                     src_lab = "已完成" if bool(args.exclude_incomplete) else "全量"
@@ -946,6 +1165,7 @@ def main() -> int:
                         print("⚠ 上MA10导出跳过：无可用样本", file=sys.stderr)
                     else:
                         n_above, n_base = export_above_ma10_sheet(above_src, above_xlsx)
+                        _publish_latest(above_xlsx, latest_above)
                         above_df = pd.read_excel(above_xlsx)
                         an, am, amed = _ret_stats(above_df)
                         if an:

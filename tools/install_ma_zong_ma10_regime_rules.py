@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """安装选股规则：马总 MA10 风格三包（CORE / 七月风 / 六月风）。
 
-基于 tools/_rule_src_ma_zong_logic1.py（涨停底池 + 诊断字段），硬门槛改为：
+基于 tools/_rule_src_ma_zong_next_day_ma10.py（近10日最近涨停 + 涨停后日线未触 MA10），
+硬门槛再叠加：
   收盘 > MA10，且落入对应风格包，且不在黑名单。
 
 用法:
@@ -10,7 +11,7 @@
 盘后流程:
   1) python tools/ma10_regime_switch.py   → 今日建议哪一包
   2) 选股页只勾对应规则跑一遍
-  3) 跌破 MA10 买 + sell-hold 2
+  3) 跌破 MA10 买 + entry_window=1 + sell-hold 2
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from sector_stock_filter import load_sector_rules, save_single_sector_rule  # noqa: E402
 
-SRC = Path(__file__).resolve().parent / "_rule_src_ma_zong_logic1.py"
+SRC = Path(__file__).resolve().parent / "_rule_src_ma_zong_next_day_ma10.py"
 OUT_DIR = ROOT / "data" / "sector_rules"
 
 # name, PACK_MODE, brief
@@ -31,17 +32,17 @@ PACKS = [
     (
         "马总-MA10核-CORE",
         "CORE_ONLY",
-        "上MA10 ∩ (B∩市值≤91) − 黑名单",
+        "次日MA10底池 ∩ 上MA10 ∩ (B∩市值≤91) - 黑名单",
     ),
     (
         "马总-MA10核-七月风",
         "CORE_PLUS_JULY",
-        "上MA10 ∩ B∩(市值≤91∨价≤18∨市值≤54) − 黑名单",
+        "次日MA10底池 ∩ 上MA10 ∩ B∩(市值≤91∨价≤18∨市值≤54) - 黑名单",
     ),
     (
         "马总-MA10核-六月风",
         "CORE_PLUS_JUNE",
-        "上MA10 ∩ [(B∩市值≤91)∪(市值170~353∩MA5>MA10)] − 黑名单",
+        "次日MA10底池 ∩ 上MA10 ∩ [(B∩市值≤91)∪(市值170~353∩MA5>MA10)] - 黑名单",
     ),
 ]
 
@@ -61,7 +62,7 @@ RS20_BLACK = 0.40
 
 # Replaces from "    above_ma = (" through end of select()
 NEW_TAIL = r'''
-    # 马总原软条件（诊断列；本规则入选不再依赖）
+    # 次日MA10 软条件（诊断列；本规则入选不再依赖）
     above_ma = (
         close_price is not None
         and ma5 is not None
@@ -70,14 +71,11 @@ NEW_TAIL = r'''
         and float(close_price) > float(ma20)
     )
 
-    cond_lu = True  # 已入选即当日涨停
     cond_board = bool(board_ok)
     cond_inflow = bool(inflow_ok)
     cond_prior = bool(no_big_move)
     cond_ma = bool(above_ma)
-    meet_logic1 = (
-        cond_lu and cond_board and cond_inflow and cond_prior and cond_ma
-    )
+    meet_logic1 = cond_board and cond_inflow and cond_prior and cond_ma
     fail_reasons = _fail_reasons_logic1(
         cond_board=cond_board,
         cond_inflow=cond_inflow,
@@ -94,6 +92,11 @@ NEW_TAIL = r'''
         board_err=board_err,
         inflow_err=bundle.get("inflow_err") or "",
     )
+
+    try:
+        lu_date_s = lu_date.strftime("%Y-%m-%d")
+    except Exception:
+        lu_date_s = str(lu_date)
 
     rs5 = _absolute_rs(closes, RS_LOOKBACK_5)
     rs10 = _absolute_rs(closes, RS_LOOKBACK)
@@ -155,11 +158,12 @@ NEW_TAIL = r'''
         pack_ok = False
         pack_label = str(PACK_MODE)
 
+    # 底池已在 select 前段保证：近10日最近涨停 + 涨停后未触 MA10
     meet_all = bool(cond_above_ma10 and pack_ok)
 
     skip_reasons = []
     if not cond_above_ma10:
-        skip_reasons.append("收盘未站上MA10")
+        skip_reasons.append("涨停日收盘未站上MA10")
     if cond_black:
         skip_reasons.append("黑名单(空头乱序或RS20>40%)")
     if cond_above_ma10 and (not pack_ok) and (not cond_black):
@@ -174,6 +178,11 @@ NEW_TAIL = r'''
         "不满足的原因": skip_text if (not meet_all) else "",
         "马总原满足条件": bool(meet_logic1),
         "马总原不满足原因": fail_reasons if (not meet_logic1) else "",
+        "涨停锚点日": lu_date_s,
+        "涨停日期": lu_date_s,  # 引擎补全主力净流入/概念排名认此列
+        "距涨停交易日数": lu_days_ago if lu_days_ago != "" else 0,
+        "条件_涨停锚点有效": True,
+        "条件_涨停后未触MA10": True,
         "条件_收盘站上MA10": bool(cond_above_ma10),
         "条件_B因子": bool(cond_B),
         "条件_黑名单": bool(cond_black),
@@ -183,7 +192,7 @@ NEW_TAIL = r'''
         "条件_风格包通过": bool(pack_ok),
         "前十个交易日最高涨幅": "" if max_prior is None else round(float(max_prior) * 100.0, 4),
         "前十个交易日最高涨幅日期": "" if max_prior_date is None else max_prior_date.strftime("%Y-%m-%d"),
-        "条件_当日涨停": bool(cond_lu),
+        "条件_当日涨停": bool(is_lu_today),
         "条件_行业或概念排名达标": bool(cond_board),
         "条件_行业前N": int(BOARD_TOP_N_INDUSTRY),
         "条件_概念前N": int(BOARD_TOP_N_CONCEPT),
@@ -214,7 +223,7 @@ NEW_TAIL = r'''
         "板块排名备注": board_err,
         "主力净流入备注": "" if inflow_wan is not None else (bundle.get("inflow_err") or ""),
         "最近10个交易日内的涨停板数量": int(lu_count),
-        "最近的涨停板是几日前": lu_days_ago,
+        "最近的涨停板是几日前": lu_days_ago if lu_days_ago != "" else 0,
         "收盘价": "" if close_price is None else round(float(close_price), 4),
         "MA5": "" if ma5 is None else round(ma5, 4),
         "MA10": "" if ma10 is None else round(ma10, 4),
@@ -249,6 +258,8 @@ NEW_TAIL = r'''
         "BOARD_SHOW_TOP_N": int(BOARD_SHOW_TOP_N),
         "MIN_INFLOW_WAN": float(MIN_INFLOW_WAN),
         "PRIOR_LOOKBACK": int(PRIOR_LOOKBACK),
+        "LU_LOOKBACK": int(LU_LOOKBACK),
+        "MA_TOUCH_PERIOD": int(MA_TOUCH_PERIOD),
         "EX_DIV_LOOKBACK": int(EX_DIV_LOOKBACK),
         "EX_DIV_EPS": float(EX_DIV_EPS),
         "PACK_MODE": str(PACK_MODE),
@@ -272,6 +283,7 @@ NEW_TAIL = r'''
             extra[_key] = round(float(_val), 6)
     if mv is not None and extra.get("流通市值_亿") in ("", None):
         extra["流通市值_亿"] = round(mv, 2)
+    extra.update(contrast)
 
     if not meet_all:
         extra["_skip"] = skip_text or ("未过风格包%s" % PACK_MODE)
@@ -282,14 +294,15 @@ NEW_TAIL = r'''
 
 HEADER_PREFIX = """# 马总选股逻辑 · MA10 风格包 {pack_mode}
 # 说明：{brief}
-# 底池同「马总选股逻辑-盘后」：全市场当日涨停（除权缺口剔除）
-# 硬入选门槛（本规则）：
-#   1) 选股日收盘 > MA10
+# 底池同「马总选股逻辑-次日MA10」：近10日最近涨停 + 涨停后日线未触MA10（除权相对涨停日前）
+# 硬入选门槛（本规则；收盘/MA/RS/B/黑名单均相对涨停锚点日）：
+#   1) 涨停日收盘 > MA10
 #   2) 落入风格包 {pack_mode}（与 tools/ma10_regime_switch.py 一致）
 #   3) 非黑名单：(MA5≤MA10且MA10≥MA20) 或 RS20>40%
-# B：RS5>13.5% 且 RS10>6% 且 RS20<25%
+# B：RS5>13.5% 且 RS10>6% 且 RS20<25%（相对涨停日）
 # 「马总原满足条件」仍输出供对照，但不作为入选门槛
-# 交易建议：跌破 MA10 买；卖出持有口径 sell-hold 2（次日=第1日）
+# 另输出选股日对照列：收盘/MA/RS/净流入/板块排名/市值（后缀_选股日）
+# 交易建议：跌破 MA10 买；挂单窗 1 日；卖出持有口径 sell-hold 2
 #
 """
 
@@ -299,7 +312,6 @@ def build_code(pack_mode: str, brief: str) -> str:
     if "def select(" not in raw:
         raise SystemExit("rule source missing select()")
 
-    # strip original header comments until first assignment
     lines = raw.splitlines(keepends=True)
     i0 = 0
     for i, ln in enumerate(lines):
@@ -308,9 +320,9 @@ def build_code(pack_mode: str, brief: str) -> str:
             break
     body = "".join(lines[i0:])
 
-    marker = 'HOT_MODE = "ma_zong_logic1_limit_up"'
+    marker = 'HOT_MODE = "ma_zong_next_day_ma10"'
     if marker not in body:
-        raise SystemExit("HOT_MODE marker not found in source")
+        raise SystemExit("HOT_MODE marker not found in next_day source")
     body = body.replace(
         marker,
         'HOT_MODE = "ma_zong_ma10_%s"\n' % pack_mode

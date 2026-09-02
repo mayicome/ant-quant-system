@@ -1881,6 +1881,12 @@ if __name__ == "__main__":
             )
             df_clean.to_csv(filename, index=False, encoding='utf_8_sig')
             print(f"\n数据已保存至 {filename} (共 {len(df_clean)} 行数据)")
+            try:
+                from tools.export_main_flow_to_jsonl import write_daily_main_flow_jsonl_shard
+
+                write_daily_main_flow_jsonl_shard(filename, today_str)
+            except Exception as e:
+                print(f"[main_flow jsonl] 写出失败: {e}")
         except Exception as e:
             print(f"\n保存CSV文件失败: {e}")
             import traceback

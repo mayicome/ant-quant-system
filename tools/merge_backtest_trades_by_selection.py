@@ -39,6 +39,19 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
+def _fill_adjust() -> str:
+    """盯市/撮合收盘价复权口径（与 BACKTEST_FILL_ADJUST 对齐，默认 qfq）。"""
+    import os
+
+    try:
+        from utils.daily_adjust_paths import normalize_adjust
+
+        return normalize_adjust(os.environ.get("BACKTEST_FILL_ADJUST") or "qfq")
+    except Exception:
+        raw = (os.environ.get("BACKTEST_FILL_ADJUST") or "qfq").strip().lower()
+        return "qfq" if raw in ("qfq", "front", "前复权") else "none"
+
 SEL_RE = re.compile(r"\[选股日\s*(\d{4}-\d{2}-\d{2})\]")
 
 # 与 strategy_generator_app.backtest.true_breakthrough.TRUE_BREAKTHROUGH_EXPORT_FIELDS 一致
@@ -80,10 +93,12 @@ def _parse_sel(trigger: str) -> str:
     return m.group(1) if m else ""
 
 
-def _sel_from_row(r: dict) -> str:
+def _sel_from_row(r: dict, *, fallback_trade_date: bool = False) -> str:
     """
     汇总键「选股日」：优先使用导出 CSV 独立列（与触发信息解析解耦，避免漏解析/混批）。
     兼容列名：选股日、selection_date、选股日期；否则回退 [选股日 yyyy-mm-dd] 触发信息。
+
+    fallback_trade_date：列与触发信息都空时，用成交「日期」兜底（盘中当日买、无选股文件时）。
     """
     if not isinstance(r, dict):
         return ""
@@ -101,7 +116,45 @@ def _sel_from_row(r: dict) -> str:
             return s[:10]
         if len(s) >= 10:
             return s[:10].replace("/", "-")
-    return _parse_sel(r.get("触发信息") or "")
+    from_trig = _parse_sel(r.get("触发信息") or "")
+    if from_trig:
+        return from_trig
+    if fallback_trade_date:
+        bd = _parse_row_date(
+            r.get("date") or r.get("日期") or r.get("买入日期") or r.get("trade_date")
+        )
+        if bd is not None:
+            return bd.strftime("%Y-%m-%d")
+    return ""
+
+
+def _code6_from_row(r: dict) -> str:
+    s = str(r.get("代码") or r.get("stock_code") or r.get("股票代码") or "").strip()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    if s.isdigit():
+        return s.zfill(6)[-6:]
+    return s
+
+
+def _resolve_sell_sel_when_missing(
+    code: str,
+    sell_d: Optional[date],
+    buy_sels_by_code: Dict[str, List[Tuple[str, Optional[date]]]],
+) -> str:
+    """卖出无选股日时：按代码回挂到买入侧选股日（同码多笔则取买入日<=卖出日的最近一笔，否则最早）。"""
+    cands = list(buy_sels_by_code.get(code) or [])
+    if not cands:
+        return ""
+    if len(cands) == 1:
+        return cands[0][0]
+    if sell_d is not None:
+        le = [(sel, bd) for sel, bd in cands if bd is not None and bd <= sell_d]
+        if le:
+            le.sort(key=lambda x: x[1] or date.min, reverse=True)
+            return le[0][0]
+    cands.sort(key=lambda x: x[1] or date.max)
+    return cands[0][0]
 
 
 def _read_rows(path: Path) -> List[dict]:
@@ -365,7 +418,7 @@ def _fetch_last_available_closes(
         sys.path.insert(0, str(root))
 
     try:
-        from utils.daily_cache_reader import load_daily_from_cache
+        from utils.daily_cache_reader import load_daily_bars as load_daily_from_cache
     except Exception:
         load_daily_from_cache = None  # type: ignore
 
@@ -373,7 +426,7 @@ def _fetch_last_available_closes(
     if load_daily_from_cache is not None:
         for c in codes_6:
             try:
-                df = load_daily_from_cache(c, through_date=through)
+                df = load_daily_from_cache(c, through_date=through, adjust=_fill_adjust())
             except Exception:
                 df = None
             md, px = _df_last_bar(df)
@@ -462,7 +515,7 @@ def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, floa
     if load_daily_from_cache is not None:
         for c in codes_6:
             try:
-                df = load_daily_from_cache(c, through_date=as_of)
+                df = load_daily_from_cache(c, through_date=as_of, adjust=_fill_adjust())
             except Exception:
                 df = None
             px = _close_on_date(df, as_of)
@@ -731,8 +784,9 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
         side = (r.get("方向") or "").strip()
         if side != "买入":
             continue
-        sel = _norm_sel_key(_sel_from_row(r))
-        code = (r.get("代码") or "").strip()
+        # 无选股日时用买入成交日兜底（马总盘中等当日扫当日买）
+        sel = _norm_sel_key(_sel_from_row(r, fallback_trade_date=True))
+        code = _code6_from_row(r)
         if not sel or not code:
             continue
         k = (sel, code)
@@ -776,12 +830,46 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
             if val and not str(st[k].get(fk) or "").strip():
                 st[k][fk] = val
 
+    # 买入侧 (选股日,代码) → 供卖出无选股日时回挂
+    buy_sels_by_code: Dict[str, List[Tuple[str, Optional[date]]]] = defaultdict(list)
+    for (sel, code), v in st.items():
+        if int(v.get("buy_n") or 0) <= 0:
+            continue
+        buy_sels_by_code[code].append((sel, v.get("buy_date")))
+
     for r in sell_rows:
         side = (r.get("方向") or "").strip()
         if side != "卖出":
             continue
+        # 与持仓回放一致：汇总占位 0 股卖出不计入清仓
+        if _int_vol(r.get("数量") or r.get("volume")) <= 0:
+            # 仍可从占位行取 end_date（仅当该组尚无 end_date）
+            sel = _norm_sel_key(_sel_from_row(r))
+            code = _code6_from_row(r)
+            if not sel and code:
+                sel = _norm_sel_key(
+                    _resolve_sell_sel_when_missing(
+                        code,
+                        _parse_row_date(r.get("日期") or r.get("date")),
+                        buy_sels_by_code,
+                    )
+                )
+            if sel and code:
+                k = (sel, code)
+                ed = _parse_row_date(r.get("end_date"))
+                if ed and st[k]["end_date"] is None:
+                    st[k]["end_date"] = ed
+            continue
         sel = _norm_sel_key(_sel_from_row(r))
-        code = (r.get("代码") or "").strip()
+        code = _code6_from_row(r)
+        if not sel and code:
+            sel = _norm_sel_key(
+                _resolve_sell_sel_when_missing(
+                    code,
+                    _parse_row_date(r.get("日期") or r.get("date")),
+                    buy_sels_by_code,
+                )
+            )
         if not sel or not code:
             continue
         k = (sel, code)
@@ -1202,7 +1290,7 @@ def apply_ma_fields_from_daily_cache(rows: List[dict]) -> str:
             sys.path.insert(0, str(root))
         from strategy_generator_app.backtest.data_provider import _full_code
         from utils.daily_cache_reader import (
-            load_daily_from_cache,
+            load_daily_bars as load_daily_from_cache,
             load_daily_xtdata_fallback,
         )
     except Exception as e:
@@ -1239,7 +1327,7 @@ def apply_ma_fields_from_daily_cache(rows: List[dict]) -> str:
             dd = pd.to_datetime(frame["date"]).dt.date
             return int((dd < sel_d).sum())
 
-        # 本地不足时补拉长历史（不覆盖已有 cache 写盘，仅本次计算用）
+        # 本地不足时补拉长历史（不覆盖已有 cache 写盘；xtdata 仅 mini 模式，见 load_daily_xtdata_fallback）
         if _prior_len(df) < min_prior_for_ma120:
             ext = None
             try:
@@ -1413,7 +1501,7 @@ def apply_buy_day_ma5_ref_fields(rows: List[dict]) -> str:
             sys.path.insert(0, str(root))
         from strategy_generator_app.backtest.data_provider import _full_code
         from utils.daily_cache_reader import (
-            load_daily_from_cache,
+            load_daily_bars as load_daily_from_cache,
             load_daily_xtdata_fallback,
         )
     except Exception as e:
@@ -1438,7 +1526,7 @@ def apply_buy_day_ma5_ref_fields(rows: List[dict]) -> str:
                 df = load_daily_from_cache(_full_code(code), through_date=through)
             except Exception:
                 df = None
-        # 偏短则补拉（与选股日均线同一套回退）
+        # 偏短则补拉（与选股日均线同一套回退；xtdata 仅 mini 模式）
         try:
             import pandas as pd
 

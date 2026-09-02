@@ -458,6 +458,14 @@ class TradingApp(QMainWindow):
                 self.task_manager.tasks_updated.emit()
             else:
                 self.logger.info("任务管理器中没有任务")
+
+            # load_tasks 时 adapter 尚未挂上，跳过了空同步；此处持仓已就绪（或确认无持仓），写一次即可
+            try:
+                from utils.qmt_execution_config import use_builtin_price_feed
+                if use_builtin_price_feed():
+                    self.task_manager._sync_rules_armed_if_builtin()
+            except Exception:
+                pass
                 
         except Exception as e:
             self.logger.error(f"QMT连接处理失败: {str(e)}", exc_info=True)

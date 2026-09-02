@@ -130,6 +130,9 @@ def _build_window_class():
 
             # id -> {text, first_seen, last_seen, cleared_at, status}
             self._alert_track: Dict[str, Dict[str, Any]] = {}
+            # 用户手动忽略的告警 id（会话内；根因消失后自动清除）
+            self._dismissed_alert_ids: set = set()
+            self._last_tick_fail_detail: List[Dict[str, str]] = []
 
             root = QWidget()
             self.setCentralWidget(root)
@@ -168,7 +171,26 @@ def _build_window_class():
             self.alerts = QTextEdit()
             self.alerts.setReadOnly(True)
             self.alerts.setPlaceholderText("无告警")
-            alert_box = self._wrap("告警（含首次/解除时间）", self.alerts)
+            alert_btn_row = QHBoxLayout()
+            self.btn_dismiss_alerts = QPushButton("忽略当前告警")
+            self.btn_dismiss_alerts.setToolTip(
+                "仅本窗口会话内隐藏当前告警（不删数据）；根因仍在时会再次弹出"
+            )
+            self.btn_dismiss_alerts.clicked.connect(self._dismiss_active_alerts)
+            self.btn_clear_tick_fail = QPushButton("清除分时失败")
+            self.btn_clear_tick_fail.setToolTip(
+                "删除 data_sync_requests.json 中 failed 的按需分时记录（需确认）"
+            )
+            self.btn_clear_tick_fail.clicked.connect(self._clear_tick_failures)
+            alert_btn_row.addWidget(self.btn_dismiss_alerts)
+            alert_btn_row.addWidget(self.btn_clear_tick_fail)
+            alert_btn_row.addStretch(1)
+            alert_wrap = QWidget()
+            alert_lay = QVBoxLayout(alert_wrap)
+            alert_lay.setContentsMargins(0, 0, 0, 0)
+            alert_lay.addWidget(self.alerts)
+            alert_lay.addLayout(alert_btn_row)
+            alert_box = self._wrap("告警（含首次/解除时间）", alert_wrap)
 
             top_half = QGridLayout()
             top_half.addWidget(busy_box, 0, 0)
@@ -177,7 +199,7 @@ def _build_window_class():
             top_half.setColumnStretch(1, 1)
             # 左右同高，避免告警区单独撑高整窗
             busy_box.setMaximumHeight(130)
-            alert_box.setMaximumHeight(130)
+            alert_box.setMaximumHeight(160)
             layout.addLayout(top_half)
 
             comm_grid = QGridLayout()
@@ -222,6 +244,13 @@ def _build_window_class():
             daily_ctrl.addStretch(1)
             self.box_daily.layout().addLayout(daily_ctrl)
             self.box_od_tick, self.lab_od_tick = _card("按需分时")
+            tick_ctrl = QHBoxLayout()
+            self.btn_tick_fail_detail = QPushButton("失败详情")
+            self.btn_tick_fail_detail.setToolTip("查看 failed 按需分时列表（最多 200 条）")
+            self.btn_tick_fail_detail.clicked.connect(self._show_tick_fail_detail)
+            tick_ctrl.addWidget(self.btn_tick_fail_detail)
+            tick_ctrl.addStretch(1)
+            self.box_od_tick.layout().addLayout(tick_ctrl)
             self.box_tick_full, self.lab_tick_full = _card("盘后分时")
             self.btn_tick_pause = QPushButton("暂停")
             self.btn_tick_pause.setToolTip(
@@ -288,6 +317,76 @@ def _build_window_class():
             self._timer.timeout.connect(self.refresh)
             self._timer.start(max(1000, int(interval_ms)))
             self.refresh()
+
+        def _dismiss_active_alerts(self) -> None:
+            now = datetime.now()
+            n = 0
+            for aid, st in list(self._alert_track.items()):
+                if st.get("status") != "告警中":
+                    continue
+                self._dismissed_alert_ids.add(aid)
+                st["status"] = "已忽略"
+                st["cleared_at"] = now
+                n += 1
+            if n:
+                self._render_alerts()
+            else:
+                QMessageBox.information(self, "无告警", "当前没有可忽略的「告警中」条目。")
+
+        def _clear_tick_failures(self) -> None:
+            try:
+                from utils.data_sync_request import list_failed_tick_requests
+            except Exception as e:
+                QMessageBox.warning(self, "失败", "无法加载 data_sync_request：%s" % e)
+                return
+            rows = list_failed_tick_requests(limit=500)
+            if not rows:
+                QMessageBox.information(self, "无需清除", "当前没有 failed 的按需分时记录。")
+                return
+            reply = QMessageBox.question(
+                self,
+                "确认清除分时失败",
+                "将删除 data/data_sync_requests.json 中 %d 条 failed 按需分时记录。\n"
+                "不影响 pending 队列；仅消除监控失败计数与告警。\n\n"
+                "确定清除？" % len(rows),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            try:
+                from utils.data_sync_request import clear_failed_tick_requests
+
+                n = clear_failed_tick_requests()
+            except Exception as e:
+                QMessageBox.warning(self, "失败", "清除失败：%s" % e)
+                return
+            QMessageBox.information(self, "已清除", "已删除 %d 条 failed 按需分时记录。" % n)
+            self.refresh()
+
+        def _show_tick_fail_detail(self) -> None:
+            try:
+                from utils.data_sync_request import list_failed_tick_requests
+
+                rows = list_failed_tick_requests(limit=500)
+            except Exception as e:
+                QMessageBox.warning(self, "失败", "无法读取失败列表：%s" % e)
+                return
+            if not rows:
+                QMessageBox.information(self, "无失败", "当前没有 failed 的按需分时记录。")
+                return
+            lines = ["共 %d 条（展示前 %d）" % (len(rows), min(len(rows), 200)), ""]
+            for r in rows[:200]:
+                lines.append(
+                    "%s  %s  %s"
+                    % (r.get("day") or "?", r.get("code") or "?", r.get("error") or "?")
+                )
+            box = QMessageBox(self)
+            box.setWindowTitle("按需分时失败详情")
+            box.setIcon(QMessageBox.Information)
+            box.setText("failed 按需分时记录")
+            box.setDetailedText("\n".join(lines))
+            box.exec_()
 
         def _wrap(self, title: str, w):
             g = QGroupBox(title)
@@ -511,12 +610,13 @@ def _build_window_class():
                 if not aid:
                     continue
                 active_ids.add(aid)
+                if aid in self._dismissed_alert_ids:
+                    continue
                 prev = self._alert_track.get(aid)
                 if prev and prev.get("status") == "告警中":
                     prev["last_seen"] = now
                     prev["text"] = text
                 else:
-                    # 新告警或已解除后再次触发
                     self._alert_track[aid] = {
                         "text": text,
                         "first_seen": now,
@@ -525,8 +625,14 @@ def _build_window_class():
                         "status": "告警中",
                     }
 
+            for aid in list(self._dismissed_alert_ids):
+                if aid not in active_ids:
+                    self._dismissed_alert_ids.discard(aid)
+
             for aid, st in list(self._alert_track.items()):
-                if st.get("status") == "告警中" and aid not in active_ids:
+                if st.get("status") not in ("告警中", "已忽略"):
+                    continue
+                if aid not in active_ids:
                     st["status"] = "已解除"
                     st["cleared_at"] = now
 
@@ -552,6 +658,11 @@ def _build_window_class():
                 for aid, st in self._alert_track.items()
                 if st.get("status") == "告警中"
             ]
+            ignored = [
+                (aid, st)
+                for aid, st in self._alert_track.items()
+                if st.get("status") == "已忽略"
+            ]
             cleared = [
                 (aid, st)
                 for aid, st in self._alert_track.items()
@@ -559,6 +670,7 @@ def _build_window_class():
             ]
             # 告警中按首次时间倒序；已解除按解除时间倒序
             active.sort(key=lambda x: x[1].get("first_seen") or datetime.min, reverse=True)
+            ignored.sort(key=lambda x: x[1].get("cleared_at") or datetime.min, reverse=True)
             cleared.sort(key=lambda x: x[1].get("cleared_at") or datetime.min, reverse=True)
 
             lines: List[str] = []
@@ -571,6 +683,15 @@ def _build_window_class():
                     '<span style="color:#a33;font-weight:bold;">[告警中]</span> '
                     '<span style="color:#822;">%s</span> %s'
                     % (_escape_html(time_bit), text)
+                )
+            for _, st in ignored[:5]:
+                first = _fmt_clock(st.get("first_seen"))
+                cleared_at = _fmt_clock(st.get("cleared_at"))
+                text = _escape_html(st.get("text") or "")
+                lines.append(
+                    '<span style="color:#888;font-weight:bold;">[已忽略]</span> '
+                    '<span style="color:#666;">%s → %s</span> %s'
+                    % (_escape_html(first), _escape_html(cleared_at), text)
                 )
             for _, st in cleared:
                 first = _fmt_clock(st.get("first_seen"))
@@ -658,7 +779,9 @@ def _build_window_class():
                     res.get("updated_at") or "—",
                     ("%.0fs前" % age_r) if age_r is not None else "—",
                     res.get("quotes_recv_at") or "—",
-                    ("（停约%.0fs）" % qlag) if qlag is not None else "",
+                    ("（滞后%.0fs）" % qlag)
+                    if isinstance(qlag, (int, float)) and qlag >= 8
+                    else "",
                     res.get("n_stocks") if res.get("exists") else "—",
                     res.get("n_positions") if res.get("exists") else "—",
                     res.get("n_orders") if res.get("exists") else "—",
@@ -699,6 +822,24 @@ def _build_window_class():
             self._render_alerts()
 
             od = snap.get("ondemand") or {}
+            self._last_tick_fail_detail = list(od.get("tick_fail_samples") or [])
+            fail_day_top = od.get("tick_fail_day_top") or []
+            fail_err_top = od.get("tick_fail_err_top") or []
+            fail_summary = ""
+            if fail_err_top:
+                fail_summary += "原因: " + " ".join(
+                    "%s×%s" % (x.get("error"), x.get("count"))
+                    for x in fail_err_top[:2]
+                    if isinstance(x, dict)
+                )
+            if fail_day_top:
+                if fail_summary:
+                    fail_summary += "\n"
+                fail_summary += "日期: " + " ".join(
+                    "%s×%s" % (x.get("day"), x.get("count"))
+                    for x in fail_day_top[:3]
+                    if isinstance(x, dict)
+                )
             self.lab_od_daily.setText(
                 "待处理: %s\n失败: %s\n粗算预计剩余: %s"
                 % (
@@ -708,11 +849,12 @@ def _build_window_class():
                 )
             )
             self.lab_od_tick.setText(
-                "待处理: %s\n失败: %s\n粗算预计剩余: %s"
+                "待处理: %s\n失败: %s\n粗算预计剩余: %s\n%s"
                 % (
                     od.get("tick_pending"),
                     od.get("tick_failed"),
                     od.get("tick_eta_text"),
+                    fail_summary or "（点「失败详情」查看列表）",
                 )
             )
 

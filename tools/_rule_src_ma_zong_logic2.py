@@ -1,10 +1,10 @@
 # 马总选股逻辑2（盘中，建议 14:40 运行）
 # 硬入选（不进结果表则跳过）：
-#   - 当时涨幅 主板>=7%、创业/科创/北交所>=13%
+#   - 当时涨幅 主板>=6%、创业/科创/北交所>=10%
 #   - 近 EX_DIV_LOOKBACK 交易日无疑似除权开盘缺口（整表回测/因子筛选不应带上）
 # 满足条件（全部为真才 True；前10日窗口不含当日）：
 #   1) 所属行业东财涨幅原始排名前 BOARD_TOP_N_INDUSTRY，或概念前 BOARD_TOP_N_CONCEPT（任一）
-#   2) 当时主力净流入 >= 5000万
+#   2) 当时主力净流入 >= 3500万
 #   3) 前10个交易日：主板无涨幅>=5%；创业/科创/北交所无涨幅>=10%
 #   4) 当时价 > MA5 且 > MA20（MA 用日线，今日收盘用当时价替换）
 #   5) 当天未涨停过（当时涨停，或今日最高价曾触及涨停价 → 满足条件=False；仍可因硬门槛入选）
@@ -40,12 +40,12 @@ BOARD_TOP_N_INDUSTRY = 32  # 满足条件：所属行业东财涨幅排名门槛
 BOARD_TOP_N_CONCEPT = 8  # 满足条件：所属概念东财涨幅排名门槛
 BOARD_TOP_N = BOARD_TOP_N_INDUSTRY  # 兼容旧字段（取行业门槛）
 BOARD_SHOW_TOP_N = 30  # 展示用名次上限（不改进入选门槛）
-MIN_INFLOW_WAN = 5000.0
+MIN_INFLOW_WAN = 3500.0
 PRIOR_LOOKBACK = 10
 EX_DIV_LOOKBACK = 20
 EX_DIV_EPS = 0.005
-MAIN_PCT_LO = 7.0
-GROWTH_PCT_LO = 13.0
+MAIN_PCT_LO = 6.0
+GROWTH_PCT_LO = 10.0
 
 _STOCK_TAG_CACHE = {"loaded": False, "code_to_tags": {}}
 
@@ -774,7 +774,7 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
             "热门模式": HOT_MODE,
             "当时涨跌幅": "" if pct is None else round(float(pct), 4),
             "涨幅门槛": thr,
-            "_skip": "当时涨幅未达硬门槛(主板7%/其他13%)",
+            "_skip": "当时涨幅未达硬门槛(主板6%/其他10%)",
         }
 
     # 疑似除权：不进结果表（整表回测/因子筛选都不应带上）
@@ -888,7 +888,7 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "条件_行业或概念排名达标": bool(board_ok),
         "条件_行业前N": int(BOARD_TOP_N_INDUSTRY),
         "条件_概念前N": int(BOARD_TOP_N_CONCEPT),
-        "条件_主力净流入>=5000万": bool(inflow_ok),
+        "条件_主力净流入>=3500万": bool(inflow_ok),
         "条件_前10日无大涨": bool(no_big_move),
         "条件_价站上MA5且MA20": bool(above_ma),
         "除权排查天数": int(EX_DIV_LOOKBACK),

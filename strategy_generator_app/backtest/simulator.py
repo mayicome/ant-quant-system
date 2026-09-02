@@ -1081,6 +1081,45 @@ def _extract_best_bid_ask(row: Any) -> Tuple[float, float]:
     return float(bid or 0.0), float(ask or 0.0)
 
 
+def _min_tick_slippage(code_6: str) -> tuple[float, int]:
+    """最小价位滑点与价格精度（与 tick 撮合一致）。"""
+    precision = SecurityTypeUtil.get_price_precision(code_6)
+    slippage = 0.001 if precision == 3 else 0.01
+    return float(slippage), int(precision)
+
+
+def _apply_min_tick_slippage(code_6: str, side: str, base_price: float) -> float:
+    """在基准成交价上加减 1 跳滑点（买加卖减）。"""
+    slippage, precision = _min_tick_slippage(code_6)
+    base = float(base_price)
+    if side == "buy":
+        return round(base + slippage, precision)
+    return round(base - slippage, precision)
+
+
+# 日线无买卖一：按比例滑点，再四舍五入到最小价位
+_OHLC_SLIPPAGE_PCT = 0.001  # 0.1%
+
+
+def _apply_ohlc_pct_slippage(
+    code_6: str,
+    side: str,
+    base_price: float,
+    pct: float = _OHLC_SLIPPAGE_PCT,
+) -> float:
+    """日线撮合滑点：买 +pct、卖 -pct，再 round 到最小价位。"""
+    try:
+        precision = int(SecurityTypeUtil.get_price_precision(code_6))
+    except Exception:
+        precision = 2
+    base = float(base_price)
+    if base <= 0:
+        return round(base, precision)
+    if side == "buy":
+        return round(base * (1.0 + float(pct)), precision)
+    return round(base * (1.0 - float(pct)), precision)
+
+
 def _calc_fill_price(code_6: str, side: str, last_price: float, best_bid: float, best_ask: float) -> float:
     """
     用于回测成交价：
@@ -1088,15 +1127,11 @@ def _calc_fill_price(code_6: str, side: str, last_price: float, best_bid: float,
     - 卖出：以买一价 bidPrice[0] 为基准，下调一个最小滑点单位
     触发判断仍用 lastPrice；这里只影响“成交价/金额/成本”。
     """
-    precision = SecurityTypeUtil.get_price_precision(code_6)
-    slippage = 0.001 if precision == 3 else 0.01
-
     if side == "buy":
         base = best_ask if best_ask and best_ask > 0 else last_price
-        return round(float(base) + slippage, precision)
-    else:
-        base = best_bid if best_bid and best_bid > 0 else last_price
-        return round(float(base) - slippage, precision)
+        return _apply_min_tick_slippage(code_6, "buy", base)
+    base = best_bid if best_bid and best_bid > 0 else last_price
+    return _apply_min_tick_slippage(code_6, "sell", base)
 
 
 def simulate_fills_with_ticks(
@@ -2568,6 +2603,8 @@ def _same_day_ohlc_sell_kind(intent: Dict[str, Any]) -> str:
     )
     if rt == "scheduled_clear":
         return "force" if force else "ma20_1455"
+    if rt == "best_sell":
+        return "best_sell"
     if rt != "single_sell":
         return "other"
     if "涨停即清仓" in name:
@@ -2589,7 +2626,7 @@ def _same_day_ohlc_sell_rank(intent: Dict[str, Any]) -> Tuple[int, float]:
     """
     kind = _same_day_ohlc_sell_kind(intent)
     px = float(intent.get("price") or intent.get("trigger_price") or 0)
-    if kind in ("open50", "lu10", "single_up"):
+    if kind in ("open50", "lu10", "single_up", "best_sell"):
         # 触发价升序：先碰到较低的半仓腿
         return (0, px if px > 0 else 0.0)
     if kind == "limit_up_clear":
@@ -2610,13 +2647,15 @@ def simulate_fills_same_day_ohlc(
     commission: float = 0.0003,
 ) -> tuple[List[Dict[str, Any]], float, Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    同日日线撮合（对齐单点买/卖 + scheduled_clear）：
-    - single_buy：low <= 触发价 → 成交价 min(open, 触发价)
-    - single_sell：high >= 触发价 → 成交价 max(open, 触发价)
+    同日日线撮合（对齐单点买/卖 + scheduled_clear + best_sell 近似）：
+    - single_buy：low <= 触发价 → 基准 min(open, 触发价)，再 +0.1% 滑点
+    - single_sell：high >= 触发价 → 基准 max(open, 触发价)，再 -0.1% 滑点
       同日多腿：按触发价升序（OPEN→LU→涨停清仓），再处理 1455/强清
-    - scheduled_clear 条件清仓（1455 破线）：close < 触发价 → 成交价 close
-    - scheduled_clear 强清：到持仓日 → 成交价 close
-    弹性/笼子/突破等非单点规则本路径不撮合（保留在 remaining）。
+    - best_sell：high >= trigger → 以 high 为峰值，若 low <= high*(1-drop%) 则按回落价成交
+    - scheduled_clear 条件清仓（1455 破线）：close < 触发价 → 基准 close，再 -0.1%
+    - scheduled_clear 强清：到持仓日 → 基准 close，再 -0.1%
+    日线无买卖一，滑点按比例后四舍五入到最小价位（与 tick 的 ±1 跳不同）。
+    笼子/突破等非上述规则本路径不撮合（保留在 remaining）。
     """
     trades: List[Dict[str, Any]] = []
     new_cash = cash
@@ -2625,7 +2664,7 @@ def simulate_fills_same_day_ohlc(
     day_s = fill_day.strftime("%Y-%m-%d") if fill_day else ""
 
     buy_types = ("single_buy",)
-    sell_types = ("single_sell", "scheduled_clear")
+    sell_types = ("single_sell", "scheduled_clear", "best_sell")
 
     buys: List[Dict[str, Any]] = []
     sells: List[Dict[str, Any]] = []
@@ -2677,15 +2716,14 @@ def simulate_fills_same_day_ohlc(
         if float(bar["low"]) - 1e-9 > trig:
             remaining.append(intent)
             continue
-        fill_px = min(float(bar["open"]), trig)
+        base_px = min(float(bar["open"]), trig)
+        if base_px <= 0:
+            remaining.append(intent)
+            continue
+        fill_px = _apply_ohlc_pct_slippage(code_6, "buy", base_px)
         if fill_px <= 0:
             remaining.append(intent)
             continue
-        try:
-            precision = SecurityTypeUtil.get_price_precision(code_6)
-            fill_px = round(fill_px, precision)
-        except Exception:
-            fill_px = round(fill_px, 2)
         amount = fill_px * volume
         fee = amount * commission
         if amount + fee > new_cash:
@@ -2696,7 +2734,8 @@ def simulate_fills_same_day_ohlc(
         intent_stock_name = (intent.get("stock_name") or "").strip()
         trigger_info = (
             f"日线单点买入: low={bar['low']:.2f}<=触发价={trig:.2f} "
-            f"成交={fill_px:.2f}(=min(open={bar['open']:.2f},触发价))"
+            f"基准={base_px:.2f}(=min(open={bar['open']:.2f},触发价)) "
+            f"成交={fill_px:.2f}(+{_OHLC_SLIPPAGE_PCT * 100:.1f}%)"
         )
         trades.append({
             "code": code_6,
@@ -2708,10 +2747,10 @@ def simulate_fills_same_day_ohlc(
             "rule_type": "single_buy",
             "position_after": int(new_positions[code_6]["volume"]),
             "date": day_s,
-            # 开盘已在线下→按开盘；盘中触线→记 10:00（日线无精确时点）
+            # 开盘已在线下→按开盘；盘中触线→记 10:00（日线无精确时点；用滑点前基准判断）
             "time": (
                 "09:30:00"
-                if abs(fill_px - float(bar["open"])) <= 1e-9
+                if abs(base_px - float(bar["open"])) <= 1e-9
                 else "10:00:00"
             ),
             "trigger_info": trigger_info,
@@ -2740,21 +2779,50 @@ def simulate_fills_same_day_ohlc(
         force = bool(intent.get("scheduled_clear_force")) or bool(
             intent.get("scheduled_clear_on_hold_day")
         )
-        fill_px = 0.0
+        base_px = 0.0
         trigger_info = ""
         if rt == "single_sell":
             if trig <= 0 or float(bar["high"]) + 1e-9 < trig:
                 remaining.append(intent)
                 continue
-            fill_px = max(float(bar["open"]), trig)
+            base_px = max(float(bar["open"]), trig)
             trigger_info = (
                 f"日线单点卖出: high={bar['high']:.2f}>=触发价={trig:.2f} "
-                f"成交={fill_px:.2f}(=max(open={bar['open']:.2f},触发价))"
+                f"基准={base_px:.2f}(=max(open={bar['open']:.2f},触发价))"
             )
+            fill_time = (
+                "09:30:00"
+                if abs(base_px - float(bar["open"])) <= 1e-9
+                else "10:00:00"
+            )
+        elif rt == "best_sell":
+            trigger = float(intent.get("trigger_price") or 0)
+            try:
+                drop_pct = float(intent.get("drop_percent") or 0)
+            except (TypeError, ValueError):
+                drop_pct = 0.0
+            if drop_pct < 0:
+                drop_pct = 0.0
+            if trigger <= 0 or float(bar["high"]) + 1e-9 < trigger:
+                remaining.append(intent)
+                continue
+            # 日线近似：触达 trigger 后峰值取 high；回落到位则按 fallback 成交
+            peak = float(bar["high"])
+            fallback = peak * (1.0 - drop_pct / 100.0) if drop_pct > 0 else trigger
+            if float(bar["low"]) - 1e-9 > fallback:
+                remaining.append(intent)
+                continue
+            base_px = max(float(fallback), float(bar["low"]))
+            base_px = min(base_px, peak)
+            trigger_info = (
+                f"日线弹性卖出: high={peak:.2f}>=trigger={trigger:.2f} "
+                f"drop={drop_pct:.2f}% fallback={fallback:.2f} low={bar['low']:.2f}"
+            )
+            fill_time = "10:30:00"
         elif rt == "scheduled_clear":
             if force:
-                fill_px = float(bar["close"])
-                trigger_info = f"日线定时强清: 收盘价={fill_px:.2f}"
+                base_px = float(bar["close"])
+                trigger_info = f"日线定时强清: 收盘价={base_px:.2f}"
             else:
                 if trig <= 0:
                     remaining.append(intent)
@@ -2763,21 +2831,27 @@ def simulate_fills_same_day_ohlc(
                 if float(bar["close"]) + 1e-9 >= trig:
                     # 当日放弃（与 tick：价>=触发价则不卖）一致
                     continue
-                fill_px = float(bar["close"])
+                base_px = float(bar["close"])
                 trigger_info = (
-                    f"日线定时清仓(收盘破线): close={fill_px:.2f}<触发价={trig:.2f}"
+                    f"日线定时清仓(收盘破线): close={base_px:.2f}<触发价={trig:.2f}"
                 )
+            sched_tm = str(intent.get("scheduled_clear_time") or "").strip()
+            fill_time = sched_tm if len(sched_tm) >= 5 else "15:00:00"
+            if len(fill_time) == 5:
+                fill_time = fill_time + ":00"
         else:
             remaining.append(intent)
             continue
+        if base_px <= 0:
+            remaining.append(intent)
+            continue
+        fill_px = _apply_ohlc_pct_slippage(code_6, "sell", base_px)
         if fill_px <= 0:
             remaining.append(intent)
             continue
-        try:
-            precision = SecurityTypeUtil.get_price_precision(code_6)
-            fill_px = round(fill_px, precision)
-        except Exception:
-            fill_px = round(fill_px, 2)
+        trigger_info = (
+            f"{trigger_info} 成交={fill_px:.2f}(-{_OHLC_SLIPPAGE_PCT * 100:.1f}%)"
+        )
         sold = apply_sell_fill_t1(new_positions, code_6, sell_vol)
         if sold <= 0:
             remaining.append(intent)
@@ -2797,7 +2871,7 @@ def simulate_fills_same_day_ohlc(
             "rule_type": rt,
             "position_after": position_after,
             "date": day_s,
-            "time": "15:00:00" if rt == "scheduled_clear" else "09:30:00",
+            "time": fill_time,
             "trigger_info": trigger_info,
             **({"stock_name": intent_stock_name} if intent_stock_name else {}),
             **({"leg_key": str(intent.get("leg_key"))} if intent.get("leg_key") else {}),

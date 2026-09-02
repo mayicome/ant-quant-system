@@ -6,24 +6,41 @@ import json
 import logging
 import os
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 import pandas as pd
+
+from utils.daily_adjust_paths import cache_dir_for, full_dir_for, normalize_adjust
+
+AdjustKind = Literal["none", "qfq"]
 
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CACHE_DIR = os.path.join(_PROJECT_ROOT, "data", "daily_cache")
+CACHE_DIR = cache_dir_for("none")
 MANIFEST_PATH = os.path.join(CACHE_DIR, "manifest.json")
 MIN_VALID_CLOSE = 0.0
+
+# 历史选股/回测：该日之前优先合并 data/daily_full（rolling daily_cache 往往从年中才有）
+PREFER_DAILY_FULL_BEFORE = date(2026, 1, 1)
+# cache 首日距 as_of 不足这么多自然日时，也并入 daily_full 补均线回溯
+_MIN_CACHE_HISTORY_CAL_DAYS = 60
 
 # 进程内日线 DF 缓存：(code, mtime) -> 全量已清洗 DataFrame；through_date 再切片
 _DAILY_DF_CACHE: Dict[tuple, pd.DataFrame] = {}
 _DAILY_DF_CACHE_MAX = 512
+# 合并 full+cache 的进程内缓存：(code, full_mtime, cache_mtime) -> DataFrame
+_MERGED_DAILY_CACHE: Dict[tuple, pd.DataFrame] = {}
+_MERGED_DAILY_CACHE_MAX = 256
 
 
-def get_cache_dir() -> str:
-    return CACHE_DIR
+def get_cache_dir(adjust: str | None = None) -> str:
+    return cache_dir_for(adjust)
+
+
+def full_daily_csv_path(stock_code: str, adjust: str | None = None) -> str:
+    full_code = to_full_stock_code(stock_code)
+    return os.path.join(full_dir_for(adjust), f"{full_code}.csv")
 
 
 def load_manifest() -> Dict[str, Any]:
@@ -59,12 +76,12 @@ def to_full_stock_code(stock_code: str) -> str:
     return f"{code}.SZ"
 
 
-def csv_path_for_code(stock_code: str) -> str:
-    return os.path.join(get_cache_dir(), to_full_stock_code(stock_code) + ".csv")
+def csv_path_for_code(stock_code: str, adjust: str | None = None) -> str:
+    return os.path.join(get_cache_dir(adjust), to_full_stock_code(stock_code) + ".csv")
 
 
-def cache_file_exists(stock_code: str) -> bool:
-    return os.path.isfile(csv_path_for_code(stock_code))
+def cache_file_exists(stock_code: str, adjust: str | None = None) -> bool:
+    return os.path.isfile(csv_path_for_code(stock_code, adjust=adjust))
 
 
 def _valid_close_mask(df: pd.DataFrame) -> pd.Series:
@@ -82,16 +99,17 @@ def load_daily_from_cache(
     stock_code: str,
     *,
     through_date: Optional[date] = None,
+    adjust: str | None = None,
 ) -> Optional[pd.DataFrame]:
-    """从 daily_cache 读取日线，返回含 date、time 列的 DataFrame（time 为毫秒时间戳）。"""
-    path = csv_path_for_code(stock_code)
+    """从 daily_cache[/daily_cache_qfq] 读取日线，返回含 date、time 列的 DataFrame。"""
+    path = csv_path_for_code(stock_code, adjust=adjust)
     if not os.path.isfile(path):
         return None
     try:
         mtime = os.path.getmtime(path)
     except Exception:
         mtime = None
-    cache_key = (str(stock_code), mtime)
+    cache_key = (str(stock_code), normalize_adjust(adjust), mtime)
     full_df = _DAILY_DF_CACHE.get(cache_key)
     if full_df is None:
         try:
@@ -140,13 +158,31 @@ def load_daily_from_cache(
     return full_df
 
 
+def _xtdata_fallback_enabled() -> bool:
+    """仅 qmt_mode=mini 时允许本机 xtquant 补日线；builtin/standalone 禁止。"""
+    try:
+        from strategy_generator_app.qmt_mode_config import allow_xtdata_daily_fallback
+
+        return bool(allow_xtdata_daily_fallback())
+    except Exception:
+        try:
+            from utils.qmt_execution_config import get_qmt_mode
+
+            return get_qmt_mode() == "mini"
+        except Exception:
+            return False
+
+
 def load_daily_xtdata_fallback(
     stock_code: str,
     *,
     through_date: Optional[date] = None,
     history_days: int = 1095,
 ) -> Optional[pd.DataFrame]:
-    """xtdata 回退：本地 cache 缺失或偏短时补拉。"""
+    """xtdata 回退：本地 cache 缺失或偏短时补拉（仅 mini 模式）。"""
+    if not _xtdata_fallback_enabled():
+        logger.debug("[%s] xtdata 回退已关闭（qmt_mode≠mini）", stock_code)
+        return None
     try:
         import xtquant.xtdata as xtdata
     except Exception as e:
@@ -413,20 +449,157 @@ def backfill_daily_gaps_from_local_ticks(
     return ok
 
 
+def _as_python_date(v: Any) -> Optional[date]:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v
+    try:
+        ts = pd.Timestamp(v)
+        if pd.isna(ts):
+            return None
+        return ts.date()
+    except Exception:
+        return None
+
+
+def _normalize_daily_dates(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["date"] = [_as_python_date(x) for x in out["date"]]
+    out = out.dropna(subset=["date"])
+    if out.empty:
+        return out
+    if "time" not in out.columns:
+        dt = pd.to_datetime(out["date"])
+        out["time"] = (dt.astype("int64") // 10**6)
+    return out.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+
+
+def _cache_history_insufficient(
+    df: Optional[pd.DataFrame],
+    through_date: Optional[date],
+    *,
+    min_cal_days: int = _MIN_CACHE_HISTORY_CAL_DAYS,
+) -> bool:
+    """rolling cache 首日太晚时，均线/涨停回溯不够。"""
+    if df is None or getattr(df, "empty", True):
+        return True
+    if through_date is None:
+        return False
+    try:
+        d0 = _as_python_date(df["date"].iloc[0])
+        if d0 is None:
+            return True
+        return (through_date - d0).days < int(min_cal_days)
+    except Exception:
+        return True
+
+
+def _should_merge_daily_full(through_date: Optional[date], cache_df: Optional[pd.DataFrame]) -> bool:
+    if through_date is None:
+        # 未切片：回测常要长历史，有 full 则合并
+        return True
+    if through_date < PREFER_DAILY_FULL_BEFORE:
+        return True
+    return _cache_history_insufficient(cache_df, through_date)
+
+
+def load_daily_bars(
+    stock_code: str,
+    *,
+    through_date: Optional[date] = None,
+    adjust: str | None = None,
+) -> Optional[pd.DataFrame]:
+    """读日线：历史区间合并 daily_full + daily_cache（同日以 cache 为准）。
+
+    adjust: none（默认，不复权）或 qfq（前复权 → daily_full_qfq + daily_cache_qfq）
+    """
+    cache_df = load_daily_from_cache(stock_code, through_date=None, adjust=adjust)
+    if not _should_merge_daily_full(through_date, cache_df):
+        if cache_df is None or getattr(cache_df, "empty", True):
+            return None
+        if through_date is not None:
+            out = cache_df[cache_df["date"] <= through_date]
+            return None if out.empty else out.reset_index(drop=True)
+        return cache_df
+
+    full_code = to_full_stock_code(stock_code)
+    full_path = full_daily_csv_path(stock_code, adjust=adjust)
+    cache_path = csv_path_for_code(stock_code, adjust=adjust)
+    try:
+        full_mtime = os.path.getmtime(full_path) if os.path.isfile(full_path) else None
+    except Exception:
+        full_mtime = None
+    try:
+        cache_mtime = os.path.getmtime(cache_path) if os.path.isfile(cache_path) else None
+    except Exception:
+        cache_mtime = None
+    merge_key = (full_code, full_mtime, cache_mtime)
+    merged = _MERGED_DAILY_CACHE.get(merge_key)
+
+    if merged is None:
+        frames: list = []
+        try:
+            from utils.data_sync_request import load_full_daily
+
+            full_df = load_full_daily(stock_code, through_date=None, adjust=adjust)
+            if full_df is not None and not getattr(full_df, "empty", True):
+                frames.append(_normalize_daily_dates(full_df))
+        except Exception as e:
+            logger.debug("[%s] load_full_daily 失败: %s", stock_code, e)
+        if cache_df is not None and not getattr(cache_df, "empty", True):
+            frames.append(_normalize_daily_dates(cache_df))
+        if not frames:
+            return None
+        if len(frames) == 1:
+            merged = frames[0]
+        else:
+            merged = (
+                pd.concat(frames, ignore_index=True)
+                .sort_values("date")
+                .drop_duplicates(subset=["date"], keep="last")
+                .reset_index(drop=True)
+            )
+        _MERGED_DAILY_CACHE[merge_key] = merged
+        while len(_MERGED_DAILY_CACHE) > _MERGED_DAILY_CACHE_MAX:
+            try:
+                _MERGED_DAILY_CACHE.pop(next(iter(_MERGED_DAILY_CACHE)))
+            except Exception:
+                break
+
+    if merged is None or merged.empty:
+        return None
+    if through_date is not None:
+        out = merged[merged["date"] <= through_date]
+        return None if out.empty else out.reset_index(drop=True)
+    return merged
+
+
 def load_daily_dataframe(
     stock_code: str,
     *,
     through_date: Optional[date] = None,
+    adjust: str | None = None,
     allow_xtdata_fallback: bool = True,
     allow_on_demand: bool = True,
     on_demand_timeout_sec: Optional[float] = None,
 ) -> Optional[pd.DataFrame]:
-    """优先 daily_cache；偏旧/缺失时可先用本地 tick 补洞，再请求大 QMT 同步；mini 可选 xtdata 回退。
+    """优先 daily_cache；历史日合并 daily_full。adjust=qfq 时读 *_qfq 目录。"""
+    # 历史选股：rolling cache 不够长时直接用 full+cache 合并结果
+    try:
+        hist = load_daily_bars(stock_code, through_date=through_date, adjust=adjust)
+        if hist is not None and not getattr(hist, "empty", True):
+            if through_date is None or through_date < PREFER_DAILY_FULL_BEFORE:
+                return hist
+            if not _cache_history_insufficient(hist, through_date):
+                # 合并后已够长；若末日也覆盖 through_date 则可用
+                last = _as_python_date(hist["date"].iloc[-1])
+                if last is not None and through_date is not None and last >= through_date:
+                    return hist
+    except Exception as e:
+        logger.debug("[%s] load_daily_bars 异常: %s", stock_code, e)
 
-    注意：仅有 CSV 不够。若末日早于期望交易日（如全市场停在上上周），必须补齐，
-    否则图表/昨收会把过期收盘价当成昨收（例：603137 显示 28.98）。
-    """
-    df = load_daily_from_cache(stock_code, through_date=through_date)
+    df = load_daily_from_cache(stock_code, through_date=through_date, adjust=adjust)
     cache_fresh = df is not None and not getattr(df, "empty", True)
     if cache_fresh and through_date is not None:
         try:
@@ -438,7 +611,7 @@ def load_daily_dataframe(
         except Exception:
             pass
 
-    if cache_fresh:
+    if cache_fresh and not _cache_history_insufficient(df, through_date):
         return df
 
     # 本地 tick 已有缺日时，先补日线，避免盘中干等 QMT 日线队列
@@ -458,7 +631,7 @@ def load_daily_dataframe(
     except Exception as e:
         logger.debug("[%s] tick 补日线异常: %s", stock_code, e)
 
-    if allow_on_demand:
+    if allow_on_demand and normalize_adjust(adjust) == "none":
         try:
             from utils.data_sync_request import ensure_daily_dataframe, use_on_demand_qmt_sync
         except ImportError:

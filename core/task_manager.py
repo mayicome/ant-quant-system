@@ -1139,7 +1139,9 @@ class TaskManager(QObject):
                 self._tasks_loaded = True
                 if not self._block_tasks_updated_signal:
                     self.tasks_updated.emit()
-                self._sync_rules_armed_if_builtin()
+                # 构造阶段尚未 set_qmt_adapter，此时 watch 一定是空的；等持仓到达后再写一次即可
+                if getattr(self, "qmt_adapter", None) is not None:
+                    self._sync_rules_armed_if_builtin()
                 return tasks
             except Exception as e:
                 self.logger.error(f"加载任务文件失败：{str(e)}")
@@ -1152,7 +1154,8 @@ class TaskManager(QObject):
             self._tasks_loaded = True
             if not self._block_tasks_updated_signal:
                 self.tasks_updated.emit()
-            self._sync_rules_armed_if_builtin()
+            if getattr(self, "qmt_adapter", None) is not None:
+                self._sync_rules_armed_if_builtin()
             return []
     
     def _sync_rules_armed_if_builtin(self) -> None:
@@ -2628,11 +2631,20 @@ class TaskManager(QObject):
             return True  # 出错时允许启动
 
     def update_pre_close_price(self, stock_code, price):
-        """更新昨收盘价"""
+        """更新昨收盘价。值未变则不写、不打日志，避免内置行情每秒轮询刷屏。"""
         if not hasattr(self, 'pre_close_prices'):
             self.pre_close_prices = {}
-        self.pre_close_prices[stock_code] = price
-        self.logger.debug(f"[价格管理] 更新 {stock_code} 昨收盘价: {price}")
+        try:
+            new_px = float(price or 0)
+        except Exception:
+            return
+        if new_px <= 0:
+            return
+        old_px = float(self.pre_close_prices.get(stock_code, 0) or 0)
+        if abs(new_px - old_px) <= 1e-9:
+            return
+        self.pre_close_prices[stock_code] = new_px
+        self.logger.debug(f"[价格管理] 更新 {stock_code} 昨收盘价: {new_px}")
 
     def get_pre_close_price(self, stock_code):
         """获取会话基准昨收（盘后自动切到今日收盘作次日基准）。"""

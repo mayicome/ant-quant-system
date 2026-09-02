@@ -386,7 +386,10 @@ def _ticks_for_simulation_or_fail(
     tick_coverage_log: List[Dict[str, Any]],
     scope: str = "意图",
 ) -> Optional[Dict[str, Any]]:
-    """意图撮合前加载 tick：有 tick 的照常撮合；仅当全部缺 tick 时返回 None（不降级开盘价）。"""
+    """意图撮合前加载 tick：有 tick 的照常撮合；仅当全部缺 tick 时返回 None。
+
+    注意：tick 主路径可另走「缺 tick → 日线兜底」；本函数仍返回 None 表示无一只有 tick。
+    """
     uniq = sorted({c for c in (_norm_code6_simple(x) for x in (codes or [])) if c})
     if not uniq:
         return {}
@@ -400,6 +403,106 @@ def _ticks_for_simulation_or_fail(
             failure_reasons.append(f"{msg}，无法回测")
             return None
     return _ticks_subset(cache, _with_tick if _with_tick else uniq)
+
+
+def _simulate_fills_tick_with_ohlc_fallback(
+    intents: List[Dict[str, Any]],
+    *,
+    fill_day: date,
+    seg_name: str,
+    cash: float,
+    positions: Dict[str, Dict[str, Any]],
+    day_ticks_cache: Dict[str, Any],
+    load_ticks_for_codes: Any,
+    failure_reasons: List[str],
+    tick_coverage_log: List[Dict[str, Any]],
+    run_start_time: str,
+    run_end_time: str,
+    get_daily_ohlc_for_codes: Any,
+    simulate_fills_with_ticks: Any,
+    simulate_fills_same_day_ohlc: Any,
+) -> Tuple[List[Dict[str, Any]], float, Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """有 tick 走 tick 撮合；缺 tick 的意图用同日日线兜底（含 best_sell / 强清近似）。"""
+    intents = list(intents or [])
+    if not intents:
+        return [], cash, positions, []
+
+    codes = sorted(
+        {
+            c
+            for c in (_norm_code6_simple(i.get("stock_code")) for i in intents)
+            if c
+        }
+    )
+    _preload_day_ticks(day_ticks_cache, codes, fill_day, load_ticks_for_codes)
+    _append_tick_coverage(tick_coverage_log, fill_day, "意图", codes, day_ticks_cache)
+    with_tick, missing = _tick_coverage_split(codes, day_ticks_cache)
+
+    tick_intents: List[Dict[str, Any]] = []
+    ohlc_intents: List[Dict[str, Any]] = []
+    for it in intents:
+        c6 = _norm_code6_simple(it.get("stock_code"))
+        if c6 and c6 in with_tick:
+            tick_intents.append(it)
+        else:
+            ohlc_intents.append(it)
+
+    day_trades: List[Dict[str, Any]] = []
+    remaining: List[Dict[str, Any]] = []
+
+    if tick_intents:
+        ticks_by_stock = _ticks_subset(day_ticks_cache, with_tick)
+        trades_t, cash, positions, rem_t = simulate_fills_with_ticks(
+            tick_intents,
+            ticks_by_stock,
+            fill_day,
+            cash,
+            positions,
+            run_start_time=run_start_time,
+            run_end_time=run_end_time,
+        )
+        day_trades.extend(trades_t)
+        remaining.extend(rem_t or [])
+
+    if ohlc_intents:
+        ohlc_codes = sorted(
+            {
+                c
+                for c in (_norm_code6_simple(i.get("stock_code")) for i in ohlc_intents)
+                if c
+            }
+        )
+        ohlc_map = get_daily_ohlc_for_codes(ohlc_codes, fill_day) or {}
+        trades_o, cash, positions, rem_o = simulate_fills_same_day_ohlc(
+            ohlc_intents, ohlc_map, fill_day, cash, positions
+        )
+        for t in trades_o or []:
+            if not isinstance(t, dict):
+                continue
+            ti = str(t.get("trigger_info") or "").strip()
+            if not ti.startswith("[缺tick"):
+                t["trigger_info"] = f"[缺tick·日线兜底] {ti}".strip()
+            day_trades.append(t)
+        remaining.extend(rem_o or [])
+        miss_show = ",".join((missing or ohlc_codes)[:12])
+        if len(missing or ohlc_codes) > 12:
+            miss_show += "…"
+        n_fill = len(trades_o or [])
+        if n_fill > 0:
+            failure_reasons.append(
+                f"[{fill_day}] [{seg_name}] 缺 tick {len(ohlc_codes)} 只已日线兜底"
+                f"（成交 {n_fill} 笔）：{miss_show}"
+            )
+        elif not ohlc_map:
+            failure_reasons.append(
+                f"[{fill_day}] [{seg_name}] 缺 tick 且无日线 OHLC，无法兜底：{miss_show}"
+            )
+        else:
+            failure_reasons.append(
+                f"[{fill_day}] [{seg_name}] 缺 tick 已尝试日线兜底但未成交：{miss_show}"
+            )
+
+    return day_trades, cash, positions, remaining
 
 
 def _apply_generation_time_prices_from_ticks(
@@ -1232,29 +1335,28 @@ def run_backtest_segmented(
                 # 2) 在 seg1 窗口内分两段撮合：seg1_rs..seg2_gen 与 seg2_gen..seg1_re
                 if intents1:
                     day_had_any_intent = True
-                    codes_ticks1 = list({i.get("stock_code") for i in intents1 if i.get("stock_code")})
-                    _preload_day_ticks(day_ticks_cache, codes_ticks1, fill_day, load_ticks_for_codes)
-                    ticks_by_stock = _ticks_for_simulation_or_fail(
-                        codes_ticks1,
-                        day_ticks_cache,
+                    trades_a, cash, positions, rem_a = _simulate_fills_tick_with_ohlc_fallback(
+                        intents1,
                         fill_day=fill_day,
                         seg_name=seg1_name,
+                        cash=cash,
+                        positions=positions,
+                        day_ticks_cache=day_ticks_cache,
+                        load_ticks_for_codes=load_ticks_for_codes,
                         failure_reasons=failure_reasons,
                         tick_coverage_log=tick_coverage_log,
+                        run_start_time=seg1_rs,
+                        run_end_time=seg2_gen,
+                        get_daily_ohlc_for_codes=get_daily_ohlc_for_codes,
+                        simulate_fills_with_ticks=simulate_fills_with_ticks,
+                        simulate_fills_same_day_ohlc=simulate_fills_same_day_ohlc,
                     )
-                    if ticks_by_stock is not None:
-                        trades_a, cash, positions, rem_a = simulate_fills_with_ticks(
-                            intents1, ticks_by_stock, fill_day, cash, positions,
-                            run_start_time=seg1_rs, run_end_time=seg2_gen,
-                        )
-                        all_trades.extend(trades_a)
-                        note_buy_fills_on_baseline(positions_baseline, trades_a)
-                        prune_baseline_if_flat(positions_baseline, positions)
-                        _update_first_buy_dates_from_trades(
-                            first_buy_date_by_code, trades_a, fill_day, positions
-                        )
-                    else:
-                        rem_a = []
+                    all_trades.extend(trades_a)
+                    note_buy_fills_on_baseline(positions_baseline, trades_a)
+                    prune_baseline_if_flat(positions_baseline, positions)
+                    _update_first_buy_dates_from_trades(
+                        first_buy_date_by_code, trades_a, fill_day, positions
+                    )
                     # 到达 seg2_gen：刷新 prices 并生成 seg2 意图（使用此刻最新价 + 当前持仓/现金）
                     try:
                         _apply_generation_time_prices_from_ticks(
@@ -1309,29 +1411,28 @@ def run_backtest_segmented(
 
                     # seg1 后半段继续撮合（用未成交 rem_a）
                     if rem_a:
-                        codes_ticks2 = list({i.get("stock_code") for i in rem_a if i.get("stock_code")})
-                        _preload_day_ticks(day_ticks_cache, codes_ticks2, fill_day, load_ticks_for_codes)
-                        ticks_by_stock2 = _ticks_for_simulation_or_fail(
-                            codes_ticks2,
-                            day_ticks_cache,
+                        trades_b, cash, positions, rem_b = _simulate_fills_tick_with_ohlc_fallback(
+                            rem_a,
                             fill_day=fill_day,
                             seg_name=seg1_name,
+                            cash=cash,
+                            positions=positions,
+                            day_ticks_cache=day_ticks_cache,
+                            load_ticks_for_codes=load_ticks_for_codes,
                             failure_reasons=failure_reasons,
                             tick_coverage_log=tick_coverage_log,
+                            run_start_time=seg2_gen,
+                            run_end_time=seg1_re,
+                            get_daily_ohlc_for_codes=get_daily_ohlc_for_codes,
+                            simulate_fills_with_ticks=simulate_fills_with_ticks,
+                            simulate_fills_same_day_ohlc=simulate_fills_same_day_ohlc,
                         )
-                        if ticks_by_stock2 is not None:
-                            trades_b, cash, positions, rem_b = simulate_fills_with_ticks(
-                                rem_a, ticks_by_stock2, fill_day, cash, positions,
-                                run_start_time=seg2_gen, run_end_time=seg1_re,
-                            )
-                            all_trades.extend(trades_b)
-                            note_buy_fills_on_baseline(positions_baseline, trades_b)
-                            prune_baseline_if_flat(positions_baseline, positions)
-                            _update_first_buy_dates_from_trades(
-                                first_buy_date_by_code, trades_b, fill_day, positions
-                            )
-                        else:
-                            rem_b = []
+                        all_trades.extend(trades_b)
+                        note_buy_fills_on_baseline(positions_baseline, trades_b)
+                        prune_baseline_if_flat(positions_baseline, positions)
+                        _update_first_buy_dates_from_trades(
+                            first_buy_date_by_code, trades_b, fill_day, positions
+                        )
                     else:
                         rem_b = []
 
@@ -1341,30 +1442,31 @@ def run_backtest_segmented(
                         effective2 = rem_b + (intents2 or [])
                     if effective2:
                         day_had_any_intent = True
-                        codes_ticks3 = list({i.get("stock_code") for i in effective2 if i.get("stock_code")})
-                        _preload_day_ticks(day_ticks_cache, codes_ticks3, fill_day, load_ticks_for_codes)
-                        ticks_by_stock3 = _ticks_for_simulation_or_fail(
-                            codes_ticks3,
-                            day_ticks_cache,
+                        trades_c, cash, positions, remaining2 = _simulate_fills_tick_with_ohlc_fallback(
+                            effective2,
                             fill_day=fill_day,
                             seg_name=seg2_name,
+                            cash=cash,
+                            positions=positions,
+                            day_ticks_cache=day_ticks_cache,
+                            load_ticks_for_codes=load_ticks_for_codes,
                             failure_reasons=failure_reasons,
                             tick_coverage_log=tick_coverage_log,
+                            run_start_time=seg2_rs,
+                            run_end_time=seg2_re,
+                            get_daily_ohlc_for_codes=get_daily_ohlc_for_codes,
+                            simulate_fills_with_ticks=simulate_fills_with_ticks,
+                            simulate_fills_same_day_ohlc=simulate_fills_same_day_ohlc,
                         )
-                        if ticks_by_stock3 is not None:
-                            trades_c, cash, positions, remaining2 = simulate_fills_with_ticks(
-                                effective2, ticks_by_stock3, fill_day, cash, positions,
-                                run_start_time=seg2_rs, run_end_time=seg2_re,
-                            )
-                            all_trades.extend(trades_c)
-                            note_buy_fills_on_baseline(positions_baseline, trades_c)
-                            prune_baseline_if_flat(positions_baseline, positions)
-                            _update_first_buy_dates_from_trades(
-                                first_buy_date_by_code, trades_c, fill_day, positions
-                            )
-                            pending_intents = remaining2 if carry_over_pending_intents else []
-                        else:
-                            pending_intents = []
+                        all_trades.extend(trades_c)
+                        note_buy_fills_on_baseline(positions_baseline, trades_c)
+                        prune_baseline_if_flat(positions_baseline, positions)
+                        _update_first_buy_dates_from_trades(
+                            first_buy_date_by_code, trades_c, fill_day, positions
+                        )
+                        pending_intents = remaining2 if carry_over_pending_intents else []
+                    else:
+                        pending_intents = []
 
                 # 本日已按插入生成逻辑处理完两段，跳过旧的逐段串行逻辑
                 #（仍会走日末盯市与权益曲线）
@@ -1556,73 +1658,68 @@ def run_backtest_segmented(
                             f"[{fill_day}] [{seg_name}] 日线撮合：意图标的均无 OHLC"
                         )
                 elif use_tick_level_eff:
-                    codes_for_ticks = list({
-                        (c or "").strip().zfill(6) if len((c or "").strip()) < 6 else (c or "").strip()[:6]
-                        for c in [i.get("stock_code") for i in effective_intents]
-                    })
-                    _preload_day_ticks(day_ticks_cache, codes_for_ticks, fill_day, load_ticks_for_codes)
-                    ticks_by_stock = _ticks_for_simulation_or_fail(
-                        codes_for_ticks,
-                        day_ticks_cache,
+                    _before_n = len(all_trades)
+                    day_trades, cash, positions, remaining_intents = _simulate_fills_tick_with_ohlc_fallback(
+                        effective_intents,
                         fill_day=fill_day,
                         seg_name=seg_name,
+                        cash=cash,
+                        positions=positions,
+                        day_ticks_cache=day_ticks_cache,
+                        load_ticks_for_codes=load_ticks_for_codes,
                         failure_reasons=failure_reasons,
                         tick_coverage_log=tick_coverage_log,
+                        run_start_time=strategy_run_start_time,
+                        run_end_time=strategy_run_end_time,
+                        get_daily_ohlc_for_codes=get_daily_ohlc_for_codes,
+                        simulate_fills_with_ticks=simulate_fills_with_ticks,
+                        simulate_fills_same_day_ohlc=simulate_fills_same_day_ohlc,
                     )
-                    if ticks_by_stock is not None:
-                        _before_n = len(all_trades)
-                        day_trades, cash, positions, remaining_intents = simulate_fills_with_ticks(
-                            effective_intents, ticks_by_stock, fill_day, cash, positions,
-                            run_start_time=strategy_run_start_time,
-                            run_end_time=strategy_run_end_time,
+                    all_trades.extend(day_trades)
+                    note_buy_fills_on_baseline(positions_baseline, day_trades)
+                    prune_baseline_if_flat(positions_baseline, positions)
+                    _record_filled_legs_from_trades(seg, day_trades)
+                    _update_first_buy_dates_from_trades(
+                        first_buy_date_by_code, day_trades, fill_day, positions
+                    )
+                    pending_intents = remaining_intents if carry_over_pending_intents else []
+                    if len(day_trades) == 0:
+                        # 关键诊断：分段窗口内未成交，记录意图概况，便于定位“窗口/条件/无tick”等问题
+                        rts = sorted(set(((i.get("rule_type") or "").strip() for i in (effective_intents or []))) )
+                        failure_reasons.append(
+                            f"[{fill_day}] [{seg_name}] 窗口 {strategy_run_start_time}–{strategy_run_end_time} 未产生成交；"
+                            f"意图数={len(effective_intents)} 类型={rts} "
+                            f"remaining={len(remaining_intents or [])} trades_total+={len(all_trades) - _before_n}"
                         )
-                        all_trades.extend(day_trades)
-                        note_buy_fills_on_baseline(positions_baseline, day_trades)
-                        prune_baseline_if_flat(positions_baseline, positions)
-                        _record_filled_legs_from_trades(seg, day_trades)
-                        _update_first_buy_dates_from_trades(
-                            first_buy_date_by_code, day_trades, fill_day, positions
-                        )
-                        pending_intents = remaining_intents if carry_over_pending_intents else []
-                        if len(day_trades) == 0:
-                            # 关键诊断：分段窗口内未成交，记录意图概况，便于定位“窗口/条件/无tick”等问题
-                            rts = sorted(set(((i.get("rule_type") or "").strip() for i in (effective_intents or []))) )
-                            failure_reasons.append(
-                                f"[{fill_day}] [{seg_name}] 窗口 {strategy_run_start_time}–{strategy_run_end_time} 未产生成交；"
-                                f"意图数={len(effective_intents)} 类型={rts} 读取tick标的数={len(ticks_by_stock)} "
-                                f"remaining={len(remaining_intents or [])} trades_total+={len(all_trades) - _before_n}"
-                            )
-                            # best_buy/best_sell 细诊断：说明是“未触发/未回落到位/连续命中不足”
-                            try:
-                                details = []
-                                for inv in (remaining_intents or [])[:8]:
-                                    rt = (inv.get("rule_type") or "").strip()
-                                    if rt not in ("best_sell", "best_buy"):
-                                        continue
-                                    dbg = inv.get("_sim_debug") or {}
-                                    code = inv.get("stock_code") or ""
-                                    if rt == "best_sell":
-                                        details.append(
-                                            f"  - {code} best_sell trigger={inv.get('trigger_price')} drop={inv.get('drop_percent')}% "
-                                            f"triggered={dbg.get('triggered')} max_seen={dbg.get('max_seen')} highest={dbg.get('highest')} "
-                                            f"last_fallback={dbg.get('last_fallback')} below_fallback={dbg.get('times_below_fallback')} "
-                                            f"max_consecutive_hits={dbg.get('max_consecutive_hits')}"
-                                            f" min_seen={dbg.get('min_seen')} min_after_trigger={dbg.get('min_after_trigger')} "
-                                            f"min_after_highest={dbg.get('min_after_highest')} fixed_fallback={dbg.get('last_fixed_fallback')}"
-                                            f" | base={inv.get('debug_base_high')} pre={inv.get('debug_pre_close')} latest={inv.get('debug_latest')} mult={inv.get('debug_mult')}"
-                                        )
-                                    else:
-                                        details.append(
-                                            f"  - {code} best_buy trigger={inv.get('trigger_price')} rise={inv.get('rise_percent')}% "
-                                            f"triggered={dbg.get('triggered')} min_seen={dbg.get('min_seen')} lowest={dbg.get('lowest')} "
-                                            f"max_seen={dbg.get('max_seen')}"
-                                        )
-                                if details:
-                                    failure_reasons.append("[诊断] 弹性规则未成交细节：\n" + "\n".join(details))
-                            except Exception:
-                                pass
-                    else:
-                        pending_intents = []
+                        # best_buy/best_sell 细诊断：说明是“未触发/未回落到位/连续命中不足”
+                        try:
+                            details = []
+                            for inv in (remaining_intents or [])[:8]:
+                                rt = (inv.get("rule_type") or "").strip()
+                                if rt not in ("best_sell", "best_buy"):
+                                    continue
+                                dbg = inv.get("_sim_debug") or {}
+                                code = inv.get("stock_code") or ""
+                                if rt == "best_sell":
+                                    details.append(
+                                        f"  - {code} best_sell trigger={inv.get('trigger_price')} drop={inv.get('drop_percent')}% "
+                                        f"triggered={dbg.get('triggered')} max_seen={dbg.get('max_seen')} highest={dbg.get('highest')} "
+                                        f"last_fallback={dbg.get('last_fallback')} below_fallback={dbg.get('times_below_fallback')} "
+                                        f"max_consecutive_hits={dbg.get('max_consecutive_hits')}"
+                                        f" min_seen={dbg.get('min_seen')} min_after_trigger={dbg.get('min_after_trigger')} "
+                                        f"min_after_highest={dbg.get('min_after_highest')} fixed_fallback={dbg.get('last_fixed_fallback')}"
+                                        f" | base={inv.get('debug_base_high')} pre={inv.get('debug_pre_close')} latest={inv.get('debug_latest')} mult={inv.get('debug_mult')}"
+                                    )
+                                else:
+                                    details.append(
+                                        f"  - {code} best_buy trigger={inv.get('trigger_price')} rise={inv.get('rise_percent')}% "
+                                        f"triggered={dbg.get('triggered')} min_seen={dbg.get('min_seen')} lowest={dbg.get('lowest')} "
+                                        f"max_seen={dbg.get('max_seen')}"
+                                    )
+                            if details:
+                                failure_reasons.append("[诊断] 弹性规则未成交细节：\n" + "\n".join(details))
+                        except Exception:
+                            pass
                 else:
                     # 旧日频：次日开盘近似（非 same_day_ohlc）
                     next_prices = next_day_open_prices(codes_union, fill_day, get_historical_prices_for_date)

@@ -6174,7 +6174,7 @@ class StockChartWidget(QWidget):
             min_interval = 0.2
         if now_ts - self._last_price_draw_time >= min_interval:
             self._last_price_draw_time = now_ts
-            self.draw_price_position_chart()
+            self._redraw_price_chart_throttled(force=True)
             elapsed = _time.time() - _t0
             # 主线程 Matplotlib 重绘常 >50ms，50ms 阈值会产生大量误报；仅对明显卡顿记 WARNING
             if elapsed > 0.5 and hasattr(self, 'logger'):
@@ -6202,6 +6202,32 @@ class StockChartWidget(QWidget):
         if isinstance(fresh_rules, list):
             self.rules = fresh_rules
             self.task["params"] = fresh.get("params", self.task.get("params"))
+
+    def _redraw_price_chart_throttled(self, force: bool = False):
+        """非当前页不画；同屏多图时节流，避免 40+ 任务把主线程打满。"""
+        import time as _time
+        try:
+            if hasattr(self, "isVisible") and not self.isVisible():
+                return
+        except Exception:
+            pass
+        now_ts = _time.time()
+        if not hasattr(self, "_last_price_draw_time"):
+            self._last_price_draw_time = 0.0
+        if not force:
+            cols = getattr(self, "current_columns", None) or 1
+            if cols >= 4:
+                min_interval = 0.35
+            elif cols == 3:
+                min_interval = 0.30
+            elif cols == 2:
+                min_interval = 0.25
+            else:
+                min_interval = 0.2
+            if now_ts - self._last_price_draw_time < min_interval:
+                return
+        self._last_price_draw_time = now_ts
+        self.draw_price_position_chart()
     
     def on_tick_data(self, tick_data):
         """
@@ -6303,7 +6329,7 @@ class StockChartWidget(QWidget):
                 if updated:
                     # 按价格从高到低排序
                     self.key_points.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else float('-inf'), reverse=True)
-                    self.draw_price_position_chart()
+                    self._redraw_price_chart_throttled()
         
         # 如果任务已暂停，不执行交易规则（定时清仓由 scheduled_clear_manager 独立调度）
         if self.task_paused:

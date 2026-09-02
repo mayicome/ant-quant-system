@@ -230,7 +230,24 @@ def _backtest_tick_kw() -> Dict[str, bool]:
     }
 
 
-def _load_daily_df(code_6: str, through_date: date) -> tuple[Optional[Any], str]:
+def _backtest_fill_adjust() -> str:
+    """回测撮合 OHLC 复权口径（环境变量 BACKTEST_FILL_ADJUST，默认 none）。"""
+    import os
+
+    try:
+        from utils.daily_adjust_paths import normalize_adjust
+
+        return normalize_adjust(os.environ.get("BACKTEST_FILL_ADJUST") or "none")
+    except Exception:
+        raw = (os.environ.get("BACKTEST_FILL_ADJUST") or "none").strip().lower()
+        return "qfq" if raw in ("qfq", "front", "前复权") else "none"
+
+
+def _load_daily_df(
+    code_6: str,
+    through_date: date,
+    adjust: str | None = None,
+) -> tuple[Optional[Any], str]:
     """返回 (DataFrame|None, source) source: cache | xtdata | miss。"""
     import pandas as pd
 
@@ -244,10 +261,11 @@ def _load_daily_df(code_6: str, through_date: date) -> tuple[Optional[Any], str]
     except Exception:
         ensure_timeout = 8.0
 
-    had_cache = cache_file_exists(code_6)
+    had_cache = cache_file_exists(code_6, adjust=adjust)
     df = load_daily_dataframe(
         code_6,
         through_date=through_date,
+        adjust=adjust,
         allow_xtdata_fallback=_allow_xtdata_fallback(),
         allow_on_demand=True,
         on_demand_timeout_sec=ensure_timeout,
@@ -660,7 +678,7 @@ def get_daily_ohlc_for_codes(
         seen.add(c6)
         codes.append(c6)
     for code_6 in codes:
-        df, _src = _load_daily_df(code_6, as_of_date)
+        df, _src = _load_daily_df(code_6, as_of_date, adjust=_backtest_fill_adjust())
         if df is None or (hasattr(df, "empty") and df.empty):
             continue
         df = _sort_daily_df(df)

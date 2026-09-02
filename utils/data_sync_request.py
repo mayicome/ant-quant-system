@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REQUESTS_PATH = os.path.join(_PROJECT_ROOT, "data", "data_sync_requests.json")
+DAILY_FULL_DIR = os.path.join(_PROJECT_ROOT, "data", "daily_full")
+# 岳教授新建票：上市以来全量日线（与 rolling daily_cache 的 2025-01-01 窗口分离）
+FULL_HISTORY_MODE = "full_history"
+FULL_HISTORY_FROM_DATE = date(1991, 1, 2)
+DEFAULT_FULL_DAILY_TIMEOUT_SEC = 1800.0
 DEFAULT_POLL_SEC = 0.5
 DEFAULT_DAILY_TIMEOUT_SEC = 180
 DEFAULT_TICK_TIMEOUT_SEC = 240
@@ -239,6 +244,64 @@ def prune_stale_daily_failures(*, today: Optional[date] = None) -> int:
     return removed
 
 
+def list_failed_tick_requests(*, limit: int = 200) -> List[Dict[str, str]]:
+    """列出按需分时 failed 记录（供监控详情）。"""
+    data = load_requests()
+    tick_root = data.get("tick") or {}
+    out: List[Dict[str, str]] = []
+    if not isinstance(tick_root, dict):
+        return out
+    for c6, days in tick_root.items():
+        if not isinstance(days, dict):
+            continue
+        for ymd, meta in days.items():
+            if not isinstance(meta, dict):
+                continue
+            st = str(meta.get("status") or "")
+            retries = int(meta.get("retries") or 0)
+            if st != "failed" and not (st == "pending" and retries >= MAX_RETRIES):
+                continue
+            out.append(
+                {
+                    "code": str(c6).zfill(6)[:6],
+                    "day": str(ymd)[:8],
+                    "error": str(meta.get("last_error") or meta.get("status") or "failed")[:120],
+                }
+            )
+    out.sort(key=lambda x: (x["day"], x["code"]), reverse=True)
+    if limit and limit > 0:
+        return out[: int(limit)]
+    return out
+
+
+def clear_failed_tick_requests() -> int:
+    """清除全部按需分时 failed / 重试耗尽记录（监控告警用，不影响 pending）。"""
+    data = load_requests()
+    tick_root = data.get("tick")
+    if not isinstance(tick_root, dict):
+        return 0
+    removed = 0
+    for c6 in list(tick_root.keys()):
+        days = tick_root.get(c6)
+        if not isinstance(days, dict):
+            continue
+        for ymd in list(days.keys()):
+            meta = days.get(ymd)
+            if not isinstance(meta, dict):
+                continue
+            st = str(meta.get("status") or "")
+            retries = int(meta.get("retries") or 0)
+            if st == "failed" or (st == "pending" and retries >= MAX_RETRIES):
+                days.pop(ymd, None)
+                removed += 1
+        if not days:
+            tick_root.pop(c6, None)
+    if removed:
+        save_requests(data)
+        logger.info("已清除按需分时失败记录 %d 条", removed)
+    return removed
+
+
 PoolProgressFn = Optional[Callable[[int, int, str], None]]
 
 
@@ -376,6 +439,57 @@ def _clamp_through_date(through_date: Optional[date]) -> date:
     return end_d
 
 
+def full_daily_csv_path(code: str, adjust: str | None = None) -> str:
+    from utils.daily_cache_reader import full_daily_csv_path as _p
+
+    return _p(code, adjust=adjust)
+
+
+def _full_daily_ready(code: str, through_date: Optional[date]) -> bool:
+    """全量日线落盘就绪：末日够新，且起点接近上市/1991（拒绝近 2 年截断窗）。"""
+    try:
+        import pandas as pd
+    except Exception:
+        return False
+    end_d = _clamp_through_date(through_date)
+    path = full_daily_csv_path(code)
+    if not os.path.isfile(path):
+        return False
+    try:
+        df = pd.read_csv(path, encoding="utf-8")
+    except Exception:
+        return False
+    if df is None or getattr(df, "empty", True) or "date" not in df.columns:
+        return False
+    try:
+        dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+    except Exception:
+        return False
+    if dates.empty or len(dates) < 4:
+        return False
+    last = dates.max().date()
+    first = dates.min().date()
+    expected = _expected_cache_last_date(end_d)
+    if last < expected and last < end_d - timedelta(days=POOL_MAX_DATE_LAG_DAYS):
+        return False
+    # 请求从 1991 起：若首根仍在 2020 年后且不足 ~15 年交易日，区分「次新真全量」与「近 2 年截断窗」
+    if first > date(2020, 1, 1) and len(dates) < 2500:
+        span_cal = (end_d - first).days
+        span_td = max(1, int(span_cal * 250 / 365))
+        # 刚上市可能只有几十根；满约半年仍用 50 下限防近窗截断
+        min_bars = 15 if span_cal <= 180 else 50
+        looks_like_ipo = len(dates) >= max(min_bars, int(span_td * 0.65))
+        if span_cal > 400 * 3 and not looks_like_ipo:
+            return False
+        if (
+            first > date(2023, 1, 1)
+            and len(dates) < 900
+            and not looks_like_ipo
+        ):
+            return False
+    return True
+
+
 def submit_daily_requests(
     codes: Iterable[str],
     *,
@@ -398,6 +512,9 @@ def submit_daily_requests(
         prev_end = _parse_date(prev.get("through_date"))
         prev_retries = int(prev.get("retries") or 0)
         prev_status = str(prev.get("status") or "")
+        # 全量请求勿被普通 rolling 请求覆盖跳过
+        if str(prev.get("mode") or "") == FULL_HISTORY_MODE and prev_status == "pending":
+            continue
         if prev_status == "short_history":
             short_bars = 0
             try:
@@ -419,6 +536,7 @@ def submit_daily_requests(
             and prev_retries < MAX_RETRIES
             and prev_end is not None
             and prev_end >= end_d
+            and str(prev.get("mode") or "") != FULL_HISTORY_MODE
         ):
             continue
         daily[full] = {
@@ -437,6 +555,137 @@ def submit_daily_requests(
             end_s,
         )
     return submitted
+
+
+def submit_full_daily_requests(
+    codes: Iterable[str],
+    *,
+    through_date: Optional[date] = None,
+    from_date: Optional[date] = None,
+    force: bool = False,
+) -> List[str]:
+    """提交「上市以来全量日线」请求 → 大 QMT 内置 download，写入 data/daily_full/。
+
+    与 rolling daily_cache（约从 2025-01-01）分离；供岳教授新建票建档。
+    """
+    prune_stale_daily_failures()
+    end_d = _clamp_through_date(through_date)
+    start_d = from_date or FULL_HISTORY_FROM_DATE
+    end_s = end_d.isoformat()
+    start_s = start_d.isoformat()
+    data = load_requests()
+    daily: Dict[str, Any] = data.setdefault("daily", {})
+    submitted: List[str] = []
+    for raw in codes or []:
+        full = to_full_stock_code(str(raw or ""))
+        if not full:
+            continue
+        if not force and _full_daily_ready(full, end_d):
+            continue
+        prev = daily.get(full) if isinstance(daily.get(full), dict) else {}
+        prev_status = str(prev.get("status") or "")
+        prev_retries = int(prev.get("retries") or 0)
+        if (
+            not force
+            and str(prev.get("mode") or "") == FULL_HISTORY_MODE
+            and prev_status == "pending"
+            and prev_retries < MAX_RETRIES
+        ):
+            # 刷新 through，保持排队
+            meta = dict(prev)
+            meta["through_date"] = end_s
+            meta["from_date"] = start_s
+            meta["requested_at"] = _now_iso()
+            daily[full] = meta
+            continue
+        daily[full] = {
+            "mode": FULL_HISTORY_MODE,
+            "from_date": start_s,
+            "through_date": end_s,
+            "requested_at": _now_iso(),
+            "status": "pending",
+            "retries": 0,
+        }
+        if force:
+            daily[full]["force_refresh"] = True
+        submitted.append(full)
+    if submitted:
+        _clear_soft_miss_cache(submitted)
+        save_requests(data)
+        logger.info(
+            "已提交全量日线请求 %d 只（from=%s through=%s）→ 大 QMT → data/daily_full/",
+            len(submitted),
+            start_s,
+            end_s,
+        )
+    return submitted
+
+
+def ensure_full_daily(
+    code: str,
+    *,
+    through_date: Optional[date] = None,
+    timeout_sec: float = DEFAULT_FULL_DAILY_TIMEOUT_SEC,
+    poll_sec: float = 2.0,
+) -> bool:
+    """提交并等待全量日线落盘；成功返回 True。"""
+    full = to_full_stock_code(code)
+    if not full:
+        return False
+    end_d = _clamp_through_date(through_date)
+    if _full_daily_ready(full, end_d):
+        return True
+    submit_full_daily_requests([full], through_date=end_d)
+    deadline = time.time() + max(30.0, float(timeout_sec))
+    while time.time() < deadline:
+        if _full_daily_ready(full, end_d):
+            return True
+        # 失败耗尽则早退
+        data = load_requests()
+        meta = (data.get("daily") or {}).get(full) or {}
+        if str(meta.get("status") or "") == "failed":
+            logger.warning(
+                "[%s] 全量日线请求失败: %s",
+                full,
+                meta.get("last_error") or "failed",
+            )
+            return False
+        time.sleep(max(0.5, float(poll_sec)))
+    logger.warning("[%s] 等待全量日线超时（%.0fs）", full, timeout_sec)
+    return False
+
+
+def load_full_daily(
+    code: str,
+    *,
+    through_date: Optional[date] = None,
+    adjust: str | None = None,
+) -> Optional["pd.DataFrame"]:
+    """读取 daily_full[/daily_full_qfq]/{code}.csv；不自动提交请求。"""
+    try:
+        import pandas as pd
+    except Exception:
+        return None
+    full = to_full_stock_code(code)
+    path = full_daily_csv_path(full, adjust=adjust)
+    if not os.path.isfile(path):
+        return None
+    try:
+        df = pd.read_csv(path, encoding="utf-8")
+    except Exception as e:
+        logger.warning("[%s] 读取 daily_full 失败: %s", full, e)
+        return None
+    if df is None or df.empty or "date" not in df.columns:
+        return None
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    if through_date is not None:
+        end_d = _clamp_through_date(through_date)
+        df = df[df["date"].dt.date <= end_d]
+    if df.empty:
+        return None
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def submit_tick_requests(

@@ -712,6 +712,12 @@ def _finalize(
     prog["mode"] = mode
     _save_json(progress_path, prog)
     print(f"[done] stocks={len(out)} mode={write_mode}/{mode} -> {out_path}")
+    try:
+        from tools.export_stock_info_to_jsonl import export_stock_info_jsonl
+
+        export_stock_info_jsonl(src_json=out_path)
+    except Exception as e:
+        print("[stock_info jsonl] export failed:", e)
     return out
 
 

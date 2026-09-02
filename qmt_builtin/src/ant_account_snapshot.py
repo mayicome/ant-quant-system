@@ -80,11 +80,14 @@ _KNOWN_DETAIL_ATTRS = (
     "m_dAsset",
     "m_dCash",
     "m_strInstrumentID",
+    "m_strStockCode",
     "m_strExchangeID",
     "m_strInstrumentName",
     "m_nVolume",
     "m_nCanUseVolume",
     "m_nFrozenVolume",
+    "m_nYesterdayVolume",
+    "m_nOnRoadVolume",
     "m_nPosition",
     "m_nCanUsePosition",
     "m_dOpenPrice",
@@ -181,6 +184,9 @@ def _object_row(item):
         ("m_nVolume", "volume"),
         ("m_nPosition", "volume"),
         ("Position", "volume"),
+        ("m_nYesterdayVolume", "yesterday_volume"),
+        ("m_nOnRoadVolume", "on_road_volume"),
+        ("m_strStockCode", "stock_code"),
         ("m_nCanUseVolume", "can_use_volume"),
         ("m_nCanUsePosition", "can_use_volume"),
         ("CanUseVolume", "can_use_volume"),
@@ -233,6 +239,8 @@ def _is_detail_row_obj(item):
         "m_strInstrumentID",
         "m_nVolume",
         "m_nPosition",
+        "m_nYesterdayVolume",
+        "m_nOnRoadVolume",
         "m_dBalance",
         "m_dAvailable",
         "m_strAccountID",
@@ -293,9 +301,18 @@ def _raw_len(raw):
 
 
 def _diagnose_position_parse_miss(pos_raw, pos_rows, parsed_n):
-    """raw 有元素但解析为 0 仓时打印样本字段，便于对照 QMT 对象布局。"""
+    """raw 条数多于解析结果时打印丢行原因。"""
     raw_n = _raw_len(pos_raw)
-    if not raw_n or parsed_n > 0:
+    if not raw_n:
+        return
+    if parsed_n >= int(raw_n or 0) and parsed_n > 0:
+        return
+    drops = list(getattr(_parse_position_rows, "last_drops", None) or [])
+    print(
+        "[交易核心] 持仓解析不全: raw_len=%s rows=%s parsed=%s drops=%s"
+        % (raw_n, len(pos_rows or []), parsed_n, drops[:8])
+    )
+    if parsed_n > 0:
         return
     item = None
     try:
@@ -322,6 +339,8 @@ def _diagnose_position_parse_miss(pos_raw, pos_rows, parsed_n):
             "Position",
             "m_nCanUseVolume",
             "m_strExchangeID",
+            "股票余额",
+            "持仓数量",
         ):
             try:
                 sample[a] = getattr(item, a, None)
@@ -567,9 +586,19 @@ def _parse_account_row(row, account_id):
     return out
 
 
+def _int_qty(row, *keys, default=0):
+    try:
+        return int(float(_pick(row, *keys, default=default) or 0))
+    except (TypeError, ValueError):
+        return int(default or 0)
+
+
 def _parse_position_rows(rows, account_id):
     out = {}
-    for row in rows:
+    drops = []
+    for idx, row in enumerate(rows or []):
+        if not isinstance(row, dict):
+            row = _object_row(row)
         code = _norm_code(
             _pick(
                 row,
@@ -577,43 +606,48 @@ def _parse_position_rows(rows, account_id):
                 "instrumentID",
                 "InstrumentID",
                 "m_strInstrumentID",
+                "m_strStockCode",
                 "code",
                 "证券代码",
+                "代码",
             )
+        )
+        vol = _int_qty(
+            row,
+            "volume",
+            "m_nVolume",
+            "m_nPosition",
+            "Position",
+            "current_qty",
+            "持仓数量",
+            "股票余额",
+            "股份余额",
+            "当前持仓",
+            "nVolume",
+            "qty",
         )
         if not code:
-            continue
-        vol = int(
-            float(
-                _pick(
-                    row,
-                    "volume",
-                    "m_nVolume",
-                    "m_nPosition",
-                    "Position",
-                    "current_qty",
-                    "持仓数量",
-                    default=0,
-                )
-                or 0
+            drops.append(
+                {
+                    "i": idx,
+                    "reason": "no_code",
+                    "keys": list(row.keys())[:18] if isinstance(row, dict) else [],
+                }
             )
-        )
-        if vol <= 0:
             continue
-        can_use = int(
-            float(
-                _pick(
-                    row,
-                    "can_use_volume",
-                    "m_nCanUseVolume",
-                    "m_nCanUsePosition",
-                    "CanUseVolume",
-                    "enable_amount",
-                    "可用数量",
-                    default=vol,
-                )
-                or vol
-            )
+        # 余额为 0 也保留（大 QMT 持仓页会留下当日已清仓行）；股数仍记 0，不用昨仓冒充现仓
+        yest = _int_qty(row, "yesterday_volume", "m_nYesterdayVolume", "昨仓")
+        on_road = _int_qty(row, "on_road_volume", "m_nOnRoadVolume", "在途数量", "在途股份")
+        can_use = _int_qty(
+            row,
+            "can_use_volume",
+            "m_nCanUseVolume",
+            "m_nCanUsePosition",
+            "CanUseVolume",
+            "enable_amount",
+            "可用数量",
+            "可用余额",
+            default=vol,
         )
         open_px = float(
             _pick(
@@ -643,6 +677,16 @@ def _parse_position_rows(rows, account_id):
             )
             or ""
         ).strip()
+        prev = out.get(code)
+        if prev:
+            prev["volume"] = int(prev.get("volume") or 0) + int(vol)
+            prev["can_use_volume"] = int(prev.get("can_use_volume") or 0) + int(can_use)
+            if mv:
+                prev["market_value"] = float(prev.get("market_value") or 0) + float(mv)
+            if name and not prev.get("stock_name"):
+                prev["stock_name"] = name
+            drops.append({"i": idx, "reason": "merged", "code": code, "add_vol": vol})
+            continue
         out[code] = {
             "account_id": str(account_id),
             "stock_code": code,
@@ -651,7 +695,10 @@ def _parse_position_rows(rows, account_id):
             "can_use_volume": can_use,
             "open_price": open_px,
             "market_value": mv,
+            "yesterday_volume": yest,
+            "on_road_volume": on_road,
         }
+    _parse_position_rows.last_drops = drops
     return out
 
 
@@ -1525,12 +1572,17 @@ def on_position_callback(ContextInfo, positionInfo):
         )
         if not code:
             return
+        parsed = _parse_position_rows([row], aid)
+        if not parsed:
+            return
+        rec = parsed.get(code) or next(iter(parsed.values()), None)
+        if rec is None:
+            return
         if vol <= 0:
-            _CACHED_POSITIONS.pop(code, None)
-        else:
-            parsed = _parse_position_rows([row], aid)
-            if parsed:
-                _CACHED_POSITIONS.update(parsed)
+            rec["volume"] = 0
+            rec["can_use_volume"] = 0
+            rec["market_value"] = 0.0
+        _CACHED_POSITIONS[code] = rec
         try:
             import ant_position_entry_dates as _ped
 
@@ -1920,14 +1972,9 @@ def _probe_bj_sectors_once(ContextInfo):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, out_path)
-        jing = int((sector_counts.get("\u4eac\u5e02A\u80a1") or {}).get("n") or 0)
-        hsj = int((sector_counts.get("\u6caa\u6df1\u4eacA\u80a1") or {}).get("n") or 0)
-        print(
-            "[交易核心] 北交所板块探测 京市A股=%s 沪深京A股=%s matched=%s"
-            % (jing, hsj, len(matched_names))
-        )
-    except Exception as e:
-        print("[交易核心] 北交所板块探测失败: %s" % e)
+        # 探测结果已写入 bj_sector_probe.json，不再刷启动日志
+    except Exception:
+        pass
 
 
 def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id="", order_raw=None, deal_raw=None):
@@ -2012,6 +2059,7 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
         "row_len": len(pos_rows or []),
         "parsed": len(positions or {}) if pos_raw is not None else len((_CACHED_POSITIONS or {})),
         "kept_cache": kept_pos_cache,
+        "drops": list(getattr(_parse_position_rows, "last_drops", None) or [])[:8],
         "updated_at": _now_iso(),
     }
     if deal_raw is not None:

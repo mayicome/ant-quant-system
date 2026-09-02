@@ -4,7 +4,7 @@
 流程：
   1) 东财 push2 拉全市场当时涨幅 + 主力净流入
   2) 东财拉行业/概念涨幅榜
-  3) 硬过滤：主板涨幅>=7%，创/科/北>=13%
+  3) 硬过滤：主板涨幅>=6%，创/科/北>=10%
   4) 对硬通过票加载日线，算前10日/均线与满足条件
   5) 导出 xls 到 history_data/马总选股逻辑/
 
@@ -62,6 +62,12 @@ def _persist_snapshot(as_of: date) -> None:
         out_p = flow_csv_path(as_of.strftime("%Y%m%d"), str(ROOT / "history_data"))
         ranked.to_csv(out_p, index=False, encoding="utf-8-sig")
         print("  wrote", out_p)
+        try:
+            from tools.export_main_flow_to_jsonl import write_daily_main_flow_jsonl_shard
+
+            write_daily_main_flow_jsonl_shard(out_p, as_of.strftime("%Y%m%d"))
+        except Exception as e:
+            print("  main_flow jsonl fail:", e)
 
     print("persist: board ranks …")
     os.makedirs(BOARD_DIR, exist_ok=True)
@@ -137,8 +143,8 @@ def main() -> None:
         _persist_snapshot(as_of)
 
     select, ns = _load_select()
-    main_lo = float(ns.get("MAIN_PCT_LO", 7.0))
-    growth_lo = float(ns.get("GROWTH_PCT_LO", 13.0))
+    main_lo = float(ns.get("MAIN_PCT_LO", 6.0))
+    growth_lo = float(ns.get("GROWTH_PCT_LO", 10.0))
 
     def is_growth(c6: str) -> bool:
         return c6.startswith(("300", "301", "688", "689", "8", "4", "920"))
@@ -204,6 +210,77 @@ def main() -> None:
         rows.append(row)
 
     print("selected", len(rows), "meet", meet_n)
+    if rows:
+        from utils.ma_zong_logic2_scan import (
+            format_qualifying_board_line,
+            format_board_rank_line,
+            summarize_qualifying_boards,
+        )
+
+        meet_rows = [r for r in rows if r.get("满足条件")]
+        hard_like = [
+            {
+                "extra": r,
+                "qualifying_board_text": format_qualifying_board_line(r),
+            }
+            for r in rows
+        ]
+        qb = summarize_qualifying_boards(hard_like)
+        print("硬门槛通过票中，满足排名门槛的板块（行业前32/概念前8）：")
+        if qb:
+            ind = [x for x in qb if x[0] == "行业"]
+            con = [x for x in qb if x[0] == "概念"]
+            if ind:
+                print("  行业（%d）：" % len(ind))
+                for _kind, name, rk, cnt in ind:
+                    print("    #%d %s（硬过票 %d 只）" % (rk, name, cnt))
+            if con:
+                print("  概念（%d）：" % len(con))
+                for _kind, name, rk, cnt in con:
+                    print("    #%d %s（硬过票 %d 只）" % (rk, name, cnt))
+        else:
+            print("  （无）")
+        print(
+            "硬门槛通过（共 %d 只，其中满足条件 %d 只）：" % (len(rows), len(meet_rows))
+        )
+        for r in sorted(rows, key=lambda x: str(x.get("股票代码") or "")):
+            tag = "满足" if r.get("满足条件") else "未全满足"
+            qual = format_qualifying_board_line(r)
+            board = format_board_rank_line(r)
+            print(
+                "  %s %s %s [%s] 涨幅=%s%% 净流入=%s万"
+                % (
+                    "✓" if r.get("满足条件") else "·",
+                    r.get("股票代码"),
+                    r.get("股票名称") or "",
+                    tag,
+                    r.get("当时涨跌幅"),
+                    r.get("主力净流入_万元"),
+                )
+            )
+            if qual:
+                print("    满足板块: %s" % qual)
+            elif board:
+                print("    满足板块: （无，所属最高 %s）" % board)
+            else:
+                print("    满足板块: （无）")
+            if board and qual:
+                print("    所属最高: %s" % board)
+            reason = str(r.get("不满足的原因") or "").strip()
+            if reason:
+                print("    不满足: %s" % reason)
+            cond_bits = []
+            for k, label in (
+                ("条件_行业或概念排名达标", "板块排名"),
+                ("条件_主力净流入>=3500万", "主力净流入"),
+                ("条件_前10日无大涨", "前10日无大涨"),
+                ("条件_价站上MA5且MA20", "价>MA5且MA20"),
+                ("条件_当天未涨停过", "当天未涨停"),
+            ):
+                v = r.get(k)
+                cond_bits.append("%s:%s" % (label, "是" if v else "否"))
+            if cond_bits:
+                print("    软门槛: %s" % " | ".join(cond_bits))
     stamp = datetime.now().strftime("%H%M%S")
     out = OUT_DIR / ("选股结果_马总选股逻辑2_%s_盘中%s.xls" % (as_of.isoformat(), stamp))
     _write_xls(out, rows)

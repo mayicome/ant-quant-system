@@ -1333,9 +1333,10 @@ class SectorStockFilterThread(QThread):
         through_date: Optional[date] = None,
         apply_as_of_slice: bool = True,
     ) -> Optional[pd.DataFrame]:
-        """获取日线数据（约3年历史）。
+        """获取日线数据。
 
-        优先读 data/daily_cache/{code}.csv（大 QMT 内置同步）；缺失时回退 xtdata。
+        经 load_daily_dataframe：近期优先 daily_cache；历史日（或 cache 回溯不足）
+        合并 data/daily_full；缺失时再回退 xtdata（mini）。
         """
         try:
             if through_date is not None:
@@ -2974,7 +2975,9 @@ class SectorStockFilterDialog(QDialog):
             merged.setdefault(k, "")
 
         date_ref = (
-            merged.get("涨停日期")
+            merged.get("涨停锚点日")
+            or merged.get("涨停日期")
+            or merged.get("涨停日")
             or merged.get("放量反包日期")
             or merged.get("信号日期")
             or as_of
@@ -3030,25 +3033,27 @@ class SectorStockFilterDialog(QDialog):
                         "主力净流入表无有效金额",
                     ) or remark.startswith("加载主力净流入失败"):
                         merged["主力净流入备注"] = ""
-                    # 同步万元与条件列，避免列表有展示值但条件/备注仍空白或误报
-                    wan_empty = merged.get("主力净流入_万元") in ("", None)
-                    if wan_empty:
-                        yuan = (info or {}).get("value")
-                        if yuan is not None:
+                    # 与 date_ref（涨停日优先）同一份 CSV 同步万元/条件列
+                    yuan = (info or {}).get("value")
+                    if yuan is not None:
+                        try:
+                            wan = float(yuan) / 1e4
+                            merged["主力净流入_万元"] = round(wan, 2)
+                            thr = merged.get("MIN_INFLOW_WAN")
                             try:
-                                wan = float(yuan) / 1e4
-                                merged["主力净流入_万元"] = round(wan, 2)
-                                thr = merged.get("MIN_INFLOW_WAN")
-                                try:
-                                    thr_f = float(thr) if thr not in ("", None) else 3000.0
-                                except (TypeError, ValueError):
-                                    thr_f = 3000.0
-                                if "条件_主力净流入>=3000万" in merged or "条件_主力净流入>=5000万" in merged:
-                                    for ck in list(merged.keys()):
-                                        if str(ck).startswith("条件_主力净流入"):
-                                            merged[ck] = bool(wan >= thr_f)
+                                thr_f = float(thr) if thr not in ("", None) else 3000.0
                             except (TypeError, ValueError):
-                                pass
+                                thr_f = 3000.0
+                            if (
+                                "条件_主力净流入>=3000万" in merged
+                                or "条件_主力净流入>=3500万" in merged
+                                or "条件_主力净流入>=5000万" in merged
+                            ):
+                                for ck in list(merged.keys()):
+                                    if str(ck).startswith("条件_主力净流入"):
+                                        merged[ck] = bool(wan >= thr_f)
+                        except (TypeError, ValueError):
+                            pass
                 elif not merged.get("主力净流入"):
                     merged["主力净流入"] = ""
             except Exception:

@@ -3,13 +3,13 @@
 验证 ma10_regime_switch 打分是否有样本外价值（用已有 6+7 月上MA10 数据）。
 
 方法（滚动 walk-forward）:
-  1) 用截至 asof 的近 `window` 个选股日打分 → 得到 decision
-  2) 用 asof 之后的 `fwd` 个选股日，比较各袖套真实收益（样本外）
+  1) 用截至 asof 的近 `window` 个交易开始日打分 → 得到 decision
+  2) 用 asof 之后的 `fwd` 个交易开始日，比较各袖套真实收益（样本外）
   3) 看「按脚本决策执行」是否优于：永远 CORE / 永远七月包 / 永远六月包 / 全样本
 
 用法:
   python tools/validate_ma10_regime_switch.py
-  python tools/validate_ma10_regime_switch.py --window 15 --fwd 5
+  python tools/validate_ma10_regime_switch.py --window 10 --fwd 5
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ PACK_COL = {
 def day_mean(sub: pd.DataFrame) -> float | None:
     if sub is None or sub.empty:
         return None
-    return float(sub.groupby("sel")["ret"].mean().mean())
+    return float(sub.groupby("start")["ret"].mean().mean())
 
 
 def ticket_mean(sub: pd.DataFrame) -> float | None:
@@ -66,14 +66,15 @@ def summarize(vals: list[float]) -> dict:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Walk-forward validate MA10 regime switch")
-    ap.add_argument("--window", type=int, default=15)
-    ap.add_argument("--fwd", type=int, default=5, help="样本外前瞻选股日数")
+    ap.add_argument("--window", type=int, default=10)
+    ap.add_argument("--fwd", type=int, default=5, help="样本外前瞻交易开始日数")
     ap.add_argument("--edge", type=float, default=rs.LEAD_EDGE)
     args = ap.parse_args(argv)
 
     files = rs.discover_files()
     df = rs.add_flags(rs.load_pool(files))
-    sels = sorted(df["sel"].unique())
+    df = rs.ensure_start(df)
+    sels = sorted(x for x in df["start"].dropna().unique())
     print("数据", sels[0], "→", sels[-1], "天", len(sels))
     print("window", args.window, "fwd", args.fwd, "edge", args.edge)
 
@@ -86,11 +87,11 @@ def main(argv=None):
         if not fwd_sels:
             continue
 
-        sc = rs.score_window(df, look)
+        sc = rs.score_window(df, look, asof=asof)
         dec = rs.decide(sc, edge=float(args.edge))
         decision = dec["decision"]
 
-        oos = df[df["sel"].isin(fwd_sels)].copy()
+        oos = df[df["start"].isin(fwd_sels)].copy()
         metrics = {}
         for name, col in [
             ("baseline", None),

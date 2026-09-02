@@ -524,7 +524,7 @@ def run(codes, prices, get_name, account, params):
                 "volume": int(avail),
             }})
 
-        if ma20 > 0 and avail >= 100:
+        if ma20 > 0 and avail >= 100 and not bool(params.get("disable_ma20_clear")):
             result.append({{
                 "stock_code": c6,
                 "stock_name": name,

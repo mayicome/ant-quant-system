@@ -2643,7 +2643,20 @@ class TasksChartsView(QWidget):
             chart_data = self._chart_cache.get(stock_code) or self.chart_widgets.get(stock_code)
             if chart_data and 'chart' in chart_data:
                 chart = chart_data['chart']
-                # 分发tick数据到图表
+                # 当前页才走重绘/规则检查；非当前页只缓存现价，避免 40+ 任务把主线程打满
+                # 定时清仓由 scheduled_clear_manager 自己收 tick，不依赖隐藏图表
+                try:
+                    if hasattr(chart, "isVisible") and not chart.isVisible():
+                        px = float(tick_data.get("lastPrice") or 0)
+                        chart._last_tick_data = tick_data
+                        if px > 0:
+                            try:
+                                chart.current_price = px
+                            except Exception:
+                                pass
+                        return
+                except Exception:
+                    pass
                 chart.on_tick_data(tick_data)
             elapsed = _time.time() - _t0
             # 与 stock_chart 一致：仅对明显卡顿记 WARNING（多股同屏正常重绘常 0.25~0.4s）

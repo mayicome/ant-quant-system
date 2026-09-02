@@ -8,7 +8,7 @@ import os
 import sys
 import time
 
-ENTRY_VERSION = "20260811.04"
+ENTRY_VERSION = "20260819.02"
 _shadow = None
 _ACCOUNT_SNAPSHOT_MOD = None
 _ENTRY_ACCOUNT_SKIP = ""
@@ -17,6 +17,9 @@ _ENTRY_ACCOUNT_INTERVAL_SEC = 3.0
 # 委托/成交查询较重，过勤会堵同一线程上的 tick 回调与 full_tick 补种
 _LAST_ENTRY_ORDER_DEAL_SYNC = 0.0
 _ENTRY_ORDER_DEAL_INTERVAL_SEC = 12.0
+_ENTRY_ORDER_DEAL_SESSION_INTERVAL_SEC = 60.0
+# kind -> get_trade_detail_data 已成功的参数元组；盘中禁止笛卡尔重试
+_GTD_OK_ARGS = {}
 # 内置 download_history_data：每进程只 bind/log 一次（勿在 handlebar 热路径刷屏）
 _DOWNLOAD_HISTORY_BOUND = False
 _DOWNLOAD_HISTORY_MISS_LOGGED = False
@@ -146,99 +149,165 @@ def _load_account_snapshot_mod():
     return mod
 
 
+def _in_continuous_auction(now=None):
+    """连续竞价：把线程留给 tick 回调。"""
+    from datetime import datetime
+    from datetime import time as dt_time
+
+    now = now or datetime.now()
+    t = now.time()
+    return (dt_time(9, 30) <= t <= dt_time(11, 30)) or (
+        dt_time(13, 0) <= t <= dt_time(15, 0)
+    )
+
+
+def _gtd_kind(data_type):
+    s = str(data_type or "").strip().lower()
+    if s in ("position", "positions", "pos"):
+        return "position"
+    if s in ("order", "orders"):
+        return "order"
+    if s in ("deal", "deals", "trade"):
+        return "deal"
+    return "account"
+
+
+def _gtd_len(raw):
+    if raw is None:
+        return -1
+    try:
+        return len(raw)
+    except Exception:
+        try:
+            return sum(1 for _ in raw)
+        except Exception:
+            return 1
+
+
+def _gtd_try(gtd, args):
+    try:
+        return gtd(*args)
+    except TypeError:
+        return None
+    except Exception:
+        return None
+
+
+def _gtd_uniq(items):
+    out = []
+    for x in items:
+        if x is None or x == "":
+            continue
+        if x not in out:
+            out.append(x)
+    return out
+
+
 def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, account_type_hint=""):
-    """Query get_trade_detail_data. Never pass empty strategyName for ORDER/DEAL."""
+    """Query get_trade_detail_data. 命中后缓存参数，盘中不再笛卡尔穷举。"""
+    global _GTD_OK_ARGS
     try:
         gtd = get_trade_detail_data
     except NameError:
         return None
     if not callable(gtd):
         return None
-    dtypes = []
-    for val in (data_type, str(data_type).upper(), str(data_type).lower()):
-        if val and val not in dtypes:
-            dtypes.append(val)
-    # 部分版本持仓 dtype 别名
-    if str(data_type).lower() in ("position", "positions", "pos"):
-        for extra in ("POSITION", "position", "Position"):
-            if extra not in dtypes:
-                dtypes.append(extra)
-    strategies = []
-    if strategy_names:
-        for s in strategy_names:
-            s = str(s or "").strip()
-            if s and s not in strategies:
-                strategies.append(s)
+    kind = _gtd_kind(data_type)
+    strategies = _gtd_uniq(
+        [str(s or "").strip() for s in (strategy_names or [])]
+    )
+
+    cached = _GTD_OK_ARGS.get(kind)
+    if isinstance(cached, tuple) and cached:
+        if cached[0] == "__merge__" and len(cached) == 4:
+            _aid, _atype, _dtype = cached[1], cached[2], cached[3]
+            merged = []
+            for sn in strategies:
+                raw = _gtd_try(gtd, (_aid, _atype, _dtype, sn))
+                n = _gtd_len(raw)
+                if n <= 0:
+                    continue
+                if isinstance(raw, list):
+                    merged.extend(raw)
+                else:
+                    try:
+                        merged.extend(list(raw))
+                    except Exception:
+                        merged.append(raw)
+            if merged:
+                return merged
+            _GTD_OK_ARGS.pop(kind, None)
+        else:
+            raw = _gtd_try(gtd, cached)
+            if raw is not None:
+                return raw
+            _GTD_OK_ARGS.pop(kind, None)
+
+    dtypes = _gtd_uniq(
+        [data_type, str(data_type).upper(), str(data_type).lower()]
+    )
+    if kind == "position":
+        dtypes = _gtd_uniq(dtypes + ["POSITION", "position", "Position"])
+
+    aid_s = str(account_id or "").strip()
     account_ids = []
-    for val in (account_id, str(account_id).strip()):
-        if val is None:
-            continue
-        s = str(val).strip()
-        if s and s not in account_ids:
-            account_ids.append(s)
+    if aid_s:
+        account_ids.append(aid_s)
         try:
-            if s.isdigit():
-                iv = int(s)
-                if iv not in account_ids:
-                    account_ids.append(iv)
+            if aid_s.isdigit():
+                account_ids.append(int(aid_s))
         except Exception:
             pass
-    account_types = []
+
     hint = str(account_type_hint or "").strip()
-    if hint:
-        account_types.append(hint)
-        account_types.append(hint.upper())
-        account_types.append(hint.lower())
-    for t in ("STOCK", "stock", "Stock", "CREDIT", "credit", "Credit"):
-        if t not in account_types:
-            account_types.append(t)
-    # 3-arg = all strategies; never use strategyName=""
-    arg_lists = []
+    account_types = _gtd_uniq([hint, "STOCK", "CREDIT"] if hint else ["STOCK", "CREDIT"])
+
+    def _hit(args, raw):
+        _GTD_OK_ARGS[kind] = args
+        try:
+            setattr(gtd, "_ant_last_pos_try", ["ok %s %s n=%s" % (kind, args[:3], _gtd_len(raw))])
+        except Exception:
+            pass
+        return raw
+
+    # 3 参：一次取该账户全部策略；有数据立刻缓存返回
     for aid in account_ids:
         for account_type in account_types:
             for dtype in dtypes:
-                arg_lists.append((aid, account_type, dtype))
-                for sn in strategies:
-                    arg_lists.append((aid, account_type, dtype, sn))
-    best = None
-    best_n = -1
-    try_log = []
-    for args in arg_lists:
-        try:
-            raw = gtd(*args)
-        except TypeError:
-            continue
-        except Exception as e:
-            if len(try_log) < 8:
-                try_log.append("%s->err:%s" % (args[:3], e))
-            continue
-        if raw is None:
-            if len(try_log) < 8:
-                try_log.append("%s->None" % (args[:3],))
-            continue
-        try:
-            n = len(raw)
-        except Exception:
-            try:
-                n = sum(1 for _ in raw)
-            except Exception:
-                n = 1 if raw else 0
-        if len(try_log) < 12:
-            try_log.append("%s->len=%s type=%s" % (args[:3], n, type(raw).__name__))
-        if n > best_n:
-            best = raw
-            best_n = n
-        if n > 0 and len(args) == 3:
-            try:
-                setattr(gtd, "_ant_last_pos_try", try_log)
-            except Exception:
-                pass
-            return raw
-    try:
-        setattr(gtd, "_ant_last_pos_try", try_log)
-    except Exception:
-        pass
-    return best
+                args = (aid, account_type, dtype)
+                raw = _gtd_try(gtd, args)
+                if _gtd_len(raw) > 0:
+                    return _hit(args, raw)
+
+    # ORDER/DEAL 3 参常为空：按策略名各查一次后合并（不再穷举大小写/两融）
+    if strategies:
+        for aid in account_ids[:1]:
+            for account_type in account_types[:1]:
+                for dtype in dtypes[:1]:
+                    merged = []
+                    for sn in strategies:
+                        raw = _gtd_try(gtd, (aid, account_type, dtype, sn))
+                        if _gtd_len(raw) <= 0:
+                            continue
+                        if isinstance(raw, list):
+                            merged.extend(raw)
+                        else:
+                            try:
+                                merged.extend(list(raw))
+                            except Exception:
+                                merged.append(raw)
+                    if merged:
+                        _GTD_OK_ARGS[kind] = ("__merge__", aid, account_type, dtype)
+                        try:
+                            setattr(
+                                gtd,
+                                "_ant_last_pos_try",
+                                ["merge %s n=%d" % (kind, len(merged))],
+                            )
+                        except Exception:
+                            pass
+                        return merged
+    return None
 
 
 def _probe_bj_sectors_once(ContextInfo):
@@ -335,15 +404,9 @@ def _probe_bj_sectors_once(ContextInfo):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, out_path)
-        jing = sector_counts.get("\u4eac\u5e02A\u80a1", {}).get("n", 0)
-        hsj = sector_counts.get("\u6caa\u6df1\u4eacA\u80a1", {}).get("n", 0)
-        print(
-            "[交易核心] 北交所板块探测 京市A股=%s 沪深京A股=%s matched=%s -> %s"
-            % (jing, hsj, len(matched_names), out_path),
-            flush=True,
-        )
-    except Exception as e:
-        print("[交易核心] 北交所板块探测失败: %s" % e, flush=True)
+        # 探测结果已写入 bj_sector_probe.json，不再刷启动日志
+    except Exception:
+        pass
 
 
 def _entry_sync_account_snapshot(ContextInfo):
@@ -400,7 +463,10 @@ def _entry_sync_account_snapshot(ContextInfo):
         # 降频：None 时 apply 侧沿用缓存，避免每轮多路 GTD 堵行情
         order_raw = None
         deal_raw = None
-        if now - _LAST_ENTRY_ORDER_DEAL_SYNC >= float(_ENTRY_ORDER_DEAL_INTERVAL_SEC):
+        od_interval = float(_ENTRY_ORDER_DEAL_INTERVAL_SEC)
+        if _in_continuous_auction():
+            od_interval = float(_ENTRY_ORDER_DEAL_SESSION_INTERVAL_SEC)
+        if now - _LAST_ENTRY_ORDER_DEAL_SYNC >= od_interval:
             _strat_names = (
                 "\u8682\u8681\u002d\u5355\u70b9\u4e70\u5165",
                 "\u8682\u8681\u002d\u5355\u70b9\u5356\u51fa",

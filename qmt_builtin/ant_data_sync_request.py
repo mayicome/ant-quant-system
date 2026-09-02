@@ -219,7 +219,14 @@ def list_pending_daily(limit: int = 20) -> List[Tuple[str, date, Dict[str, Any]]
                 str(meta.get("requested_at") or ""),
             )
         )
-    pending.sort(key=lambda x: (x[3], x[4], x[0]))
+    pending.sort(
+        key=lambda x: (
+            0 if str((x[2] or {}).get("mode") or "") == "full_history" else 1,
+            x[3],
+            x[4],
+            x[0],
+        )
+    )
     if len(pending) > 1:
         off = _PENDING_ROTATE_OFFSET % len(pending)
         pending = pending[off:] + pending[:off]

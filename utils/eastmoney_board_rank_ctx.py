@@ -154,12 +154,26 @@ def board_rank_csv_paths(
     *,
     rank_dir: Optional[str] = None,
 ) -> Dict[str, str]:
-    """返回某日 industry / concept CSV 路径（不一定存在）。"""
+    """返回某日 industry / concept 涨跌幅榜 CSV 路径（不一定存在）。"""
     ds = _dashed(as_of) or ""
     base = rank_dir or default_board_rank_dir()
     return {
         "industry": os.path.join(base, f"industry_rank_{ds}.csv"),
         "concept": os.path.join(base, f"concept_rank_{ds}.csv"),
+    }
+
+
+def board_lu_rank_csv_paths(
+    as_of: DateLike,
+    *,
+    rank_dir: Optional[str] = None,
+) -> Dict[str, str]:
+    """返回某日按涨停家数排名的 industry / concept CSV 路径（不一定存在）。"""
+    ds = _dashed(as_of) or ""
+    base = rank_dir or default_board_rank_dir()
+    return {
+        "industry": os.path.join(base, f"industry_lu_rank_{ds}.csv"),
+        "concept": os.path.join(base, f"concept_lu_rank_{ds}.csv"),
     }
 
 
@@ -438,6 +452,152 @@ def _load_float_mv_yi_for_day(as_of: date) -> Dict[str, float]:
     return {}
 
 
+_FLOAT_MV_SNAP_DATES: Optional[List[date]] = None
+_FLOAT_MV_PRICE_CACHE: Dict[str, Dict[str, Tuple[float, float]]] = {}
+
+
+def _list_float_mv_snapshot_dates(*, force: bool = False) -> List[date]:
+    """本地已有「流通市值」列的主力净流入快照日（升序）。"""
+    global _FLOAT_MV_SNAP_DATES
+    if _FLOAT_MV_SNAP_DATES is not None and not force:
+        return _FLOAT_MV_SNAP_DATES
+    out: List[date] = []
+    root = os.path.join(_project_root(), "history_data", "个股主力净流入")
+    if not os.path.isdir(root):
+        _FLOAT_MV_SNAP_DATES = out
+        return out
+    for fn in os.listdir(root):
+        if not (fn.startswith("个股主力净流入_") and fn.endswith(".csv")):
+            continue
+        digits = "".join(ch for ch in fn if ch.isdigit())
+        if len(digits) < 8:
+            continue
+        try:
+            d = date(int(digits[0:4]), int(digits[4:6]), int(digits[6:8]))
+        except Exception:
+            continue
+        path = os.path.join(root, fn)
+        # 旧表可能无流通市值列：用轻量读头判断
+        try:
+            cols = list(pd.read_csv(path, encoding="utf-8-sig", nrows=0).columns)
+        except Exception:
+            continue
+        if not any("流通市值" in str(c) for c in cols):
+            continue
+        out.append(d)
+    out.sort()
+    _FLOAT_MV_SNAP_DATES = out
+    return out
+
+
+def _read_float_mv_price_from_csv(path: str) -> Dict[str, Tuple[float, float]]:
+    """code6 → (流通市值亿, 最新价)。缺价或市值则跳过。"""
+    out: Dict[str, Tuple[float, float]] = {}
+    if not path or not os.path.isfile(path):
+        return out
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+    except Exception:
+        return out
+    code_cols = [c for c in df.columns if "代码" in str(c)]
+    cap_cols = [c for c in df.columns if "流通市值" in str(c)]
+    px_cols = [c for c in df.columns if str(c).strip() in ("最新价", "收盘价", "现价")]
+    if not px_cols:
+        px_cols = [c for c in df.columns if "最新价" in str(c) or "收盘" in str(c)]
+    if not code_cols or not cap_cols or not px_cols:
+        return out
+    code_col, cap_col, px_col = code_cols[0], cap_cols[0], px_cols[0]
+    for _, r in df.iterrows():
+        c6 = _norm_code6(r[code_col])
+        yuan = _parse_float_mv_yuan(r[cap_col])
+        try:
+            px = float(r[px_col])
+        except (TypeError, ValueError):
+            continue
+        if not c6 or not yuan or yuan <= 0 or px != px or px <= 0:
+            continue
+        out[c6] = (float(yuan) / 1e8, float(px))
+    return out
+
+
+def _nearest_float_mv_snapshot_date(as_of: date) -> Optional[date]:
+    days = _list_float_mv_snapshot_dates()
+    if not days:
+        return None
+    # 同日优先；否则绝对值最近；并列取较早
+    best = min(days, key=lambda d: (abs((d - as_of).days), d))
+    return best
+
+
+def resolve_float_mv_yi(
+    as_of: DateLike,
+    code: str,
+    close_px: Optional[float] = None,
+) -> Tuple[Optional[float], str]:
+    """解析选股日流通市值（亿）。
+
+    1) 当日/近 ±12 自然日主力净流入快照（精确）
+    2) 若无：取本地含该股的最近快照，用
+       流通股本≈快照流通市值/快照最新价，再 × 选股日收盘 估算
+       （股本变动慢，适合 2026-06 之前本地无市值快照的回测日）
+
+    返回 (市值亿或 None, 来源备注)。
+    """
+    as_d = _to_date(as_of)
+    c6 = _norm_code6(code)
+    if as_d is None or not c6:
+        return None, "缺日期或代码"
+
+    near = _load_float_mv_yi_for_day(as_d)
+    if c6 in near:
+        return float(near[c6]), "snapshot_near"
+
+    if close_px is None:
+        return None, "无近邻快照且缺收盘价无法估算"
+    try:
+        px = float(close_px)
+    except (TypeError, ValueError):
+        return None, "收盘价无效"
+    if px != px or px <= 0:
+        return None, "收盘价无效"
+
+    days = _list_float_mv_snapshot_dates()
+    if not days:
+        return None, "本地无流通市值快照文件"
+
+    # 按与 as_of 的距离排序，取第一张含该股的快照
+    ordered = sorted(days, key=lambda d: (abs((d - as_d).days), d))
+    pair = None
+    snap_d: Optional[date] = None
+    for cand in ordered:
+        ymd = cand.strftime("%Y%m%d")
+        cached = _FLOAT_MV_PRICE_CACHE.get(ymd)
+        if cached is None:
+            cached = _read_float_mv_price_from_csv(_float_mv_csv_path(cand))
+            _FLOAT_MV_PRICE_CACHE[ymd] = cached
+        if c6 in cached:
+            pair = cached[c6]
+            snap_d = cand
+            break
+    if not pair or snap_d is None:
+        return None, "本地快照均无该股流通市值"
+    mv_yi_snap, px_snap = pair
+    if px_snap <= 0 or mv_yi_snap <= 0:
+        return None, "快照价/市值无效(%s)" % snap_d.isoformat()
+    # 流通股本(股) ≈ 市值(元) / 价；再 × 选股日收盘 → 亿
+    shares = (float(mv_yi_snap) * 1e8) / float(px_snap)
+    mv_est = shares * px / 1e8
+    return float(mv_est), "scaled_from_%s" % snap_d.isoformat()
+
+
+def load_float_mv_yi_map_for_day(as_of: DateLike) -> Dict[str, float]:
+    """兼容旧调用：仅返回近邻快照 map（不含收盘缩放）。"""
+    as_d = _to_date(as_of)
+    if as_d is None:
+        return {}
+    return _load_float_mv_yi_for_day(as_d)
+
+
 def _empty_ctx(
     as_of: DateLike,
     *,
@@ -542,8 +702,13 @@ def build_code_owned_board_rank_maps(
     *,
     rank_dir: Optional[str] = None,
     info_path: Optional[str] = None,
+    rank_kind: str = "chg",
 ) -> Dict[str, Any]:
-    """按东财当日行业/概念涨幅榜 + 成分归属，为每只股票找名次最好的行业与概念。
+    """按东财当日行业/概念榜 + 成分归属，为每只股票找名次最好的行业与概念。
+
+    rank_kind:
+      - \"chg\"（默认）：涨跌幅全榜 industry_rank_ / concept_rank_
+      - \"lu\"：涨停家数榜 industry_lu_rank_ / concept_lu_rank_
 
     与选股规则里「标签名精确撞榜」不同：这里用 all_a_stock_info / QMT 成分反查，
     因此「食品加工」等个股标签也能挂到东财行业板（如畜禽饲料）上。
@@ -575,11 +740,17 @@ def build_code_owned_board_rank_maps(
         def is_excluded_em_board(_n: str) -> bool:
             return False
 
-    paths = board_rank_csv_paths(as_of_d, rank_dir=rank_dir)
+    kind = str(rank_kind or "chg").strip().lower()
+    if kind == "lu":
+        paths = board_lu_rank_csv_paths(as_of_d, rank_dir=rank_dir)
+        missing_msg = "无涨停家数行业/概念榜"
+    else:
+        paths = board_rank_csv_paths(as_of_d, rank_dir=rank_dir)
+        missing_msg = "无东财行业/概念涨幅榜"
     ind_rank, ind_chg = _load_rank_chg_maps(paths.get("industry") or "")
     con_rank, con_chg = _load_rank_chg_maps(paths.get("concept") or "")
     if not ind_rank and not con_rank:
-        out["error"] = "无东财行业/概念涨幅榜"
+        out["error"] = missing_msg
         return out
 
     ind_flow: Dict[str, float] = {}

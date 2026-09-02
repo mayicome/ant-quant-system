@@ -5,7 +5,7 @@ import sys
 import time
 from typing import Any, List, Optional
 
-SHADOW_VERSION = "20260804.07"
+SHADOW_VERSION = "20260819.02"
 SEED_INTERVAL_SEC = 3
 AUCTION_SEED_INTERVAL_SEC = 1.0
 # 盘中 quotes_recv_at(本机收到推送墙钟) 落后超过该秒数 → full_tick 补种
@@ -2141,7 +2141,7 @@ def periodic_sync(ContextInfo):
 
 
 def _periodic_sync_body(ContextInfo):
-    global _LAST_PERIODIC_TS
+    global _LAST_PERIODIC_TS, _RUNNER, _RESULTS
     now = time.time()
     if now - _LAST_PERIODIC_TS < float(RULES_RELOAD_INTERVAL_SEC) * 0.8:
         return
@@ -2149,6 +2149,16 @@ def _periodic_sync_body(ContextInfo):
     _process_pending_resubscribe(ContextInfo)
     reload_rules_if_changed(ContextInfo, allow_resubscribe=True)
     _maybe_seed_snapshots(force=False)
+    # tick 回调停掉时：用 results.stocks 已有价格判触发并回写 skipped/委托
+    try:
+        if _RUNNER is not None and _RESULTS is not None and hasattr(
+            _RUNNER, "evaluate_price_map"
+        ):
+            snap_events = _RUNNER.evaluate_price_map(_RESULTS.get("stocks") or {})
+            if snap_events:
+                _apply_runner_events(snap_events, {})
+    except Exception as e:
+        print("[交易核心] 快照触发错误: %s" % e)
     try:
         night_fin = _finalize_night_market_orders()
         night_ev = _poll_night_market_events()
@@ -2172,26 +2182,6 @@ def _periodic_sync_body(ContextInfo):
     except Exception as e:
         print("[交易核心] 夜市轮询错误: %s" % e)
     _flush_results_to_disk(force=True)
-    daily_sync = _get_daily_sync_runner()
-    try:
-        daily_sync.maybe_run_failed_manifest_recovery(ContextInfo)
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        print("[交易核心] 失败恢复同步错误: %s" % e)
-    try:
-        if hasattr(daily_sync, "maybe_run_force_year_backfill"):
-            daily_sync.maybe_run_force_year_backfill(ContextInfo)
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        print("[交易核心] 强制补数年回补错误: %s" % e)
-    try:
-        daily_sync.process_on_demand_sync_requests(ContextInfo)
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        print("[交易核心] 按需同步错误: %s" % e)
     try:
         import ant_cancel_request as _cancel_req
 
@@ -2202,6 +2192,31 @@ def _periodic_sync_body(ContextInfo):
         raise
     except Exception as e:
         print("[交易核心] 撤单请求错误: %s" % e)
+    # 连续竞价：仅跑按需日线（10s/只）；FORCE/回补/分笔/盘后任务仍跳过
+    in_continuous = _in_continuous_quote_watch()
+    daily_sync = _get_daily_sync_runner()
+    if not in_continuous:
+        try:
+            daily_sync.maybe_run_failed_manifest_recovery(ContextInfo)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print("[交易核心] 失败恢复同步错误: %s" % e)
+        try:
+            if hasattr(daily_sync, "maybe_run_force_year_backfill"):
+                daily_sync.maybe_run_force_year_backfill(ContextInfo)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print("[交易核心] 强制补数年回补错误: %s" % e)
+    try:
+        daily_sync.process_on_demand_sync_requests(ContextInfo)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        print("[交易核心] 按需同步错误: %s" % e)
+    if in_continuous:
+        return
     # 手动指定日 tick 全量续跑（data/tick_full_sync/manual_request.json）
     try:
         tick_full = _get_tick_full_sync_runner()
@@ -2508,7 +2523,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
     优先 ContextInfo.get_full_tick（与 subscribe_whole_quote 同一路缓存）；
     xtdata.get_full_tick 只是旁路，9:25 前常为空——这是以前「9:30 才有价」的主因之一。
     """
-    global _RESULTS, _CONTEXT
+    global _RESULTS, _CONTEXT, _RUNNER
     if _RESULTS is None or not codes:
         return False
 
@@ -2547,6 +2562,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
 
     changed = False
     seeded = 0
+    tick_datas = {}
     for stock_code in code_list:
         row = _light_row(tick_map.get(stock_code))
         if not row:
@@ -2557,6 +2573,7 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
         lp = extract_tick_price(row)
         if lp <= 0:
             continue
+        tick_datas[stock_code] = row
         # 只用官方 timetag；缺则空串，便于暴露行情时间问题（不用 time/墙钟兜底）
         raw_tt = None
         if ShadowTickRunner is not None:
@@ -2576,7 +2593,63 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
             "[交易核心] 已种子 %d/%d codes 来自 full_tick via %s"
             % (seeded, len(code_list), source or "?")
         )
+    # 补种只写价时，若 tick 回调停掉就不会触发规则。把 full_tick 也送进 runner。
+    if tick_datas and _RUNNER is not None:
+        try:
+            events = _RUNNER.on_quote_dict(tick_datas)
+        except Exception as e:
+            print("[交易核心] seed 触发错误: %s" % e)
+            events = []
+        if events:
+            _apply_runner_events(events, tick_datas)
+            changed = True
     return changed
+
+
+def _apply_runner_events(events, datas) -> bool:
+    """打印、passorder/跳过、写 results.orders 与 done_task_ids。"""
+    global _RUNNER, _RESULTS
+    if not events or _RESULTS is None:
+        return False
+    for ev in events:
+        code = str(ev.get("stock_code") or "")
+        print(
+            "[交易核心] %s %s %s trig=%s %s"
+            % (
+                code,
+                ev.get("type"),
+                ev.get("tick_time"),
+                ev.get("trigger_price"),
+                ev.get("msg"),
+            )
+        )
+        if ev.get("detail"):
+            print("[交易核心] 详情: %s" % ev.get("detail"))
+    try:
+        _handle_order_events(_CONTEXT, events, datas or {})
+    except Exception as e:
+        print("[交易核心] 委托处理错误: %s: %s" % (type(e).__name__, e))
+    try:
+        if _RUNNER is not None:
+            done_ids = _RUNNER.dump_done_task_ids()
+            prev_done = (_RESULTS or {}).get("done_task_ids")
+            if done_ids != prev_done:
+                _RESULTS["done_task_ids"] = done_ids
+            if hasattr(_RUNNER, "dump_early_states"):
+                early_dumped = _RUNNER.dump_early_states()
+                prev_early = (_RESULTS or {}).get("early_states")
+                if early_dumped != prev_early:
+                    _RESULTS["early_states"] = early_dumped
+    except Exception:
+        pass
+    for ev in events:
+        append_stock_event(
+            _RESULTS,
+            str(ev.get("stock_code") or ""),
+            ev,
+            last_tick_time=str(ev.get("tick_time") or ""),
+        )
+    return True
 
 
 def _on_tick(datas):

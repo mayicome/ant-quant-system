@@ -51,8 +51,8 @@ def main() -> None:
     )
     # keep ELIG by kind from base; tweak HOT_MODE tag if present
     code = code.replace(
-        'HOT_MODE = "today_elig_sec1_30_con1_40_rs_1_50_frac1of2"',
-        'HOT_MODE = "today_elig_sec1_30_con1_40_rs_1_50_frac1of2_ma_union"',
+        'HOT_MODE = "today_elig_sec1_50_con1_50_rs_1_50_frac1of2"',
+        'HOT_MODE = "today_elig_sec1_50_con1_50_rs_1_50_frac1of2_ma_union"',
         1,
     )
     # fallback if base still old mode string

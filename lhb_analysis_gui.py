@@ -424,7 +424,28 @@ def build_lhb_advanced_tables(date_str: str) -> dict:
         ws.row_dimensions[1].height = 32
     wb.save(out_fp)
 
-    return {"date": date_str, "summary_df": df_result, "raw_all_df": df_lhb_all, "raw_detail_df": df, "export_path": out_fp}
+    jsonl_info = None
+    try:
+        from tools.export_lhb_to_jsonl import write_daily_lhb_jsonl_shards
+
+        jsonl_info = write_daily_lhb_jsonl_shards(out_fp, str(date_str))
+        print(
+            "[龙虎榜] JSONL 分片已写:",
+            jsonl_info.get("counts"),
+            "→",
+            jsonl_info.get("out_dir"),
+        )
+    except Exception as e:
+        print("[龙虎榜] JSONL 分片写出失败:", e)
+
+    return {
+        "date": date_str,
+        "summary_df": df_result,
+        "raw_all_df": df_lhb_all,
+        "raw_detail_df": df,
+        "export_path": out_fp,
+        "jsonl_info": jsonl_info,
+    }
 
 
 class Worker(QThread):
@@ -709,10 +730,20 @@ class Dialog(QDialog):
         if not ok_png:
             ok_png = self._summary_df_to_png(df_result, png_path)
         exit_tip = "；10秒后自动退出" if self._auto_run else ""
+        jsonl_info = data.get("jsonl_info") or {}
+        jsonl_tip = ""
+        if jsonl_info.get("paths"):
+            jsonl_tip = "；JSONL：" + "、".join(
+                os.path.basename(p) for p in (jsonl_info.get("paths") or {}).values()
+            )
         if ok_png:
-            self.status.setText(f"分析完成：{date_str}；已导出：{out_fp}、{png_path}{exit_tip}。")
+            self.status.setText(
+                f"分析完成：{date_str}；已导出：{out_fp}、{png_path}{jsonl_tip}{exit_tip}。"
+            )
         else:
-            self.status.setText(f"分析完成：{date_str}；已导出Excel但图片导出失败{exit_tip}。")
+            self.status.setText(
+                f"分析完成：{date_str}；已导出Excel但图片导出失败{jsonl_tip}{exit_tip}。"
+            )
         if self._auto_run and (not self._auto_finished):
             self._auto_finished = True
             QTimer.singleShot(10000, self.accept)

@@ -35,17 +35,63 @@ def _as_date(v: Any) -> Optional[date]:
 
 
 def _load_daily(code6: str, through: date):
-    try:
-        from utils.daily_cache_reader import load_daily_dataframe
+    """只读本地 daily_cache CSV（不走 load_daily_dataframe）。
 
-        return load_daily_dataframe(code6, through_date=through, allow_xtdata_fallback=True)
+    load_daily_dataframe 在缓存「偏旧」时会扫 tick 补洞，整池检查会卡死 UI。
+    缺数时跳过该票（不当已触达）。
+    """
+    try:
+        from utils.daily_cache_reader import load_daily_from_cache
+
+        return load_daily_from_cache(code6, through_date=through)
     except Exception:
         try:
-            from daily_cache_reader import load_daily_dataframe as _ld  # type: ignore
+            from daily_cache_reader import load_daily_from_cache as _ld  # type: ignore
 
-            return _ld(code6, through_date=through, allow_xtdata_fallback=True)
+            return _ld(code6, through_date=through)
         except Exception:
             return None
+
+
+def _calendar_span_days(entry_window: int) -> int:
+    """入场窗只需约 entry_window 个交易日，勿用 +400 天（会超出日历缓存并反复拉 akshare）。"""
+    ew = max(1, int(entry_window or 1))
+    return max(45, ew * 3 + 30)
+
+
+def _trading_days_sorted(lo: date, hi: date) -> list:
+    if lo > hi:
+        lo, hi = hi, lo
+    try:
+        from strategy_generator_app.trading_calendar import get_trading_dates_in_range_sorted
+
+        return list(get_trading_dates_in_range_sorted(lo, hi) or [])
+    except Exception:
+        pass
+    try:
+        from trading_calendar import get_trading_dates_in_range_sorted as _g2  # type: ignore
+
+        return list(_g2(lo, hi) or [])
+    except Exception:
+        out = []
+        d = lo
+        while d <= hi:
+            if d.weekday() < 5:
+                out.append(d)
+            d += timedelta(days=1)
+        return out
+
+
+def _bounds_from_sorted_cal(
+    sel: date, entry_window: int, cal: list
+) -> Tuple[Optional[date], Optional[date]]:
+    ew = max(1, int(entry_window or 1))
+    after = [d for d in cal if d > sel]
+    if not after:
+        return None, None
+    start = after[0]
+    end = after[ew - 1] if len(after) >= ew else after[-1]
+    return start, end
 
 
 def already_touched_ma_in_entry_window(
@@ -160,40 +206,16 @@ def already_touched_ma_in_entry_window(
 def _entry_window_bounds(
     sel: date,
     entry_window: int,
+    *,
+    cal: Optional[list] = None,
 ) -> Tuple[Optional[date], Optional[date]]:
     """选股日后第 1～entry_window 个交易日 → (start, end)。"""
     ew = max(1, int(entry_window or 1))
-    try:
-        from strategy_generator_app.trading_calendar import (
-            get_trading_dates_in_range_sorted,
-            next_trading_day_after,
-        )
-
-        start = next_trading_day_after(sel)
-        if start is None:
-            return None, None
-        lst = get_trading_dates_in_range_sorted(start, start + timedelta(days=400))
-        if not lst:
-            return start, start
-        end = lst[ew - 1] if len(lst) >= ew else lst[-1]
-        return start, end
-    except Exception:
-        pass
-    try:
-        from trading_calendar import (  # type: ignore
-            get_trading_dates_in_range_sorted as _g2,
-            next_trading_day_after as _n2,
-        )
-
-        start = _n2(sel)
-        if start is None:
-            return None, None
-        lst = _g2(start, start + timedelta(days=400))
-        if not lst:
-            return start, start
-        end = lst[ew - 1] if len(lst) >= ew else lst[-1]
-        return start, end
-    except Exception:
+    if cal is not None:
+        return _bounds_from_sorted_cal(sel, ew, cal)
+    span = _calendar_span_days(ew)
+    lst = _trading_days_sorted(sel + timedelta(days=1), sel + timedelta(days=span))
+    if not lst:
         start = sel + timedelta(days=1)
         while start.weekday() >= 5:
             start += timedelta(days=1)
@@ -205,6 +227,7 @@ def _entry_window_bounds(
                 if n >= ew:
                     return start, d
             d += timedelta(days=1)
+    return _bounds_from_sorted_cal(sel, ew, lst)
 
 
 def scan_codes_already_touched_ma(
@@ -215,7 +238,10 @@ def scan_codes_already_touched_ma(
     ma_period: int = 10,
     codes: Optional[list] = None,
 ) -> list:
-    """批量扫描：返回已触达列表 [{code, selection_date, touch_date}, ...]。"""
+    """批量扫描：返回已触达列表 [{code, selection_date, touch_date}, ...]。
+
+    整池只拉一次交易日历，避免每只股票 +400 天触发反复联网刷新日历。
+    """
     sel_map = selection_date_by_code if isinstance(selection_date_by_code, dict) else {}
     before = _as_date(before_date) or date.today()
     out: list = []
@@ -223,6 +249,9 @@ def scan_codes_already_touched_ma(
         keys = list(sel_map.keys())
     else:
         keys = list(codes)
+
+    # 先收集 (code, sel)，再一次性取日历
+    pairs: list = []
     seen = set()
     for raw in keys:
         c6 = _norm_code(raw)
@@ -231,14 +260,24 @@ def scan_codes_already_touched_ma(
         seen.add(c6)
         sel = _as_date(sel_map.get(c6) or sel_map.get(raw))
         if sel is None:
-            # 尝试无前导零等宽松键
             for k, v in sel_map.items():
                 if _norm_code(k) == c6:
                     sel = _as_date(v)
                     break
         if sel is None:
             continue
-        start, end = _entry_window_bounds(sel, entry_window)
+        pairs.append((c6, sel))
+    if not pairs:
+        return out
+
+    ew = max(1, int(entry_window or 1))
+    span = _calendar_span_days(ew)
+    dmin = min(s for _, s in pairs)
+    dmax = max(max(s for _, s in pairs), before) + timedelta(days=span)
+    cal = _trading_days_sorted(dmin, dmax)
+
+    for c6, sel in pairs:
+        start, end = _entry_window_bounds(sel, ew, cal=cal)
         hit, touch_d = already_touched_ma_in_entry_window(
             c6,
             selection_date=sel,

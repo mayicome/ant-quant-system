@@ -48,6 +48,8 @@ secrets.*
 settings.json
 sound_settings.json
 truth_monitor_seen_ids.json
+config/cos_upload.local.json
+ant-quant-data.zip
 
 # ===== 可执行文件 / 大二进制 =====
 *.exe

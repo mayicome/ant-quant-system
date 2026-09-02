@@ -131,6 +131,51 @@ class AntLauncherWindow(QMainWindow):
                 "order": 50,
                 "enabled": True,
             },
+            {
+                "id": "ma10_regime_monitor",
+                "name": "MA10风格切换监控",
+                "script": "ma10_regime_monitor_gui.py",
+                "category": "tool",
+                "description": "马总 MA10 近三个月风格切换与回测监控",
+                "order": 60,
+                "enabled": True,
+            },
+            {
+                "id": "zt12_strict_bull_monitor",
+                "name": "严多头策略监控",
+                "script": "zt12_strict_bull_monitor_gui.py",
+                "category": "tool",
+                "description": "涨停后1–2天严多头：真突破/不看真突破叠画对比",
+                "order": 61,
+                "enabled": True,
+            },
+            {
+                "id": "em_hot_clip_monitor",
+                "name": "东财热门夹档监控",
+                "script": "em_hot_clip_monitor_gui.py",
+                "category": "tool",
+                "description": "东财热门夹档：空头排列/排列并集叠画对比（自动选股+回测）",
+                "order": 62,
+                "enabled": True,
+            },
+            {
+                "id": "bb_pctb_pullback_monitor",
+                "name": "布林%b回落监控",
+                "script": "bb_pctb_pullback_monitor_gui.py",
+                "category": "tool",
+                "description": "布林%b回落选股：买点A vs 买点B 叠画对比（自动选股+回测）",
+                "order": 64,
+                "enabled": True,
+            },
+            {
+                "id": "ma_zong_meet_monitor",
+                "name": "马总满足条件对比监控",
+                "script": "ma_zong_meet_monitor_gui.py",
+                "category": "tool",
+                "description": "马总选股逻辑：满足条件 vs 不满足条件的只数与收益对比",
+                "order": 63,
+                "enabled": True,
+            },
         ]
         if not os.path.isfile(cfg_path):
             return sorted([a for a in default_apps if a.get("enabled", True)], key=lambda x: x.get("order", 0))
@@ -139,8 +184,9 @@ class AntLauncherWindow(QMainWindow):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             if not isinstance(raw, list):
-                return []
+                return sorted([a for a in default_apps if a.get("enabled", True)], key=lambda x: x.get("order", 0))
             apps = []
+            seen = set()
             for item in raw:
                 if not isinstance(item, dict):
                     continue
@@ -149,6 +195,18 @@ class AntLauncherWindow(QMainWindow):
                 if item.get("category") != "tool":
                     continue
                 apps.append(item)
+                aid = str(item.get("id") or "")
+                if aid:
+                    seen.add(aid)
+            # 配置文件缺项时补上源码默认（避免加了新工具但旧 json 看不到）
+            for item in default_apps:
+                if item.get("enabled", True) is False:
+                    continue
+                if item.get("category") != "tool":
+                    continue
+                aid = str(item.get("id") or "")
+                if aid and aid not in seen:
+                    apps.append(item)
             apps.sort(key=lambda x: x.get("order", 0))
             return apps
         except Exception:

@@ -75,6 +75,7 @@ def _light_row(raw: Any) -> Dict[str, Any]:
         "amount", "volume", "lastVol", "tradeVol", "tradeVolume", "tickVol",
         "singleVol", "matchQty", "qty", "volume_delta", "cumVol", "totalVol", "dealVol",
         "askPrice", "askVol", "bidPrice", "bidVol", "timetag",
+        "time", "stime", "timeStamp", "timestamp",
         "highLimit", "upperLimit", "limitUp", "lastClose", "preClose", "pre_close",
     )
     for c in cols:
@@ -559,8 +560,8 @@ class ShadowTickRunner:
             return []
         events: List[Dict[str, Any]] = []
         for stock_code, stock_data in quote.items():
-            code = str(stock_code or "").strip().upper()
-            if code not in self._tasks_by_code:
+            code = self._lookup_task_code(stock_code)
+            if not code:
                 continue
             row = _light_row(stock_data)
             if not row:
@@ -569,10 +570,52 @@ class ShadowTickRunner:
         return events
 
     def on_row(self, stock_code: str, row: Dict[str, Any]) -> List[Dict[str, Any]]:
-        code = str(stock_code or "").strip().upper()
-        if code not in self._tasks_by_code:
+        code = self._lookup_task_code(stock_code)
+        if not code:
             return []
         return self._process_row(code, _light_row(row))
+
+    def _lookup_task_code(self, stock_code: str) -> str:
+        code = str(stock_code or "").strip().upper()
+        if not code:
+            return ""
+        if code in self._tasks_by_code:
+            return code
+        prefix = code.split(".")[0]
+        if prefix in self._tasks_by_code:
+            return prefix
+        for k in self._tasks_by_code:
+            if str(k).split(".")[0] == prefix:
+                return str(k)
+        return ""
+
+    def evaluate_price_map(self, stocks: Any) -> List[Dict[str, Any]]:
+        """用 results.stocks 快照判触发（tick 回调停掉时的兜底）。"""
+        events: List[Dict[str, Any]] = []
+        if not isinstance(stocks, dict):
+            return events
+        for raw_code, bucket in stocks.items():
+            code = self._lookup_task_code(raw_code)
+            if not code:
+                continue
+            if not isinstance(bucket, dict):
+                continue
+            try:
+                lp = float(bucket.get("last_price") or 0)
+            except (TypeError, ValueError):
+                lp = 0.0
+            if lp <= 0:
+                continue
+            row = {
+                "lastPrice": lp,
+                "last_price": lp,
+                "open": float(bucket.get("today_open") or 0),
+                "high": float(bucket.get("today_high") or 0),
+                "low": float(bucket.get("today_low") or 0),
+                "timetag": str(bucket.get("last_tick_time") or ""),
+            }
+            events.extend(self._process_row(code, row))
+        return events
 
     def snapshot_results(self) -> Dict[str, Any]:
         try:
@@ -1530,18 +1573,37 @@ class ShadowTickRunner:
 
     @staticmethod
     def _format_tick_time(raw: Any) -> str:
-        """只格式化 timetag → HH:MM:SS；不解析 time 毫秒戳。
+        """格式化 tick 时间 → HH:MM:SS。
 
         支持：
         - '20240620 14:13:30' / '2024-06-20 14:13:30' / ISO
         - '14:13:30'
         - '20240620141330' / '20240620 141330'（无冒号）
+        - unix 秒(10位) / 毫秒(13位)（部分 QMT 全推只给 time 不给 timetag）
         """
         if raw is None:
             return ""
         s = str(raw).strip()
         if not s:
             return ""
+        digits_only = s.isdigit() or (
+            s[0] in "+-" and s[1:].replace(".", "", 1).isdigit()
+        )
+        if digits_only:
+            try:
+                n = float(s)
+                abs_n = abs(n)
+                # 10 位秒 / 13 位毫秒；14+ 位是 YYYYMMDDHHMMSS，走下面
+                nd = "".join(c for c in s if c.isdigit())
+                if len(nd) in (10, 13) or (1e9 < abs_n < 2e10) or (1e12 < abs_n < 2e13):
+                    if abs_n > 1e12:
+                        n = n / 1000.0
+                    if 1e9 < abs(n) < 2e10:
+                        from datetime import datetime as _dt
+
+                        return _dt.fromtimestamp(n).strftime("%H:%M:%S")
+            except Exception:
+                pass
         # "20240620 14:13:30" / "2024-06-20 14:13:30" / "2024-06-20T14:13:30"
         if " " in s or "T" in s:
             try:
@@ -1566,13 +1628,15 @@ class ShadowTickRunner:
 
     @staticmethod
     def _tick_row_timetag(row: Dict[str, Any]) -> Any:
-        """仅取官方全推 timetag；不用 time/stime 兜底。"""
+        """优先官方 timetag；直播回调常只有 time/stime，缺则兜底以免 last_tick_time 冻住。"""
         if not isinstance(row, dict):
             return None
-        v = row.get("timetag")
-        if v is None or str(v).strip() == "":
-            return None
-        return v
+        for key in ("timetag", "time", "stime", "timeStamp", "timestamp"):
+            v = row.get(key)
+            if v is None or str(v).strip() == "":
+                continue
+            return v
+        return None
 
     @staticmethod
     def _event(
