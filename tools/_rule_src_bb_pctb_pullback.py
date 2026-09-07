@@ -1,31 +1,28 @@
 # 布林%b回落选股
 # %b = (现价 - 布林下轨) / (布林上轨 - 布林下轨)；现价=选股日收盘
-# 入选硬条件（四项全过）：
-#   1) 流通市值 ∈ [MIN_FLOAT_MV_YI, MAX_FLOAT_MV_YI]（默认 80~800 亿）
-#   2) 选股日所属行业/概念在涨幅榜上的最好名次 ∈ [BOARD_RANK_LO, BOARD_RANK_HI]（默认 21~100）
-#   3) %b 买点 A 或 B（二选一）：
-#      A 深度超跌反弹：近 PCTB_LOOKBACK 个交易日内曾 %b<0，且今日 %b>=PCTB_A_MIN（默认 0.05）
-#      B 下轨附近企稳：今日 %b<=PCTB_B_MAX（默认 0.04），且 T、T-1 连续两日最低价不再创新低
-#   4) 10 日均线不持续向下：近 5 日 MA10 线性回归归一化斜率 Slope_norm > -0.008
-#   5) 近 EX_DIV_LOOKBACK_DAYS 个交易日内无疑似除权（不复权 OHLC 跳空过滤）
+# 入选硬条件：
+#   1) 今日 %b <= PCTB_MAX（默认 0.05）
+#   2) 近 EX_DIV_LOOKBACK_DAYS 个交易日内无疑似除权（不复权 OHLC 跳空过滤）
+#   3) MA10 归一斜率 >= MA10_SLOPE_NORM_MIN（默认 -0.004）
+#   4) 流通市值 < MAX_FLOAT_MV_YI（默认 80 亿）
+#   5) 最佳板块排名 ∈[BOARD_RANK_LO,BOARD_RANK_HI]
+#      或 所属概念最高排名 ∈ 同区间（默认 [1,50]）
 # 选股日 < 2026-01-01 时优先读 data/daily_full 日线（引擎传入的 daily_cache 不够长时更稳）
 # 引擎：关闭热门池收窄，全市场扫描
 USE_EM_CANDIDATE_POOL = False
 HOT_MODE = "bb_pctb_pullback"
 
-MIN_FLOAT_MV_YI = 80.0
-MAX_FLOAT_MV_YI = 800.0
-BOARD_RANK_LO = 21
-BOARD_RANK_HI = 100
+MIN_FLOAT_MV_YI = 0.0  # 市值下限（硬条件只用上限）
+MAX_FLOAT_MV_YI = 80.0  # 硬条件：流通市值 < 此值（亿元）
+BOARD_RANK_LO = 1
+BOARD_RANK_HI = 50
 BOARD_RANK_KIND = "chg"  # 东财涨跌幅榜
-PCTB_A_MIN = 0.05  # 买点 A：今日 %b 下限
-PCTB_B_MAX = 0.04  # 买点 B：今日 %b 上限
-PCTB_LOOKBACK = 5  # 买点 A：回溯交易日数（含今日）
+PCTB_MAX = 0.05  # 硬条件：今日 %b 上限
 BB_PERIOD = 20
 BB_K = 2.0
 MA10_PERIOD = 10
 MA10_SLOPE_DAYS = 5  # 近 N 日 MA10 做线性回归
-MA10_SLOPE_NORM_MIN = -0.008  # Slope_norm = k/mean(MA10) 须大于该阈值
+MA10_SLOPE_NORM_MIN = -0.004  # 硬条件：归一斜率下限（含）
 EX_DIV_LOOKBACK_DAYS = 20  # 近 N 交易日疑似除权则剔除
 DAILY_FULL_BEFORE = (2026, 1, 1)  # 该日之前优先 daily_full
 
@@ -140,127 +137,6 @@ def _pct_b(price, upper, lower):
     return (p - lo) / width
 
 
-def _pctb_at_index(closes, idx, period=20, k=2.0):
-    """第 idx 根 K 线（0-based）收盘对应的 %b。"""
-    if closes is None or idx < 0 or idx >= len(closes):
-        return None
-    sub = closes[: idx + 1]
-    _, upper, lower = _boll_bands(sub, period=period, k=k)
-    return _pct_b(sub[-1], upper, lower)
-
-
-def _recent_pctb_window(closes, lookback=5, period=20, k=2.0):
-    """近 lookback 日（含今日）的 %b 序列；不足 BB 窗口则对应位为 None。"""
-    if closes is None:
-        return []
-    n = max(1, int(lookback or 1))
-    out = []
-    start = max(0, len(closes) - n)
-    for i in range(start, len(closes)):
-        out.append(_pctb_at_index(closes, i, period=period, k=k))
-    return out
-
-
-def _check_buy_a(closes, pctb_today):
-    """A：近 PCTB_LOOKBACK 日曾 %b<0，且今日 %b>=PCTB_A_MIN。"""
-    if pctb_today is None or float(pctb_today) < float(PCTB_A_MIN):
-        return False, None
-    window = _recent_pctb_window(closes, lookback=PCTB_LOOKBACK, period=BB_PERIOD, k=BB_K)
-    if not window:
-        return False, None
-    had_below_zero = any(p is not None and float(p) < 0 for p in window)
-    min_pctb = None
-    for p in window:
-        if p is None:
-            continue
-        fp = float(p)
-        if min_pctb is None or fp < min_pctb:
-            min_pctb = fp
-    return bool(had_below_zero), min_pctb
-
-
-def _lows_through(daily_data, as_of_date):
-    """取最低价序列（与 closes 对齐）。"""
-    if daily_data is None:
-        return None
-    try:
-        if len(daily_data) == 0:
-            return None
-    except Exception:
-        return None
-    try:
-        import pandas as _pd
-        import numpy as _np
-
-        lows = _pd.to_numeric(daily_data["low"], errors="coerce").to_numpy(dtype=float)
-        as_d = _as_date(as_of_date)
-        if as_d is not None and "date" in getattr(daily_data, "columns", []):
-            dser = _pd.to_datetime(daily_data["date"], errors="coerce")
-            last = dser.iloc[-1]
-            if _pd.notna(last) and last.date() > as_d:
-                mask = dser.dt.normalize() <= _pd.Timestamp(as_d)
-                lows = lows[_np.asarray(mask)]
-        out = [float(x) for x in lows if x == x and x > 0]
-        return out if out else None
-    except Exception:
-        pass
-    as_d = _as_date(as_of_date)
-    rows = []
-    try:
-        for _, r in daily_data.iterrows():
-            dd = _as_date(r.get("_d") or r.get("date"))
-            if dd is None:
-                continue
-            if as_d is not None and dd > as_d:
-                continue
-            try:
-                lo = float(r.get("low"))
-            except (TypeError, ValueError):
-                continue
-            if lo == lo and lo > 0:
-                rows.append(lo)
-    except Exception:
-        return None
-    return rows if rows else None
-
-
-def _lows_no_new_low_2d(lows):
-    """T、T-1 连续两日最低价不再创新低。
-
-    T-1 不低于 T-2 之前最低；T 不低于 T-1（企稳，不再下探）。
-    """
-    if lows is None or len(lows) < 3:
-        return None
-    lo_t = float(lows[-1])
-    lo_t1 = float(lows[-2])
-    prior = [float(x) for x in lows[:-2] if x == x and x > 0]
-    if not prior:
-        return None
-    ref = min(prior)
-    return bool(lo_t1 >= ref and lo_t >= lo_t1)
-
-
-def _check_buy_b(closes, lows, pctb_today):
-    """B：今日 %b<=PCTB_B_MAX，且 T/T-1 不再创新低。"""
-    if pctb_today is None or float(pctb_today) > float(PCTB_B_MAX):
-        return False, None
-    stable = _lows_no_new_low_2d(lows)
-    if stable is None:
-        return False, None
-    return bool(stable), stable
-
-
-def _check_pctb_entry(closes, lows, pctb_today):
-    """返回 (ok, buy_kind, detail_dict)。buy_kind: A|B|''。"""
-    ok_a, min_pctb = _check_buy_a(closes, pctb_today)
-    if ok_a:
-        return True, "A", {"近窗最低%b": min_pctb}
-    ok_b, stable = _check_buy_b(closes, lows, pctb_today)
-    if ok_b:
-        return True, "B", {"T_T1不再创新低": stable}
-    return False, "", {}
-
-
 def _closes_through(daily_data, as_of_date):
     """取收盘序列。引擎 / daily_full(through_date) 通常已截到 as_of，直接读 close。"""
     if daily_data is None:
@@ -352,7 +228,7 @@ def _resolve_daily(stock_code, daily_data, as_of_date):
 def _ma10_slope_ok(closes, period=10, slope_days=5, slope_norm_min=-0.008):
     """方法 A：近 slope_days 日 MA10 对时间 0..n-1 线性回归。
 
-    Slope_norm = k / mean(MA10_recent)；通过条件：Slope_norm > slope_norm_min。
+    Slope_norm = k / mean(MA10_recent)；通过条件：Slope_norm >= slope_norm_min。
     返回 (ok|None, mas, k, slope_norm)。
     """
     p = max(1, int(period or 10))
@@ -379,7 +255,7 @@ def _ma10_slope_ok(closes, period=10, slope_days=5, slope_norm_min=-0.008):
     cov_xy = sum((xs[i] - mean_x) * (mas[i] - mean_y) for i in range(n))
     k = cov_xy / var_x
     slope_norm = k / mean_y
-    ok = bool(slope_norm > float(slope_norm_min))
+    ok = bool(slope_norm >= float(slope_norm_min))
     return ok, mas, float(k), float(slope_norm)
 
 
@@ -597,14 +473,14 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
     mid, upper, lower = _boll_bands(closes, period=BB_PERIOD, k=BB_K)
     pctb = _pct_b(close_px, upper, lower)
 
-    lows = _lows_through(daily, as_of_date)
-    cond_pctb, buy_kind, pctb_detail = _check_pctb_entry(closes, lows, pctb)
-    # 绝大多数票 %b 买点不过：先拒，不碰板块/市值 I/O
+    # 硬条件：%b 先拒，再算斜率/市值/板块
+    cond_pctb = pctb is not None and float(pctb) <= float(PCTB_MAX)
     if not cond_pctb:
         return False, {
             "热门模式": HOT_MODE,
-            "_skip": "%b买点不满足",
+            "_skip": "%b不满足",
             "%b": "" if pctb is None else round(float(pctb), 6),
+            "PCTB_MAX": float(PCTB_MAX),
             "日线来源": daily_src,
         }
 
@@ -615,16 +491,7 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         slope_days=MA10_SLOPE_DAYS,
         slope_norm_min=MA10_SLOPE_NORM_MIN,
     )
-    cond_ma10 = bool(ma10_ok)
-    if not cond_ma10:
-        return False, {
-            "热门模式": HOT_MODE,
-            "_skip": "MA10斜率不满足",
-            "MA10归一化斜率": (
-                "" if ma10_slope_norm is None else round(float(ma10_slope_norm), 8)
-            ),
-            "日线来源": daily_src,
-        }
+    cond_ma10 = bool(ma10_ok) if ma10_ok is not None else False
 
     bundle = _day_bundle(as_of_date)
     mv, mv_src = _resolve_mv_yi(stock_code, as_of_date, close_px, bundle)
@@ -632,29 +499,65 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         stock_code, sectors, bundle
     )
 
-    cond_mv = (
-        mv is not None
-        and float(MIN_FLOAT_MV_YI) <= float(mv) <= float(MAX_FLOAT_MV_YI)
-    )
-    cond_board = (
-        best_rk is not None
-        and int(BOARD_RANK_LO) <= int(best_rk) <= int(BOARD_RANK_HI)
-    )
+    def _rank_in_band(rk):
+        if rk is None or rk == "":
+            return False
+        try:
+            r = int(rk)
+        except (TypeError, ValueError):
+            try:
+                r = int(float(rk))
+            except (TypeError, ValueError):
+                return False
+        return int(BOARD_RANK_LO) <= int(r) <= int(BOARD_RANK_HI)
 
+    cond_mv = mv is not None and float(mv) < float(MAX_FLOAT_MV_YI)
+    cond_board = _rank_in_band(best_rk) or _rank_in_band(con_rk)
+
+    fail = []
+    if not cond_ma10:
+        fail.append(
+            "MA10斜率不满足，要求>=%s，实际%s"
+            % (
+                MA10_SLOPE_NORM_MIN,
+                "" if ma10_slope_norm is None else round(float(ma10_slope_norm), 8),
+            )
+        )
     if not cond_mv:
-        return False, {
-            "热门模式": HOT_MODE,
-            "_skip": "流通市值不满足",
-            "流通市值_亿": "" if mv is None else round(float(mv), 2),
-            "流通市值来源": mv_src or "",
-            "日线来源": daily_src,
-        }
+        fail.append(
+            "流通市值不满足，要求<%s亿，实际%s"
+            % (
+                MAX_FLOAT_MV_YI,
+                "无数据" if mv is None else ("%s亿" % round(float(mv), 2)),
+            )
+        )
     if not cond_board:
+        fail.append(
+            "板块/概念排名不满足，要求最佳或概念∈[%d,%d]，实际最佳=%s 概念=%s"
+            % (
+                int(BOARD_RANK_LO),
+                int(BOARD_RANK_HI),
+                "" if best_rk is None else int(best_rk),
+                "" if con_rk is None else int(con_rk),
+            )
+        )
+    if fail:
         return False, {
             "热门模式": HOT_MODE,
-            "_skip": "板块最好排名不满足",
+            "_skip": "；".join(fail),
+            "满足条件": False,
+            "不满足的原因": "；".join(fail),
+            "条件_%b<=0.05": True,
+            "条件_MA10斜率达标": bool(cond_ma10),
+            "条件_流通市值<80亿": bool(cond_mv),
+            "条件_板块或概念排名1to50": bool(cond_board),
+            "MA10归一化斜率": (
+                "" if ma10_slope_norm is None else round(float(ma10_slope_norm), 8)
+            ),
+            "流通市值_亿": "" if mv is None else round(float(mv), 2),
             "最佳板块排名": "" if best_rk is None else int(best_rk),
-            "最佳板块名称": best_name or "",
+            "所属概念最高排名名次": "" if con_rk is None else int(con_rk),
+            "%b": "" if pctb is None else round(float(pctb), 6),
             "日线来源": daily_src,
         }
 
@@ -663,11 +566,17 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "热门模式": HOT_MODE,
         "满足条件": True,
         "不满足的原因": "",
-        "买点": buy_kind,
-        "条件_流通市值80to800亿": True,
-        "条件_板块最好排名21to100": True,
-        "条件_%b买点A或B": True,
-        "条件_MA10不持续向下": True,
+        "条件_流通市值<80亿": bool(cond_mv),
+        "条件_流通市值80to800亿": bool(
+            mv is not None and 80.0 <= float(mv) <= 800.0
+        ),
+        "条件_板块或概念排名1to50": bool(cond_board),
+        "条件_板块最好排名21to100": bool(
+            best_rk is not None and 21 <= int(best_rk) <= 100
+        ),
+        "条件_%b<=0.05": True,
+        "条件_MA10斜率达标": bool(cond_ma10),
+        "条件_MA10不持续向下": bool(cond_ma10),
         "MA10斜率k": "" if ma10_k is None else round(float(ma10_k), 8),
         "MA10归一化斜率": (
             "" if ma10_slope_norm is None else round(float(ma10_slope_norm), 8)
@@ -692,9 +601,7 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "布林上轨": "" if upper is None else round(float(upper), 4),
         "布林下轨": "" if lower is None else round(float(lower), 4),
         "%b": "" if pctb is None else round(float(pctb), 6),
-        "PCTB_A_MIN": float(PCTB_A_MIN),
-        "PCTB_B_MAX": float(PCTB_B_MAX),
-        "PCTB_LOOKBACK": int(PCTB_LOOKBACK),
+        "PCTB_MAX": float(PCTB_MAX),
         "BB_PERIOD": int(BB_PERIOD),
         "BB_K": float(BB_K),
         "MA10": "" if ma10 is None else round(float(ma10), 4),
@@ -705,11 +612,4 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "板块排名备注": bundle.get("board_err") or "",
         "流通市值备注": "" if mv is not None else (mv_src or bundle.get("mv_err") or ""),
     }
-    if buy_kind == "A" and pctb_detail.get("近窗最低%b") is not None:
-        extra["近窗最低%b"] = round(float(pctb_detail["近窗最低%b"]), 6)
-    if buy_kind == "B":
-        extra["T_T1不再创新低"] = bool(pctb_detail.get("T_T1不再创新低"))
-        if lows and len(lows) >= 2:
-            extra["T日最低"] = round(float(lows[-1]), 4)
-            extra["T1日最低"] = round(float(lows[-2]), 4)
     return bool(ok), extra

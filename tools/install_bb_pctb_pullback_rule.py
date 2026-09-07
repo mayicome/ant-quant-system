@@ -2,9 +2,10 @@
 """安装选股规则：布林%b回落选股
 
 基于 tools/_rule_src_bb_pctb_pullback.py：
-  流通市值 80~800 亿 + 涨幅榜最好名次 21~100
-  + %b 买点 A（近5日曾%b<0且今日>=0.05）或 B（今日<=0.04且T/T-1不再创新低）
-  + MA10 不持续向下。
+  硬条件：%b<=0.05 + 除权过滤
+    + MA10归一斜率>=-0.004
+    + 流通市值<80亿
+    + 最佳板块或概念排名∈[1,50]
   选股日 < 2026-01-01 优先读 data/daily_full。
 
 用法:
@@ -28,12 +29,14 @@ def main() -> None:
         raise SystemExit("rule source missing select()")
     if "bb_pctb_pullback" not in code:
         raise SystemExit("unexpected rule source (HOT_MODE)")
-    if "PCTB_A_MIN = 0.05" not in code:
-        raise SystemExit("expected PCTB_A_MIN = 0.05")
-    if "PCTB_B_MAX = 0.04" not in code:
-        raise SystemExit("expected PCTB_B_MAX = 0.04")
-    if "MA10_SLOPE_NORM_MIN = -0.008" not in code:
-        raise SystemExit("expected MA10_SLOPE_NORM_MIN = -0.008")
+    if "PCTB_MAX = 0.05" not in code:
+        raise SystemExit("expected PCTB_MAX = 0.05")
+    if "MA10_SLOPE_NORM_MIN = -0.004" not in code:
+        raise SystemExit("expected MA10_SLOPE_NORM_MIN = -0.004")
+    if "MAX_FLOAT_MV_YI = 80.0" not in code:
+        raise SystemExit("expected MAX_FLOAT_MV_YI = 80.0")
+    if "BOARD_RANK_HI = 50" not in code:
+        raise SystemExit("expected BOARD_RANK_HI = 50")
     if "MA10_SLOPE_DAYS = 5" not in code:
         raise SystemExit("expected MA10_SLOPE_DAYS = 5")
     rid = str(uuid.uuid4())

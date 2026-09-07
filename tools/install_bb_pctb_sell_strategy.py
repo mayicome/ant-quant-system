@@ -2,8 +2,8 @@
 """安装策略：卖：布林%b回落-斜率/%b/12日次日开盘
 
 持仓每个交易日收盘后检查（策略在次日开盘前用昨收判定）：
-  ① MA10 归一斜率 < -0.008 → 次日开盘止损
-  ② %b ≥ 0.5 → 次日开盘止盈
+  ① 持仓超过 slope_buffer_days（默认5）后，MA10 归一斜率 < -0.012 → 次日开盘止损
+  ② %b ≥ 0.5 → 次日开盘止盈（自买入次日起可触发，不受缓冲限制）
   ③ 持仓天数 = 12 → 次日开盘强制离场（引擎买入日=第1日 → 第13日开盘强清）
   ④ 全部不触发则继续持有
 
@@ -26,10 +26,10 @@ STATE_FILE = "bb_pctb_sell_filled_legs.json"
 
 STRATEGY_CODE = r'''# 卖：布林%b回落
 # 昨收检查 → 今日开盘卖出（single_sell@跌停 ≈ 开盘成交）
-# ① Slope_norm < MA10_SLOPE_STOP（默认 -0.008）止损
-# ② %b >= PCTB_TP（默认 0.5）止盈
+# ① 持仓 idx > slope_buffer_days（默认5）且 Slope_norm < MA10_SLOPE_STOP（默认 -0.012）止损
+# ② %b >= PCTB_TP（默认 0.5）止盈（idx>=2 即可，不受缓冲）
 # ③ 持仓满 HOLD_DAYS（默认12）后次日开盘强清：code_sell_day_index > HOLD_DAYS
-# params：hold_days(=12), ma10_slope_stop(=-0.008), pctb_tp(=0.5),
+# params：hold_days(=12), ma10_slope_stop(=-0.012), slope_buffer_days(=5), pctb_tp(=0.5),
 #         code_sell_day_index（引擎注入）, positions / positions_volume / _filled_legs
 
 NAME_SLOPE = "布林%b卖-MA10斜率止损开盘"
@@ -101,7 +101,10 @@ def run(codes, prices, get_name, account, params):
     hold_days = _int_param("hold_days", 12)
     if hold_days < 1:
         hold_days = 12
-    slope_stop = _float_param("ma10_slope_stop", -0.008)
+    slope_stop = _float_param("ma10_slope_stop", -0.012)
+    slope_buffer_days = _int_param("slope_buffer_days", 5)
+    if slope_buffer_days < 0:
+        slope_buffer_days = 0
     pctb_tp = _float_param("pctb_tp", 0.5)
 
     code_sell_day_index = params.get("code_sell_day_index") or {}
@@ -172,7 +175,10 @@ def run(codes, prices, get_name, account, params):
         filled |= set(str(k) for k, v in filled_raw.items() if v)
     else:
         filled |= set(str(x) for x in filled_raw)
-    filled |= _load_state_legs()
+    # 回测：只用 params['_filled_legs']（按选股窗隔离）。磁盘腿表会跨窗/跨跑污染，导致到期强清被跳过。
+    is_backtest = params.get("backtest_trade_date") is not None
+    if not is_backtest:
+        filled |= _load_state_legs()
 
     def _prev_trading_day(d0):
         try:
@@ -271,14 +277,20 @@ def run(codes, prices, get_name, account, params):
         # 满 hold_days 后次日开盘强清：买入日=1 … 第 hold_days 日收盘后 → 第 hold_days+1 日开盘
         force = idx > int(hold_days)
         # 买入当日（idx=1）开盘不根据昨收做斜率/%b 卖出；首检=买入日收盘后 → 次日开盘
+        # 斜率缓冲：前 slope_buffer_days 个持仓日不启用斜率止损（%b止盈仍可）
+        if slope_buffer_days > 0:
+            can_slope = idx > int(slope_buffer_days)
+        else:
+            can_slope = idx >= 2
         slope_n, pb, last_c, src = None, None, None, ""
         stop_slope = False
         take_pctb = False
         if idx >= 2 or force:
             slope_n, pb, last_c, src = _indicators_asof(c6, check_d)
             if idx >= 2:
-                stop_slope = slope_n is not None and float(slope_n) < float(slope_stop)
                 take_pctb = pb is not None and float(pb) >= float(pctb_tp)
+                if can_slope:
+                    stop_slope = slope_n is not None and float(slope_n) < float(slope_stop)
 
         reason = None
         leg_id = None
@@ -331,7 +343,8 @@ def run(codes, prices, get_name, account, params):
             lk = it.get("leg_key")
             if lk:
                 filled.add(str(lk))
-        _save_state_legs(filled)
+        if not is_backtest:
+            _save_state_legs(filled)
         params["_filled_legs"] = sorted(filled)
     return result
 '''
@@ -356,7 +369,8 @@ def main() -> None:
             "buy_amount_per_stock": float(prev_params.get("buy_amount_per_stock", 50000) or 50000),
             "min_order_amount": float(prev_params.get("min_order_amount", 5000) or 5000),
             "hold_days": int(prev_params.get("hold_days", 12) or 12),
-            "ma10_slope_stop": float(prev_params.get("ma10_slope_stop", -0.008)),
+            "ma10_slope_stop": -0.012,
+            "slope_buffer_days": 5,
             "pctb_tp": float(prev_params.get("pctb_tp", 0.5)),
             "sell_hold_trading_days": int(prev_params.get("sell_hold_trading_days", 13) or 13),
             "entry_window_trading_days": int(prev_params.get("entry_window_trading_days", 13) or 13),
@@ -370,7 +384,10 @@ def main() -> None:
     path.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print("wrote", path)
     print("name", STRATEGY_NAME)
-    print("params hold_days=12 slope_stop=-0.008 pctb_tp=0.5 → next open")
+    print(
+        "params hold_days=12 slope_stop=-0.012 slope_buffer_days=5 "
+        "pctb_tp=0.5 → next open"
+    )
 
 
 if __name__ == "__main__":

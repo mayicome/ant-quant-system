@@ -1,4 +1,4 @@
-#coding:gbk
+# -*- coding: utf-8 -*-
 """
 QMT ????????????????????.py?????? ant_*.py ?????
 get_trade_detail_data ????????????????????????/????????????
@@ -8,7 +8,7 @@ import os
 import sys
 import time
 
-ENTRY_VERSION = "20260819.02"
+ENTRY_VERSION = "20260907.03"
 _shadow = None
 _ACCOUNT_SNAPSHOT_MOD = None
 _ENTRY_ACCOUNT_SKIP = ""
@@ -614,6 +614,8 @@ def _ensure_download_history_bound():
         return False
 
 
+
+
 def init(ContextInfo):
     try:
         sys.stdout.reconfigure(line_buffering=True)
@@ -626,7 +628,8 @@ def init(ContextInfo):
     if shadow is None:
         _plog("[入口] 初始化中止: 交易核心为 None")
         return
-    return shadow.init(ContextInfo)
+    out = shadow.init(ContextInfo)
+    return out
 
 
 def handlebar(ContextInfo):

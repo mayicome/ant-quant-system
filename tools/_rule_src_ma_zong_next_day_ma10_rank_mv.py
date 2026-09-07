@@ -1,23 +1,8 @@
-# 马总选股逻辑 · 次日MA10
-# 参考「马总选股逻辑-盘后」字段骨架；入选语义改为「供次日开买」：
-#   近 LU_LOOKBACK 个交易日（含选股日）内有涨停，锚点=最近一次涨停日 L；
-#   从 L 的下一交易日到选股日 D（含），日线未触达 MA10
-#   （触线口径对齐跌MA单点：low <= 早盘「10日」= 不含当日的近 9 根收盘均）。
-# 若 L=D（当日涨停）：L 之后尚无交易日，视为未触，可入选。
-# 硬过滤（不进结果表）：
-#   - 近 LU_LOOKBACK 日无涨停，或涨停后已触 MA10
-#   - L 后～选股日（含）：任一日最高价相对 L 日收盘涨幅达主板>=5% / 成长>=10%
-#   - 近 EX_DIV_LOOKBACK 个交易日（不含当日）出现疑似除权开盘缺口
-# 满足条件（诊断软门槛，不挡进池；行情类字段一律相对涨停锚点日 L）：
-#   无大涨 ∧ 均线 ∧ 布林 ∧ (行业名次∈[RANK_MEET_LO,RANK_MEET_HI] ∨ 概念名次∈同区间)
-#   - 前10日无大涨：主板无涨幅>=5%；创业/科创/北交所无涨幅>=10%
-#   - 涨停日收盘 > MA5 且 > MA20
-#   - 涨停日收盘 > 布林上轨（MA20 + 2*STD20）
-#   - 行业/概念东财涨幅榜最高名次：任一落在 [RANK_MEET_LO,RANK_MEET_HI]（默认[5,38]）
-# 另保留旧诊断列：行业前32/概念前8、流通市值<80亿（不计入满足条件）
-# 「前十个交易日最高涨幅/日期」、近5/10/20日RS、除权排查、涨停次数等同理相对 L
-# 另输出选股日对照列（后缀 _选股日）：收盘/MA/均线差/RS/净流入/行业概念排名/市值
-# 依赖引擎 ctx["em_board_hot"]（触发引擎按选股日预载；本规则展示/门槛改用涨停锚点日热门与净流入）
+# 马总选股逻辑 · 次日MA10 · 排名市值硬过滤
+# 在「次日MA10」硬过滤（近涨停、未触MA10、L后未冲高、除权排查）之上，再强制入池：
+#   最佳板块排名 ∈ [RANK_MV_LO, RANK_MV_HI]（默认[5,20]）
+#   ∧ 流通市值 < RANK_MV_MAX_YI 亿（默认50；优先选股日流通市值，缺则用涨停日市值）
+# 「满足条件」仍为旧软诊断（无大涨∧均线∧布林∧名次∈[5,38]），不挡进池。
 # 引擎：关闭热门池收窄，全市场扫描
 USE_EM_CANDIDATE_POOL = False
 TOP_N = 50
@@ -43,7 +28,10 @@ REQUIRE_MA_GAP = False
 REQUIRE_MA_LT_ALIGN = False
 REQUIRE_NO_RECENT_LU = False
 APPLY_STOCK_FILTERS = False
-HOT_MODE = "ma_zong_next_day_ma10"
+HOT_MODE = "ma_zong_next_day_ma10_rank_mv"
+RANK_MV_LO = 5
+RANK_MV_HI = 20
+RANK_MV_MAX_YI = 50.0
 N = 20
 BOARD_TOP_N_INDUSTRY = 32  # 诊断列：所属行业东财涨幅排名门槛（旧热门口径）
 BOARD_TOP_N_CONCEPT = 8  # 诊断列：所属概念东财涨幅排名门槛（旧热门口径）
@@ -1537,6 +1525,54 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
     # 选股日 D 对照（价/MA/RS/净流入/板块/市值）；须在 above_ma 之前，供风格包裁剪后仍保留
     contrast = _sel_day_contrast_fields(stock_code, sectors, daily_data, as_of_date)
 
+    # ---- 硬过滤：最佳板块排名∈[RANK_MV_LO,RANK_MV_HI] ∧ 市值<RANK_MV_MAX_YI ----
+    mv_gate = contrast.get("流通市值_亿_选股日")
+    if mv_gate in ("", None):
+        mv_gate = mv
+    rk_i = None
+    if best_rk not in (None, ""):
+        try:
+            rk_i = int(best_rk)
+        except (TypeError, ValueError):
+            try:
+                rk_i = int(float(best_rk))
+            except (TypeError, ValueError):
+                rk_i = None
+    mv_f = None
+    if mv_gate not in (None, ""):
+        try:
+            mv_f = float(mv_gate)
+        except (TypeError, ValueError):
+            mv_f = None
+    rank_mv_ok = (
+        rk_i is not None
+        and mv_f is not None
+        and int(RANK_MV_LO) <= int(rk_i) <= int(RANK_MV_HI)
+        and float(mv_f) < float(RANK_MV_MAX_YI)
+    )
+    if not rank_mv_ok:
+        lu_s = ""
+        try:
+            lu_s = lu_date.strftime("%Y-%m-%d")
+        except Exception:
+            lu_s = str(lu_date)
+        return False, {
+            "热门模式": HOT_MODE,
+            "_skip": "非最佳排名[%d,%d]或市值>=%.0f亿"
+            % (int(RANK_MV_LO), int(RANK_MV_HI), float(RANK_MV_MAX_YI)),
+            "涨停锚点日": lu_s,
+            "涨停日期": lu_s,
+            "最佳板块排名": "" if rk_i is None else int(rk_i),
+            "最佳板块名称": best_name,
+            "最佳板块类型": best_kind,
+            "流通市值_亿": "" if mv is None else round(float(mv), 2),
+            "流通市值_亿_选股日": "" if mv_f is None else round(float(mv_f), 2),
+            "条件_硬过滤_排名市值": False,
+            "RANK_MV_LO": int(RANK_MV_LO),
+            "RANK_MV_HI": int(RANK_MV_HI),
+            "RANK_MV_MAX_YI": float(RANK_MV_MAX_YI),
+        }
+
     above_ma = (
         close_price is not None
         and ma5 is not None
@@ -1595,6 +1631,10 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "条件_涨停锚点有效": True,
         "条件_涨停后未触MA10": True,
         "条件_L后最高价未超阈值": not bool(hi_exceeded),
+        "条件_硬过滤_排名市值": True,
+        "RANK_MV_LO": int(RANK_MV_LO),
+        "RANK_MV_HI": int(RANK_MV_HI),
+        "RANK_MV_MAX_YI": float(RANK_MV_MAX_YI),
         "L后最高涨幅%": (
             ""
             if hi_peak_ret is None

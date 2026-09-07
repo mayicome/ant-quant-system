@@ -5,7 +5,7 @@
 （持有未完成样本需随收盘更新；已有选股日优先复用选股文件，不必重选）。
 
 选股规则：马总选股逻辑-次日MA10；回测挂单窗 entry_window=1。
-卖出：sell_half；持有最多 2 个交易日强清；默认关闭 1455 破 MA20 清仓。
+卖出：sell_half；持有最多 8 个交易日强清；默认关闭 1455 破 MA20 清仓。
 
 用法:
   python tools/prepare_ma10_regime_data.py
@@ -38,7 +38,7 @@ OUT_DIR = ROOT / "history_data" / "马总选股逻辑"
 RULE_NAME = "马总选股逻辑-次日MA10"
 DEFAULT_DAYS = 15
 # 与回测 --sell-hold 一致：已覆盖选股日至少再跑这么多天，更新未完成样本
-SELL_HOLD = 2
+SELL_HOLD = 8
 REFRESH_LOOKBACK = SELL_HOLD
 ENTRY_WINDOW = 1  # 与次日MA10 / 监控挂单窗一致
 # 监控日线回测：不挂 1455 破 MA20 清仓
@@ -536,8 +536,14 @@ def run_selection(
     return out_path
 
 
-def run_backtest(sel_path: Path, *, progress: ProgressCb = None) -> int:
+def run_backtest(
+    sel_path: Path,
+    *,
+    sell_hold: int = SELL_HOLD,
+    progress: ProgressCb = None,
+) -> int:
     """跑 ma10 × sell_half 日线回测。"""
+    hold_n = max(1, int(sell_hold or SELL_HOLD))
     script = ROOT / "tools" / "run_ma_zong1_single_daily_backtest.py"
     cmd = [
         sys.executable,
@@ -552,7 +558,7 @@ def run_backtest(sel_path: Path, *, progress: ProgressCb = None) -> int:
         "--entry-window",
         str(ENTRY_WINDOW),
         "--sell-hold",
-        str(SELL_HOLD),
+        str(hold_n),
         "--out-dir",
         str(OUT_DIR),
     ]
@@ -614,6 +620,7 @@ def prepare(
     selection_file: Optional[Path] = None,
     force_days: Optional[int] = None,
     no_reuse: bool = False,
+    sell_hold: int = SELL_HOLD,
     progress: ProgressCb = None,
 ) -> Dict[str, Any]:
     import pandas as pd
@@ -639,7 +646,11 @@ def prepare(
         }
 
     start, end_d, win, reason = planned
-    _log(f"准备窗口: {start} → {end_d}（{len(win)} 个交易日）| {reason}", progress)
+    hold_n = max(1, int(sell_hold or SELL_HOLD))
+    _log(
+        f"准备窗口: {start} → {end_d}（{len(win)} 个交易日）| {reason} | sell-hold={hold_n}",
+        progress,
+    )
     sel_path = selection_file
 
     if skip_select:
@@ -697,7 +708,7 @@ def prepare(
         sel_path = write_selection_df(merged, start, end_d, progress=progress)
 
     if not skip_backtest:
-        run_backtest(Path(sel_path), progress=progress)
+        run_backtest(Path(sel_path), sell_hold=hold_n, progress=progress)
     return {
         "start": str(start),
         "end": str(end_d),
@@ -705,6 +716,7 @@ def prepare(
         "selection": str(sel_path),
         "skipped": False,
         "reason": reason,
+        "sell_hold": hold_n,
     }
 
 
@@ -730,6 +742,12 @@ def main(argv=None) -> int:
         action="store_true",
         help="不复用旧选股文件，窗口内全部重选（改满足条件后必须加）",
     )
+    ap.add_argument(
+        "--sell-hold",
+        type=int,
+        default=SELL_HOLD,
+        help=f"买入次日起持有第 N 日强清（默认 {SELL_HOLD}）",
+    )
     ap.add_argument("--selection", type=str, default="", help="指定选股文件（配合 --skip-select）")
     args = ap.parse_args(argv)
     try:
@@ -741,6 +759,7 @@ def main(argv=None) -> int:
             selection_file=Path(args.selection) if args.selection else None,
             force_days=int(args.force_days) if int(args.force_days or 0) > 0 else None,
             no_reuse=bool(args.no_reuse),
+            sell_hold=int(args.sell_hold),
         )
         if out.get("skipped"):
             return 0

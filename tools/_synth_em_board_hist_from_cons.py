@@ -2,7 +2,10 @@
 """用成份股日线等权涨跌幅补齐缺失的东财板块日 K（hist 不可用时）。
 
 优先使用 ``_hist_cache`` 中已有的真实 push2his 日 K；
-仅对缺失板块，用成份股 ``data/daily_cache`` 等权平均涨跌幅合成。
+仅对缺失板块，用成份股日线等权平均涨跌幅合成。
+
+日线查找顺序：``daily_full`` → ``daily_full_qfq`` → ``daily_cache``
+（2024 全年等历史窗口须用 daily_full；daily_cache 多为近窗）。
 
 注意：合成涨跌幅 ≠ 东财官方板块指数涨跌幅（权重/样本不同），仅作排名近似。
 """
@@ -31,6 +34,11 @@ from tools.backfill_em_board_rank_from_hist import (  # noqa: E402
 )
 
 DAILY_CACHE = os.path.join(ROOT, "data", "daily_cache")
+DAILY_DIRS = (
+    os.path.join(ROOT, "data", "daily_full"),
+    os.path.join(ROOT, "data", "daily_full_qfq"),
+    DAILY_CACHE,
+)
 CONS_DIR = os.path.join(CACHE_DIR, "_cons")
 
 
@@ -105,6 +113,14 @@ def _load_cons(kind: str, code: str) -> List[str]:
     return list(payload.get("members") or [])
 
 
+def _resolve_daily_csv(stem: str) -> Optional[str]:
+    for d in DAILY_DIRS:
+        path = os.path.join(d, f"{stem}.csv")
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def _load_stock_pct_panel(stems: Set[str], start: date, end: date) -> pd.DataFrame:
     """返回 index=date, columns=stem 的涨跌幅(%)面板。"""
     start_s = _ymd(start)
@@ -113,8 +129,8 @@ def _load_stock_pct_panel(stems: Set[str], start: date, end: date) -> pd.DataFra
     widen_start = (start - timedelta(days=10)).strftime("%Y-%m-%d")
     frames = []
     for stem in stems:
-        path = os.path.join(DAILY_CACHE, f"{stem}.csv")
-        if not os.path.isfile(path):
+        path = _resolve_daily_csv(stem)
+        if not path:
             continue
         try:
             df = pd.read_csv(path, usecols=["date", "close"])
@@ -183,7 +199,7 @@ def synthesize_hist_from_cons(
             {
                 "code": code,
                 "name": name,
-                "source": "equal_weight_daily_cache",
+                "source": "equal_weight_daily_full_or_cache",
                 "members_used": len(stems),
                 "members_total": len(members),
                 "rows": len(df),

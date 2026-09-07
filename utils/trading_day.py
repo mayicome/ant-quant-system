@@ -191,6 +191,9 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
     today = date.today()
     cache_start = today.replace(year=today.year - 3)  # 从3年前开始
     cache_end = today.replace(year=today.year + 1)    # 到明年结束
+    # 历史回测/选股若问到更早日期，把缓存起点前推（含约 60 自然日缓冲，供「前 N 交易日」）
+    if check_date < cache_start:
+        cache_start = check_date - timedelta(days=60)
 
     missing_today_in_cache = (
         _trade_date_cache is not None and today not in _trade_date_cache
@@ -224,6 +227,14 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
     if need_refresh:
         if same_day_incomplete_cache:
             _same_day_missing_today_refresh_on = today
+        # 已有缓存但问到更早日期时，合并扩窗，避免把近期日历冲掉
+        if (
+            _cache_date_range is not None
+            and check_date < _cache_date_range[0]
+            and _trade_date_cache
+        ):
+            cache_start = min(cache_start, check_date - timedelta(days=60))
+            cache_end = max(cache_end, _cache_date_range[1])
         if not _build_trade_date_cache(cache_start, cache_end, today):
             return _today_weekday_fallback(check_date) if check_date == today else check_date.weekday() < 5
 

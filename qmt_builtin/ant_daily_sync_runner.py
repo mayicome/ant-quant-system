@@ -1273,11 +1273,28 @@ def _full_qfq_dir() -> str:
     return os.path.join(_data_paths()[0], "data", "daily_full_qfq")
 
 
+def _cache_hfq_dir(cache_dir: str) -> str:
+    base = os.path.dirname(cache_dir.rstrip("\\/"))
+    return os.path.join(base, "daily_cache_hfq")
+
+
+def _full_hfq_dir() -> str:
+    return os.path.join(_data_paths()[0], "data", "daily_full_hfq")
+
+
 def _qfq_cache_floor_date() -> date:
     return date(date.today().year, 1, 1)
 
 
 def _qfq_full_cap_date() -> date:
+    return date(date.today().year - 1, 12, 31)
+
+
+def _hfq_cache_floor_date() -> date:
+    return date(date.today().year, 1, 1)
+
+
+def _hfq_full_cap_date() -> date:
     return date(date.today().year - 1, 12, 31)
 
 
@@ -1393,6 +1410,84 @@ def _mirror_qfq_full_csv(
     _write_csv_atomic(os.path.join(qfq_dir, code + ".csv"), rows)
 
 
+def _mirror_hfq_cache_csv(
+    cache_dir: str,
+    code: str,
+    rows_none: Dict[str, Dict[str, Any]],
+    ContextInfo=None,
+    xtdata=None,
+) -> None:
+    """同步写入 daily_cache_hfq（后复权）；窗口：当年 1/1 .. rows 末日。"""
+    if not rows_none or ContextInfo is None:
+        return
+    d0, d1 = _rows_date_bounds(rows_none)
+    if d0 is None or d1 is None:
+        return
+    floor_d = _hfq_cache_floor_date()
+    start_d = max(d0, floor_d)
+    end_d = d1
+    if start_d > end_d:
+        return
+    batch_map, _ = _batch_fetch_1d_bars(
+        ContextInfo,
+        xtdata,
+        [code],
+        start_d,
+        end_d,
+        prefer_count=-1,
+        quality_min=1,
+        dividend_type="back",
+    )
+    bars = _sanitize_bars(batch_map.get(code) or [])
+    if not bars:
+        return
+    hfq_dir = _cache_hfq_dir(cache_dir)
+    os.makedirs(hfq_dir, exist_ok=True)
+    hfq_path = os.path.join(hfq_dir, code + ".csv")
+    hfq_rows = _read_csv_rows(hfq_path)
+    _merge_bars(hfq_rows, bars)
+    hfq_rows = _trim_rows_for_storage(hfq_rows)
+    hfq_rows = _trim_rows_before(hfq_rows, floor_d)
+    _write_csv_atomic(hfq_path, hfq_rows)
+
+
+def _mirror_hfq_full_csv(
+    code: str,
+    start_d: date,
+    end_d: date,
+    ContextInfo=None,
+    xtdata=None,
+) -> None:
+    """按需全量成功后写入 daily_full_hfq（后复权，裁至去年末）。"""
+    if ContextInfo is None:
+        return
+    cap_d = _hfq_full_cap_date()
+    eff_end = min(end_d, cap_d)
+    if start_d > eff_end:
+        return
+    batch_map, _ = _batch_fetch_1d_bars(
+        ContextInfo,
+        xtdata,
+        [code],
+        start_d,
+        eff_end,
+        prefer_count=-1,
+        quality_min=1,
+        dividend_type="back",
+    )
+    bars = _sanitize_bars(batch_map.get(code) or [])
+    if len(bars) < 4:
+        return
+    rows: Dict[str, Dict[str, Any]] = {}
+    _merge_bars(rows, bars)
+    rows = _trim_rows_after(rows, cap_d)
+    if len(rows) < 4:
+        return
+    hfq_dir = _full_hfq_dir()
+    os.makedirs(hfq_dir, exist_ok=True)
+    _write_csv_atomic(os.path.join(hfq_dir, code + ".csv"), rows)
+
+
 def _write_daily_cache_csv(
     cache_dir: str,
     code: str,
@@ -1406,6 +1501,10 @@ def _write_daily_cache_csv(
         _mirror_qfq_cache_csv(cache_dir, code, rows, ContextInfo=ContextInfo, xtdata=xtdata)
     except Exception as e:
         print("[日线同步] qfq cache mirror %s: %s" % (code, e))
+    try:
+        _mirror_hfq_cache_csv(cache_dir, code, rows, ContextInfo=ContextInfo, xtdata=xtdata)
+    except Exception as e:
+        print("[日线同步] hfq cache mirror %s: %s" % (code, e))
 
 
 def _last_date_in_csv(path: str) -> Optional[date]:
@@ -6155,6 +6254,10 @@ def _sync_one_code_ipo_full(
         _mirror_qfq_full_csv(code, start_d, end_d, ContextInfo=ContextInfo, xtdata=xtdata)
     except Exception as e:
         print("[按需同步] qfq full mirror %s: %s" % (code, e))
+    try:
+        _mirror_hfq_full_csv(code, start_d, end_d, ContextInfo=ContextInfo, xtdata=xtdata)
+    except Exception as e:
+        print("[按需同步] hfq full mirror %s: %s" % (code, e))
 
     valid_n = _count_valid_rows(rows)
     earliest = _rows_earliest_date(rows)

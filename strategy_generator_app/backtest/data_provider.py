@@ -231,9 +231,10 @@ def _backtest_tick_kw() -> Dict[str, bool]:
 
 
 def _backtest_fill_adjust() -> str:
-    """回测撮合 OHLC 复权口径（环境变量 BACKTEST_FILL_ADJUST，默认 none）。"""
-    import os
+    """回测成交价 OHLC 复权口径（环境变量 BACKTEST_FILL_ADJUST，默认 none）。
 
+    触价判定始终用不复权；仅成交金额/基准价使用本函数返回的口径（马总回测常为 qfq）。
+    """
     try:
         from utils.daily_adjust_paths import normalize_adjust
 
@@ -241,6 +242,61 @@ def _backtest_fill_adjust() -> str:
     except Exception:
         raw = (os.environ.get("BACKTEST_FILL_ADJUST") or "none").strip().lower()
         return "qfq" if raw in ("qfq", "front", "前复权") else "none"
+
+
+def _extract_ohlc_row(df: Any, as_of_date: date) -> Optional[Dict[str, float]]:
+    """从日线 DataFrame 取 as_of 当日 OHLC；缺 K 返回 None。"""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return None
+    df = _sort_daily_df(df)
+    try:
+        if "date" in getattr(df, "columns", []):
+            row_df = df[df["date"] == as_of_date]
+            if row_df is None or row_df.empty:
+                return None
+            row = row_df.iloc[-1]
+        else:
+            row = df.iloc[-1]
+    except Exception:
+        return None
+    open_col = _find_open_column(df)
+    high_col = _find_high_column(df)
+    low_col = _find_low_column(df)
+    close_col = _find_close_column(df)
+    if not close_col:
+        return None
+    try:
+        import pandas as pd
+
+        def _f(col: Optional[str]) -> float:
+            if not col:
+                return 0.0
+            v = row[col] if col in row.index else None
+            if v is None or (hasattr(pd, "isna") and pd.isna(v)):
+                return 0.0
+            f = float(v)
+            return f if f > 0 and not math.isnan(f) else 0.0
+
+        o = _f(open_col)
+        h = _f(high_col)
+        low_v = _f(low_col)
+        cl = _f(close_col)
+        if cl <= 0:
+            return None
+        if o <= 0:
+            o = cl
+        if h <= 0:
+            h = max(o, cl)
+        if low_v <= 0:
+            low_v = min(o, cl)
+        return {
+            "open": float(o),
+            "high": float(h),
+            "low": float(low_v),
+            "close": float(cl),
+        }
+    except Exception:
+        return None
 
 
 def _load_daily_df(
@@ -665,7 +721,13 @@ def get_daily_ohlc_for_codes(
     stock_codes_6: List[str],
     as_of_date: date,
 ) -> Dict[str, Dict[str, float]]:
-    """同日日线撮合用：返回 {code6: {open, high, low, close}}；缺 K 线则跳过该代码。"""
+    """同日日线撮合用 OHLC。
+
+    返回 {code6: {open,high,low,close, fill_open,fill_high,fill_low,fill_close}}：
+    - open/high/low/close：不复权，用于是否触发判定（与策略信号一致）
+    - fill_*：成交价口径（BACKTEST_FILL_ADJUST；未设或 none 时与不复权相同）
+    缺信号 K 线则跳过该代码。
+    """
     out: Dict[str, Dict[str, float]] = {}
     if not stock_codes_6:
         return out
@@ -677,59 +739,33 @@ def get_daily_ohlc_for_codes(
             continue
         seen.add(c6)
         codes.append(c6)
+
+    fill_adj = _backtest_fill_adjust()
     for code_6 in codes:
-        df, _src = _load_daily_df(code_6, as_of_date, adjust=_backtest_fill_adjust())
-        if df is None or (hasattr(df, "empty") and df.empty):
+        df_sig, _src = _load_daily_df(code_6, as_of_date, adjust="none")
+        sig = _extract_ohlc_row(df_sig, as_of_date)
+        if not sig:
             continue
-        df = _sort_daily_df(df)
-        try:
-            if "date" in getattr(df, "columns", []):
-                row_df = df[df["date"] == as_of_date]
-                if row_df is None or row_df.empty:
-                    continue
-                row = row_df.iloc[-1]
+        row = dict(sig)
+        if fill_adj and fill_adj != "none":
+            df_fill, _ = _load_daily_df(code_6, as_of_date, adjust=fill_adj)
+            fill = _extract_ohlc_row(df_fill, as_of_date)
+            if fill:
+                row["fill_open"] = float(fill["open"])
+                row["fill_high"] = float(fill["high"])
+                row["fill_low"] = float(fill["low"])
+                row["fill_close"] = float(fill["close"])
             else:
-                row = df.iloc[-1]
-        except Exception:
-            continue
-        open_col = _find_open_column(df)
-        high_col = _find_high_column(df)
-        low_col = _find_low_column(df)
-        close_col = _find_close_column(df)
-        if not close_col:
-            continue
-        try:
-            import pandas as pd
-
-            def _f(col: Optional[str]) -> float:
-                if not col:
-                    return 0.0
-                v = row[col] if col in row.index else None
-                if v is None or (hasattr(pd, "isna") and pd.isna(v)):
-                    return 0.0
-                f = float(v)
-                return f if f > 0 and not math.isnan(f) else 0.0
-
-            o = _f(open_col)
-            h = _f(high_col)
-            low_v = _f(low_col)
-            cl = _f(close_col)
-            if cl <= 0:
-                continue
-            if o <= 0:
-                o = cl
-            if h <= 0:
-                h = max(o, cl)
-            if low_v <= 0:
-                low_v = min(o, cl)
-            out[code_6] = {
-                "open": float(o),
-                "high": float(h),
-                "low": float(low_v),
-                "close": float(cl),
-            }
-        except Exception:
-            continue
+                row["fill_open"] = float(sig["open"])
+                row["fill_high"] = float(sig["high"])
+                row["fill_low"] = float(sig["low"])
+                row["fill_close"] = float(sig["close"])
+        else:
+            row["fill_open"] = float(sig["open"])
+            row["fill_high"] = float(sig["high"])
+            row["fill_low"] = float(sig["low"])
+            row["fill_close"] = float(sig["close"])
+        out[code_6] = row
     return out
 
 

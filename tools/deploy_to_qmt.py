@@ -19,6 +19,7 @@ MODULE_FILES = (
     "ant_elastic_sell_lite.py",
     "ant_elastic_buy_lite.py",
     "ant_daily_sync_runner.py",
+    "ant_hfq_bulk_runner.py",
     "ant_after_hours_rank_runner.py",
     "ant_sector_sync_runner.py",
     "ant_data_sync_request.py",

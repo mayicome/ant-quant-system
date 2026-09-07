@@ -132,15 +132,29 @@ def fill_cons(kind: str) -> int:
 
 
 def main() -> None:
+    import argparse
+
     _clear_proxy_env()
-    start = date(2026, 6, 9)
-    end = date(2026, 7, 31)
-    print(f"[info] start {datetime.now()}")
-    for kind in ("industry", "concept"):
+    ap = argparse.ArgumentParser(description="拉成份股 + 等权合成 hist + build-only 写榜")
+    ap.add_argument("--start", default="2026-06-09")
+    ap.add_argument("--end", default="2026-07-31")
+    ap.add_argument("--kind", default="both", choices=("both", "industry", "concept"))
+    ap.add_argument("--skip-fetch-cons", action="store_true", help="已有 _cons 时跳过拉取")
+    ap.add_argument("--skip-synth", action="store_true")
+    ap.add_argument("--skip-build", action="store_true")
+    args = ap.parse_args()
+    start = date.fromisoformat(str(args.start)[:10])
+    end = date.fromisoformat(str(args.end)[:10])
+    kinds = ("industry", "concept") if args.kind == "both" else (args.kind,)
+    print(f"[info] start {datetime.now()} window={start}..{end} kinds={kinds}")
+    for kind in kinds:
         export_pending_cons(kind, start, end)
-        fill_cons(kind)
-        fill_missing_with_synth(kind, start, end)
-        backfill_kind(kind, start, end, allow_network=False, write_csv=True)
+        if not args.skip_fetch_cons:
+            fill_cons(kind)
+        if not args.skip_synth:
+            fill_missing_with_synth(kind, start, end)
+        if not args.skip_build:
+            backfill_kind(kind, start, end, allow_network=False, write_csv=True)
     print(f"[done] {datetime.now()}")
 
 

@@ -4,11 +4,12 @@
 不依赖 tick、不改 UI「回测」页。选股文件 → 买入/卖出成交明细 CSV + 收益汇总。
 
 撮合口径：
-  买：low<=MA → min(open, MA)
-  卖半仓/涨停：high>=触发价 → max(open, 触发价)
-  1455 破 MA20：close<MA20 → close（可用 --no-ma20-clear 关闭）
-  第 N 日强清：close
-  成交价/盯市：前复权日线（BACKTEST_FILL_ADJUST=qfq）；策略信号与涨跌停用不复权
+  买：不复权 low<=MA → 前复权 min(open, 映射MA)
+  卖半仓/涨停：不复权 high>=触发价 → 前复权 max(open, 映射触发价)
+  1455 破 MA20：不复权 close<MA20 → 前复权 close（可用 --no-ma20-clear 关闭）
+  第 N 日强清：前复权 close
+  触价判定：不复权日线；成交价/金额：前复权（BACKTEST_FILL_ADJUST=qfq）
+  策略信号与涨跌停：不复权
 
 用法:
   python tools/run_ma_zong1_single_daily_backtest.py 选股结果.xls
@@ -783,9 +784,12 @@ def main() -> int:
 
     import os
 
-    # 撮合 OHLC / 盯市收盘用前复权；策略信号与涨跌停仍走不复权日线
+    # 触价判定用不复权 OHLC；成交金额用前复权（fill_*）
     os.environ["BACKTEST_FILL_ADJUST"] = "qfq"
-    print("回测撮合价口径: 前复权 (BACKTEST_FILL_ADJUST=qfq)；选股信号/涨跌停仍用不复权")
+    print(
+        "回测撮合: 触价判定=不复权；成交价=前复权 (BACKTEST_FILL_ADJUST=qfq)；"
+        "选股信号/涨跌停仍用不复权"
+    )
 
     sel_path = Path(args.selection)
     if not sel_path.is_file():
@@ -942,6 +946,17 @@ def main() -> int:
             sell_params["hold_days"] = int(sell_hold)
             sell_params.setdefault("ma10_slope_stop", -0.008)
             sell_params.setdefault("pctb_tp", 0.5)
+            # 避免磁盘腿表跨选股窗污染（回测只认 params['_filled_legs']）
+            try:
+                _leg_path = ROOT / "data" / "bb_pctb_sell_filled_legs.json"
+                if i == 0 and _leg_path.is_file():
+                    _leg_path.write_text(
+                        '{"legs":[],"note":"cleared_for_backtest"}\n',
+                        encoding="utf-8",
+                    )
+                    print("已清空 data/bb_pctb_sell_filled_legs.json（回测隔离）")
+            except Exception:
+                pass
 
         segments = [
             {

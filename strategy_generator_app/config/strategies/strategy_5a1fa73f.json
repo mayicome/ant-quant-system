@@ -6,9 +6,10 @@
     "002828"
   ],
   "strategy_params": {
-    "buy_amount_per_stock": 50000,
+    "buy_amount_per_stock": 50000.0,
     "min_order_amount": 5000.0,
-    "entry_window_trading_days": 4,
+    "entry_window_trading_days": 8,
+    "sizing_mode": "fixed",
     "drop_percent": 1.0,
     "open_gain_main": 0.05,
     "open_gain_growth": 0.1,

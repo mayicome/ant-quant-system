@@ -2656,6 +2656,10 @@ def simulate_fills_same_day_ohlc(
     - scheduled_clear 强清：到持仓日 → 基准 close，再 -0.1%
     日线无买卖一，滑点按比例后四舍五入到最小价位（与 tick 的 ±1 跳不同）。
     笼子/突破等非上述规则本路径不撮合（保留在 remaining）。
+
+    复权双口径（ohlc 含 fill_* 时）：
+    - open/high/low/close：不复权，仅用于是否触发
+    - fill_*：成交基准价/金额；触发价按开盘比映射到 fill 空间后再算成交价
     """
     trades: List[Dict[str, Any]] = []
     new_cash = cash
@@ -2677,17 +2681,7 @@ def simulate_fills_same_day_ohlc(
         else:
             remaining.append(intent)
 
-    def _bar(code_6: str) -> Optional[Dict[str, float]]:
-        b = ohlc_by_code.get(code_6) or {}
-        if not isinstance(b, dict):
-            return None
-        try:
-            o = float(b.get("open") or 0)
-            h = float(b.get("high") or 0)
-            low_v = float(b.get("low") or 0)
-            cl = float(b.get("close") or 0)
-        except (TypeError, ValueError):
-            return None
+    def _norm_bar(o: float, h: float, low_v: float, cl: float) -> Optional[Dict[str, float]]:
         if cl <= 0 and o <= 0:
             return None
         if o <= 0:
@@ -2700,23 +2694,71 @@ def simulate_fills_same_day_ohlc(
             low_v = min(o, cl)
         return {"open": o, "high": h, "low": low_v, "close": cl}
 
+    def _signal_fill_bars(
+        code_6: str,
+    ) -> tuple[Optional[Dict[str, float]], Optional[Dict[str, float]]]:
+        b = ohlc_by_code.get(code_6) or {}
+        if not isinstance(b, dict):
+            return None, None
+        try:
+            o = float(b.get("open") or 0)
+            h = float(b.get("high") or 0)
+            low_v = float(b.get("low") or 0)
+            cl = float(b.get("close") or 0)
+        except (TypeError, ValueError):
+            return None, None
+        sig = _norm_bar(o, h, low_v, cl)
+        if not sig:
+            return None, None
+        has_fill = any(
+            k in b for k in ("fill_open", "fill_high", "fill_low", "fill_close")
+        )
+        if not has_fill:
+            return sig, dict(sig)
+        try:
+            fo = float(b.get("fill_open") or 0) or float(sig["open"])
+            fh = float(b.get("fill_high") or 0) or float(sig["high"])
+            fl = float(b.get("fill_low") or 0) or float(sig["low"])
+            fc = float(b.get("fill_close") or 0) or float(sig["close"])
+        except (TypeError, ValueError):
+            return sig, dict(sig)
+        fill = _norm_bar(fo, fh, fl, fc)
+        return sig, (fill or dict(sig))
+
+    def _map_trig_to_fill(
+        trig: float, sig: Dict[str, float], fill: Dict[str, float]
+    ) -> float:
+        """不复权触发价 → 成交复权空间（按当日开盘比，缺则用收盘比）。"""
+        if trig <= 0:
+            return trig
+        so = float(sig.get("open") or 0)
+        fo = float(fill.get("open") or 0)
+        if so > 0 and fo > 0 and abs(so - fo) > 1e-9:
+            return float(trig) * fo / so
+        sc = float(sig.get("close") or 0)
+        fc = float(fill.get("close") or 0)
+        if sc > 0 and fc > 0 and abs(sc - fc) > 1e-9:
+            return float(trig) * fc / sc
+        return float(trig)
+
     for intent in buys:
         code_6 = _code6(intent.get("stock_code") or "")
         volume = int(intent.get("volume") or 0)
         if not code_6 or volume <= 0:
             continue
-        bar = _bar(code_6)
-        if not bar:
+        sig, fill = _signal_fill_bars(code_6)
+        if not sig or not fill:
             remaining.append(intent)
             continue
         trig = float(intent.get("price") or 0)
         if trig <= 0:
             remaining.append(intent)
             continue
-        if float(bar["low"]) - 1e-9 > trig:
+        if float(sig["low"]) - 1e-9 > trig:
             remaining.append(intent)
             continue
-        base_px = min(float(bar["open"]), trig)
+        trig_fill = _map_trig_to_fill(trig, sig, fill)
+        base_px = min(float(fill["open"]), trig_fill)
         if base_px <= 0:
             remaining.append(intent)
             continue
@@ -2733,8 +2775,8 @@ def simulate_fills_same_day_ohlc(
         apply_buy_fill_t1(new_positions, code_6, volume, fill_px)
         intent_stock_name = (intent.get("stock_name") or "").strip()
         trigger_info = (
-            f"日线单点买入: low={bar['low']:.2f}<=触发价={trig:.2f} "
-            f"基准={base_px:.2f}(=min(open={bar['open']:.2f},触发价)) "
+            f"日线单点买入: low={sig['low']:.2f}<=触发价={trig:.2f} "
+            f"基准={base_px:.2f}(=min(fill_open={fill['open']:.2f},映射触发={trig_fill:.2f})) "
             f"成交={fill_px:.2f}(+{_OHLC_SLIPPAGE_PCT * 100:.1f}%)"
         )
         trades.append({
@@ -2750,7 +2792,7 @@ def simulate_fills_same_day_ohlc(
             # 开盘已在线下→按开盘；盘中触线→记 10:00（日线无精确时点；用滑点前基准判断）
             "time": (
                 "09:30:00"
-                if abs(base_px - float(bar["open"])) <= 1e-9
+                if abs(base_px - float(fill["open"])) <= 1e-9
                 else "10:00:00"
             ),
             "trigger_info": trigger_info,
@@ -2766,8 +2808,8 @@ def simulate_fills_same_day_ohlc(
         rt = (intent.get("rule_type") or "").strip()
         if not code_6 or volume <= 0:
             continue
-        bar = _bar(code_6)
-        if not bar:
+        sig, fill = _signal_fill_bars(code_6)
+        if not sig or not fill:
             remaining.append(intent)
             continue
         pos = new_positions.get(code_6, {"volume": 0, "cost": 0.0, "available": 0})
@@ -2782,19 +2824,33 @@ def simulate_fills_same_day_ohlc(
         base_px = 0.0
         trigger_info = ""
         if rt == "single_sell":
-            if trig <= 0 or float(bar["high"]) + 1e-9 < trig:
-                remaining.append(intent)
-                continue
-            base_px = max(float(bar["open"]), trig)
-            trigger_info = (
-                f"日线单点卖出: high={bar['high']:.2f}>=触发价={trig:.2f} "
-                f"基准={base_px:.2f}(=max(open={bar['open']:.2f},触发价))"
-            )
-            fill_time = (
-                "09:30:00"
-                if abs(base_px - float(bar["open"])) <= 1e-9
-                else "10:00:00"
-            )
+            # 开盘卖（布林%b 等）：不走「上破触发价」语义，直接按开盘价成交，
+            # 避免信号用不复权跌停、撮合用前复权 OHLC 时 high<触发 导致到期强清失败。
+            if bool(intent.get("open_sell")):
+                base_px = float(fill["open"])
+                if base_px <= 0:
+                    remaining.append(intent)
+                    continue
+                trigger_info = (
+                    f"日线开盘卖出: fill_open={base_px:.2f}"
+                    + (f" (挂单价={trig:.2f})" if trig > 0 else "")
+                )
+                fill_time = "09:30:00"
+            else:
+                if trig <= 0 or float(sig["high"]) + 1e-9 < trig:
+                    remaining.append(intent)
+                    continue
+                trig_fill = _map_trig_to_fill(trig, sig, fill)
+                base_px = max(float(fill["open"]), trig_fill)
+                trigger_info = (
+                    f"日线单点卖出: high={sig['high']:.2f}>=触发价={trig:.2f} "
+                    f"基准={base_px:.2f}(=max(fill_open={fill['open']:.2f},映射触发={trig_fill:.2f}))"
+                )
+                fill_time = (
+                    "09:30:00"
+                    if abs(base_px - float(fill["open"])) <= 1e-9
+                    else "10:00:00"
+                )
         elif rt == "best_sell":
             trigger = float(intent.get("trigger_price") or 0)
             try:
@@ -2803,37 +2859,43 @@ def simulate_fills_same_day_ohlc(
                 drop_pct = 0.0
             if drop_pct < 0:
                 drop_pct = 0.0
-            if trigger <= 0 or float(bar["high"]) + 1e-9 < trigger:
+            if trigger <= 0 or float(sig["high"]) + 1e-9 < trigger:
                 remaining.append(intent)
                 continue
-            # 日线近似：触达 trigger 后峰值取 high；回落到位则按 fallback 成交
-            peak = float(bar["high"])
-            fallback = peak * (1.0 - drop_pct / 100.0) if drop_pct > 0 else trigger
-            if float(bar["low"]) - 1e-9 > fallback:
+            # 触达用信号 high；成交用 fill 峰值/回落
+            peak = float(fill["high"])
+            fallback = (
+                peak * (1.0 - drop_pct / 100.0)
+                if drop_pct > 0
+                else _map_trig_to_fill(trigger, sig, fill)
+            )
+            if float(fill["low"]) - 1e-9 > fallback:
                 remaining.append(intent)
                 continue
-            base_px = max(float(fallback), float(bar["low"]))
+            base_px = max(float(fallback), float(fill["low"]))
             base_px = min(base_px, peak)
             trigger_info = (
-                f"日线弹性卖出: high={peak:.2f}>=trigger={trigger:.2f} "
-                f"drop={drop_pct:.2f}% fallback={fallback:.2f} low={bar['low']:.2f}"
+                f"日线弹性卖出: high={sig['high']:.2f}>=trigger={trigger:.2f} "
+                f"drop={drop_pct:.2f}% fill_peak={peak:.2f} fallback={fallback:.2f} "
+                f"fill_low={fill['low']:.2f}"
             )
             fill_time = "10:30:00"
         elif rt == "scheduled_clear":
             if force:
-                base_px = float(bar["close"])
-                trigger_info = f"日线定时强清: 收盘价={base_px:.2f}"
+                base_px = float(fill["close"])
+                trigger_info = f"日线定时强清: fill_close={base_px:.2f}"
             else:
                 if trig <= 0:
                     remaining.append(intent)
                     continue
-                # 1455 破线 ≈ 收盘跌破触发价
-                if float(bar["close"]) + 1e-9 >= trig:
+                # 1455 破线 ≈ 收盘跌破触发价（判定用不复权收盘）
+                if float(sig["close"]) + 1e-9 >= trig:
                     # 当日放弃（与 tick：价>=触发价则不卖）一致
                     continue
-                base_px = float(bar["close"])
+                base_px = float(fill["close"])
                 trigger_info = (
-                    f"日线定时清仓(收盘破线): close={base_px:.2f}<触发价={trig:.2f}"
+                    f"日线定时清仓(收盘破线): close={sig['close']:.2f}<触发价={trig:.2f} "
+                    f"fill_close={base_px:.2f}"
                 )
             sched_tm = str(intent.get("scheduled_clear_time") or "").strip()
             fill_time = sched_tm if len(sched_tm) >= 5 else "15:00:00"

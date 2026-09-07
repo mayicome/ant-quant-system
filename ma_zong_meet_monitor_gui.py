@@ -3,8 +3,10 @@
 """
 马总选股逻辑 · 满足条件对比监控 GUI
 
-- 三个图叠画两组：满足条件 / 不满足条件（同一回测池按「满足条件」列拆分）
-- 「满足条件」= 软门槛五项全真（含涨停日收盘站上布林上轨）；改规则后需重跑选股+回测才刷新
+- 三个图叠画两组；顶部「对比口径」可切换：
+  · 排名5-20·市值<50 vs 其余（默认）
+  · 满足条件 vs 不满足
+- 按票数据合并 history_data/马总选股逻辑 下 2024/、最终/ 等子目录 latest
 - 近窗滚动、开买日票均、累计开买日票均；量柱展示各组选股只数与成交笔数
 - 点击某开买日 → 两组对比摘要 + 票明细
 - 「更新选股+回测」：缺口补选股（马总选股逻辑-次日MA10）+ ma10/sell_half 回测（持有最多8日，无破MA20清仓）
@@ -23,7 +25,7 @@ import sys
 import warnings
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -85,11 +87,37 @@ import ma_zong_meet_monitor as zb  # noqa: E402
 plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
-# 满足条件 / 不满足条件 配色
+# 满足条件 / 不满足条件 配色（第二口径复用：蓝=过滤命中 / 橙=其余）
 C_TB = "#2E86AB"
 C_NO = "#E67E22"
 C_TB_WIN = "#5DADE2"
 C_NO_WIN = "#F5B041"
+
+
+def _variant_pair(reports: Dict[str, dict] | None = None, mode: str | None = None) -> tuple:
+    if mode:
+        return zb.variants_for_mode(mode)
+    if reports:
+        if zb.VARIANT_RANK_MV in reports:
+            return zb.MODE_VARIANTS[zb.MODE_RANK_MV]
+        if zb.VARIANT_MEET in reports:
+            return zb.MODE_VARIANTS[zb.MODE_MEET]
+        keys = [k for k in reports.keys() if k]
+        if len(keys) >= 2:
+            return keys[0], keys[1]
+    return zb.variants_for_mode(zb.MODE_MEET)
+
+
+def _short_variant(v: str) -> str:
+    if v == zb.VARIANT_RANK_MV:
+        return "排名市值"
+    if v == zb.VARIANT_NOT_RANK_MV:
+        return "其余"
+    if v == zb.VARIANT_MEET:
+        return "满足"
+    if v == zb.VARIANT_NOT_MEET:
+        return "不满足"
+    return str(v)[:6]
 
 
 def _fmt_pct(v: Any) -> str:
@@ -186,7 +214,7 @@ def _sel_count_map(reports: Dict[str, dict], variant: str) -> Dict[date, int]:
 
 def _sel_count_map_legacy(reports: Dict[str, dict]) -> Dict[date, int]:
     """选股日 → 入选只数（兼容旧逻辑）。"""
-    for v in zb.VARIANTS:
+    for v in _variant_pair(reports):
         rep = reports.get(v) or {}
         sc = _df_from_dict(rep.get("sel_counts"))
         if sc is None or sc.empty or "sel" not in sc.columns or "n_sel" not in sc.columns:
@@ -206,7 +234,7 @@ def _n_sel_series_for_asofs(
     sel_map = _sel_count_map(reports, variant)
     # 兜底：从两侧 day_view 合并（旧序列化无 sel_counts 时）
     day_maps = []
-    for v in zb.VARIANTS:
+    for v in _variant_pair(reports):
         day = _df_from_dict((reports.get(v) or {}).get("day_view"))
         day_maps.append(_series_by_start(day, "start", "n_sel"))
 
@@ -226,10 +254,13 @@ def _n_sel_series_for_asofs(
     return np.array(out, dtype=float)
 
 
-def _sample_starts(reports: Dict[str, dict]) -> List[date]:
+def _sample_starts(
+    reports: Dict[str, dict], variants: Sequence[str] | None = None
+) -> List[date]:
     """月份窗口内、两侧有已了结开买样本的开买日。"""
+    variants = list(variants) if variants is not None else list(_variant_pair(reports))
     out: set = set()
-    for v in zb.VARIANTS:
+    for v in variants:
         rep = reports.get(v) or {}
         day = _df_from_dict(rep.get("day_view"))
         if not day.empty and "start" in day.columns:
@@ -249,12 +280,15 @@ def _sample_starts(reports: Dict[str, dict]) -> List[date]:
     return sorted(out)
 
 
-def _union_starts(reports: Dict[str, dict]) -> List[date]:
+def _union_starts(
+    reports: Dict[str, dict], variants: Sequence[str] | None = None
+) -> List[date]:
     """横轴开买日：月份窗口内每个交易日都占位（两侧都无样本也显示，曲线为 NaN）。"""
-    samples = _sample_starts(reports)
+    variants = list(variants) if variants is not None else list(_variant_pair(reports))
+    samples = _sample_starts(reports, variants)
     last_close: Optional[date] = None
     months = 2
-    for v in zb.VARIANTS:
+    for v in variants:
         rep = reports.get(v) or {}
         lc = rep.get("last_close")
         if lc is not None:
@@ -280,22 +314,44 @@ class MonitorWorker(QThread):
     finished_ok = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
-    def __init__(self, window: int, months: int, parent=None):
+    def __init__(
+        self,
+        window: int,
+        months: int,
+        mode: str = zb.MODE_RANK_MV,
+        parent=None,
+    ):
         super().__init__(parent)
         self.window = int(window)
         self.months = int(months)
+        self.mode = zb.normalize_mode(mode)
 
     def run(self):
         try:
-            self.progress.emit("加载按票回测并按「满足条件」拆分…")
-            raw = zb.build_all_reports(window=self.window, months=self.months)
+            variants = zb.variants_for_mode(self.mode)
+            tip = (
+                "排名5-20·市值<50 / 其余"
+                if self.mode == zb.MODE_RANK_MV
+                else "满足/不满足"
+            )
+            self.progress.emit(f"加载按票回测并按展示口径拆分（{tip}）…")
+            raw = zb.build_all_reports(
+                window=self.window, months=self.months, mode=self.mode
+            )
             reports = {v: _serialize_report(rep) for v, rep in raw.items()}
-            if not any(reports[v].get("starts") for v in zb.VARIANTS):
+            if not any(reports.get(v, {}).get("starts") for v in variants):
                 raise RuntimeError(
                     "两组回测均无已了结开买日样本。\n"
-                    f"请检查: {zb.DIR} 下是否有带「满足条件」列的按票回测文件"
+                    f"请检查: {zb.DIR}（含 2024/、最终/）下是否有按票回测 latest；\n"
+                    "排名市值口径还需「最佳板块排名」与流通市值列。"
                 )
-            self.finished_ok.emit({"reports": reports})
+            self.finished_ok.emit(
+                {
+                    "reports": reports,
+                    "mode": self.mode,
+                    "variants": list(variants),
+                }
+            )
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -351,7 +407,7 @@ class PrepareDataWorker(QThread):
             script = ROOT / "tools" / "prepare_ma10_regime_data.py"
             if not script.is_file():
                 raise FileNotFoundError(f"缺少脚本: {script}")
-            # --no-reuse：满足条件改规则后必须重选，否则会复用旧选股导致「满足」全为 False
+            # --no-reuse：仅改选股硬规则时需要；展示用满足条件已在监控端重算
             cmd = [
                 sys.executable,
                 "-X",
@@ -500,11 +556,13 @@ class CompareChartWidget(QWidget):
             self.export_requested.emit(asof_s)
 
     def render(self, reports: Dict[str, dict], highlight: Optional[str] = None):
-        asofs = _union_starts(reports)
+        v_pos, v_neg = _variant_pair(reports)
+        s_pos, s_neg = _short_variant(v_pos), _short_variant(v_neg)
+        asofs = _union_starts(reports, (v_pos, v_neg))
         if not asofs:
             reasons = [
                 f"{v}: {(reports.get(v) or {}).get('empty_reason') or '无数据'}"
-                for v in zb.VARIANTS
+                for v in (v_pos, v_neg)
             ]
             self.clear("\n".join(reasons))
             return
@@ -520,9 +578,8 @@ class CompareChartWidget(QWidget):
         else:
             self._highlight_idx = len(asofs) - 1
 
-        # 预取各变体系列
         series: Dict[str, Dict[str, Dict[date, float]]] = {}
-        for v in zb.VARIANTS:
+        for v in (v_pos, v_neg):
             rep = reports.get(v) or {}
             day = _df_from_dict(rep.get("day_view"))
             roll = _df_from_dict(rep.get("roll_view"))
@@ -546,32 +603,82 @@ class CompareChartWidget(QWidget):
         ax2 = self.figure.add_subplot(312, sharex=ax1)
         ax3 = self.figure.add_subplot(313, sharex=ax1)
 
-        # --- 1 近窗滚动 ---
-        ax1.plot(x, ys(zb.VARIANT_MEET, "roll_mean"), color=C_TB, lw=1.3, marker="o", ms=3, label="满足·近窗日均%")
-        ax1.plot(x, ys(zb.VARIANT_NOT_MEET, "roll_mean"), color=C_NO, lw=1.3, marker="s", ms=3, label="不满足·近窗日均%")
+        ax1.plot(
+            x,
+            ys(v_pos, "roll_mean"),
+            color=C_TB,
+            lw=1.3,
+            marker="o",
+            ms=3,
+            label=f"{s_pos}·近窗日均%",
+        )
+        ax1.plot(
+            x,
+            ys(v_neg, "roll_mean"),
+            color=C_NO,
+            lw=1.3,
+            marker="s",
+            ms=3,
+            label=f"{s_neg}·近窗日均%",
+        )
         ax1.axhline(0, color="#999", lw=0.8, ls="--")
         ax1b = ax1.twinx()
-        ax1b.plot(x, ys(zb.VARIANT_MEET, "roll_win"), color=C_TB_WIN, lw=1.2, ls="--", marker=".", ms=3, label="满足·日胜率%")
-        ax1b.plot(x, ys(zb.VARIANT_NOT_MEET, "roll_win"), color=C_NO_WIN, lw=1.2, ls="--", marker=".", ms=3, label="不满足·日胜率%")
+        ax1b.plot(
+            x,
+            ys(v_pos, "roll_win"),
+            color=C_TB_WIN,
+            lw=1.2,
+            ls="--",
+            marker=".",
+            ms=3,
+            label=f"{s_pos}·日胜率%",
+        )
+        ax1b.plot(
+            x,
+            ys(v_neg, "roll_win"),
+            color=C_NO_WIN,
+            lw=1.2,
+            ls="--",
+            marker=".",
+            ms=3,
+            label=f"{s_neg}·日胜率%",
+        )
         ax1b.set_ylabel("日胜率%")
         ax1b.set_ylim(0, 100)
         lines1, labs1 = ax1.get_legend_handles_labels()
         lines2, labs2 = ax1b.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labs1 + labs2, loc="upper left", fontsize=8, ncol=2)
         ax1.set_ylabel("近窗日均%")
-        ax1.set_title("近窗滚动（开买日票均）· 满足条件 vs 不满足条件")
+        ax1.set_title(f"近窗滚动（开买日票均）· {v_pos} vs {v_neg}")
         ax1.grid(True, alpha=0.25)
 
-        # --- 2 开买日票均 + 成交笔数 ---
-        ax2.plot(x, ys(zb.VARIANT_MEET, "day_mean"), color=C_TB, lw=1.3, marker="o", ms=3, zorder=3, label="满足·票均%")
-        ax2.plot(x, ys(zb.VARIANT_NOT_MEET, "day_mean"), color=C_NO, lw=1.3, marker="s", ms=3, zorder=3, label="不满足·票均%")
+        ax2.plot(
+            x,
+            ys(v_pos, "day_mean"),
+            color=C_TB,
+            lw=1.3,
+            marker="o",
+            ms=3,
+            zorder=3,
+            label=f"{s_pos}·票均%",
+        )
+        ax2.plot(
+            x,
+            ys(v_neg, "day_mean"),
+            color=C_NO,
+            lw=1.3,
+            marker="s",
+            ms=3,
+            zorder=3,
+            label=f"{s_neg}·票均%",
+        )
         ax2.axhline(0, color="#999", lw=0.8, ls="--")
         ax2.set_ylabel("票均%")
         ax2b = ax2.twinx()
-        n_meet = np.array(ys(zb.VARIANT_MEET, "n"), dtype=float)
-        n_no = np.array(ys(zb.VARIANT_NOT_MEET, "n"), dtype=float)
-        n_sel_meet = _n_sel_series_for_asofs(asofs, reports, zb.VARIANT_MEET)
-        n_sel_no = _n_sel_series_for_asofs(asofs, reports, zb.VARIANT_NOT_MEET)
+        n_meet = np.array(ys(v_pos, "n"), dtype=float)
+        n_no = np.array(ys(v_neg, "n"), dtype=float)
+        n_sel_meet = _n_sel_series_for_asofs(asofs, reports, v_pos)
+        n_sel_no = _n_sel_series_for_asofs(asofs, reports, v_neg)
         bw = 0.18
         ax2b.bar(
             x - 1.5 * bw,
@@ -579,7 +686,7 @@ class CompareChartWidget(QWidget):
             width=bw,
             color="#7D3C98",
             alpha=0.55,
-            label="满足·选股只数",
+            label=f"{s_pos}·选股只数",
             zorder=1,
         )
         ax2b.bar(
@@ -588,7 +695,7 @@ class CompareChartWidget(QWidget):
             width=bw,
             color=C_TB,
             alpha=0.40,
-            label="满足·成交笔数",
+            label=f"{s_pos}·成交笔数",
             zorder=1,
         )
         ax2b.bar(
@@ -597,7 +704,7 @@ class CompareChartWidget(QWidget):
             width=bw,
             color="#95A5A6",
             alpha=0.50,
-            label="不满足·选股只数",
+            label=f"{s_neg}·选股只数",
             zorder=1,
         )
         ax2b.bar(
@@ -606,32 +713,31 @@ class CompareChartWidget(QWidget):
             width=bw,
             color=C_NO,
             alpha=0.40,
-            label="不满足·成交笔数",
+            label=f"{s_neg}·成交笔数",
             zorder=1,
         )
         ax2b.plot(
             x,
-            ys(zb.VARIANT_MEET, "win_rate"),
+            ys(v_pos, "win_rate"),
             color=C_TB_WIN,
             lw=1.2,
             ls="--",
             marker=".",
             ms=3,
-            label="满足·票胜率%",
+            label=f"{s_pos}·票胜率%",
             zorder=3,
         )
         ax2b.plot(
             x,
-            ys(zb.VARIANT_NOT_MEET, "win_rate"),
+            ys(v_neg, "win_rate"),
             color=C_NO_WIN,
             lw=1.2,
             ls="--",
             marker=".",
             ms=3,
-            label="不满足·票胜率%",
+            label=f"{s_neg}·票胜率%",
             zorder=3,
         )
-        # 满足选股占比：绝对量柱被「不满足」压住时，用占比看布林过滤是否生效
         tot = np.nan_to_num(n_sel_meet) + np.nan_to_num(n_sel_no)
         share = np.where(tot > 0, np.nan_to_num(n_sel_meet) / tot * 100.0, np.nan)
         ax2b.plot(
@@ -641,7 +747,7 @@ class CompareChartWidget(QWidget):
             lw=1.4,
             marker="D",
             ms=3,
-            label="满足·选股占比%",
+            label=f"{s_pos}·选股占比%",
             zorder=4,
         )
         try:
@@ -659,11 +765,26 @@ class CompareChartWidget(QWidget):
         ax2.set_title("开买日票均 · 选股只数/成交笔数 · 票胜率（叠画）")
         ax2.grid(True, alpha=0.25)
 
-        # --- 3 累计 ---
-        ax3.plot(x, ys(zb.VARIANT_MEET, "cum_mean"), color=C_TB, lw=1.3, marker="o", ms=3, label="满足·累计")
-        ax3.plot(x, ys(zb.VARIANT_NOT_MEET, "cum_mean"), color=C_NO, lw=1.3, marker="s", ms=3, label="不满足·累计")
-        ax3.fill_between(x, ys(zb.VARIANT_MEET, "cum_mean"), 0, alpha=0.08, color=C_TB)
-        ax3.fill_between(x, ys(zb.VARIANT_NOT_MEET, "cum_mean"), 0, alpha=0.08, color=C_NO)
+        ax3.plot(
+            x,
+            ys(v_pos, "cum_mean"),
+            color=C_TB,
+            lw=1.3,
+            marker="o",
+            ms=3,
+            label=f"{s_pos}·累计",
+        )
+        ax3.plot(
+            x,
+            ys(v_neg, "cum_mean"),
+            color=C_NO,
+            lw=1.3,
+            marker="s",
+            ms=3,
+            label=f"{s_neg}·累计",
+        )
+        ax3.fill_between(x, ys(v_pos, "cum_mean"), 0, alpha=0.08, color=C_TB)
+        ax3.fill_between(x, ys(v_neg, "cum_mean"), 0, alpha=0.08, color=C_NO)
         ax3.axhline(0, color="#999", lw=0.8, ls="--")
         ax3.set_ylabel("累计票均pp")
         ax3.set_title("累计开买日票均（简单加总，非资金曲线）")
@@ -702,6 +823,8 @@ class MaZongMeetMonitorDialog(QDialog):
         self._prepare_worker: Optional[PrepareDataWorker] = None
         self._prepare_max_days = 15
         self._reports: Dict[str, dict] = {}
+        self._mode = zb.MODE_RANK_MV
+        self._variants = list(zb.variants_for_mode(self._mode))
 
         root = QVBoxLayout(self)
 
@@ -714,6 +837,18 @@ class MaZongMeetMonitorDialog(QDialog):
         self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         top.addWidget(self.status_label, 1)
 
+        top.addWidget(QLabel("对比口径:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("排名5-20·市值<50 vs 其余", zb.MODE_RANK_MV)
+        self.mode_combo.addItem("满足条件 vs 不满足", zb.MODE_MEET)
+        self.mode_combo.setCurrentIndex(0)
+        self.mode_combo.setToolTip(
+            "排名市值：最佳板块排名∈[5,20] 且 流通市值<50亿（监控端过滤，不改回测文件）\n"
+            "看 2024+最终 三年时建议「月份」调到 32～36"
+        )
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        top.addWidget(self.mode_combo)
+
         top.addWidget(QLabel("近窗天数:"))
         self.window_spin = QSpinBox()
         self.window_spin.setRange(3, 60)
@@ -723,7 +858,8 @@ class MaZongMeetMonitorDialog(QDialog):
         top.addWidget(QLabel("月份:"))
         self.months_spin = QSpinBox()
         self.months_spin.setRange(1, 36)
-        self.months_spin.setValue(int(months))
+        # 默认拉长窗口，便于一眼看到合并后的 2024～2026
+        self.months_spin.setValue(max(int(months), 36) if int(months) <= 2 else int(months))
         top.addWidget(self.months_spin)
 
         top.addWidget(QLabel("定位开买日:"))
@@ -870,7 +1006,7 @@ class MaZongMeetMonitorDialog(QDialog):
             path += ".xlsx"
 
         window = int(self.window_spin.value())
-        for v in zb.VARIANTS:
+        for v in self._variants:
             w = (self._reports.get(v) or {}).get("window")
             if w:
                 window = int(w)
@@ -884,6 +1020,7 @@ class MaZongMeetMonitorDialog(QDialog):
                 Path(path),
                 reports=self._reports,
                 window=window,
+                mode=self._mode,
             )
         except Exception as e:
             self.status_label.setText(f"导出失败: {e}")
@@ -931,12 +1068,21 @@ class MaZongMeetMonitorDialog(QDialog):
         self.status_label.setText("准备失败")
         QMessageBox.warning(self, "准备失败", err)
 
+    def _on_mode_changed(self, _idx: int = 0):
+        data = self.mode_combo.currentData()
+        self._mode = zb.normalize_mode(data)
+        self._variants = list(zb.variants_for_mode(self._mode))
+        if self._reports:
+            self.refresh()
+
     def refresh(self):
         if self._worker and self._worker.isRunning():
             return
         if self._prepare_worker and self._prepare_worker.isRunning():
             QMessageBox.information(self, "请稍候", "正在更新选股+回测，请等完成后再刷新。")
             return
+        self._mode = zb.normalize_mode(self.mode_combo.currentData())
+        self._variants = list(zb.variants_for_mode(self._mode))
         self.refresh_btn.setEnabled(False)
         self.prepare_btn.setEnabled(False)
         self.status_label.setText("计算中…")
@@ -944,6 +1090,7 @@ class MaZongMeetMonitorDialog(QDialog):
         self._worker = MonitorWorker(
             window=int(self.window_spin.value()),
             months=int(self.months_spin.value()),
+            mode=self._mode,
             parent=self,
         )
         self._worker.progress.connect(self._on_progress)
@@ -966,8 +1113,17 @@ class MaZongMeetMonitorDialog(QDialog):
         self.prepare_btn.setEnabled(True)
         reports = payload.get("reports") or {}
         self._reports = reports
+        self._mode = zb.normalize_mode(payload.get("mode") or self._mode)
+        self._variants = list(
+            payload.get("variants") or zb.variants_for_mode(self._mode)
+        )
+        v_pos, v_neg = (
+            (self._variants[0], self._variants[1])
+            if len(self._variants) >= 2
+            else _variant_pair(reports, self._mode)
+        )
         bits = []
-        for v in zb.VARIANTS:
+        for v in (v_pos, v_neg):
             rep = reports.get(v) or {}
             n = int(rep.get("n_start_days") or 0)
             if n:
@@ -975,16 +1131,16 @@ class MaZongMeetMonitorDialog(QDialog):
                 bits.append(f"{v}:票均{_fmt_pct(full.get('mean'))}/胜率{full.get('win')}%")
             else:
                 bits.append(f"{v}:暂无数据")
-        # 量柱核对：选股日均只数（补丁后满足应明显低于未加布林时）
         try:
-            sc_m = _sel_count_map(reports, zb.VARIANT_MEET)
-            sc_n = _sel_count_map(reports, zb.VARIANT_NOT_MEET)
+            sc_m = _sel_count_map(reports, v_pos)
+            sc_n = _sel_count_map(reports, v_neg)
             if sc_m and sc_n:
                 avg_m = sum(sc_m.values()) / max(1, len(sc_m))
                 avg_n = sum(sc_n.values()) / max(1, len(sc_n))
                 share = avg_m / max(1e-9, avg_m + avg_n) * 100.0
                 bits.append(
-                    f"选股日均:满足{avg_m:.0f}/不满足{avg_n:.0f}(占比{share:.1f}%)"
+                    f"选股日均:{_short_variant(v_pos)}{avg_m:.0f}/"
+                    f"{_short_variant(v_neg)}{avg_n:.0f}(占比{share:.1f}%)"
                 )
         except Exception:
             pass
@@ -994,12 +1150,15 @@ class MaZongMeetMonitorDialog(QDialog):
             type_tip = summarize_config()
         except Exception:
             type_tip = ""
+        if self._mode == zb.MODE_RANK_MV:
+            legend = f"蓝={zb.RANK_MV_DISPLAY_DESC} / 橙=其余"
+        else:
+            legend = f"蓝={zb.MEET_DISPLAY_DESC} / 橙=不满足"
         self.status_label.setText(
-            " | ".join(bits) + "  · 蓝=满足条件 / 橙=不满足条件"
-            + (f"  · {type_tip}" if type_tip else "")
+            " | ".join(bits) + "  · " + legend + (f"  · {type_tip}" if type_tip else "")
         )
 
-        starts = [str(x) for x in _union_starts(reports)]
+        starts = [str(x) for x in _union_starts(reports, (v_pos, v_neg))]
         self.asof_combo.blockSignals(True)
         self.asof_combo.clear()
         self.asof_combo.addItems(starts)
@@ -1043,22 +1202,28 @@ class MaZongMeetMonitorDialog(QDialog):
         self.asof_combo.blockSignals(False)
         self.chart.render(self._reports, highlight=asof_s)
 
+        v_pos, v_neg = (
+            (self._variants[0], self._variants[1])
+            if len(self._variants) >= 2
+            else _variant_pair(self._reports, self._mode)
+        )
         lines: List[str] = [f"【开买日 {asof_s} · 对比】"]
         try:
             asof_d = date.fromisoformat(asof_s)
             prev = zb.prev_trading_day(asof_d)
-            meet_map = _sel_count_map(self._reports, zb.VARIANT_MEET)
-            not_map = _sel_count_map(self._reports, zb.VARIANT_NOT_MEET)
+            meet_map = _sel_count_map(self._reports, v_pos)
+            not_map = _sel_count_map(self._reports, v_neg)
             n_meet = meet_map.get(prev) if prev is not None else None
             n_not = not_map.get(prev) if prev is not None else None
             lines.append(
-                f"前一日选股 {prev or '—'}: 满足 {n_meet if n_meet is not None else '—'} 只 / "
-                f"不满足 {n_not if n_not is not None else '—'} 只"
+                f"前一日选股 {prev or '—'}: {_short_variant(v_pos)} "
+                f"{n_meet if n_meet is not None else '—'} 只 / "
+                f"{_short_variant(v_neg)} {n_not if n_not is not None else '—'} 只"
             )
         except Exception:
             pass
         win = None
-        for v in zb.VARIANTS:
+        for v in (v_pos, v_neg):
             rep = self._reports.get(v) or {}
             if win is None:
                 win = rep.get("window")
@@ -1080,7 +1245,7 @@ class MaZongMeetMonitorDialog(QDialog):
                     f"（{rr.get('window_from')} → {rr.get('window_to')}）"
                 )
 
-        for v in zb.VARIANTS:
+        for v in (v_pos, v_neg):
             rep = self._reports.get(v) or {}
             lines.append("")
             lines.append(f"—— {v} 票明细 ——")
@@ -1100,7 +1265,7 @@ class MaZongMeetMonitorDialog(QDialog):
                     )
 
         lines.append("")
-        for v in zb.VARIANTS:
+        for v in (v_pos, v_neg):
             rep = self._reports.get(v) or {}
             full = rep.get("full") or {}
             lines.append(
@@ -1109,7 +1274,17 @@ class MaZongMeetMonitorDialog(QDialog):
                 f"笔数{full.get('n_known')} 未完成{full.get('n_open')} | "
                 f"{rep.get('trade_dir') or ''}"
             )
-        lines.append("口径：横轴=开买日；蓝=满足条件、橙=不满足条件；累计=开买日票均简单加总；分组=选股表「满足条件」列。")
+        desc = (
+            zb.RANK_MV_DISPLAY_DESC
+            if self._mode == zb.MODE_RANK_MV
+            else zb.MEET_DISPLAY_DESC
+        )
+        lines.append(
+            "口径：横轴=开买日；蓝=过滤命中、橙=对照侧；累计=开买日票均简单加总；"
+            "数据合并 2024/+最终/；展示过滤="
+            + desc
+            + "（不改选股/回测文件）。"
+        )
         self.detail.setPlainText("\n".join(lines))
 
 

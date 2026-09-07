@@ -2035,6 +2035,20 @@ class LimitUpGeneAnalysisDialog(QDialog):
                 except Exception:
                     pass
 
+    def _schedule_auto_quit(self, delay_ms: int = 1000) -> None:
+        """批跑模式：关闭窗口并退出事件循环（避免 accept 后仍挂起）。"""
+        app = QApplication.instance()
+
+        def _quit() -> None:
+            try:
+                self.accept()
+            except Exception:
+                pass
+            if app is not None:
+                app.quit()
+
+        QTimer.singleShot(max(0, int(delay_ms)), _quit)
+
     def _export_gene_excels_and_pngs(self, exit_after: bool = False) -> bool:
         """导出涨停基因 Excel + PNG；auto-run 时再延时退出。"""
         date = getattr(self, "_limitup_date", "") or datetime.now().strftime("%Y%m%d")
@@ -2045,7 +2059,7 @@ class LimitUpGeneAnalysisDialog(QDialog):
         if self.first_board_table.rowCount() <= 0 or n <= 0:
             self.status_label.setText("无可导出的基因统计表。")
             if exit_after:
-                QTimer.singleShot(10000, self.accept)
+                self._schedule_auto_quit(1000)
             return False
 
         aligns: List[str] = []
@@ -2082,25 +2096,28 @@ class LimitUpGeneAnalysisDialog(QDialog):
         if not ok_xlsx:
             self.status_label.setText(f"导出失败：{base_name}.xlsx 导出失败。")
             if exit_after:
-                QTimer.singleShot(10000, self.accept)
+                self._schedule_auto_quit(1000)
             return False
         self._auto_adjust_excel_column_widths(xlsx_path)
-        ok_png = self._excel_to_png_via_wps(xlsx_path, png_path)
+        # 批跑优先用 Qt 表渲染，避免 WPS COM 卡死拖住整晚批处理
+        ok_png = False
+        if not exit_after:
+            ok_png = self._excel_to_png_via_wps(xlsx_path, png_path)
         if not ok_png:
             ok_png = self._export_qtable_to_png(self.first_board_table, png_path)
         if not ok_png:
             self.status_label.setText(f"导出失败：{base_name}.png 导出失败。")
             if exit_after:
-                QTimer.singleShot(10000, self.accept)
+                self._schedule_auto_quit(1000)
             return False
 
         self._auto_last_exports = [xlsx_path, png_path]
-        exit_tip = "；10秒后退出" if exit_after else ""
+        exit_tip = "；即将退出" if exit_after else ""
         self.status_label.setText(
             f"已导出：{os.path.basename(xlsx_path)}、{os.path.basename(png_path)}{exit_tip}。"
         )
         if exit_after:
-            QTimer.singleShot(10000, self.accept)
+            self._schedule_auto_quit(1000)
         return True
 
     def _export_wechat_html(self) -> None:
@@ -2511,6 +2528,10 @@ class LimitUpGeneAnalysisDialog(QDialog):
     def _on_error(self, msg: str):
         self.status_label.setText(f"出错：{msg}")
         self._enable_action_buttons(True)
+        # 批跑模式下出错也必须退出，否则会一直挂在 GUI 事件循环，卡住整晚盘后批处理
+        if self._auto_run:
+            print(f"[auto-run] 分析失败，准备退出: {msg}")
+            self._schedule_auto_quit(2000)
 
 
 def main():
@@ -2518,7 +2539,7 @@ def main():
     parser.add_argument(
         "--auto-run",
         action="store_true",
-        help="启动后自动分析，分析完成后自动导出涨停基因 Excel 和图片（表末合并同日封单结构三列），并在10秒后退出",
+        help="启动后自动分析，分析完成后自动导出涨停基因 Excel 和图片（表末合并同日封单结构三列），并很快退出",
     )
     args, _unknown = parser.parse_known_args()
 

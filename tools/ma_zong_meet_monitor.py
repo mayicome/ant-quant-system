@@ -2,9 +2,11 @@
 """
 马总选股逻辑 · 满足条件对比监控（核心库）
 
-按回测按票文件中的「满足条件」列，将同一回测池拆成两组对比：
-  - 满足条件（软门槛五项全为真：涨幅榜行业前32/概念前8、流通市值<80亿、前10日无大涨、站上MA5/MA20、站上布林上轨）
-  - 不满足条件
+按回测/选股表中的分项条件列，在展示层重算「满足条件」后拆成两组对比
+（与次日MA10规则一致；旧表无新公式时仍可按分项重算）：
+  满足 = 前10日无大涨 ∧ 站上MA5/MA20 ∧ 站上布林上轨
+         ∧ (行业名次∈[5,38] ∨ 概念名次∈[5,38])
+  行业/概念均为涨停日东财涨跌幅榜最高名次。
 
 用法:
   python tools/ma_zong_meet_monitor.py
@@ -14,6 +16,7 @@
   history_data/马总选股逻辑/
     选股结果_马总选股逻辑-次日MA10_*.xls
     各日选股收益汇总_日线-ma10-sell_half-单点_按票_*_收盘上MA10_latest.xlsx
+    2024/、最终/ 等同名 latest（合并加载）
 """
 from __future__ import annotations
 
@@ -22,7 +25,7 @@ import sys
 import warnings
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 warnings.filterwarnings("ignore")
 
@@ -55,50 +58,178 @@ from em_hot_clip_monitor import (  # noqa: E402
 
 DIR = ROOT / "history_data" / "马总选股逻辑"
 RULE_NAME = "马总选股逻辑-次日MA10"
-MEET_COL = "满足条件"
+MEET_COL = "满足条件"  # 选股写入列；监控分组用 compute_display_meet（与规则公式一致）
+COL_PRIOR = "条件_前10日无大涨"
+COL_MA = "条件_收盘站上MA5且MA20"
+COL_BOLL = "条件_收盘站上布林上轨"
+COL_IND_RANK = "所属行业最高排名名次"
+COL_CON_RANK = "所属概念最高排名名次"
+COL_BEST_RANK = "最佳板块排名"
+COL_MV = "流通市值_亿"
+COL_MV_SEL = "流通市值_亿_选股日"
+# 与次日MA10 RANK_MEET_* 一致：收益×频次平衡后的 [5,38]
+RANK_LO = 5
+RANK_HI = 38
+# 监控第二套对比：最佳板块排名∈[5,20] ∧ 选股日流通市值<50亿
+RANK_MV_LO = 5
+RANK_MV_HI = 20
+RANK_MV_MAX_YI = 50.0
 DEFAULT_WINDOW = 10
+
+MODE_MEET = "meet"
+MODE_RANK_MV = "rank_mv"
 
 VARIANT_MEET = "满足条件"
 VARIANT_NOT_MEET = "不满足条件"
-VARIANTS = (VARIANT_MEET, VARIANT_NOT_MEET)
+VARIANT_RANK_MV = "排名5-20·市值<50"
+VARIANT_NOT_RANK_MV = "其余(非排名市值)"
+
+MODE_VARIANTS: Dict[str, Tuple[str, str]] = {
+    MODE_MEET: (VARIANT_MEET, VARIANT_NOT_MEET),
+    MODE_RANK_MV: (VARIANT_RANK_MV, VARIANT_NOT_RANK_MV),
+}
+# 兼容旧引用：默认仍指向满足/不满足
+VARIANTS = MODE_VARIANTS[MODE_MEET]
+MEET_DISPLAY_DESC = (
+    "无大涨 ∧ 均线 ∧ 布林 ∧ (行业∈[%d,%d] ∨ 概念∈[%d,%d])"
+    % (RANK_LO, RANK_HI, RANK_LO, RANK_HI)
+)
+RANK_MV_DISPLAY_DESC = (
+    "最佳板块排名∈[%d,%d] ∧ 流通市值<%.0f亿（优先选股日市值）"
+    % (RANK_MV_LO, RANK_MV_HI, RANK_MV_MAX_YI)
+)
+
+
+def variants_for_mode(mode: str | None) -> Tuple[str, str]:
+    m = str(mode or MODE_MEET).strip().lower()
+    if m in ("rank_mv", "rank-mv", "排名", "市值", VARIANT_RANK_MV):
+        return MODE_VARIANTS[MODE_RANK_MV]
+    return MODE_VARIANTS[MODE_MEET]
+
+
+def normalize_mode(mode: str | None) -> str:
+    v0, _ = variants_for_mode(mode)
+    return MODE_RANK_MV if v0 == VARIANT_RANK_MV else MODE_MEET
+
+
+def data_search_dirs() -> list[Path]:
+    """根目录 + 2024/最终（按票 latest 合并用；不扫 hold* 等其它试验目录）。"""
+    out: list[Path] = []
+    if DIR.is_dir():
+        out.append(DIR)
+    seen = {DIR.resolve()} if DIR.is_dir() else set()
+    for name in ("2024", "最终"):
+        p = DIR / name
+        if p.is_dir() and p.resolve() not in seen:
+            out.append(p)
+            seen.add(p.resolve())
+    return out
+
+
+def _rank_in_band(series: pd.Series, lo: int = RANK_LO, hi: int = RANK_HI) -> pd.Series:
+    x = pd.to_numeric(series, errors="coerce")
+    return (x >= float(lo)) & (x <= float(hi))
+
+
+def compute_rank_mv_filter(df: pd.DataFrame) -> pd.Series:
+    """最佳板块排名∈[5,20] ∧ 流通市值<50亿（优先选股日市值列）。"""
+    if df is None or df.empty:
+        return pd.Series(dtype=bool)
+    rk = (
+        pd.to_numeric(df[COL_BEST_RANK], errors="coerce")
+        if COL_BEST_RANK in df.columns
+        else pd.Series(np.nan, index=df.index)
+    )
+    if COL_MV_SEL in df.columns:
+        mv = pd.to_numeric(df[COL_MV_SEL], errors="coerce")
+    elif COL_MV in df.columns:
+        mv = pd.to_numeric(df[COL_MV], errors="coerce")
+    else:
+        mv = pd.Series(np.nan, index=df.index)
+    out = (rk >= float(RANK_MV_LO)) & (rk <= float(RANK_MV_HI)) & (mv < float(RANK_MV_MAX_YI))
+    return out.reindex(df.index).fillna(False).astype(bool)
+
+
+def compute_display_meet(df: pd.DataFrame) -> pd.Series:
+    """满足条件（与次日MA10规则写入列一致；旧表无新公式时仍可按分项重算）。
+
+    满足 = 前10日无大涨 ∧ 均线 ∧ 布林
+           ∧ (行业最高名次∈[5,38] ∨ 概念最高名次∈[5,38])
+    缺列时该分项视为 False。
+    """
+    if df is None or df.empty:
+        return pd.Series(dtype=bool)
+    prior = as_bool(df[COL_PRIOR]) if COL_PRIOR in df.columns else pd.Series(False, index=df.index)
+    ma = as_bool(df[COL_MA]) if COL_MA in df.columns else pd.Series(False, index=df.index)
+    boll = as_bool(df[COL_BOLL]) if COL_BOLL in df.columns else pd.Series(False, index=df.index)
+    ind_ok = (
+        _rank_in_band(df[COL_IND_RANK])
+        if COL_IND_RANK in df.columns
+        else pd.Series(False, index=df.index)
+    )
+    con_ok = (
+        _rank_in_band(df[COL_CON_RANK])
+        if COL_CON_RANK in df.columns
+        else pd.Series(False, index=df.index)
+    )
+    board_mid = ind_ok | con_ok
+    out = prior & ma & boll & board_mid
+    return out.reindex(df.index).fillna(False).astype(bool)
 
 
 def discover_trade_files() -> list[Path]:
-    """优先 收盘上MA10 latest 按票汇总。"""
-    pats = (
+    """合并根目录与 2024/最终 等子目录的收盘上MA10 latest 按票汇总。"""
+    pats_latest = (
         "各日选股收益汇总_日线-ma10-sell_half*-单点_按票_*收盘上MA10_latest.xlsx",
         "各日选股收益汇总_日线-ma10*-单点_按票_*收盘上MA10_latest.xlsx",
         "各日选股收益汇总_日线-ma10-sell_half*-单点_按票_latest.xlsx",
         "各日选股收益汇总_日线-ma10*-单点_按票_latest.xlsx",
+    )
+    pats_any = (
+        "各日选股收益汇总_日线-ma10*-单点_按票_*收盘上MA10_*.xlsx",
         "各日选股收益汇总_日线-ma10*-单点_按票_*.xlsx",
     )
     seen: set[Path] = set()
     out: list[Path] = []
-    for pat in pats:
-        for p in sorted(DIR.glob(pat), key=lambda x: x.stat().st_mtime, reverse=True):
-            key = p.resolve()
-            if key in seen:
-                continue
-            if p.name.startswith("选股结果_"):
-                continue
-            seen.add(key)
-            out.append(p)
-            if "_latest" in p.name:
-                return [p]
-        if out and "_latest" in out[0].name:
-            return out[:1]
+    for d in data_search_dirs():
+        picked: Optional[Path] = None
+        for pat in pats_latest:
+            hits = sorted(d.glob(pat), key=lambda x: x.stat().st_mtime, reverse=True)
+            hits = [p for p in hits if not p.name.startswith("选股结果_")]
+            if hits:
+                picked = hits[0]
+                break
+        if picked is None:
+            for pat in pats_any:
+                hits = sorted(d.glob(pat), key=lambda x: x.stat().st_mtime, reverse=True)
+                hits = [
+                    p
+                    for p in hits
+                    if not p.name.startswith("选股结果_") and not p.name.startswith("~$")
+                ]
+                if hits:
+                    picked = hits[0]
+                    break
+        if picked is None:
+            continue
+        key = picked.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(picked)
     return out
 
 
 def discover_selection_files() -> list[Path]:
-    """优先带 _boll 的补丁选股表，再按修改时间。"""
-    cands = list(DIR.glob(f"选股结果_{RULE_NAME}_*.xls")) + list(
-        DIR.glob(f"选股结果_{RULE_NAME}_*.xlsx")
-    )
+    """优先带 _boll 的补丁选股表，再按修改时间；含 2024/最终 子目录。"""
+    cands: list[Path] = []
+    for d in data_search_dirs():
+        cands.extend(d.glob(f"选股结果_{RULE_NAME}_*.xls"))
+        cands.extend(d.glob(f"选股结果_{RULE_NAME}_*.xlsx"))
     if not cands:
-        cands = list(DIR.glob("选股结果_马总选股逻辑*.xls")) + list(
-            DIR.glob("选股结果_马总选股逻辑*.xlsx")
-        )
+        for d in data_search_dirs():
+            cands.extend(d.glob("选股结果_马总选股逻辑*.xls"))
+            cands.extend(d.glob("选股结果_马总选股逻辑*.xlsx"))
 
     def _key(p: Path):
         boll = 0 if "_boll" in p.name.lower() else 1
@@ -108,11 +239,22 @@ def discover_selection_files() -> list[Path]:
             mt = 0.0
         return (boll, mt)
 
-    return sorted(cands, key=_key)
+    seen: set[Path] = set()
+    uniq: list[Path] = []
+    for p in sorted(cands, key=_key):
+        k = p.resolve()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(p)
+    return uniq
 
 
 def discover_fill_files() -> list[Path]:
-    return _discover_csv_under(DIR, "回测成交明细_*.csv")
+    files: list[Path] = []
+    for d in data_search_dirs():
+        files.extend(_discover_csv_under(d, "回测成交明细_*.csv"))
+    return files
 
 
 def _order_fill_files(files: list[Path]) -> list[Path]:
@@ -124,16 +266,21 @@ def _order_fill_files(files: list[Path]) -> list[Path]:
 
 
 def _fill_files_for_side(side_zh: str) -> list[Path]:
-    """成交明细：优先 ``*_latest.csv``（sell_half > 其它），目录=马总选股逻辑。"""
+    """成交明细：优先 ``*_latest.csv``（sell_half > 其它），含子目录。"""
     side = str(side_zh or "").strip()
-    for pat in (
-        f"回测成交明细_日线-ma10-sell_half*{side}_latest.csv",
-        f"回测成交明细_日线-ma10*{side}_latest.csv",
-    ):
-        hits = sorted(DIR.glob(pat), key=lambda p: p.stat().st_mtime, reverse=True)
-        if hits:
-            return hits
-    return _order_fill_files(list(DIR.glob(f"回测成交明细_*{side}_*.csv")))
+    hits_all: list[Path] = []
+    for d in data_search_dirs():
+        for pat in (
+            f"回测成交明细_日线-ma10-sell_half*{side}_latest.csv",
+            f"回测成交明细_日线-ma10*{side}_latest.csv",
+        ):
+            hits_all.extend(d.glob(pat))
+    if hits_all:
+        return _order_fill_files(hits_all)
+    loose: list[Path] = []
+    for d in data_search_dirs():
+        loose.extend(d.glob(f"回测成交明细_*{side}_*.csv"))
+    return _order_fill_files(loose)
 
 
 def load_last_exit_map() -> dict:
@@ -213,13 +360,21 @@ def apply_realized_known_on(df: pd.DataFrame) -> pd.DataFrame:
 def _filter_variant(df: pd.DataFrame, variant: str) -> pd.DataFrame:
     if df is None or df.empty:
         return df
-    if "meet" not in df.columns:
-        return df.iloc[0:0].copy()
-    meet = as_bool(df["meet"])
-    if variant == VARIANT_MEET:
-        return df.loc[meet].copy()
-    if variant == VARIANT_NOT_MEET:
+    v = str(variant or "").strip()
+    if v in (VARIANT_MEET, VARIANT_NOT_MEET):
+        if "meet" not in df.columns:
+            return df.iloc[0:0].copy()
+        meet = as_bool(df["meet"])
+        if v == VARIANT_MEET:
+            return df.loc[meet].copy()
         return df.loc[~meet].copy()
+    if v in (VARIANT_RANK_MV, VARIANT_NOT_RANK_MV):
+        if "rank_mv" not in df.columns:
+            return df.iloc[0:0].copy()
+        flag = as_bool(df["rank_mv"])
+        if v == VARIANT_RANK_MV:
+            return df.loc[flag].copy()
+        return df.loc[~flag].copy()
     return df.copy()
 
 
@@ -239,12 +394,8 @@ def load_one(path: Path) -> pd.DataFrame:
     out["ret"] = pd.to_numeric(df["收益率pct"], errors="coerce")
     out["name"] = df["股票名称"] if "股票名称" in df.columns else ""
     out["buy_on"] = _col_ts(df, "买入日")
-    if MEET_COL in df.columns:
-        out["meet"] = as_bool(df[MEET_COL])
-    elif "meet" in df.columns:
-        out["meet"] = as_bool(df["meet"])
-    else:
-        out["meet"] = False
+    out["meet"] = compute_display_meet(df)
+    out["rank_mv"] = compute_rank_mv_filter(df)
     if "end_date" in df.columns:
         out["end_date"] = df["end_date"]
     if "剩余持仓数量" in df.columns:
@@ -311,7 +462,7 @@ def load_pool(
 def load_selection_counts(variant: str | None = None) -> pd.DataFrame:
     """按选股日统计入选只数。
 
-    先按 (选股日, 代码) 取最新文件行，再按「满足条件」分组；
+    先按 (选股日, 代码) 取最新文件行，再按展示用「满足条件」分组；
     避免旧文件里已过时的 True 在过滤后仍被计入量柱。
     """
     files = discover_selection_files()
@@ -330,10 +481,8 @@ def load_selection_counts(variant: str | None = None) -> pd.DataFrame:
             continue
         code_col = "股票代码" if "股票代码" in df.columns else ("代码" if "代码" in df.columns else None)
         t = pd.DataFrame({"sel": pd.to_datetime(df["选股日"], errors="coerce").dt.date})
-        if MEET_COL in df.columns:
-            t["meet"] = as_bool(df[MEET_COL])
-        else:
-            t["meet"] = False
+        t["meet"] = compute_display_meet(df)
+        t["rank_mv"] = compute_rank_mv_filter(df)
         if code_col:
             t["code"] = df[code_col].map(code6)
             t["name"] = df["股票名称"] if "股票名称" in df.columns else ""
@@ -359,6 +508,10 @@ def load_selection_counts(variant: str | None = None) -> pd.DataFrame:
         all_d = all_d.loc[all_d["meet"]].copy()
     elif variant == VARIANT_NOT_MEET:
         all_d = all_d.loc[~all_d["meet"]].copy()
+    elif variant == VARIANT_RANK_MV:
+        all_d = all_d.loc[all_d["rank_mv"]].copy()
+    elif variant == VARIANT_NOT_RANK_MV:
+        all_d = all_d.loc[~all_d["rank_mv"]].copy()
     if all_d.empty:
         return pd.DataFrame(columns=["sel", "n_sel"])
     g = all_d.groupby("sel").size().reset_index(name="n_sel")
@@ -445,7 +598,7 @@ def build_report(
             months=months,
             last_close=last_close,
             variant=variant,
-            reason=f"「{variant}」无样本（按票文件缺少{MEET_COL}列或该组为空）",
+            reason=f"「{variant}」无样本（展示用满足条件为空，或按票缺分项条件列）",
         )
 
     sel_counts = load_selection_counts(variant=variant)
@@ -498,6 +651,7 @@ def build_all_reports(
     window: int = DEFAULT_WINDOW,
     months: int = 2,
     end: Optional[date] = None,
+    mode: str | None = MODE_MEET,
 ) -> Dict[str, Dict[str, Any]]:
     files = discover_trade_files()
     pool = None
@@ -506,9 +660,10 @@ def build_all_reports(
             pool = load_pool(files, variant=None)
         except Exception:
             pool = None
+    variants = variants_for_mode(mode)
     return {
         v: build_report(window=window, months=months, end=end, variant=v, pool=pool)
-        for v in VARIANTS
+        for v in variants
     }
 
 
@@ -529,13 +684,18 @@ def load_selection_rows_for_day(sel_day: date, *, variant: str | None = None) ->
         sub = df.loc[sel == sel_day].copy()
         if sub.empty:
             continue
-        # 已命中覆盖该日的最新文件：按 variant 过滤后直接返回（空也返回，勿回退旧表）
-        if variant and MEET_COL in sub.columns:
-            meet = as_bool(sub[MEET_COL])
+        # 已命中覆盖该日的最新文件：按展示口径过滤后直接返回（空也返回，勿回退旧表）
+        meet = compute_display_meet(sub)
+        rank_mv = compute_rank_mv_filter(sub)
+        if variant:
             if variant == VARIANT_MEET:
                 sub = sub.loc[meet].copy()
             elif variant == VARIANT_NOT_MEET:
                 sub = sub.loc[~meet].copy()
+            elif variant == VARIANT_RANK_MV:
+                sub = sub.loc[rank_mv].copy()
+            elif variant == VARIANT_NOT_RANK_MV:
+                sub = sub.loc[~rank_mv].copy()
         sub.insert(0, "_来源文件", p.name)
         try:
             from utils.monitor_stock_type_filter import filter_dataframe
@@ -584,18 +744,32 @@ def build_asof_export_frames(
     *,
     reports: Dict[str, dict],
     window: int = DEFAULT_WINDOW,
+    mode: str | None = None,
 ) -> Dict[str, pd.DataFrame]:
     prev = prev_trading_day(asof)
+    mode_n = normalize_mode(mode)
+    variants = variants_for_mode(mode_n)
+    # 若 reports 已是另一套口径，以 reports 键为准
+    if reports:
+        keys = [k for k in variants if k in reports]
+        if len(keys) == 2:
+            variants = (keys[0], keys[1])
+        elif VARIANT_RANK_MV in reports:
+            variants = MODE_VARIANTS[MODE_RANK_MV]
+        elif VARIANT_MEET in reports:
+            variants = MODE_VARIANTS[MODE_MEET]
+    desc = RANK_MV_DISPLAY_DESC if variants[0] == VARIANT_RANK_MV else MEET_DISPLAY_DESC
     sug_rows: list[dict] = [
         {"项目": "开买日(asof)", "值": str(asof)},
         {"项目": "前一交易日(选股日口径)", "值": str(prev) if prev else ""},
         {"项目": "近窗天数", "值": int(window)},
         {"项目": "选股规则", "值": RULE_NAME},
-        {"项目": "分组列", "值": MEET_COL},
+        {"项目": "分组口径", "值": desc},
+        {"项目": "分组方式", "值": "监控端重算（不改选股/回测文件）"},
     ]
     compare_rows: list[dict] = []
 
-    for v in VARIANTS:
+    for v in variants:
         rep = reports.get(v) or {}
         day = rep.get("day_view")
         if isinstance(day, dict):
@@ -653,11 +827,11 @@ def build_asof_export_frames(
         )
 
     frames: Dict[str, pd.DataFrame] = {
-        "前一日选股_满足": (
-            load_selection_rows_for_day(prev, variant=VARIANT_MEET) if prev else pd.DataFrame()
+        f"前一日选股_{variants[0]}": (
+            load_selection_rows_for_day(prev, variant=variants[0]) if prev else pd.DataFrame()
         ),
-        "前一日选股_不满足": (
-            load_selection_rows_for_day(prev, variant=VARIANT_NOT_MEET) if prev else pd.DataFrame()
+        f"前一日选股_{variants[1]}": (
+            load_selection_rows_for_day(prev, variant=variants[1]) if prev else pd.DataFrame()
         ),
         "当日摘要与近窗": pd.DataFrame(sug_rows),
         "当日对比汇总": pd.DataFrame(compare_rows),
@@ -667,7 +841,7 @@ def build_asof_export_frames(
     frames["当天买入_全池"] = buys
     frames["当天卖出_全池"] = sells
 
-    for v in VARIANTS:
+    for v in variants:
         trades = (reports.get(v) or {}).get("trades") or {}
         trade_rows = trades.get(str(asof)) or []
         if trade_rows:
@@ -702,8 +876,11 @@ def export_asof_report(
     *,
     reports: Dict[str, dict],
     window: int = DEFAULT_WINDOW,
+    mode: str | None = None,
 ) -> Path:
-    frames = build_asof_export_frames(asof, reports=reports, window=window)
+    frames = build_asof_export_frames(
+        asof, reports=reports, window=window, mode=mode
+    )
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -741,9 +918,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="马总选股逻辑 · 满足条件对比监控")
     ap.add_argument("--window", type=int, default=DEFAULT_WINDOW)
     ap.add_argument("--months", type=int, default=2)
+    ap.add_argument(
+        "--mode",
+        default=MODE_MEET,
+        choices=(MODE_MEET, MODE_RANK_MV),
+        help="对比口径: meet=满足条件; rank_mv=排名5-20·市值<50",
+    )
     args = ap.parse_args()
-    reps = build_all_reports(window=args.window, months=args.months)
-    for v in VARIANTS:
+    mode = normalize_mode(args.mode)
+    variants = variants_for_mode(mode)
+    reps = build_all_reports(window=args.window, months=args.months, mode=mode)
+    print("files", [p.name for p in discover_trade_files()])
+    for v in variants:
         rep = reps[v]
         full = rep.get("full") or {}
         print(

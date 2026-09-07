@@ -5197,7 +5197,7 @@ def save_daily_data(stocks, plate_stats, concept_stats=None, sector_plate_stats=
             # 验证文件是否创建成功
             if os.path.exists(csv_filename):
                 file_size = os.path.getsize(csv_filename)
-                print(f"✓ CSV文件已成功保存到: {csv_filename}")
+                print(f"[ok] CSV文件已成功保存到: {csv_filename}")
                 print(f"  文件大小: {file_size} 字节, 股票数量: {len(csv_data)}, 时间: {datetime.now().strftime('%H:%M:%S')}")
             else:
                 print(f"错误：CSV文件保存后不存在: {csv_filename}")
@@ -6267,15 +6267,9 @@ def update_data():
                 if _restore_today_cache_from_history(today_str):
                     return
 
-                print("尚无有效历史数据，使用空数据")
-                _data_cache['limit_up_stocks'] = []
-                _data_cache['plate_stats'] = []
-                _data_cache['concept_stats'] = []
-                _data_cache['sector_plate_stats'] = []
-                _data_cache['combined_stats'] = []
-                _data_cache['last_update_time'] = int(time.time())
+                # 抓取失败且无可用缓存：不写空 JSON，避免覆盖/污染盘后导出依赖
+                print("尚无有效历史数据，跳过空数据落盘")
                 _data_cache['is_trading_time'] = is_trading_time()
-                save_daily_data([], [], [], [])
                 return
             
             # 计算行业统计
@@ -6388,6 +6382,10 @@ def run_fetch_once() -> int:
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [--once] 完成，"
             f"涨停 {len(stocks)} 只，程序退出"
         )
+        # 交易日抓到 0 只视为失败，避免批跑误判成功后继续导出空榜
+        if is_trading_day() and not stocks:
+            print("[--once] 交易日未获取到涨停股票，返回失败")
+            return 1
         return 0
     except Exception as e:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [--once] 失败: {e}")

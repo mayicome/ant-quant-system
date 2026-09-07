@@ -615,12 +615,16 @@ def _install_one(spec: tuple) -> None:
                 prev = {}
 
     sp = dict(prev.get("strategy_params") or {})
+    # 与 MA10 监控回测一致：默认不挂 1455 破 MA20（仍可用 params 改回 False）
+    if "disable_ma20_clear" not in sp:
+        sp["disable_ma20_clear"] = True
     sp.update(
         {
             "open_gain_main": float(sp.get("open_gain_main") or 0.05),
             "open_gain_growth": float(sp.get("open_gain_growth") or 0.10),
             "entry_window_trading_days": int(sp.get("entry_window_trading_days") or 4),
             "min_order_amount": float(sp.get("min_order_amount") or 5000),
+            "disable_ma20_clear": bool(sp.get("disable_ma20_clear")),
             "_filled_legs": list(sp.get("_filled_legs") or []),
         }
     )
