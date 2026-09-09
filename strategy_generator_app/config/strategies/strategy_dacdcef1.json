@@ -2,12 +2,20 @@
   "id": "strategy_dacdcef1",
   "name": "买：马总逻辑1-涨停后跌破MA10/20各1/2-单点",
   "enabled": true,
-  "stock_codes": [],
+  "stock_codes": [
+    "600975",
+    "000735",
+    "000876",
+    "002124",
+    "600059",
+    "002702",
+    "601949"
+  ],
   "strategy_params": {
     "buy_amount_per_stock": 50000.0,
     "min_order_amount": 5000.0,
-    "sizing_mode": "fixed",
     "entry_window_trading_days": 10,
+    "sizing_mode": "fixed",
     "selection_date_by_code": {},
     "_filled_legs": [],
     "ex_div_lookback": 20

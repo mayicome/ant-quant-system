@@ -104,6 +104,8 @@ class TaskManager(QObject):
         self._newly_loaded_stock_codes = set()
         # 重新加载时被置为暂停的任务显示名列表，供界面弹窗提示（与启动时一致）
         self._reload_paused_task_names = []
+        # 重新加载时被意图暂停的股票 6 位代码，供 UI 勿按图表快照恢复为运行中
+        self._reload_paused_norms = set()
         
         # 添加重连处理标志，避免重复处理
         self._reconnection_processed = False
@@ -632,8 +634,7 @@ class TaskManager(QObject):
             "init_volume": task.get("init_volume"),
             "init_cost": task.get("init_cost"),
             "params": params,
-            "status": str(task.get("status") or ""),
-            "order_id": task.get("order_id"),
+            # 勿纳入 status/order_id：运行中内存与文件常不一致，会导致重载时全员误暂停并卡死
             "create_time": str(task.get("create_time") or ""),
         }
         return json.dumps(key, sort_keys=True, ensure_ascii=False, default=str)
@@ -937,7 +938,7 @@ class TaskManager(QObject):
                     
                     processed_tasks.append(task)
                 
-                # 一只股票只保留一个任务：按 6 位代码合并，同股多条只保留一条并合并 params.rules
+                # 一只股票只保留一个任务：按 6 位代码合并，同股多条只保留一条；同名/同腿规则后者覆盖
                 merged_by_stock = {}
                 for task in processed_tasks:
                     norm = _normalize_stock_code(task.get('stock_code'))
@@ -945,12 +946,19 @@ class TaskManager(QObject):
                         continue
                     if norm in merged_by_stock:
                         existing = merged_by_stock[norm]
-                        rules = (existing.get('params') or {}).get('rules') or []
-                        rules = list(rules)
-                        rules.extend((task.get('params') or {}).get('rules') or [])
+                        rules = list((existing.get('params') or {}).get('rules') or [])
+                        new_rules = list((task.get('params') or {}).get('rules') or [])
                         if isinstance(existing.get('params'), dict):
-                            existing['params']['rules'] = _dedupe_rules(rules)
+                            existing['params']['rules'] = self._merge_rules_replace_by_identity(
+                                rules, new_rules
+                            )
                     else:
+                        params = task.get('params') if isinstance(task.get('params'), dict) else {}
+                        rules = list(params.get('rules') or [])
+                        if rules:
+                            if not isinstance(task.get('params'), dict):
+                                task['params'] = {}
+                            task['params']['rules'] = self._collapse_rules_by_identity(rules)
                         merged_by_stock[norm] = task
                 
                 self.tasks.clear()
@@ -961,37 +969,37 @@ class TaskManager(QObject):
                     self.task_params[task_id] = task['params']
 
                 # 应用旧执行状态合并：避免重载后把 executed 规则恢复为未执行
-                if force_reload and _old_rule_exec_payload_by_norm_and_key:
+                # 同名价格变更时按身份键继承执行态；并压掉同名旧价+新价并存
+                if force_reload:
                     applied_rules = 0
                     applied_norms = set()
                     for task_id, task in self.tasks.items():
                         norm = _norm(task.get("stock_code"))
                         if not norm:
                             continue
-                        exec_payload_map = _old_rule_exec_payload_by_norm_and_key.get(norm) or {}
-                        if not exec_payload_map:
+                        params = task.get("params") if isinstance(task.get("params"), dict) else {}
+                        rules = list(params.get("rules") or [])
+                        if not rules:
                             continue
-                        params = task.get("params") or {}
-                        rules = params.get("rules") or []
-                        if not isinstance(rules, list):
+                        rules = self._collapse_rules_by_identity(rules)
+                        params["rules"] = rules
+                        task["params"] = params
+                        self.task_params[task_id] = params
+
+                        exec_payload_map = _old_rule_exec_payload_by_norm_and_key.get(norm) or {}
+                        old_task = _old_tasks_by_norm.get(norm) or {}
+                        old_by_identity = {}
+                        for orule in list(((old_task.get("params") or {}).get("rules") or [])):
+                            if isinstance(orule, dict):
+                                old_by_identity[self._rule_identity_key(orule)] = orule
+                        if not exec_payload_map and not old_by_identity:
                             continue
                         for rule in rules:
                             if not isinstance(rule, dict):
                                 continue
-                            # 用同一套 key 忽略运行时执行字段做匹配
-                            # 这里复用上面同名闭包逻辑：把 executed 相关字段从 rule 中移除后做 key
                             rr = dict(rule)
                             rr.pop("id", None)
-                            for k in [
-                                "executed",
-                                "executed_time",
-                                "executed_price",
-                                "executed_volume",
-                                "executed_grids",
-                                "executed_grid_prices",
-                                "executed_endpoint",
-                                "scheduled_clear_executed",
-                            ]:
+                            for k in list(self._RULE_EXEC_KEYS):
                                 rr.pop(k, None)
                             rr.pop("enabled", None)
                             rr.pop("cage_entered", None)
@@ -999,22 +1007,32 @@ class TaskManager(QObject):
                             rule_key = json.dumps(rr, sort_keys=True, ensure_ascii=False, default=str)
                             payload = exec_payload_map.get(rule_key) or {}
                             if not payload:
+                                old_same = old_by_identity.get(self._rule_identity_key(rule))
+                                if old_same:
+                                    payload = {
+                                        k: old_same.get(k)
+                                        for k in self._RULE_EXEC_KEYS
+                                        if k in old_same
+                                    }
+                            if not payload:
                                 continue
                             for k, v in payload.items():
                                 rule[k] = v
                             applied_rules += 1
                             applied_norms.add(norm)
-                    try:
-                        self.logger.info(
-                            f"重新加载任务：已合并保留执行状态 rules={applied_rules} 股票={len(applied_norms)}"
-                        )
-                    except Exception:
-                        pass
+                    if applied_rules:
+                        try:
+                            self.logger.info(
+                                f"重新加载任务：已合并保留执行状态 rules={applied_rules} 股票={len(applied_norms)}"
+                            )
+                        except Exception:
+                            pass
                 
                 if force_reload:
                     # 本次重载中新出现的股票（任务文件里原来没有的）
                     self._newly_loaded_stock_codes = set(merged_by_stock.keys()) - _old_stock_codes
                     self._reload_paused_task_names = []
+                    self._reload_paused_norms = set()
                     # 对「重载前正在运行」且「文件中的任务与内存中持久化内容不一致」的股票置为暂停。
                     # 旧逻辑仅用「新增股票代码 ∩ 运行中」几乎永远为空；应比较重载前后指纹（规则/成本等变化）。
                     affected = set()
@@ -1030,20 +1048,66 @@ class TaskManager(QObject):
                         # 兼容：文件里新出现的股票代码若恰好在运行集合中（极少见，如规范化/合并边界）
                         affected |= _running_stock_codes_before & self._newly_loaded_stock_codes
                     if affected:
+                        # 轻量停止：勿在 load 中途调用完整 stop_task（会 save_tasks clear 重建，
+                        # 且 process.join 会把 UI 卡死成「不加载」）。只发 stop 并摘掉运行登记。
+                        for tid in list(self.running_tasks.keys()):
+                            try:
+                                info = self.running_tasks.get(tid) or {}
+                                if not isinstance(info, dict):
+                                    info = {}
+                                sc = info.get("stock_code")
+                                if not sc and tid in self.tasks:
+                                    sc = (self.tasks.get(tid) or {}).get("stock_code")
+                                if _norm(sc) not in affected:
+                                    continue
+                                try:
+                                    pipe = info.get("control_pipe")
+                                    if pipe is not None:
+                                        try:
+                                            pipe.send("stop")
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                                try:
+                                    self.running_tasks.pop(tid, None)
+                                except Exception:
+                                    pass
+                                if sc and sc in getattr(self, "task_processes", {}):
+                                    try:
+                                        self.task_processes[sc] = [
+                                            item
+                                            for item in self.task_processes[sc]
+                                            if item[0] != tid
+                                        ]
+                                        if not self.task_processes[sc]:
+                                            del self.task_processes[sc]
+                                    except Exception:
+                                        pass
+                            except Exception as stop_err:
+                                self.logger.warning(
+                                    f"重新加载暂停时处理运行任务失败 ({tid}): {stop_err}"
+                                )
                         for task in self.tasks.values():
                             norm = _norm(task.get("stock_code"))
                             if norm in affected:
-                                params = task.get("params") or {}
+                                params = task.get("params") if isinstance(task.get("params"), dict) else {}
                                 params["task_running"] = False
                                 params["task_paused"] = True
                                 task["params"] = params
-                                self.task_params[task["task_id"]] = params
+                                if task.get("status") == "运行中":
+                                    task["status"] = "未运行"
+                                tid = task.get("task_id")
+                                if tid:
+                                    self.task_params[tid] = params
+                                    self.tasks[tid] = task
                                 self._reload_paused_task_names.append(
                                     f"{task.get('stock_name', '未知')} ({task.get('stock_code', '')})"
                                 )
                                 self.logger.info(
                                     f"重新加载：检测到任务内容变化，已将正在运行的 {task.get('stock_code')} 置为暂停，请确认规则后手动启动"
                                 )
+                        self._reload_paused_norms = set(affected)
                         try:
                             self._block_tasks_updated_signal = True
                             self.save_tasks(list(self.tasks.values()))
@@ -1053,7 +1117,8 @@ class TaskManager(QObject):
                             self._block_tasks_updated_signal = False
                 else:
                     self._newly_loaded_stock_codes = set()
-                
+                    self._reload_paused_norms = set()
+                    
                 if len(merged_by_stock) < len(processed_tasks):
                     self.logger.info(f"已按股票合并任务：{len(processed_tasks)} 条合并为 {len(merged_by_stock)} 条（一只股票只保留一个任务）")
                     try:
@@ -1109,6 +1174,16 @@ class TaskManager(QObject):
                         # 其他任务：
                         # 若旧任务已有 executed 规则，避免重载把其重置为未执行/未运行
                         norm = _norm(task.get('stock_code'))
+                        # 意图暂停的股票：勿把 status 从旧内存恢复成「运行中」
+                        if force_reload and norm in getattr(self, "_reload_paused_norms", set()):
+                            params = task.get("params") if isinstance(task.get("params"), dict) else {}
+                            params["task_running"] = False
+                            params["task_paused"] = True
+                            task["params"] = params
+                            self.task_params[task_id] = params
+                            if task.get("status") == "运行中":
+                                task["status"] = "未运行"
+                            continue
                         if _old_any_executed_by_norm.get(norm):
                             old_task = _old_tasks_by_norm.get(norm)
                             if old_task:
@@ -1176,26 +1251,97 @@ class TaskManager(QObject):
         s = "".join(c for c in s if c.isdigit())
         return s.zfill(6) if len(s) >= 6 else (s[:6].zfill(6) if len(s) > 0 else "")
 
+    @staticmethod
+    def _rule_identity_key(rule) -> str:
+        """同腿/同名身份键：优先 leg_key，否则 type+name。"""
+        if not isinstance(rule, dict):
+            return f"obj:{id(rule)}"
+        lk = str(rule.get("leg_key") or "").strip()
+        if lk:
+            return f"leg:{lk}"
+        rtype = str(rule.get("type") or "").strip()
+        name = str(rule.get("name") or "").strip()
+        if rtype or name:
+            return f"nt:{rtype}|{name}"
+        rr = dict(rule)
+        rr.pop("id", None)
+        return f"content:{json.dumps(rr, sort_keys=True, ensure_ascii=False, default=str)}"
+
+    _RULE_EXEC_KEYS = (
+        "executed",
+        "executed_time",
+        "executed_price",
+        "executed_volume",
+        "executed_grids",
+        "executed_grid_prices",
+        "executed_endpoint",
+        "scheduled_clear_executed",
+    )
+
     def _dedupe_rules_list(self, rules_list):
-        """规则列表去重（忽略 id），与 load_tasks / 策略生成器 task_builder 一致。"""
+        """规则列表去重：同 leg_key / 同 type+name 只保留最后一条（新价格覆盖旧价格）。"""
+        return self._collapse_rules_by_identity(rules_list)
+
+    def _collapse_rules_by_identity(self, rules_list):
+        """同身份规则只留最后一条，避免同名旧价+新价并存。"""
         if not rules_list:
             return []
-        seen = set()
         out = []
+        index_by_id = {}
+        identity = self._rule_identity_key
         for r in rules_list:
             if not isinstance(r, dict):
                 continue
-            rr = dict(r)
-            rr.pop("id", None)
-            key = json.dumps(rr, sort_keys=True, ensure_ascii=False)
-            if key in seen:
+            kid = identity(r)
+            if kid in index_by_id:
+                out[index_by_id[kid]] = r
+            else:
+                index_by_id[kid] = len(out)
+                out.append(r)
+        return out
+
+    def _merge_rules_replace_by_identity(self, old_rules, new_rules):
+        """合并规则：同身份用新规则覆盖，并保留旧执行态；新列表未覆盖的旧规则保留。"""
+        old_list = [r for r in (old_rules or []) if isinstance(r, dict)]
+        new_list = [r for r in (new_rules or []) if isinstance(r, dict)]
+        if not new_list:
+            return self._collapse_rules_by_identity(old_list)
+        if not old_list:
+            return self._collapse_rules_by_identity(new_list)
+
+        old_by_id = {}
+        for r in old_list:
+            old_by_id[self._rule_identity_key(r)] = r
+
+        new_ids = {self._rule_identity_key(r) for r in new_list}
+        out = []
+        seen_keep = set()
+        for r in old_list:
+            kid = self._rule_identity_key(r)
+            if kid in new_ids or kid in seen_keep:
                 continue
-            seen.add(key)
+            seen_keep.add(kid)
             out.append(r)
+
+        seen_new = set()
+        for nr in new_list:
+            kid = self._rule_identity_key(nr)
+            if kid in seen_new:
+                out = [r for r in out if self._rule_identity_key(r) != kid]
+            seen_new.add(kid)
+            merged = dict(nr)
+            old = old_by_id.get(kid)
+            if old:
+                for ek in self._RULE_EXEC_KEYS:
+                    if ek in old:
+                        merged[ek] = old[ek]
+                if old.get("id"):
+                    merged["id"] = old.get("id")
+            out.append(merged)
         return out
 
     def _merge_task_rows_by_stock(self, tasks):
-        """多行任务按股票合并为一条，params.rules 合并后去重（同 load_tasks）。"""
+        """多行任务按股票合并为一条；同名/同腿规则后者覆盖前者。"""
         merged_by_stock = {}
         for task in tasks:
             norm = self._normalize_stock_code(task.get("stock_code"))
@@ -1207,8 +1353,15 @@ class TaskManager(QObject):
                 r2 = list((task.get("params") or {}).get("rules") or [])
                 if not isinstance(existing.get("params"), dict):
                     existing["params"] = {}
-                existing["params"]["rules"] = self._dedupe_rules_list(r1 + r2)
+                existing["params"]["rules"] = self._merge_rules_replace_by_identity(r1, r2)
             else:
+                # 单行内也可能已有同名重复，先压掉
+                params = task.get("params") if isinstance(task.get("params"), dict) else {}
+                rules = list(params.get("rules") or [])
+                if rules:
+                    if not isinstance(task.get("params"), dict):
+                        task["params"] = {}
+                    task["params"]["rules"] = self._collapse_rules_by_identity(rules)
                 merged_by_stock[norm] = task
         return merged_by_stock
 
@@ -1267,7 +1420,8 @@ class TaskManager(QObject):
                 r_file = list((ft.get("params") or {}).get("rules") or [])
                 if not isinstance(ot.get("params"), dict):
                     ot["params"] = {}
-                ot["params"]["rules"] = self._dedupe_rules_list(r_mem + r_file)
+                # 文件侧为策略生成器新写入：同名/同腿以文件覆盖内存旧价
+                ot["params"]["rules"] = self._merge_rules_replace_by_identity(r_mem, r_file)
                 merged.append(ot)
             elif ot:
                 merged.append(ot)
@@ -1275,15 +1429,20 @@ class TaskManager(QObject):
                 merged.append(ft)
         return merged
     
-    def save_tasks(self, tasks):
-        """保存任务到文件。若检测到任务文件已被外部（如策略生成系统）修改，则先与内存合并再保存，既保留新任务也保留手动修改。"""
+    def save_tasks(self, tasks, merge_external: bool = True):
+        """保存任务到文件。
+
+        merge_external=True（默认）：若检测到任务文件已被外部（如策略生成系统）修改，
+        则先与内存合并再保存。
+        merge_external=False：以传入/内存任务为准直接写盘（图表删改规则时用，避免已删规则被磁盘合并回来）。
+        """
         try:
             # 与 load_tasks 一致：跨天常驻时先把路径切到当日，避免整晚仍写入「启动日」任务表
             if self.update_tasks_file_path():
                 self._tasks_loaded = False
                 self.logger.info("保存任务：检测到自然日切换，已切换到当日任务文件路径")
             # 检测任务文件是否被外部修改（如策略生成系统写入新任务）
-            if os.path.exists(self.tasks_file):
+            if merge_external and os.path.exists(self.tasks_file):
                 try:
                     current_mtime = os.path.getmtime(self.tasks_file)
                     need_merge = False

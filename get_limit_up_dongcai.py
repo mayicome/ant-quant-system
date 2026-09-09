@@ -1,43 +1,25 @@
 import time
 import os
-from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import pandas as pd
 
+from utils.selenium_chrome import create_chrome_driver, find_dc_path
+
+
 def find_file_path(d_path, c_path=None):
-    """
-    查找文件路径，如果 D 盘找不到就找 C 盘的同名文件
-    
-    Args:
-        d_path: D 盘的路径
-        c_path: C 盘的路径（可选，如果不提供则自动从 d_path 转换）
-    
-    Returns:
-        找到的文件路径，如果都找不到则返回原始 d_path
-    """
+    """兼容旧调用：D/C 盘查找；找不到时仍返回 d_path（历史行为）。"""
+    found = find_dc_path(d_path, c_path)
+    if found:
+        print(f"找到文件: {found}")
+        return found
     if c_path is None:
-        # 自动将 D: 替换为 C:
-        c_path = d_path.replace('D:', 'C:', 1) if d_path.startswith('D:') else d_path.replace('d:', 'c:', 1)
-    
-    # 先检查 D 盘
-    if os.path.exists(d_path):
-        print(f"找到文件: {d_path}")
-        return d_path
-    
-    # 如果 D 盘找不到，检查 C 盘
-    if os.path.exists(c_path):
-        print(f"D 盘未找到，使用 C 盘路径: {c_path}")
-        return c_path
-    
-    # 都找不到，返回原始路径（让 Selenium 报错）
-    print(f"警告：D 盘和 C 盘都未找到文件")
+        c_path = d_path.replace("D:", "C:", 1) if d_path.startswith("D:") else d_path.replace("d:", "c:", 1)
+    print("警告：D 盘和 C 盘都未找到文件")
     print(f"  D 盘路径: {d_path}")
     print(f"  C 盘路径: {c_path}")
     return d_path
@@ -98,35 +80,11 @@ def clean_dataframe(df):
     
     return df_clean
 
-def _apply_chrome_proxy_options(chrome_options):
-    """配置 Chrome 代理：默认直连，避免继承失效的系统代理（如 127.0.0.1:7078）。"""
-    use_system_proxy = os.environ.get('SELENIUM_USE_SYSTEM_PROXY', '').strip().lower()
-    if use_system_proxy in ('1', 'true', 'yes'):
-        print("使用系统代理（SELENIUM_USE_SYSTEM_PROXY=1）")
-        return
-    chrome_options.add_argument('--no-proxy-server')
-    chrome_options.add_argument('--proxy-bypass-list=*')
-    print("已禁用 Chrome 系统代理（直连）；如需走代理请设置 SELENIUM_USE_SYSTEM_PROXY=1")
-
 def get_limit_up_stocks_selenium():
     """
-    使用Selenium控制测试版Chrome获取涨停板数据
+    使用Selenium获取涨停板数据（便携 Chrome 优先，否则系统 Chrome）。
     """
-    chrome_options = Options()
-    
-    # --- 1. 指定你的测试版Chrome浏览器路径 ---
-    # 如果 D 盘找不到就找 C 盘
-    chrome_binary_path = find_file_path(r"D:\download\chrome-win64\chrome-win64\chrome.exe")
-    chrome_options.binary_location = chrome_binary_path
-    _apply_chrome_proxy_options(chrome_options)
-    
-    # --- 2. 指定你的ChromeDriver路径 ---
-    # 如果 D 盘找不到就找 C 盘
-    driver_path = find_file_path(r"D:\download\chromedriver-win64\chromedriver.exe")
-    service = Service(executable_path=driver_path)
-    
-    # 启动浏览器
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver = create_chrome_driver()
 
     try:
         # 打开东方财富网涨停板页面

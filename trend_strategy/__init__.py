@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""周频趋势策略（暴露×溢价 / Fama-MacBeth），规格见 docs/trend_strategy_spec_v1.2.md。"""
+"""趋势策略（暴露×溢价 / Fama-MacBeth）。周频见 docs/trend_strategy_spec_v1.2.md；半周压缩用 TrendStrategyConfig.half_week()。"""
 
-from trend_strategy.config import TrendStrategyConfig
+from trend_strategy.config import FACTOR_NAMES, FACTOR_NAMES_HALF, TrendStrategyConfig
 
-__all__ = ["TrendStrategyConfig"]
+__all__ = ["TrendStrategyConfig", "FACTOR_NAMES", "FACTOR_NAMES_HALF"]

@@ -21,8 +21,13 @@ from trend_strategy.engine import run_backtest
 from trend_strategy.filters import build_tradable_mask
 from trend_strategy.factors import compute_factor_bundle
 from trend_strategy.fm import premium_summary, run_fama_macbeth, week_returns_hfq
-from trend_strategy.validate import factor_corr_and_vif, factor_ic_table, prediction_deciles
-from trend_strategy.weeks import week_end_dates
+from trend_strategy.validate import (
+    factor_corr_and_vif,
+    factor_ic_table,
+    nav_stats,
+    prediction_deciles,
+)
+from trend_strategy.weeks import decision_dates_for_config
 
 
 def run_pipeline(
@@ -43,12 +48,21 @@ def run_pipeline(
     if max_stocks and len(uni) > max_stocks:
         uni = uni[:max_stocks]
 
-    print(f"[pipeline] universe={len(uni)} stocks", flush=True)
+    mode = str(getattr(cfg, "rebalance_mode", "week") or "week")
+    step = int(getattr(cfg, "decision_step_days", 3) or 3)
+    print(
+        f"[pipeline] universe={len(uni)} mode={mode} step={step} "
+        f"factors={cfg.factor_names} W={cfg.estimate_window}",
+        flush=True,
+    )
 
-    # 为斜率窗口预留历史
+    # 为斜率窗口 + FM 预留历史（半周按调仓期×步长加长）
     load_start = cfg.start_date
     if load_start is not None:
-        load_start = load_start - timedelta(days=400)
+        extra = 400
+        if mode == "half":
+            extra = 400 + int(step * cfg.estimate_window * 1.5)
+        load_start = load_start - timedelta(days=extra)
 
     panels = build_panels(uni, start=load_start, end=cfg.end_date)
     close_hfq = panels["close_hfq"]
@@ -75,17 +89,23 @@ def run_pipeline(
         cfg=cfg,
     )
 
-    week_ends_all = week_end_dates(all_days)
-    week_ends = list(week_ends_all)
+    decision_all = decision_dates_for_config(
+        all_days,
+        rebalance_mode=mode,
+        decision_step_days=step,
+    )
+    week_ends = list(decision_all)
     if cfg.start_date:
-        # 因子/溢价需要 start 之前的周，便于滚动窗口；回测再截断
-        warm = cfg.start_date - timedelta(days=400)
+        warm_days = 400
+        if mode == "half":
+            warm_days = 400 + int(step * cfg.estimate_window * 1.5)
+        warm = cfg.start_date - timedelta(days=warm_days)
         week_ends = [d for d in week_ends if d >= warm]
     if cfg.end_date:
         week_ends = [d for d in week_ends if d <= cfg.end_date]
-    print(f"[pipeline] week_ends={len(week_ends)}", flush=True)
+    print(f"[pipeline] decision_dates={len(week_ends)} mode={mode}", flush=True)
 
-    print("[pipeline] computing factors (SLOPE60 may take a while) ...", flush=True)
+    print("[pipeline] computing factors ...", flush=True)
     bundle = compute_factor_bundle(close_hfq, panels["amount"], mask, cfg, week_ends=week_ends)
     z = bundle["z"]
     pass_mask = bundle["pass_mask"]
@@ -111,7 +131,7 @@ def run_pipeline(
             first_ok = fm["hist_dates"][cfg.estimate_window - 1]
         bt_weeks = [d for d in bt_weeks if d > first_ok]
 
-    print(f"[pipeline] backtest weeks={len(bt_weeks)}", flush=True)
+    print(f"[pipeline] backtest periods={len(bt_weeks)}", flush=True)
     bt = run_backtest(
         score,
         bt_weeks,
@@ -123,6 +143,7 @@ def run_pipeline(
         name_map,
         cfg,
     )
+    stats = nav_stats(bt["nav"], periods_per_year=cfg.periods_per_year)
 
     result = {
         "config": {k: (str(v) if isinstance(v, date) else v) for k, v in asdict(cfg).items()},
@@ -137,6 +158,9 @@ def run_pipeline(
         "trades": bt["trades"],
         "premium": fm["premium"],
         "r2_threshold_used": bundle["r2_threshold_used"],
+        "nav_stats": stats,
+        "n_decision": len(week_ends),
+        "n_bt": len(bt_weeks),
     }
 
     if out_dir is not None:
@@ -156,22 +180,30 @@ def run_pipeline(
             diag["vif"].to_csv(out_dir / "factor_vif.csv", encoding="utf-8-sig", header=["vif"])
         bt["nav"].to_csv(out_dir / "nav.csv", index=False, encoding="utf-8-sig")
         bt["trades"].to_csv(out_dir / "trades.csv", index=False, encoding="utf-8-sig")
+        pd.DataFrame([stats]).to_csv(out_dir / "nav_stats.csv", index=False, encoding="utf-8-sig")
         with open(out_dir / "config.json", "w", encoding="utf-8") as f:
             json.dump(result["config"], f, ensure_ascii=False, indent=2, default=str)
-        # 简报
         lines = [
-            f"stocks={len(uni)} weeks={len(week_ends)} bt_weeks={len(bt_weeks)}",
+            f"stocks={len(uni)} mode={mode} step={step} decisions={len(week_ends)} bt={len(bt_weeks)}",
+            f"factors={cfg.factor_names} W={cfg.estimate_window} turnover_cap={cfg.max_turnover} cost={cfg.cost_roundtrip}",
             "=== IC ===",
             ic_tbl.to_string(index=False),
             "=== Premium ===",
             prem_sum.to_string(index=False) if not prem_sum.empty else "(empty)",
             "=== Deciles ===",
             deciles.to_string(index=False) if not deciles.empty else "(empty)",
+            f"=== NAV stats === {stats}",
         ]
         if not bt["nav"].empty:
             nav0 = float(bt["nav"]["nav"].iloc[0])
             nav1 = float(bt["nav"]["nav"].iloc[-1])
-            lines.append(f"=== NAV {nav0:.2f} -> {nav1:.2f} ({nav1 / nav0 - 1:.2%}) ===")
+            lines.append(f"NAV {nav0:.2f} -> {nav1:.2f} ({nav1 / nav0 - 1:.2%})")
+            if "turnover_used" in bt["nav"].columns:
+                tu = bt["nav"]["turnover_used"]
+                lines.append(
+                    f"turnover_used mean={tu.mean():.3f} median={tu.median():.3f} "
+                    f"frac>cap={(tu > cfg.max_turnover + 1e-9).mean():.1%}"
+                )
         (out_dir / "summary.txt").write_text("\n".join(lines), encoding="utf-8")
         print(f"[pipeline] wrote {out_dir}", flush=True)
 

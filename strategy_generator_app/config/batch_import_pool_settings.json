@@ -1,0 +1,8 @@
+{
+  "file_prefix": "选股结果_马总选股逻辑-盘后",
+  "recent_trading_days": 10,
+  "only_meet_condition": true,
+  "filter_post_select_max_gain": true,
+  "main_board_max_gain_pct": 5.0,
+  "other_board_max_gain_pct": 10.0
+}

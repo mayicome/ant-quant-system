@@ -1,12 +1,9 @@
 import time
-from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 import pandas as pd
 from typing import Optional
@@ -14,6 +11,7 @@ from datetime import date, datetime, timedelta
 import os
 import argparse
 from utils.trading_day import is_tradeday
+from utils.selenium_chrome import create_chrome_driver
 import sys
 
 # Windows 控制台常为 GBK：避免 print 含 ✓/✗ 等字符时把整页提取打崩
@@ -614,17 +612,8 @@ def get_capital_flow_selenium(min_amount_threshold=3000):
         min_amount_threshold: 最小净流入金额阈值（万元），默认3000万元
                              当某页最后一条数据的净额小于此值时，停止提取
     """
-    chrome_options = Options()
-    
-    # --- 1. 指定你的测试版Chrome浏览器路径 ---
-    chrome_options.binary_location = r"D:\download\chrome-win64\chrome-win64\chrome.exe"
-    
-    # --- 2. 指定你的ChromeDriver路径 ---
-    driver_path = r"D:\download\chromedriver-win64\chromedriver.exe"
-    service = Service(executable_path=driver_path)
-    
-    # 启动浏览器
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    # 便携 Chrome(D:/C:/download/...) 优先；否则系统 Chrome + Selenium Manager
+    driver = create_chrome_driver()
 
     try:
         # 打开东方财富网个股主力净流入页面

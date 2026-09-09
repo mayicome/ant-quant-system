@@ -3914,7 +3914,11 @@ class StockChartWidget(QWidget):
                 self.task_manager.save_tasks(all_tasks)
     
     def _save_rules(self):
-        """保存规则到任务"""
+        """保存规则到任务。
+
+        图表 self.rules 即该股完整规则列表；删除后不得再与 TaskManager 旧列表按 id 合并，
+        否则会把已删规则「复活」。
+        """
         if hasattr(self, 'task') and hasattr(self, 'task_manager') and self.task:
             # 旧规则缺 early_order_enabled 时一次性迁移（不覆盖已有快照）
             for r in self.rules or []:
@@ -3922,46 +3926,28 @@ class StockChartWidget(QWidget):
                 self._stamp_breakthrough_flags(r, force=False)
             if 'params' not in self.task:
                 self.task['params'] = {}
-            # 与 TaskManager 按 id 合并，避免图表侧规则不完整时冲掉其它规则
+            rules_list = list(self.rules or [])
+            self.rules = rules_list
+            self.task['params']['rules'] = rules_list
+
+            # 同步到 TaskManager，避免保存时仍读到删前快照
             try:
                 tid = str(self.task.get("task_id") or getattr(self, "task_id", "") or "")
-                fresh = self.task_manager.tasks.get(tid) if tid else None
-                tm_rules = None
-                if isinstance(fresh, dict) and isinstance(fresh.get("params"), dict):
-                    tm_rules = fresh["params"].get("rules")
-                if isinstance(tm_rules, list) and tm_rules:
-                    chart_by_id = {}
-                    for r in self.rules or []:
-                        if isinstance(r, dict) and r.get("id"):
-                            chart_by_id[str(r.get("id"))] = r
-                    if chart_by_id:
-                        merged = []
-                        seen = set()
-                        for r in tm_rules:
-                            if not isinstance(r, dict):
-                                continue
-                            rid = str(r.get("id") or "")
-                            if rid and rid in chart_by_id:
-                                merged.append(chart_by_id[rid])
-                                seen.add(rid)
-                            else:
-                                merged.append(r)
-                        for r in self.rules or []:
-                            if not isinstance(r, dict):
-                                continue
-                            rid = str(r.get("id") or "")
-                            if rid and rid not in seen:
-                                merged.append(r)
-                                seen.add(rid)
-                        self.rules = merged
+                if tid and self.task_manager and tid in getattr(self.task_manager, "tasks", {}):
+                    tm_task = self.task_manager.tasks[tid]
+                    if not isinstance(tm_task.get("params"), dict):
+                        tm_task["params"] = {}
+                    tm_task["params"]["rules"] = rules_list
+                    self.task_manager.task_params[tid] = tm_task["params"]
+                    # 保持 chart.task 与 TM 同一引用偏好
+                    self.task = tm_task
             except Exception:
                 pass
-            self.task['params']['rules'] = self.rules
-            
-            # 保存任务
+
             if self.task_manager:
+                # 图表删改以内存为准，禁止与磁盘旧规则合并把已删项加回
                 all_tasks = list(self.task_manager.tasks.values())
-                self.task_manager.save_tasks(all_tasks)
+                self.task_manager.save_tasks(all_tasks, merge_external=False)
     
     def _record_execution(self, rule, trade_info, tick_data, exec_time, price, volume, order_id, require_manual_approval, approval_result, approval_time=None):
         """记录执行记录
@@ -4341,8 +4327,31 @@ class StockChartWidget(QWidget):
             detail_action = menu.addAction(f"  网格进度: {_n}/{_total} 点已完成，剩余点待触发")
             detail_action.setEnabled(False)
         else:
-            info_action = menu.addAction(f"📋 {rule_name} ({type_name})")
-            info_action.setEnabled(False)  # 只显示，不可点击
+            if (
+                not rule_enabled
+                and str(rule.get("halt_reason") or "").strip() == "open_gain"
+            ):
+                info_action = menu.addAction(
+                    f"[已停止-开盘涨幅超限] {rule_name} ({type_name})"
+                )
+                info_action.setEnabled(False)
+                hd = str(rule.get("halt_detail") or "").strip()
+                if hd:
+                    detail_action = menu.addAction(f"  详情: {hd}")
+                    detail_action.setEnabled(False)
+            else:
+                info_action = menu.addAction(f"📋 {rule_name} ({type_name})")
+                info_action.setEnabled(False)  # 只显示，不可点击
+
+        # 开盘涨幅熔断：仅在右键菜单标明开关（不改节点名称）
+        try:
+            from core.open_gain_halt import rule_wants_open_gain_halt
+
+            if rule_wants_open_gain_halt(rule):
+                halt_status = menu.addAction("  已启用开盘涨幅熔断")
+                halt_status.setEnabled(False)
+        except Exception:
+            pass
         
         menu.addSeparator()
         
@@ -4399,8 +4408,12 @@ class StockChartWidget(QWidget):
         if action == delete_action:
             # 已执行的规则直接删除，不需要确认
             if rule_executed:
-                # 从规则列表中删除
-                self.rules = [r for r in self.rules if r.get('id') != rule.get('id')]
+                # 从规则列表中删除（按对象/id，避免无 id 时误伤或删不掉）
+                rid = rule.get("id")
+                if rid:
+                    self.rules = [r for r in self.rules if r.get("id") != rid]
+                else:
+                    self.rules = [r for r in self.rules if r is not rule]
                 
                 # 保存并更新图表
                 self._save_rules()
@@ -4422,8 +4435,11 @@ class StockChartWidget(QWidget):
                     if rule.get('early_order', False) and not rule.get('executed', False):
                         self._cancel_single_early_order(rule)
 
-                    # 从规则列表中删除
-                    self.rules = [r for r in self.rules if r.get('id') != rule.get('id')]
+                    rid = rule.get("id")
+                    if rid:
+                        self.rules = [r for r in self.rules if r.get("id") != rid]
+                    else:
+                        self.rules = [r for r in self.rules if r is not rule]
                     
                     # 保存并更新图表
                     self._save_rules()
@@ -6397,6 +6413,53 @@ class StockChartWidget(QWidget):
         }
         
         from core.rule_activation import rule_activation_allows_trigger
+
+        # 开盘涨幅熔断：先停掉带开关且已超限的未执行买入
+        try:
+            from core.open_gain_halt import (
+                apply_open_gain_halt,
+                should_halt_on_open_gain,
+            )
+
+            halted_any = False
+            for rule in list(self.rules or []):
+                hit, detail = should_halt_on_open_gain(
+                    rule,
+                    stock_code=str(getattr(self, "stock_code", "") or ""),
+                    stock_name=str(getattr(self, "stock_name", "") or ""),
+                    tick_or_row=tick_data,
+                )
+                if not hit:
+                    continue
+                if apply_open_gain_halt(rule, detail):
+                    halted_any = True
+                    try:
+                        if rule.get("early_order", False) and not rule.get("executed", False):
+                            self._cancel_single_early_order(rule)
+                    except Exception:
+                        pass
+                    try:
+                        self.logger.info(
+                            f"[{getattr(self, 'stock_code', '')}] "
+                            f"开盘涨幅熔断停止买入规则 "
+                            f"{rule.get('name')}: {detail}"
+                        )
+                    except Exception:
+                        pass
+            if halted_any:
+                try:
+                    self._save_rules()
+                except Exception:
+                    pass
+                try:
+                    self.update_chart()
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self.logger.debug(f"开盘涨幅熔断检查失败: {e}")
+            except Exception:
+                pass
 
         # 按优先级排序规则（排除夜市规则、已执行的规则，夜市规则有自己的定时器）
         sorted_rules = sorted(
@@ -9704,8 +9767,12 @@ class StockChartWidget(QWidget):
                         color = '#ffffff'  # 白色节点（已执行但未下单）
                         rule_name = f"[已执行] {rule_name_with_time}"
                 elif not rule_enabled:
-                    color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）
-                    rule_name = f"[已禁用] {rule_name_with_time}"
+                    if str(rule.get("halt_reason") or "").strip() == "open_gain":
+                        color = '#FFC107'  # 开盘涨幅熔断：黄色节点
+                        rule_name = f"[已停止-开盘涨幅超限] {rule_name_with_time}"
+                    else:
+                        color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）
+                        rule_name = f"[已禁用] {rule_name_with_time}"
                 else:
                     # 定时清仓规则使用紫色，便于区分
                     color = '#9c27b0'  # 紫色
@@ -9762,9 +9829,13 @@ class StockChartWidget(QWidget):
                         color = '#999999'
                         rule_name = f"[已执行] {rule_name}"
                 elif not rule_enabled:
-                    # 禁用的规则显示为浅灰色
-                    color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）
-                    rule_name = f"[已禁用] {rule_name}"
+                    if str(rule.get("halt_reason") or "").strip() == "open_gain":
+                        color = '#FFC107'  # 开盘涨幅熔断：黄色节点，区别于普通禁用黑点
+                        rule_name = f"[已停止-开盘涨幅超限] {rule_name}"
+                    else:
+                        # 禁用的规则显示为黑色
+                        color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）
+                        rule_name = f"[已禁用] {rule_name}"
                 else:
                     # 正常规则使用规则类型颜色
                     # 夜市规则使用特殊颜色

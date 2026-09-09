@@ -232,16 +232,59 @@ def _normalize_stock_code(stock_code: str) -> str:
 
 
 def _rule_content_key(rule: Dict[str, Any]) -> str:
-    """生成规则的内容键，用于去重（忽略 id 等运行时字段）。完全相同的规则得到相同 key。"""
+    """生成规则的内容键，用于去重（忽略 id / 执行态）。完全相同的规则得到相同 key。"""
     if not isinstance(rule, dict):
         return str(id(rule))
     r = dict(rule)
-    r.pop("id", None)
-    return json.dumps(r, sort_keys=True, ensure_ascii=False)
+    for k in (
+        "id",
+        "executed",
+        "executed_time",
+        "executed_price",
+        "executed_volume",
+        "executed_grids",
+        "executed_grid_prices",
+        "executed_endpoint",
+        "scheduled_clear_executed",
+        "enabled",
+        "cage_entered",
+        "early_order",
+    ):
+        r.pop(k, None)
+    return json.dumps(r, sort_keys=True, ensure_ascii=False, default=str)
+
+
+_RULE_EXEC_KEYS = (
+    "executed",
+    "executed_time",
+    "executed_price",
+    "executed_volume",
+    "executed_grids",
+    "executed_grid_prices",
+    "executed_endpoint",
+    "scheduled_clear_executed",
+)
+
+
+def _rule_identity_key(rule: Dict[str, Any]) -> str:
+    """同腿/同名规则身份键：优先 leg_key，否则 type+name。
+
+    策略生成器重写同名腿（如马总1-跌破MA10）时应覆盖触发价，而不是追加第二条。
+    """
+    if not isinstance(rule, dict):
+        return f"obj:{id(rule)}"
+    lk = str(rule.get("leg_key") or "").strip()
+    if lk:
+        return f"leg:{lk}"
+    rtype = str(rule.get("type") or "").strip()
+    name = str(rule.get("name") or "").strip()
+    if rtype or name:
+        return f"nt:{rtype}|{name}"
+    return f"content:{_rule_content_key(rule)}"
 
 
 def _dedupe_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """规则列表去重：内容完全相同的多条只保留第一条。"""
+    """规则列表去重：语义内容完全相同的多条只保留第一条。"""
     if not rules:
         return []
     seen = set()
@@ -252,6 +295,60 @@ def _dedupe_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         seen.add(key)
         out.append(r)
+    return out
+
+
+def _merge_rules_replace_by_identity(
+    old_rules: List[Dict[str, Any]],
+    new_rules: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """合并规则：同 leg_key / 同 type+name 用新规则覆盖旧规则，并保留旧执行态。
+
+    未出现在新列表中的旧规则保留（如手工加的其它腿）。
+    """
+    old_list = [r for r in (old_rules or []) if isinstance(r, dict)]
+    new_list = [r for r in (new_rules or []) if isinstance(r, dict)]
+    if not new_list:
+        return _dedupe_rules(old_list)
+    if not old_list:
+        return _dedupe_rules(new_list)
+
+    old_by_id: Dict[str, Dict[str, Any]] = {}
+    for r in old_list:
+        old_by_id[_rule_identity_key(r)] = r  # 同身份多条时后者覆盖索引
+
+    new_ids = {_rule_identity_key(r) for r in new_list}
+    out: List[Dict[str, Any]] = []
+    # 先保留新任务未覆盖的旧规则
+    seen_keep = set()
+    for r in old_list:
+        kid = _rule_identity_key(r)
+        if kid in new_ids:
+            continue
+        if kid in seen_keep:
+            continue
+        seen_keep.add(kid)
+        out.append(r)
+    # 再写入新规则（覆盖同身份），并拷贝旧执行态
+    seen_new = set()
+    for nr in new_list:
+        kid = _rule_identity_key(nr)
+        if kid in seen_new:
+            # 新列表内同身份：后者覆盖前者
+            out = [r for r in out if _rule_identity_key(r) != kid]
+        seen_new.add(kid)
+        merged = dict(nr)
+        old = old_by_id.get(kid)
+        if old:
+            for ek in _RULE_EXEC_KEYS:
+                if ek in old:
+                    merged[ek] = old[ek]
+            # 保留旧 id，避免运行中进程对不上规则
+            if old.get("id") and not merged.get("id"):
+                merged["id"] = old.get("id")
+            elif old.get("id"):
+                merged["id"] = old.get("id")
+        out.append(merged)
     return out
 
 
@@ -275,6 +372,17 @@ def _make_rule_dict(
         lk = str(intent.get("leg_key") or "").strip()
         if lk:
             out["leg_key"] = lk
+        # 买入开盘涨幅熔断开关（意图显式打开时落盘）
+        if _truthy_flag(intent.get("halt_on_open_gain")):
+            rtype = str(out.get("type") or "").strip()
+            if rtype in (
+                "single_buy",
+                "best_buy",
+                "breakthrough_buy",
+                "cage_buy",
+                "grid_buy",
+            ):
+                out["halt_on_open_gain"] = True
         return out
 
     if rule_type == "breakthrough_buy":
@@ -720,7 +828,8 @@ def write_tasks_to_excel(
             old_params = old.get("params") or {}
             old_rules = list(old_params.get("rules") or [])
             new_rules = (new_task.get("params") or {}).get("rules") or []
-            merged_rules = _dedupe_rules(old_rules + new_rules)
+            # 同名/同腿：用新规则覆盖旧触发价，避免新旧价格并存导致「加载无变化」
+            merged_rules = _merge_rules_replace_by_identity(old_rules, new_rules)
             if drop_scheduled_clear_on_merge:
                 merged_rules = [
                     r for r in merged_rules

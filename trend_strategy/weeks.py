@@ -23,6 +23,36 @@ def week_end_dates(trade_days: Sequence[date]) -> List[date]:
     return out
 
 
+def every_n_trade_days(
+    trade_days: Sequence[date],
+    n: int = 3,
+    *,
+    offset: int = 0,
+) -> List[date]:
+    """
+    交易日等步长决策网格（半周：n=3）。
+    offset：从第 offset 个交易日起步（0-based），再每 n 日取一点。
+    """
+    days = sorted(trade_days)
+    step = max(1, int(n))
+    off = max(0, int(offset))
+    if off >= len(days):
+        return []
+    return list(days[off::step])
+
+
+def decision_dates_for_config(
+    trade_days: Sequence[date],
+    *,
+    rebalance_mode: str = "week",
+    decision_step_days: int = 3,
+) -> List[date]:
+    mode = (rebalance_mode or "week").strip().lower()
+    if mode == "half":
+        return every_n_trade_days(trade_days, n=decision_step_days, offset=0)
+    return week_end_dates(trade_days)
+
+
 def next_trade_day(trade_days: Sequence[date], d: date) -> date | None:
     for x in trade_days:
         if x > d:

@@ -1157,13 +1157,17 @@ def group_codes_by_selection_date_from_file(file_path: str) -> Tuple[Dict[date, 
 
 def group_codes_and_clip_strength_by_selection_date(
     file_path: str,
+    *,
+    only_meet_condition: bool = False,
 ) -> Tuple[Dict[date, List[str]], Dict[date, Dict[str, Dict[str, object]]], str]:
     """按选股日返回代码列表 + clip 强度元数据（Elig/标签内RS）。
 
     strength_by_day[d][code6] = {"合格榜内序位": ..., "合格榜标签内RS排名": ...}
     供 clip_equity 按强度分取票（与导出强度序一致；无 max_per_tag）。
+    only_meet_condition=True 时仅保留「满足条件」列为真的行。
     """
     import pandas as pd
+    from batch_import_pool import is_meet_condition_true
 
     file_path = os.path.abspath(file_path)
     if not os.path.isfile(file_path):
@@ -1208,12 +1212,24 @@ def group_codes_and_clip_strength_by_selection_date(
         raise ValueError("未找到股票代码列（需要「股票代码」等列）")
     elig_col = _find_column_by_header_candidates(header_df, ("合格榜内序位",))
     rs_col = _find_column_by_header_candidates(header_df, ("合格榜标签内RS排名",))
+    meet_col = None
+    if only_meet_condition:
+        meet_col = _find_column_by_header_candidates(header_df, ("满足条件",))
+        if meet_col is None:
+            for orig, norm in _df_header_pairs(header_df):
+                if norm == "满足条件" or norm.replace(" ", "") == "满足条件":
+                    meet_col = orig
+                    break
+        if meet_col is None:
+            raise ValueError("已勾选「只导入满足条件」，但文件中未找到「满足条件」列")
 
     usecols = [dc, cc]
     if elig_col:
         usecols.append(elig_col)
     if rs_col:
         usecols.append(rs_col)
+    if meet_col:
+        usecols.append(meet_col)
     # 去重且保序
     seen_cols = set()
     usecols_u = []
@@ -1228,6 +1244,12 @@ def group_codes_and_clip_strength_by_selection_date(
         df = _read_tabular_file(file_path, ext, usecols=usecols_u)
     if df.empty:
         raise ValueError("表格为空")
+
+    if meet_col is not None:
+        meet_mask = df[meet_col].map(is_meet_condition_true)
+        df = df.loc[meet_mask].copy()
+        if df.empty:
+            raise ValueError("没有「满足条件」为 True 的行")
 
     dates = pd.to_datetime(df[dc], errors="coerce")
     codes = df[cc].map(_normalize_code_6)
@@ -2009,6 +2031,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "已存在的代码不会重复添加，不清空现有股票。"
         )
         self.pool_import_btn.clicked.connect(self._on_import_pool_codes)
+        self.pool_batch_import_btn = QPushButton("批量导入选股文件")
+        self.pool_batch_import_btn.setToolTip(
+            "按设置的前缀，在 history_data 与存档中匹配最近 N 个交易日的选股文件并入股票池。\n"
+            "可设置是否只导入「满足条件」为 True 的股票。"
+        )
+        self.pool_batch_import_btn.clicked.connect(self._on_batch_import_pool_codes)
         self.pool_import_positions_btn = QPushButton("一键导入持仓")
         self.pool_import_positions_btn.setToolTip(
             "买入策略：持仓代码并入股票池。\n"
@@ -2045,6 +2073,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         pool_btn_row.addWidget(self.pool_copy_btn)
         pool_btn_row.addWidget(self.pool_paste_btn)
         pool_btn_row.addWidget(self.pool_import_btn)
+        pool_btn_row.addWidget(self.pool_batch_import_btn)
         pool_btn_row.addWidget(self.pool_import_positions_btn)
         pool_btn_row.addWidget(self.pool_sort_btn)
         pool_btn_row.addWidget(self.pool_restore_btn)
@@ -4262,6 +4291,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
         added = 0
         err: Optional[BaseException] = None
         touched_rows: List[Dict[str, str]] = []
+        entry_window = 1
+        new_codes: List[str] = []
+        sp: Dict[str, Any] = {}
         try:
             if getattr(self, "param_entry_window_spin", None) is not None:
                 entry_window = max(1, int(self.param_entry_window_spin.value()))
@@ -4299,56 +4331,24 @@ class StrategyGeneratorMainWindow(QMainWindow):
             else:
                 codes = _parse_codes_from_file(path)
 
-            if not codes:
-                return
-
-            existing = self._get_pool_codes_from_list()
-            existing_set = set(existing)
-            new_codes = [c for c in codes if c not in existing_set]
-            merged = list(existing) + new_codes
-            added = len(new_codes)
-
-            sp = dict(cfg.strategy_params or {})
-            if incoming_dates:
-                prev_map = dict(sp.get("selection_date_by_code") or {})
-                merged_dates, wrote_n, refreshed_n, refreshed_codes = _merge_selection_date_with_existing(
-                    prev_map,
-                    incoming_dates,
+            if codes:
+                (
+                    added,
+                    new_codes,
+                    date_note2,
+                    strength_note2,
+                    sp,
+                ) = self._merge_codes_into_strategy_pool(
+                    cfg,
+                    codes,
+                    incoming_dates=incoming_dates,
+                    merged_strength=merged_strength,
                     entry_window=entry_window,
+                    date_note=date_note,
+                    strength_note=strength_note,
                 )
-                sp["selection_date_by_code"] = merged_dates
-                if refreshed_codes:
-                    sp["_filled_legs"] = _drop_filled_legs_for_codes(
-                        sp.get("_filled_legs"), refreshed_codes
-                    )
-                parts = []
-                if wrote_n:
-                    parts.append(f"新写 {wrote_n}")
-                if refreshed_n:
-                    parts.append(f"未开窗/已结束改新 {refreshed_n}")
-                kept = max(0, len(incoming_dates) - wrote_n - refreshed_n)
-                if kept:
-                    parts.append(f"进行中保留 {kept}")
-                date_note = ("；选股日 " + "，".join(parts)) if parts else "；已同步选股日"
-            if merged_strength:
-                prev = dict(sp.get("clip_strength_by_code") or {})
-                prev.update(merged_strength)
-                sp["clip_strength_by_code"] = prev
-
-            cfg.stock_codes = list(merged)
-            cfg.strategy_params = sp
-            self._prune_selection_date_map_for_pool(cfg, cfg.stock_codes)
-            save_strategy(cfg)
-            self._pool_original_order = list(cfg.stock_codes)
-            self._refresh_strategy_row_count_text(sid)
-            self._dirty_sections.discard("pool")
-            self._refresh_dirty_ui()
-            if not self._dirty_sections:
-                self._last_saved_snapshot = self._take_snapshot()
-
-            # 一次填表；导入时不读 current_tasks（避免二次 Excel 拖慢）
-            self._fill_pool_list(merged, set_original=True, load_task_legs=False)
-            # 触达扫描放到 WaitCursor 之外：只扫本次新增，且只用本地日线（见 first_ma_touch）
+                date_note = date_note2
+                strength_note = strength_note2
         except Exception as e:
             err = e
         finally:
@@ -4361,7 +4361,99 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.warning(self, "导入结果", "未能从该文件中解析出有效的 6 位股票代码。")
             return
 
-        # 跌MA10：仅扫描本次新并入的代码（旧票请用「检查已触达MA10」）
+        self._finish_pool_import_feedback(
+            cfg,
+            codes=codes,
+            added=added,
+            new_codes=new_codes,
+            entry_window=entry_window,
+            date_note=date_note,
+            strength_note=strength_note,
+            sp=sp,
+            incoming_dates=incoming_dates,
+        )
+
+    def _merge_codes_into_strategy_pool(
+        self,
+        cfg,
+        codes: List[str],
+        *,
+        incoming_dates: Optional[Dict[str, str]] = None,
+        merged_strength: Optional[Dict[str, Dict[str, object]]] = None,
+        entry_window: int = 1,
+        date_note: str = "",
+        strength_note: str = "",
+    ) -> Tuple[int, List[str], str, str, Dict[str, Any]]:
+        """将代码并入策略股票池并保存；返回 (added, new_codes, date_note, strength_note, sp)。"""
+        incoming_dates = dict(incoming_dates or {})
+        merged_strength = dict(merged_strength or {})
+        existing = self._get_pool_codes_from_list()
+        existing_set = set(existing)
+        new_codes = [c for c in codes if c not in existing_set]
+        merged = list(existing) + new_codes
+        added = len(new_codes)
+
+        sp = dict(cfg.strategy_params or {})
+        if incoming_dates:
+            prev_map = dict(sp.get("selection_date_by_code") or {})
+            merged_dates, wrote_n, refreshed_n, refreshed_codes = _merge_selection_date_with_existing(
+                prev_map,
+                incoming_dates,
+                entry_window=entry_window,
+            )
+            sp["selection_date_by_code"] = merged_dates
+            if refreshed_codes:
+                sp["_filled_legs"] = _drop_filled_legs_for_codes(
+                    sp.get("_filled_legs"), refreshed_codes
+                )
+            parts = []
+            if wrote_n:
+                parts.append(f"新写 {wrote_n}")
+            if refreshed_n:
+                parts.append(f"未开窗/已结束改新 {refreshed_n}")
+            kept = max(0, len(incoming_dates) - wrote_n - refreshed_n)
+            if kept:
+                parts.append(f"进行中保留 {kept}")
+            date_note = ("；选股日 " + "，".join(parts)) if parts else "；已同步选股日"
+        if merged_strength:
+            prev = dict(sp.get("clip_strength_by_code") or {})
+            prev.update(merged_strength)
+            sp["clip_strength_by_code"] = prev
+            if "clip 强度" not in strength_note:
+                strength_note = f"；已写入 clip 强度 {len(merged_strength)} 只"
+
+        cfg.stock_codes = list(merged)
+        cfg.strategy_params = sp
+        self._prune_selection_date_map_for_pool(cfg, cfg.stock_codes)
+        save_strategy(cfg)
+        sid = getattr(cfg, "id", None) or self._get_selected_strategy_id()
+        self._pool_original_order = list(cfg.stock_codes)
+        if sid:
+            self._refresh_strategy_row_count_text(sid)
+        self._dirty_sections.discard("pool")
+        self._refresh_dirty_ui()
+        if not self._dirty_sections:
+            self._last_saved_snapshot = self._take_snapshot()
+
+        self._fill_pool_list(merged, set_original=True, load_task_legs=False)
+        return added, new_codes, date_note, strength_note, sp
+
+    def _finish_pool_import_feedback(
+        self,
+        cfg,
+        *,
+        codes: List[str],
+        added: int,
+        new_codes: List[str],
+        entry_window: int,
+        date_note: str,
+        strength_note: str,
+        sp: Dict[str, Any],
+        incoming_dates: Optional[Dict[str, str]] = None,
+        extra_prefix: str = "",
+    ) -> None:
+        touched_rows: List[Dict[str, str]] = []
+        incoming_dates = dict(incoming_dates or {})
         if (
             added > 0
             and _strategy_wants_ma_touch_import_scan(cfg)
@@ -4383,21 +4475,215 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 QApplication.restoreOverrideCursor()
 
         if added > 0:
-            msg = f"已从文件并入 {added} 只股票并自动保存"
+            msg = f"{extra_prefix}已并入 {added} 只股票并自动保存"
             if added < len(codes):
-                msg += f"（文件解析 {len(codes)} 只，其余已在池中或重复）"
+                msg += f"（解析 {len(codes)} 只，其余已在池中或重复）"
             msg += f"{date_note}{strength_note}。"
             QMessageBox.information(self, "导入结果", msg)
         else:
             QMessageBox.information(
                 self,
                 "导入结果",
-                f"导入完成：这些股票已在当前策略股票池中，无新增{date_note}{strength_note}。",
+                f"{extra_prefix}导入完成：这些股票已在当前策略股票池中，无新增{date_note}{strength_note}。",
             )
 
-        # 导入结果确认后再弹出已触达列表，方便删池
         if touched_rows:
             self._prompt_remove_already_touched_ma10(touched_rows)
+
+    def _on_batch_import_pool_codes(self):
+        """按设置：在 history_data/存档中匹配前缀+最近交易日选股文件，批量并入股票池。"""
+        from batch_import_pool import (
+            BatchImportPoolDialog,
+            filter_by_day_post_select_max_gain,
+            find_selection_files_by_prefix,
+            load_batch_import_settings,
+        )
+        from utils.trading_day import get_trading_dates
+
+        dlg = BatchImportPoolDialog(self)
+        if dlg.exec_() != QDialog.Accepted or not getattr(dlg, "do_import", False):
+            return
+
+        sid = self._get_selected_strategy_id()
+        if not sid:
+            QMessageBox.information(self, "提示", "请先在左侧选择一个策略。")
+            return
+        cfg = self._find_strategy_by_id(sid)
+        if not cfg:
+            QMessageBox.warning(self, "警告", "未找到所选策略。")
+            return
+
+        settings = load_batch_import_settings()
+        prefix = str(settings.get("file_prefix") or "").strip()
+        days_n = max(1, int(settings.get("recent_trading_days") or 5))
+        only_meet = bool(settings.get("only_meet_condition", True))
+        filter_max_gain = bool(settings.get("filter_post_select_max_gain", False))
+        main_gain_pct = float(settings.get("main_board_max_gain_pct") or 5.0)
+        other_gain_pct = float(settings.get("other_board_max_gain_pct") or 10.0)
+        if not prefix:
+            QMessageBox.warning(self, "批量导入", "请先在「设置」中填写选股文件前缀。")
+            return
+
+        history_dir = os.path.join(self._project_root(), "history_data")
+        trading_days = get_trading_dates(days_n)
+        if not trading_days:
+            QMessageBox.warning(self, "批量导入", "未能取得最近交易日，请检查交易日历。")
+            return
+
+        paths = find_selection_files_by_prefix(history_dir, prefix, trading_days)
+        if not paths:
+            day_txt = "、".join(d.isoformat() for d in trading_days)
+            QMessageBox.warning(
+                self,
+                "批量导入",
+                f"未找到匹配文件。\n前缀：{prefix}\n最近交易日：{day_txt}\n"
+                f"查找目录：{history_dir} 及其存档。",
+            )
+            return
+
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            entry_window = max(1, int(self.param_entry_window_spin.value()))
+        else:
+            entry_window = _entry_window_trading_days_from_params(cfg.strategy_params)
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        by_day_all: Dict[date, List[str]] = {}
+        strength_all: Dict[date, Dict[str, Dict[str, object]]] = {}
+        used_files: List[str] = []
+        skip_notes: List[str] = []
+        gain_dropped: List[Dict[str, object]] = []
+        err: Optional[BaseException] = None
+        try:
+            for path in paths:
+                try:
+                    by_day, strength_by_day, _hint = group_codes_and_clip_strength_by_selection_date(
+                        path, only_meet_condition=only_meet
+                    )
+                except ValueError as e:
+                    skip_notes.append(f"{os.path.basename(path)}：{e}")
+                    continue
+                except Exception as e:
+                    skip_notes.append(f"{os.path.basename(path)}：{type(e).__name__}: {e}")
+                    continue
+                if not by_day:
+                    skip_notes.append(f"{os.path.basename(path)}：无有效行")
+                    continue
+                used_files.append(path)
+                for d, codes_d in by_day.items():
+                    bucket = by_day_all.setdefault(d, [])
+                    seen = set(bucket)
+                    for c6 in codes_d or []:
+                        c6 = _normalize_code(c6)
+                        if c6 and c6 not in seen:
+                            seen.add(c6)
+                            bucket.append(c6)
+                for d, day_map in (strength_by_day or {}).items():
+                    sm = strength_all.setdefault(d, {})
+                    for c6, meta in (day_map or {}).items():
+                        c6 = _normalize_code(c6)
+                        if c6 and isinstance(meta, dict):
+                            sm[c6] = meta
+            if filter_max_gain and by_day_all:
+                by_day_all, strength_filtered, gain_dropped = (
+                    filter_by_day_post_select_max_gain(
+                        by_day_all,
+                        main_board_pct=main_gain_pct,
+                        other_board_pct=other_gain_pct,
+                        strength_by_day=strength_all,
+                    )
+                )
+                if strength_filtered is not None:
+                    strength_all = strength_filtered
+        except Exception as e:
+            err = e
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if err is not None:
+            QMessageBox.critical(self, "批量导入失败", str(err))
+            return
+        if not by_day_all:
+            detail = "\n".join(skip_notes[:12]) if skip_notes else "无有效股票行"
+            if gain_dropped:
+                detail = (
+                    f"最大涨幅过滤后无剩余股票（剔除 {len(gain_dropped)} 只）。\n"
+                    + detail
+                ).strip()
+            QMessageBox.warning(
+                self,
+                "批量导入",
+                f"匹配到 {len(paths)} 个文件，但未能解析出可导入股票。\n\n{detail}",
+            )
+            return
+
+        incoming_dates = _resolve_selection_dates_by_code(
+            by_day_all, entry_window=entry_window
+        )
+        codes: List[str] = []
+        seen_codes = set()
+        for d in sorted(by_day_all.keys()):
+            for c6 in by_day_all.get(d) or []:
+                c6 = _normalize_code(c6)
+                if c6 and c6 not in seen_codes:
+                    seen_codes.add(c6)
+                    codes.append(c6)
+        merged_strength: Dict[str, Dict[str, object]] = {}
+        for day_map in strength_all.values():
+            for c6, meta in (day_map or {}).items():
+                c6 = _normalize_code(c6)
+                if c6 and isinstance(meta, dict):
+                    merged_strength[c6] = meta
+
+        strength_note = ""
+        if merged_strength:
+            strength_note = f"；已写入 clip 强度 {len(merged_strength)} 只"
+        meet_note = "；仅满足条件=True" if only_meet else ""
+        gain_note = ""
+        if filter_max_gain:
+            gain_note = (
+                f"；最大涨幅过滤剔除 {len(gain_dropped)} 只"
+                f"（主板≤{main_gain_pct}%/其他≤{other_gain_pct}%）"
+            )
+        file_note = f"匹配 {len(used_files)}/{len(paths)} 个文件"
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            added, new_codes, date_note, strength_note, sp = self._merge_codes_into_strategy_pool(
+                cfg,
+                codes,
+                incoming_dates=incoming_dates,
+                merged_strength=merged_strength,
+                entry_window=entry_window,
+                strength_note=strength_note,
+            )
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "批量导入失败", str(e))
+            return
+        finally:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+
+        extra = f"{file_note}{meet_note}{gain_note}。"
+        if skip_notes:
+            extra += f" 跳过 {len(skip_notes)} 个。"
+        self._finish_pool_import_feedback(
+            cfg,
+            codes=codes,
+            added=added,
+            new_codes=new_codes,
+            entry_window=entry_window,
+            date_note=date_note,
+            strength_note=strength_note,
+            sp=sp,
+            incoming_dates=incoming_dates,
+            extra_prefix=extra,
+        )
+        if skip_notes and len(skip_notes) <= 8:
+            # 次要信息：不打断主流程，仅当跳过较少时补充说明
+            pass
 
     def _prompt_remove_already_touched_ma10(
         self, touched_rows: List[Dict[str, str]]

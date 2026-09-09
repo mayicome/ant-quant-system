@@ -40,9 +40,6 @@ def _slope_r2_1d(y: np.ndarray, window: int) -> Tuple[np.ndarray, np.ndarray]:
     t = np.arange(window, dtype=np.float64)
     t -= t.mean()
     sxx = float(t @ t)
-    # 滑动窗口：用 cumsum 加速 sum(y), sum(t*y) 但 t 相对窗口固定
-    # sum(t * y_win) = sum(t * y) - mean(y)*sum(t)= sum(t*y) since sum(t)=0
-    # 用 stride
     shape = (n - window + 1, window)
     strides = (y.strides[0], y.strides[0])
     try:
@@ -50,7 +47,6 @@ def _slope_r2_1d(y: np.ndarray, window: int) -> Tuple[np.ndarray, np.ndarray]:
     except Exception:
         windows = None
     if windows is not None and windows.flags["OWNDATA"] is False:
-        # as_strided 视图；检查连续性风险——对 1d 连续数组 OK
         wmean = windows.mean(axis=1)
         yc = windows - wmean[:, None]
         b = (yc * t).sum(axis=1) / sxx
@@ -83,21 +79,45 @@ def compute_raw_factors(
     amount: pd.DataFrame,
     *,
     slope_window: int = 60,
+    factor_pack: str = "week",
 ) -> Dict[str, pd.DataFrame]:
+    """
+    factor_pack=week：v1.2 MOM20/SLOPE60/BRK20/VPC5/MAALG(5-10-20)
+    factor_pack=half：MOM10/SLOPE30/BRK10/VPC3/MAALG(3-6-12)
+    """
     close = close_hfq.sort_index()
     amt = amount.reindex(index=close.index, columns=close.columns)
+    pack = (factor_pack or "week").strip().lower()
 
-    mom20 = close.shift(1) / close.shift(21) - 1.0
-    h20 = close.shift(1).rolling(20, min_periods=20).max()
-    brk20 = (close - h20) / h20
-    r5 = close / close.shift(5) - 1.0
-    vol5 = amt.rolling(5, min_periods=5).mean()
-    vol20 = amt.rolling(20, min_periods=20).mean()
-    vpc5 = r5 * (vol5 / vol20.replace(0, np.nan))
-    ma5 = close.rolling(5, min_periods=5).mean()
-    ma10 = close.rolling(10, min_periods=10).mean()
-    ma20 = close.rolling(20, min_periods=20).mean()
-    maalg = (ma5 - ma10) / ma10 + (ma10 - ma20) / ma20
+    if pack == "half":
+        # MOM10：剔除最近 1 日，10 日中期短动量
+        mom = close.shift(1) / close.shift(11) - 1.0
+        h = close.shift(1).rolling(10, min_periods=10).max()
+        brk = (close - h) / h
+        r = close / close.shift(3) - 1.0
+        vol_s = amt.rolling(3, min_periods=3).mean()
+        vol_l = amt.rolling(10, min_periods=10).mean()
+        vpc = r * (vol_s / vol_l.replace(0, np.nan))
+        ma_a = close.rolling(3, min_periods=3).mean()
+        ma_b = close.rolling(6, min_periods=6).mean()
+        ma_c = close.rolling(12, min_periods=12).mean()
+        maalg = (ma_a - ma_b) / ma_b + (ma_b - ma_c) / ma_c
+        slope_window = int(slope_window or 30)
+        names = ("MOM10", "SLOPE30", "BRK10", "VPC3", "MAALG")
+    else:
+        mom = close.shift(1) / close.shift(21) - 1.0
+        h = close.shift(1).rolling(20, min_periods=20).max()
+        brk = (close - h) / h
+        r = close / close.shift(5) - 1.0
+        vol_s = amt.rolling(5, min_periods=5).mean()
+        vol_l = amt.rolling(20, min_periods=20).mean()
+        vpc = r * (vol_s / vol_l.replace(0, np.nan))
+        ma_a = close.rolling(5, min_periods=5).mean()
+        ma_b = close.rolling(10, min_periods=10).mean()
+        ma_c = close.rolling(20, min_periods=20).mean()
+        maalg = (ma_a - ma_b) / ma_b + (ma_b - ma_c) / ma_c
+        slope_window = int(slope_window or 60)
+        names = ("MOM20", "SLOPE60", "BRK20", "VPC5", "MAALG")
 
     log_close = np.log(close.where(close > 0))
     slope_mat = np.full(log_close.shape, np.nan)
@@ -105,23 +125,21 @@ def compute_raw_factors(
     values = log_close.to_numpy(dtype=float, copy=True)
     for j in range(values.shape[1]):
         col = values[:, j]
-        # 跳过全 nan
         if not np.isfinite(col).any():
             continue
-        # 对中间 nan：分段或直接跑（nan 窗口会被 good 过滤）
-        s, r = _slope_r2_1d(col, slope_window)
+        s, r2 = _slope_r2_1d(col, slope_window)
         slope_mat[:, j] = s
-        r2_mat[:, j] = r
+        r2_mat[:, j] = r2
 
-    slope60 = pd.DataFrame(slope_mat, index=close.index, columns=close.columns)
+    slope = pd.DataFrame(slope_mat, index=close.index, columns=close.columns)
     slope_r2 = pd.DataFrame(r2_mat, index=close.index, columns=close.columns)
 
     return {
-        "MOM20": mom20,
-        "SLOPE60": slope60,
-        "BRK20": brk20,
-        "VPC5": vpc5,
-        "MAALG": maalg,
+        names[0]: mom,
+        names[1]: slope,
+        names[2]: brk,
+        names[3]: vpc,
+        names[4]: maalg,
         "slope_r2": slope_r2,
     }
 
@@ -136,7 +154,7 @@ def standardize_on_dates(
     winsor_q: Tuple[float, float],
     factor_names=FACTOR_NAMES,
 ) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame, pd.Series]:
-    """仅在指定日期（周调仓日）做 R² 过滤 + winsorize + z-score。"""
+    """仅在指定决策日做 R² 过滤 + winsorize + z-score。"""
     slope_r2 = raw["slope_r2"]
     codes = mask.columns
     use_dates = [d for d in dates if d in mask.index]
@@ -178,7 +196,13 @@ def compute_factor_bundle(
     cfg: TrendStrategyConfig,
     week_ends: Optional[Iterable] = None,
 ) -> dict:
-    raw = compute_raw_factors(close_hfq, amount, slope_window=cfg.slope_window)
+    pack = str(getattr(cfg, "factor_pack", "week") or "week")
+    raw = compute_raw_factors(
+        close_hfq,
+        amount,
+        slope_window=cfg.slope_window,
+        factor_pack=pack,
+    )
     mask = tradable_mask.reindex(index=close_hfq.index, columns=close_hfq.columns).fillna(False)
     dates = list(week_ends) if week_ends is not None else list(mask.index)
     z, pass_mask, thr = standardize_on_dates(

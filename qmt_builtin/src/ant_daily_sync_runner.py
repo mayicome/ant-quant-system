@@ -9,7 +9,7 @@ import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Tuple
 
-DAILY_SYNC_VERSION = "20260811.01"
+DAILY_SYNC_VERSION = "20260908.04"
 INTRADAY_PRIORITY_DAILY_LIMIT = 1
 INTRADAY_PRIORITY_DAILY_LIMIT_MAX = 8
 # ??????????????????? 1 ??????????????? download_history_data(1d) ??????????????????????
@@ -54,7 +54,10 @@ BACKFILL_FIRST_DATE_SLACK_DAYS = 14
 # Daytime FORCE uses time-slice + idle gap (not a full stop).
 # v7: FORCE/cold get uses date-range (BACKFILL_START..end), not count-only last-N.
 # No FORCE flag => daily/pipeline never year-backfill / never gate on first-date.
-QUALITY_VERSION = 7
+# v8: (reverted) tick last-bar reconcile was too expensive for full-universe after hours.
+# v9: after-hours incremental re-pulls from CSV last trade day only.
+# v10: drop full_tick close/vol reconcile; keep last-trade-day 1d refresh only.
+QUALITY_VERSION = 10
 # Touch under data/daily_cache/ to force one-shot backfill.
 # Empty file => start at BACKFILL_START_DATE; optional JSON {"start":"YYYYMMDD"}
 # or plain YYYYMMDD text overrides the floor for this FORCE run.
@@ -148,14 +151,49 @@ _SYNC_RUNNING = False
 _FAIL_LOG_COUNT = 0
 _TICK_CHAIN_DUE_AT = 0.0
 _TICK_CHAIN_WAIT_LOG_TS = 0.0
+_LIVE_ONLY_LOGGED = False
 # Once per sync_trade_date: reopen completed gate if CSV bars still lag.
 _STALE_REOPEN_CHECKED_END = ""
 
 
+def _env_truthy(name: str) -> bool:
+    v = str(os.environ.get(name) or "").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def is_qmt_live_only() -> bool:
+    """实盘机：跳过 tick 全量 / 盘后量能串联（仍保留日线 + 按需日线）。
+
+    任一生效：
+    - 环境变量 ANT_QMT_LIVE_ONLY=1
+    - 文件 data/qmt_live_only.flag（PROJECT_ROOT 下）
+    """
+    if _env_truthy("ANT_QMT_LIVE_ONLY"):
+        return True
+    try:
+        flag = os.path.join(PROJECT_ROOT.rstrip("\\/"), "data", "qmt_live_only.flag")
+        return os.path.isfile(flag)
+    except Exception:
+        return False
+
+
+def _live_only_skip(what: str) -> bool:
+    """若实盘模式则打印一次说明并返回 True（调用方应直接 return）。"""
+    global _LIVE_ONLY_LOGGED
+    if not is_qmt_live_only():
+        return False
+    if not _LIVE_ONLY_LOGGED:
+        _LIVE_ONLY_LOGGED = True
+        print(
+            "[日线同步] 实盘模式：跳过 tick/盘后量能（%s）版本=%s"
+            % (what, DAILY_SYNC_VERSION)
+        )
+    return True
+
+
 def _daily_sync_verbose() -> bool:
     """Chatty logs when DAILY_SYNC_VERBOSE=1: per-code miss/fail/syncing/ok, batch ctx."""
-    v = str(os.environ.get("DAILY_SYNC_VERBOSE") or "").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    return _env_truthy("DAILY_SYNC_VERBOSE")
 
 
 def _is_quote_rpc_error(exc_or_msg: Any) -> bool:
@@ -3687,7 +3725,7 @@ def _sync_one_code(
     fetch_start_s, fetch_end_s = _range_strings(fetch_start, end_d)
 
     def _ensure_today_from_tick(cur_bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """???? 1d ?????? end_d ????? get_full_tick ?????????QMT ???????????"""
+        """若 1d 缺 end_d，用 get_full_tick 补当日 K（仅补缺，不对账覆盖）。"""
         nonlocal last_dl, tick_bar
         has_end = any(
             str(b.get("date") or "")[:10] == end_d.isoformat() for b in (cur_bars or [])
@@ -3696,7 +3734,6 @@ def _sync_one_code(
             return cur_bars
         tb = tick_bar
         if tb is None:
-            # ???????????????????????????????? batch_tried ??????
             got = _fetch_today_bars_from_full_tick(
                 xtdata, [code], end_d, ContextInfo=ContextInfo
             )
@@ -4219,9 +4256,11 @@ def _sync_start_date(
         return end_d - timedelta(days=int(CTX_INCREMENTAL_LOOKBACK_DAYS))
     if last > end_d:
         return end_d + timedelta(days=1)
+    # After-hours: re-pull from the CSV's last trade day (most likely incomplete
+    # freeze) through end_d. Tick reconcile still covers end_d when last==end_d.
+    if refresh_today:
+        return last
     if last == end_d:
-        if refresh_today:
-            return end_d
         return end_d + timedelta(days=1)
     return last + timedelta(days=1)
 
@@ -5069,6 +5108,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
 
                 # Session: skip full_tick batch enrichment (expensive on quotes).
+                # After hours: only fill codes still missing today's 1d bar.
                 tick_prefetch = {}
                 if not slice_mode:
                     missing_today = []
@@ -5080,16 +5120,17 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         )
                         if not has_end:
                             missing_today.append(bc)
-                    try:
-                        tick_prefetch = _fetch_today_bars_from_full_tick(
-                            xtdata,
-                            missing_today or batch_codes,
-                            end_d,
-                            ContextInfo=ContextInfo,
-                        )
-                    except Exception as e:
-                        print("[日线同步] 批量 full_tick 补数失败: %s" % e)
-                        tick_prefetch = {}
+                    if missing_today:
+                        try:
+                            tick_prefetch = _fetch_today_bars_from_full_tick(
+                                xtdata,
+                                missing_today,
+                                end_d,
+                                ContextInfo=ContextInfo,
+                            )
+                        except Exception as e:
+                            print("[日线同步] 批量 full_tick 补数失败: %s" % e)
+                            tick_prefetch = {}
 
                 # Optional xtdata download: after hours only.
                 hit_ratio = (
@@ -5601,6 +5642,8 @@ def _daily_gate_open_for_tick() -> bool:
 
 def _schedule_tick_pipeline() -> None:
     """??????????? tick?????????????????????"""
+    if _live_only_skip("schedule_tick"):
+        return
     global _TICK_CHAIN_DUE_AT
     delay = max(0, int(TICK_CHAIN_DELAY_SEC))
     now = time.time()
@@ -5699,6 +5742,8 @@ def _load_sector_sync_runner():
 
 def _chain_tick_pipeline(ContextInfo) -> None:
     """?????????tick ???? ?? ?????tick ????????????????"""
+    if _live_only_skip("chain_tick"):
+        return
     try:
         tick_full = _load_tick_full_sync_runner()
         print("[日线同步] 已串行启动 tick 全量 + 盘后量能")
@@ -5712,6 +5757,8 @@ def _chain_tick_pipeline(ContextInfo) -> None:
 
 def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
     """????????????? tick ? ?? ? ???"""
+    if _live_only_skip("catch_up"):
+        return False
     now = datetime.now()
     if (now.hour, now.minute) < (SYNC_HOUR, SYNC_MINUTE):
         return False

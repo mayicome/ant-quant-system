@@ -56,6 +56,8 @@ def _rule_executed(rule: Dict[str, Any]) -> bool:
         return True
     if rule.get("true_breakthrough_passed"):
         return True
+    if str(rule.get("halt_reason") or "").strip():
+        return True
     reason = str(rule.get("executed_reason") or "").strip()
     return bool(reason)
 
@@ -306,6 +308,9 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "enabled": True,
                             "max_volume": vol_pg,
                             "early_order_enabled": eo,
+                            "halt_on_open_gain": bool(rule.get("halt_on_open_gain"))
+                            if rule_type == "grid_buy"
+                            else False,
                             "metadata": _rule_meta(task_id, rule),
                         }
                     )
@@ -339,6 +344,9 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                             "trigger_price": price_low,
                             "enabled": not _rule_executed(rule),
                             "max_volume": volume,
+                            "halt_on_open_gain": bool(rule.get("halt_on_open_gain"))
+                            if rule_type == "cage_buy"
+                            else False,
                             "metadata": _rule_meta(task_id, rule),
                         }
                     )
@@ -363,6 +371,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                     "enabled": not _rule_executed(rule),
                     "max_volume": volume,
                     "early_order_enabled": eo,
+                    "halt_on_open_gain": bool(rule.get("halt_on_open_gain")),
                     "metadata": _rule_meta(task_id, rule),
                 }
                 if rule.get("wait_unseal"):
@@ -443,6 +452,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                                 "cooldown_after_extreme_ticks"
                             ),
                             "dynamic_thresholds": rule.get("dynamic_thresholds"),
+                            "halt_on_open_gain": bool(rule.get("halt_on_open_gain")),
                             "enabled": not _rule_executed(rule),
                             "max_volume": volume,
                             "metadata": _rule_meta(task_id, rule),
@@ -499,6 +509,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                         if rule.get("band_accept_low") is not None
                         else rule.get("accept_band_low"),
                         "max_volume": volume,
+                        "halt_on_open_gain": bool(rule.get("halt_on_open_gain")),
                         "metadata": _rule_meta(task_id, rule),
                     }
                 )

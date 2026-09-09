@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 from datetime import date
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 ARCHIVE_SUBDIR_NAME = "存档"
 
@@ -61,10 +61,14 @@ def iter_history_files(history_dir: str) -> Iterable[str]:
 def archive_history_before(
     history_dir: str,
     keep_on_or_after: date,
+    *,
+    exclude_prefixes: Optional[Sequence[str]] = None,
 ) -> Tuple[int, int, List[str]]:
     """
     将 history_data 根目录下日期 < keep_on_or_after 的文件移到 history_data/存档/。
     子目录一律不动。
+
+    exclude_prefixes: 文件名以此前缀开头则跳过（不归档），例如 ("选股结果",)。
 
     返回 (moved, skipped, errors)。
     """
@@ -77,13 +81,17 @@ def archive_history_before(
     moved = 0
     skipped = 0
     errors: List[str] = []
+    prefixes = tuple(str(p) for p in (exclude_prefixes or ()) if str(p))
 
     for src in list(iter_history_files(history_dir)):
+        rel = os.path.basename(src)
+        if prefixes and any(rel.startswith(p) for p in prefixes):
+            skipped += 1
+            continue
         d = extract_file_date(src)
         if d is None or d >= keep_on_or_after:
             skipped += 1
             continue
-        rel = os.path.basename(src)
         dest = os.path.join(arch_root, rel)
         try:
             if os.path.exists(dest):

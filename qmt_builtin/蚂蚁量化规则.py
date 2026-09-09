@@ -14,20 +14,20 @@ _ACCOUNT_SNAPSHOT_MOD = None
 _ENTRY_ACCOUNT_SKIP = ""
 _LAST_ENTRY_ACCOUNT_SYNC = 0.0
 _ENTRY_ACCOUNT_INTERVAL_SEC = 3.0
-# Î¯ÍÐ/³É½»²éÑ¯½ÏÖØ£¬¹ýÇÚ»á¶ÂÍ¬Ò»Ïß³ÌÉÏµÄ tick »Øµ÷Óë full_tick ²¹ÖÖ
+# Î¯ï¿½ï¿½/ï¿½É½ï¿½ï¿½ï¿½Ñ¯ï¿½ï¿½ï¿½Ø£ï¿½ï¿½ï¿½ï¿½Ú»ï¿½ï¿½Í¬Ò»ï¿½ß³ï¿½ï¿½Ïµï¿½ tick ï¿½Øµï¿½ï¿½ï¿½ full_tick ï¿½ï¿½ï¿½ï¿½
 _LAST_ENTRY_ORDER_DEAL_SYNC = 0.0
 _ENTRY_ORDER_DEAL_INTERVAL_SEC = 12.0
 _ENTRY_ORDER_DEAL_SESSION_INTERVAL_SEC = 60.0
-# kind -> get_trade_detail_data ÒÑ³É¹¦µÄ²ÎÊýÔª×é£»ÅÌÖÐ½ûÖ¹µÑ¿¨¶ûÖØÊÔ
+# kind -> get_trade_detail_data ï¿½Ñ³É¹ï¿½ï¿½Ä²ï¿½ï¿½ï¿½Ôªï¿½é£»ï¿½ï¿½ï¿½Ð½ï¿½Ö¹ï¿½Ñ¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 _GTD_OK_ARGS = {}
-# ÄÚÖÃ download_history_data£ºÃ¿½ø³ÌÖ» bind/log Ò»´Î£¨ÎðÔÚ handlebar ÈÈÂ·¾¶Ë¢ÆÁ£©
+# ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½Ã¿ï¿½ï¿½ï¿½ï¿½Ö» bind/log Ò»ï¿½Î£ï¿½ï¿½ï¿½ï¿½ï¿½ handlebar ï¿½ï¿½Â·ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½ï¿½
 _DOWNLOAD_HISTORY_BOUND = False
 _DOWNLOAD_HISTORY_MISS_LOGGED = False
 _BJ_SECTOR_PROBE_DONE = False
 
 
 def _plog(msg):
-    """QMT ÄÚÖÃ Python ³£·Ç TTY£¬print È«»º³å£»Æô¶¯ÈÕÖ¾±ØÐë flush ²ÅÄÜÁ¢¿Ì¿´¼û¡£"""
+    """QMT ï¿½ï¿½ï¿½ï¿½ Python ï¿½ï¿½ï¿½ï¿½ TTYï¿½ï¿½print È«ï¿½ï¿½ï¿½å£»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ flush ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¿ï¿½ï¿½ï¿½ï¿½ï¿½"""
     try:
         print(msg, flush=True)
     except Exception:
@@ -37,7 +37,7 @@ def _plog(msg):
             pass
 
 
-_plog("[Èë¿Ú] Ä£¿éÒÑ¼ÓÔØ °æ±¾=%s" % ENTRY_VERSION)
+_plog("[ï¿½ï¿½ï¿½] Ä£ï¿½ï¿½ï¿½Ñ¼ï¿½ï¿½ï¿½ ï¿½æ±¾=%s" % ENTRY_VERSION)
 
 
 def _qmt_python_dir():
@@ -76,14 +76,14 @@ def _load_shadow():
     global _shadow
     path = _shadow_py_path()
     if not path:
-        _plog("[Èë¿Ú] ÖÂÃü: Î´ÕÒµ½ ant_shadow_strategy.py")
+        _plog("[ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½: Î´ï¿½Òµï¿½ ant_shadow_strategy.py")
         _shadow = None
         return None
     try:
         mtime = int(os.path.getmtime(path))
     except OSError:
         mtime = 0
-    # Í¬ÎÄ¼þÎ´¸ÄÔò¸´ÓÃ£¬±ÜÃâ init ÔÙÕû°ü reload Ë¢Ë«·ÝÆô¶¯ÈÕÖ¾
+    # Í¬ï¿½Ä¼ï¿½Î´ï¿½ï¿½ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½ï¿½ init ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ reload Ë¢Ë«ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾
     if _shadow is not None and getattr(_shadow, "_ANT_SHADOW_MTIME", None) == mtime:
         return _shadow
     for key in list(sys.modules.keys()):
@@ -92,7 +92,7 @@ def _load_shadow():
     mod_name = "ant_shadow_%d" % mtime
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
-        _plog("[Èë¿Ú] ÖÂÃü: ÎÞ·¨¼ÓÔØ " + path)
+        _plog("[ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½: ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ " + path)
         _shadow = None
         return None
     mod = importlib.util.module_from_spec(spec)
@@ -101,7 +101,7 @@ def _load_shadow():
     mod._ANT_SHADOW_MTIME = mtime
     _shadow = mod
     ver = getattr(mod, "SHADOW_VERSION", "?")
-    _plog("[Èë¿Ú] ½»Ò×ºËÐÄÒÑ¼ÓÔØ °æ±¾=%s" % ver)
+    _plog("[ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½ï¿½Ñ¼ï¿½ï¿½ï¿½ ï¿½æ±¾=%s" % ver)
     return mod
 
 
@@ -150,7 +150,7 @@ def _load_account_snapshot_mod():
 
 
 def _in_continuous_auction(now=None):
-    """Á¬Ðø¾º¼Û£º°ÑÏß³ÌÁô¸ø tick »Øµ÷¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Û£ï¿½ï¿½ï¿½ï¿½ß³ï¿½ï¿½ï¿½ï¿½ï¿½ tick ï¿½Øµï¿½ï¿½ï¿½"""
     from datetime import datetime
     from datetime import time as dt_time
 
@@ -204,7 +204,7 @@ def _gtd_uniq(items):
 
 
 def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, account_type_hint=""):
-    """Query get_trade_detail_data. ÃüÖÐºó»º´æ²ÎÊý£¬ÅÌÖÐ²»ÔÙµÑ¿¨¶ûÇî¾Ù¡£"""
+    """Query get_trade_detail_data. ï¿½ï¿½ï¿½Ðºó»º´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð²ï¿½ï¿½ÙµÑ¿ï¿½ï¿½ï¿½ï¿½ï¿½Ù¡ï¿½"""
     global _GTD_OK_ARGS
     try:
         gtd = get_trade_detail_data
@@ -270,7 +270,7 @@ def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, accoun
             pass
         return raw
 
-    # 3 ²Î£ºÒ»´ÎÈ¡¸ÃÕË»§È«²¿²ßÂÔ£»ÓÐÊý¾ÝÁ¢¿Ì»º´æ·µ»Ø
+    # 3 ï¿½Î£ï¿½Ò»ï¿½ï¿½È¡ï¿½ï¿½ï¿½Ë»ï¿½È«ï¿½ï¿½ï¿½ï¿½ï¿½Ô£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì»ï¿½ï¿½æ·µï¿½ï¿½
     for aid in account_ids:
         for account_type in account_types:
             for dtype in dtypes:
@@ -279,7 +279,7 @@ def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, accoun
                 if _gtd_len(raw) > 0:
                     return _hit(args, raw)
 
-    # ORDER/DEAL 3 ²Î³£Îª¿Õ£º°´²ßÂÔÃû¸÷²éÒ»´ÎºóºÏ²¢£¨²»ÔÙÇî¾Ù´óÐ¡Ð´/Á½ÈÚ£©
+    # ORDER/DEAL 3 ï¿½Î³ï¿½Îªï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½Îºï¿½Ï²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ù´ï¿½Ð¡Ð´/ï¿½ï¿½ï¿½Ú£ï¿½
     if strategies:
         for aid in account_ids[:1]:
             for account_type in account_types[:1]:
@@ -311,7 +311,7 @@ def _entry_fetch_trade_detail(account_id, data_type, strategy_names=None, accoun
 
 
 def _probe_bj_sectors_once(ContextInfo):
-    """Ò»´ÎÐÔÌ½²â±¾»ú QMT ±±½»Ëù°å¿éÃûÊÇ·ñ¿ÉÓÃ£¬½á¹ûÐ´Èë data/bj_sector_probe.json¡£"""
+    """Ò»ï¿½ï¿½ï¿½ï¿½Ì½ï¿½â±¾ï¿½ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ data/bj_sector_probe.jsonï¿½ï¿½"""
     global _BJ_SECTOR_PROBE_DONE
     if _BJ_SECTOR_PROBE_DONE:
         return
@@ -339,13 +339,13 @@ def _probe_bj_sectors_once(ContextInfo):
             pass
 
         sector_candidates = (
-            "\u4eac\u5e02A\u80a1",  # ¾©ÊÐA¹É
-            "\u6caa\u6df1\u4eacA\u80a1",  # »¦Éî¾©A¹É
-            "\u5317\u4ea4\u6240",  # ±±½»Ëù
-            "\u5317\u4ea4\u6240A\u80a1",  # ±±½»ËùA¹É
+            "\u4eac\u5e02A\u80a1",  # ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½
+            "\u6caa\u6df1\u4eacA\u80a1",  # ï¿½ï¿½ï¿½î¾©Aï¿½ï¿½
+            "\u5317\u4ea4\u6240",  # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+            "\u5317\u4ea4\u6240A\u80a1",  # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½
             "BJ",
-            "\u4eacA\u80a1",  # ¾©A¹É
-            "\u6caa\u6df1A\u80a1",  # »¦ÉîA¹É£¨¶ÔÕÕ£©
+            "\u4eacA\u80a1",  # ï¿½ï¿½Aï¿½ï¿½
+            "\u6caa\u6df1A\u80a1",  # ï¿½ï¿½ï¿½ï¿½Aï¿½É£ï¿½ï¿½ï¿½ï¿½Õ£ï¿½
         )
         sector_counts = {}
         samples = {}
@@ -404,13 +404,13 @@ def _probe_bj_sectors_once(ContextInfo):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, out_path)
-        # Ì½²â½á¹ûÒÑÐ´Èë bj_sector_probe.json£¬²»ÔÙË¢Æô¶¯ÈÕÖ¾
+        # Ì½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ bj_sector_probe.jsonï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾
     except Exception:
         pass
 
 
 def _entry_sync_account_snapshot(ContextInfo):
-    """´ó QMT ÕË»§/³Ö²Ö/Î¯ÍÐÐ´Èë results£¨µ÷ÓÃ get_trade_detail_data£©¡£"""
+    """ï¿½ï¿½ QMT ï¿½Ë»ï¿½/ï¿½Ö²ï¿½/Î¯ï¿½ï¿½Ð´ï¿½ï¿½ resultsï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ get_trade_detail_dataï¿½ï¿½ï¿½ï¿½"""
     global _ENTRY_ACCOUNT_SKIP, _LAST_ENTRY_ACCOUNT_SYNC, _LAST_ENTRY_ORDER_DEAL_SYNC
     try:
         _probe_bj_sectors_once(ContextInfo)
@@ -426,14 +426,14 @@ def _entry_sync_account_snapshot(ContextInfo):
         if snap is None:
             if _ENTRY_ACCOUNT_SKIP != "snapshot_mod_missing":
                 _ENTRY_ACCOUNT_SKIP = "snapshot_mod_missing"
-                print("[½»Ò×ºËÐÄ] ÕË»§¿ìÕÕÌø¹ý: È±ÉÙ ant_account_snapshot")
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ë»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: È±ï¿½ï¿½ ant_account_snapshot")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
         aid = snap.resolve_account_id(ContextInfo)
         if not aid:
             if _ENTRY_ACCOUNT_SKIP != "no_account_id":
                 _ENTRY_ACCOUNT_SKIP = "no_account_id"
-                print("[½»Ò×ºËÐÄ] ÕË»§¿ìÕÕÌø¹ý: no_account_id")
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ë»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: no_account_id")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
         try:
@@ -441,11 +441,11 @@ def _entry_sync_account_snapshot(ContextInfo):
         except NameError:
             if _ENTRY_ACCOUNT_SKIP != "no_gtd":
                 _ENTRY_ACCOUNT_SKIP = "no_gtd"
-                print("[½»Ò×ºËÐÄ] ÕË»§¿ìÕÕÌø¹ý: Èë¿Ú×÷ÓÃÓòÎÞ get_trade_detail_data")
+                print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ë»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ get_trade_detail_data")
             _LAST_ENTRY_ACCOUNT_SYNC = now
             return
 
-        # Ã¿´Î²éÑ¯Ç°ÖØÐÂ°ó¶¨ÕËºÅ + account_type£¬±ÜÃâ³Ö²Ö²éÑ¯¿ÕÁÐ±í
+        # Ã¿ï¿½Î²ï¿½Ñ¯Ç°ï¿½ï¿½ï¿½Â°ï¿½ï¿½Ëºï¿½ + account_typeï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö²Ö²ï¿½Ñ¯ï¿½ï¿½ï¿½Ð±ï¿½
         try:
             snap.bind_trading_account(ContextInfo, aid)
         except Exception:
@@ -460,7 +460,7 @@ def _entry_sync_account_snapshot(ContextInfo):
         except Exception:
             pos_try_log = []
         # ORDER/DEAL: do NOT query with strategyName="" (filters everything out)
-        # ½µÆµ£ºNone Ê± apply ²àÑØÓÃ»º´æ£¬±ÜÃâÃ¿ÂÖ¶àÂ· GTD ¶ÂÐÐÇé
+        # ï¿½ï¿½Æµï¿½ï¿½None Ê± apply ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½æ£¬ï¿½ï¿½ï¿½ï¿½Ã¿ï¿½Ö¶ï¿½Â· GTD ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         order_raw = None
         deal_raw = None
         od_interval = float(_ENTRY_ORDER_DEAL_INTERVAL_SEC)
@@ -503,7 +503,7 @@ def _entry_sync_account_snapshot(ContextInfo):
             order_raw=order_raw,
             deal_raw=deal_raw,
         )
-        # ¸½¼Ó³Ö²Ö²éÑ¯ÊÔÌ½ÈÕÖ¾£¬±ãÓÚ¶ÔÕÕ¡¸ÕË»§ÓÐÊÐÖµµ«³Ö²Ö¿Õ¡¹
+        # ï¿½ï¿½ï¿½Ó³Ö²Ö²ï¿½Ñ¯ï¿½ï¿½Ì½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½Ú¶ï¿½ï¿½Õ¡ï¿½ï¿½Ë»ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½Ö²Ö¿Õ¡ï¿½
         try:
             pq = results.get("position_query")
             if isinstance(pq, dict):
@@ -522,13 +522,13 @@ def _entry_sync_account_snapshot(ContextInfo):
                 pass
         elif reason != _ENTRY_ACCOUNT_SKIP:
             _ENTRY_ACCOUNT_SKIP = reason
-            print("[½»Ò×ºËÐÄ] ÕË»§¿ìÕÕÌø¹ý: %s" % reason)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ë»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: %s" % reason)
     except Exception as e:
         _LAST_ENTRY_ACCOUNT_SYNC = time.time()
         msg = "%s: %s" % (type(e).__name__, e)
         if msg != _ENTRY_ACCOUNT_SKIP:
             _ENTRY_ACCOUNT_SKIP = msg
-            print("[½»Ò×ºËÐÄ] ÕË»§¿ìÕÕ´íÎó: %s" % msg)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ë»ï¿½ï¿½ï¿½ï¿½Õ´ï¿½ï¿½ï¿½: %s" % msg)
 
 
 def _reload_daily_sync_runner():
@@ -540,7 +540,7 @@ def _reload_daily_sync_runner():
         import qmt_builtin.ant_daily_sync_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[ÈÕÏßÍ¬²½] ¶¨Ê±Èë¿Ú °æ±¾=%s"
+        "[ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ ï¿½æ±¾=%s"
         % getattr(runner, "DAILY_SYNC_VERSION", "?")
     )
     return runner
@@ -552,7 +552,7 @@ def _ensure_passorder_bound():
         root = _qmt_python_dir()
         path = os.path.join(root, "ant_passorder.py") if root else ""
         if not (path and os.path.isfile(path)):
-            print("[Èë¿Ú] È±ÉÙ ant_passorder.py")
+            print("[ï¿½ï¿½ï¿½] È±ï¿½ï¿½ ant_passorder.py")
             return False
         mod_name = "ant_passorder_%d" % int(os.path.getmtime(path))
         po = sys.modules.get(mod_name)
@@ -567,15 +567,15 @@ def _ensure_passorder_bound():
             return bool(po.bind_runtime_globals(globals()))
         return False
     except Exception as e:
-        print("[Èë¿Ú] °ó¶¨ passorder ´íÎó: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½] ï¿½ï¿½ passorder ï¿½ï¿½ï¿½ï¿½: %s: %s" % (type(e).__name__, e))
         return False
 
 
 def _ensure_download_history_bound():
-    """Bind ÄÚÖÃ download_history_data£¨´ó QMT Ä£ÐÍ½»Ò×È«¾Öº¯Êý£¬·Ç xtdata£©¡£
+    """Bind ï¿½ï¿½ï¿½ï¿½ download_history_dataï¿½ï¿½ï¿½ï¿½ QMT Ä£ï¿½Í½ï¿½ï¿½ï¿½È«ï¿½Öºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ xtdataï¿½ï¿½ï¿½ï¿½
 
-    ³É¹¦ºóÉè _DOWNLOAD_HISTORY_BOUND£¬ºóÐø handlebar/periodic Ö±½ÓÌø¹ý£¬±ÜÃâË¢ÆÁ¡£
-    miss Ö»´òÒ»´ÎÈÕÖ¾£¬ÈÔÔÊÐíºóÐø¾²Ä¬ÖØÊÔ£¨globals ¿ÉÄÜÍíÓÚÊ×Ö¡¾ÍÐ÷£©¡£
+    ï¿½É¹ï¿½ï¿½ï¿½ï¿½ï¿½ _DOWNLOAD_HISTORY_BOUNDï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ handlebar/periodic Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½ï¿½
+    miss Ö»ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½ï¿½ï¿½Ô£ï¿½globals ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     """
     global _DOWNLOAD_HISTORY_BOUND, _DOWNLOAD_HISTORY_MISS_LOGGED
     if _DOWNLOAD_HISTORY_BOUND:
@@ -601,14 +601,14 @@ def _ensure_download_history_bound():
                 _DOWNLOAD_HISTORY_BOUND = True
             elif not _DOWNLOAD_HISTORY_MISS_LOGGED:
                 _DOWNLOAD_HISTORY_MISS_LOGGED = True
-                _plog("[Èë¿Ú] °ó¶¨ download_history_data Î´ÃüÖÐ£¨²ßÂÔ globals ÖÐÎÞ´Ëº¯Êý£©")
+                _plog("[ï¿½ï¿½ï¿½] ï¿½ï¿½ download_history_data Î´ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ globals ï¿½ï¿½ï¿½Þ´Ëºï¿½ï¿½ï¿½ï¿½ï¿½")
             return ok
         return False
     except Exception as e:
         if not _DOWNLOAD_HISTORY_MISS_LOGGED:
             _DOWNLOAD_HISTORY_MISS_LOGGED = True
             _plog(
-                "[Èë¿Ú] °ó¶¨ download_history_data ´íÎó: %s: %s"
+                "[ï¿½ï¿½ï¿½] ï¿½ï¿½ download_history_data ï¿½ï¿½ï¿½ï¿½: %s: %s"
                 % (type(e).__name__, e)
             )
         return False
@@ -626,7 +626,7 @@ def init(ContextInfo):
     _ensure_download_history_bound()
     shadow = _load_shadow()
     if shadow is None:
-        _plog("[Èë¿Ú] ³õÊ¼»¯ÖÐÖ¹: ½»Ò×ºËÐÄÎª None")
+        _plog("[ï¿½ï¿½ï¿½] ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½Ö¹: ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½Îª None")
         return
     out = shadow.init(ContextInfo)
     return out
@@ -638,12 +638,12 @@ def handlebar(ContextInfo):
         _ensure_download_history_bound()
         if _shadow is None:
             return
-        # ÏÈÅÜ½»Ò×ºËÐÄ£¨º¬ full_tick ²¹ÖÖ£©£¬ÔÙ²éÕË»§£¬±ÜÃâ GTD ¶ÂÐÐÇéÇ½ÖÓ
+        # ï¿½ï¿½ï¿½Ü½ï¿½ï¿½×ºï¿½ï¿½Ä£ï¿½ï¿½ï¿½ full_tick ï¿½ï¿½ï¿½Ö£ï¿½ï¿½ï¿½ï¿½Ù²ï¿½ï¿½Ë»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ GTD ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç½ï¿½ï¿½
         out = _shadow.handlebar(ContextInfo)
         _entry_sync_account_snapshot(ContextInfo)
         return out
     except KeyboardInterrupt:
-        # Ä£ÐÍ½»Ò×ÊÖ¶¯Í£Ö¹£»ÍÌµôÒÔÃâÉîÕ»Ë¢ÆÁ
+        # Ä£ï¿½Í½ï¿½ï¿½ï¿½ï¿½Ö¶ï¿½Í£Ö¹ï¿½ï¿½ï¿½Ìµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ»Ë¢ï¿½ï¿½
         return
 
 
@@ -689,7 +689,7 @@ def _reload_after_hours_rank_runner():
         import qmt_builtin.ant_after_hours_rank_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[ÅÌºóÅÅÃû] ¶¨Ê±Èë¿Ú °æ±¾=%s"
+        "[ï¿½Ìºï¿½ï¿½ï¿½ï¿½ï¿½] ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ ï¿½æ±¾=%s"
         % getattr(runner, "AFTER_HOURS_RANK_VERSION", "?")
     )
     return runner
@@ -709,7 +709,7 @@ def _reload_tick_full_sync_runner():
         import qmt_builtin.ant_tick_full_sync_runner as runner
     runner = importlib.reload(runner)
     print(
-        "[·Ö±ÊÍ¬²½] ¶¨Ê±Èë¿Ú °æ±¾=%s"
+        "[ï¿½Ö±ï¿½Í¬ï¿½ï¿½] ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ ï¿½æ±¾=%s"
         % getattr(runner, "TICK_FULL_SYNC_VERSION", "?")
     )
     return runner
@@ -721,12 +721,12 @@ def tick_full_sync(ContextInfo):
 
 
 def tick_probe(ContextInfo):
-    """Ò»´ÎÐÔÌ½²â£ºÄÚÖÃ download_history_data + ContextInfo tick ±äÌå£¨Ä¬ÈÏ 20260730£©¡£"""
+    """Ò»ï¿½ï¿½ï¿½ï¿½Ì½ï¿½â£ºï¿½ï¿½ï¿½ï¿½ download_history_data + ContextInfo tick ï¿½ï¿½ï¿½å£¨Ä¬ï¿½ï¿½ 20260730ï¿½ï¿½ï¿½ï¿½"""
     _ensure_download_history_bound()
     runner = _reload_tick_full_sync_runner()
     fn = getattr(runner, "tick_probe", None)
     if not callable(fn):
-        _plog("[Èë¿Ú] runner ÉÏÈ±ÉÙ tick_probe")
+        _plog("[ï¿½ï¿½ï¿½] runner ï¿½ï¿½È±ï¿½ï¿½ tick_probe")
         return None
     return fn(ContextInfo, day="20260730")
 
@@ -740,11 +740,11 @@ def sector_data_sync(ContextInfo):
         try:
             import qmt_builtin.ant_sector_sync_runner as runner
         except ImportError:
-            print("[Èë¿Ú] sector_data_sync: Î´ÕÒµ½ ant_sector_sync_runner")
+            print("[ï¿½ï¿½ï¿½] sector_data_sync: Î´ï¿½Òµï¿½ ant_sector_sync_runner")
             return
     runner = importlib.reload(runner)
     print(
-        "[°å¿éÍ¬²½] ¶¨Ê±Èë¿Ú °æ±¾=%s"
+        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ ï¿½æ±¾=%s"
         % getattr(runner, "SECTOR_SYNC_VERSION", "?")
     )
     return runner.sector_data_sync(ContextInfo)
@@ -759,7 +759,7 @@ def _dispatch_account_snapshot_callback(callback_name, ContextInfo, payload):
         if callable(fn):
             fn(ContextInfo, payload)
     except Exception as e:
-        print("[Èë¿Ú] %s ´íÎó: %s" % (callback_name, e))
+        print("[ï¿½ï¿½ï¿½] %s ï¿½ï¿½ï¿½ï¿½: %s" % (callback_name, e))
 
 
 def account_callback(ContextInfo, accountInfo):
@@ -801,9 +801,9 @@ def order_callback(ContextInfo, orderInfo):
                 st = str(getattr(orderInfo, "m_nOrderStatus", "") or "")
             except Exception:
                 pass
-            print("[½»Ò×ºËÐÄ] Î¯ÍÐ»Øµ÷ status=%s" % st)
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] Î¯ï¿½Ð»Øµï¿½ status=%s" % st)
     except Exception as e:
-        print("[Èë¿Ú] order_callback ´íÎó: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½] order_callback ï¿½ï¿½ï¿½ï¿½: %s: %s" % (type(e).__name__, e))
 
 
 
@@ -829,9 +829,9 @@ def deal_callback(ContextInfo, dealInfo):
                 _shadow.flush_results(ContextInfo)
             except Exception:
                 pass
-            print("[½»Ò×ºËÐÄ] ³É½»»Øµ÷")
+            print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½É½ï¿½ï¿½Øµï¿½")
     except Exception as e:
-        print("[Èë¿Ú] deal_callback ´íÎó: %s: %s" % (type(e).__name__, e))
+        print("[ï¿½ï¿½ï¿½] deal_callback ï¿½ï¿½ï¿½ï¿½: %s: %s" % (type(e).__name__, e))
 
 
 def startup_sector_sync(ContextInfo):
@@ -843,11 +843,11 @@ def startup_sector_sync(ContextInfo):
         try:
             import qmt_builtin.ant_sector_sync_runner as runner
         except ImportError:
-            print("[Èë¿Ú] startup_sector_sync: Î´ÕÒµ½ ant_sector_sync_runner")
+            print("[ï¿½ï¿½ï¿½] startup_sector_sync: Î´ï¿½Òµï¿½ ant_sector_sync_runner")
             return
     runner = importlib.reload(runner)
     print(
-        "[°å¿éÍ¬²½] Æô¶¯Èë¿Ú °æ±¾=%s"
+        "[ï¿½ï¿½ï¿½Í¬ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½æ±¾=%s"
         % getattr(runner, "SECTOR_SYNC_VERSION", "?")
     )
     return runner.startup_sector_sync(ContextInfo)

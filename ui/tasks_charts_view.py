@@ -829,9 +829,17 @@ class TasksChartsView(QWidget):
             return
         try:
             self.task_manager.load_tasks(force_reload=True)
+            # 先拷贝提示列表；load_tasks 内会按 _reload_paused_norms 纠正 UI
+            paused_list = list(
+                getattr(self.task_manager, '_reload_paused_task_names', []) or []
+            )
             self.load_tasks()
+            # 恢复完成后清掉意图暂停集合，避免用户手动启动后再切列又被刷回暂停
+            try:
+                self.task_manager._reload_paused_norms = set()
+            except Exception:
+                pass
             # 若有因重新加载被置为暂停的任务，弹窗提示（与程序启动时一致）
-            paused_list = getattr(self.task_manager, '_reload_paused_task_names', []) or []
             if paused_list:
                 from PyQt5.QtWidgets import QMessageBox
                 from PyQt5.QtCore import QTimer
@@ -2682,8 +2690,9 @@ class TasksChartsView(QWidget):
     def _resolve_task_run_state(self, task_id, task, chart=None):
         """解析任务运行/暂停显示状态。
 
-        优先信任：图表组件当前态、TaskManager.running_tasks；
-        再回退 params/status。避免切列重排后用陈旧 params 把「运行中」刷成「已暂停」。
+        优先信任：TaskManager.running_tasks；
+        再：params 明确「已暂停」时覆盖图表残留的 live 态（重新加载意图暂停）；
+        再回退图表实况 / status / params。避免切列重排后用陈旧 params 把「运行中」刷成「已暂停」。
         """
         params = task.get('params') if isinstance(task.get('params'), dict) else {}
         in_tm = bool(
@@ -2699,11 +2708,31 @@ class TasksChartsView(QWidget):
             and getattr(chart, 'task_paused', False)
             and not getattr(chart, 'task_running', False)
         )
-        if live_running or in_tm or task.get('status') == '运行中' or bool(params.get('task_running')):
+        # 真正在 TM 里跑着 → 运行中
+        if in_tm or bool(params.get('task_running')):
             return True, False
-        if live_paused or bool(params.get('task_paused')):
+        # 意图暂停（重载改规则后）：勿被图表残留 live_running / status=运行中 盖掉
+        if bool(params.get('task_paused')) and not bool(params.get('task_running')):
+            return False, True
+        if live_running or task.get('status') == '运行中':
+            return True, False
+        if live_paused:
             return False, True
         return False, False
+
+    def _norm_stock_code6(self, stock_code) -> str:
+        s = str(stock_code or "").strip().upper()
+        s = s.replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
+        digits = "".join(c for c in s if c.isdigit())
+        if not digits:
+            return ""
+        return digits.zfill(6)[-6:]
+
+    def _is_reload_intent_paused(self, stock_code) -> bool:
+        norms = getattr(self.task_manager, "_reload_paused_norms", None) if self.task_manager else None
+        if not norms:
+            return False
+        return self._norm_stock_code6(stock_code) in norms
 
     def _block_chart_toggle_signals(self, blocked: bool) -> None:
         """切列/翻页重排时屏蔽启动暂停按钮，防止布局挤压导致误触 pause_task。"""
@@ -2742,50 +2771,52 @@ class TasksChartsView(QWidget):
 
         注意：快照为「未运行」时，不得覆盖 TaskManager 里已在跑的任务
         （预约重载：先 start_all 再 load_tasks 时，旧图快照全是未运行）。
+        重新加载因规则变化意图暂停的股票：禁止按快照拉回运行中。
         """
-        if not snap:
-            return
-        cache = getattr(self, '_chart_cache', None) or {}
-        running_tasks = getattr(self.task_manager, 'running_tasks', {}) if self.task_manager else {}
-        for stock_code, (was_running, was_paused) in snap.items():
-            cached = cache.get(stock_code)
-            if not isinstance(cached, dict):
-                continue
-            chart = cached.get('chart')
-            if not chart:
-                continue
-            task_id = getattr(chart, 'task_id', None)
-            in_tm = bool(task_id and task_id in running_tasks)
-
-            # 重排前是运行中，重排后若变成暂停/未运行 → 视为误触，恢复 UI（并尽量重启 TM）
-            if was_running and not was_paused:
-                now_running = bool(getattr(chart, 'task_running', False)) and not bool(
-                    getattr(chart, 'task_paused', False)
-                )
-                if now_running:
+        try:
+            if not snap:
+                return
+            cache = getattr(self, '_chart_cache', None) or {}
+            running_tasks = getattr(self.task_manager, 'running_tasks', {}) if self.task_manager else {}
+            for stock_code, (was_running, was_paused) in snap.items():
+                cached = cache.get(stock_code)
+                if not isinstance(cached, dict):
                     continue
-                if self.task_manager and task_id:
-                    if not in_tm:
-                        try:
-                            # 误触 pause 会 stop_task；尝试重新启动
-                            self.task_manager.start_task(task_id)
-                        except Exception as e:
-                            self.logger.warning(
-                                f"切列后恢复运行失败 {stock_code}: {e}"
-                            )
-                try:
-                    chart.set_task_status(True, False)
-                    if getattr(chart, 'task', None) and isinstance(chart.task.get('params'), dict):
-                        chart.task['params']['task_running'] = True
-                        chart.task['params']['task_paused'] = False
-                except Exception:
-                    pass
-            else:
-                # 快照未运行，但 TM 已在跑 / 组件已标运行 → 保留运行态，勿刷回未运行
-                if in_tm or (
-                    bool(getattr(chart, 'task_running', False))
-                    and not bool(getattr(chart, 'task_paused', False))
-                ):
+                chart = cached.get('chart')
+                if not chart:
+                    continue
+                task_id = getattr(chart, 'task_id', None)
+                in_tm = bool(task_id and task_id in running_tasks)
+
+                # 重载意图暂停：强制 UI 为已暂停，且不要 start_task 拉回
+                if self._is_reload_intent_paused(stock_code):
+                    try:
+                        chart.set_task_status(False, True)
+                        if getattr(chart, 'task', None) and isinstance(chart.task.get('params'), dict):
+                            chart.task['params']['task_running'] = False
+                            chart.task['params']['task_paused'] = True
+                            if chart.task.get('status') == '运行中':
+                                chart.task['status'] = '未运行'
+                    except Exception:
+                        pass
+                    continue
+
+                # 重排前是运行中，重排后若变成暂停/未运行 → 视为误触，恢复 UI（并尽量重启 TM）
+                if was_running and not was_paused:
+                    now_running = bool(getattr(chart, 'task_running', False)) and not bool(
+                        getattr(chart, 'task_paused', False)
+                    )
+                    if now_running:
+                        continue
+                    if self.task_manager and task_id:
+                        if not in_tm:
+                            try:
+                                # 误触 pause 会 stop_task；尝试重新启动
+                                self.task_manager.start_task(task_id)
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"切列后恢复运行失败 {stock_code}: {e}"
+                                )
                     try:
                         chart.set_task_status(True, False)
                         if getattr(chart, 'task', None) and isinstance(chart.task.get('params'), dict):
@@ -2793,11 +2824,31 @@ class TasksChartsView(QWidget):
                             chart.task['params']['task_paused'] = False
                     except Exception:
                         pass
-                    continue
-                try:
-                    chart.set_task_status(was_running, was_paused)
-                except Exception:
-                    pass
+                else:
+                    # 快照未运行，但 TM 已在跑 / 组件已标运行 → 保留运行态，勿刷回未运行
+                    if in_tm or (
+                        bool(getattr(chart, 'task_running', False))
+                        and not bool(getattr(chart, 'task_paused', False))
+                    ):
+                        try:
+                            chart.set_task_status(True, False)
+                            if getattr(chart, 'task', None) and isinstance(chart.task.get('params'), dict):
+                                chart.task['params']['task_running'] = True
+                                chart.task['params']['task_paused'] = False
+                        except Exception:
+                            pass
+                        continue
+                    try:
+                        chart.set_task_status(was_running, was_paused)
+                    except Exception:
+                        pass
+        finally:
+            # 意图暂停已落到 UI/params 后清空，避免用户手动启动后再切列被再次刷回暂停
+            try:
+                if self.task_manager and getattr(self.task_manager, "_reload_paused_norms", None):
+                    self.task_manager._reload_paused_norms = set()
+            except Exception:
+                pass
 
     def sync_charts_with_running_tasks(self) -> int:
         """按 TaskManager.running_tasks 同步当前缓存/本页图表的运行态。返回同步为运行中的数量。"""

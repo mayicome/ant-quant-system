@@ -5,7 +5,7 @@ import sys
 import time
 from typing import Any, List, Optional
 
-SHADOW_VERSION = "20260819.02"
+SHADOW_VERSION = "20260908.01"
 SEED_INTERVAL_SEC = 3
 AUCTION_SEED_INTERVAL_SEC = 1.0
 # 盘中 quotes_recv_at(本机收到推送墙钟) 落后超过该秒数 → full_tick 补种
@@ -2104,16 +2104,22 @@ def init(ContextInfo):
     daily_sync = _get_daily_sync_runner()
     daily_sync.register_daily_sync_timer(ContextInfo)
     daily_sync.schedule_failed_manifest_recovery_on_init()
-    try:
-        after_rank = _get_after_hours_rank_runner()
-        after_rank.register_after_hours_rank_timer(ContextInfo)
-    except Exception as e:
-        print("[交易核心] 盘后排名定时注册失败: %s" % e)
-    try:
-        tick_full = _get_tick_full_sync_runner()
-        tick_full.register_tick_full_sync_timer(ContextInfo)
-    except Exception as e:
-        print("[交易核心] 分笔同步定时注册失败: %s" % e)
+    live_only = bool(
+        hasattr(daily_sync, "is_qmt_live_only") and daily_sync.is_qmt_live_only()
+    )
+    if live_only:
+        print("[交易核心] 实盘模式：不注册分笔/盘后量能定时")
+    else:
+        try:
+            after_rank = _get_after_hours_rank_runner()
+            after_rank.register_after_hours_rank_timer(ContextInfo)
+        except Exception as e:
+            print("[交易核心] 盘后排名定时注册失败: %s" % e)
+        try:
+            tick_full = _get_tick_full_sync_runner()
+            tick_full.register_tick_full_sync_timer(ContextInfo)
+        except Exception as e:
+            print("[交易核心] 分笔同步定时注册失败: %s" % e)
     # 初始化完成信息已并入上方「就绪」一行
 
 
@@ -2217,31 +2223,35 @@ def _periodic_sync_body(ContextInfo):
         print("[交易核心] 按需同步错误: %s" % e)
     if in_continuous:
         return
-    # 手动指定日 tick 全量续跑（data/tick_full_sync/manual_request.json）
-    try:
-        tick_full = _get_tick_full_sync_runner()
-        if hasattr(tick_full, "process_manual_request"):
-            tick_full.process_manual_request(ContextInfo)
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        print("[交易核心] 分笔手动请求错误: %s" % e)
-    # 手动指定日盘后量能重跑（data/after_hours_rank/manual_request.json）
-    try:
-        after_rank = _get_after_hours_rank_runner()
-        if hasattr(after_rank, "process_manual_request"):
-            after_rank.process_manual_request(ContextInfo)
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        print("[交易核心] 盘后排名手动请求错误: %s" % e)
-    # 盘后流水线补跑：日线 → tick 落盘 → 量能（互相串行，不抢下载）
-    try:
-        daily_sync.maybe_catch_up_after_hours_pipeline(ContextInfo)
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        print("[交易核心] 盘后流水线补跑错误: %s" % e)
+    live_only = bool(
+        hasattr(daily_sync, "is_qmt_live_only") and daily_sync.is_qmt_live_only()
+    )
+    if not live_only:
+        # 手动指定日 tick 全量续跑（data/tick_full_sync/manual_request.json）
+        try:
+            tick_full = _get_tick_full_sync_runner()
+            if hasattr(tick_full, "process_manual_request"):
+                tick_full.process_manual_request(ContextInfo)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print("[交易核心] 分笔手动请求错误: %s" % e)
+        # 手动指定日盘后量能重跑（data/after_hours_rank/manual_request.json）
+        try:
+            after_rank = _get_after_hours_rank_runner()
+            if hasattr(after_rank, "process_manual_request"):
+                after_rank.process_manual_request(ContextInfo)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print("[交易核心] 盘后排名手动请求错误: %s" % e)
+        # 盘后流水线补跑：日线 → tick 落盘 → 量能（互相串行，不抢下载）
+        try:
+            daily_sync.maybe_catch_up_after_hours_pipeline(ContextInfo)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print("[交易核心] 盘后流水线补跑错误: %s" % e)
 
 
 def _maybe_sync_account_snapshot(ContextInfo) -> None:

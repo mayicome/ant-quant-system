@@ -26,6 +26,9 @@ deep-translator>=1.11.4
 # 注意：已使用 akshare 替代 chncal 用于交易日判断
 # akshare>=1.0.0
 
+# 东财涨停/主力净流入抓取（Selenium）
+selenium>=4.15.0
+
 # QMT量化交易接口
 # 注意：xtquant由QMT客户端提供，安装QMT客户端后会自动包含
 # 如果通过pip安装，可能需要从QMT官方源获取

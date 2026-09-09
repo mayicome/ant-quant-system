@@ -134,3 +134,33 @@ def factor_corr_and_vif(
         except Exception:
             vif[name] = np.nan
     return {"corr": corr, "vif": pd.Series(vif)}
+
+
+def nav_stats(nav: pd.DataFrame, *, periods_per_year: float = 52.0) -> dict:
+    """按调仓期收益年化。"""
+    if nav is None or nav.empty or "nav" not in nav.columns:
+        return {}
+    s = nav["nav"].astype(float)
+    if len(s) < 2:
+        return {}
+    rets = s.pct_change().dropna()
+    if rets.empty:
+        return {}
+    total = float(s.iloc[-1] / s.iloc[0] - 1.0)
+    mu = float(rets.mean())
+    sd = float(rets.std(ddof=1)) if len(rets) > 1 else float("nan")
+    ppy = float(periods_per_year) if periods_per_year else 52.0
+    ann = (1.0 + mu) ** ppy - 1.0 if np.isfinite(mu) else float("nan")
+    ann_vol = sd * np.sqrt(ppy) if np.isfinite(sd) else float("nan")
+    sharpe = (ann / ann_vol) if ann_vol and abs(ann_vol) > 1e-12 else float("nan")
+    peak = s.cummax()
+    dd = (s / peak - 1.0).min()
+    return {
+        "total_return": total,
+        "ann_return": float(ann),
+        "ann_vol": float(ann_vol) if np.isfinite(ann_vol) else float("nan"),
+        "sharpe": float(sharpe) if np.isfinite(sharpe) else float("nan"),
+        "max_dd": float(dd),
+        "n_periods": int(len(rets)),
+        "periods_per_year": ppy,
+    }
