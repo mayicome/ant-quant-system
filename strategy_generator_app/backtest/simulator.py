@@ -1481,15 +1481,25 @@ def simulate_fills_with_ticks(
                 elif rule_type == "best_buy":
                     trigger = float(intent.get("trigger_price") or 0)
                     rise_pct = float(intent.get("rise_percent") or 0)
-                    # 回测：一律使用 config.ini [Elastic]，避免意图字典里误带 confirm_ticks 覆盖全局
-                    confirm_ticks = int(cfg_confirm_ticks)
-                    cooldown_ticks = int(cfg_cooldown_ticks)
+                    # confirm/cooldown：默认用 config.ini [Elastic]；规则显式给出时（含 0）优先，与实盘 ant_tick_runner 一致
+                    _r_confirm = intent.get("confirm_ticks", None)
+                    _r_cool = intent.get("cooldown_after_extreme_ticks", None)
+                    confirm_ticks = int(cfg_confirm_ticks) if _r_confirm is None else int(_r_confirm)
+                    cooldown_ticks = int(cfg_cooldown_ticks) if _r_cool is None else int(_r_cool)
                     if confirm_ticks < 0:
                         confirm_ticks = 2
                     if confirm_ticks == 0:
                         confirm_ticks = 1
                     if cooldown_ticks < 0:
                         cooldown_ticks = 0
+                    # dynamic_thresholds：规则显式值（含 0=关闭动态）优先于全局，避免 0 被当成缺省
+                    dyn_th = int(cfg_dynamic_thresholds)
+                    _r_dyn = intent.get("dynamic_thresholds", None)
+                    if _r_dyn is not None:
+                        try:
+                            dyn_th = int(_r_dyn)
+                        except (TypeError, ValueError):
+                            pass
 
                     # state: triggered/lowest/lowest_tick_idx/tick_idx/rebound_hit_count
                     state = best_buy_state.setdefault(
@@ -1534,13 +1544,22 @@ def simulate_fills_with_ticks(
                         continue
 
                     # 动态反弹阈值：跌得越深，反弹阈值更苛刻（减少小反抽误触发）
+                    # rise_scale / max_rise：显式 0 有效，不能用 `or` 回退（对齐 ant_elastic_buy_lite）
                     try:
                         drop_from_trigger_pct = max(0.0, (trigger / float(state["lowest"]) - 1.0) * 100.0) if state["lowest"] else 0.0
                     except Exception:
                         drop_from_trigger_pct = 0.0
-                    rise_scale = float(intent.get("rise_scale") or 0.35)
-                    max_rise = float(intent.get("max_rise_percent") or 4.0)
-                    if int(cfg_dynamic_thresholds) <= 0:
+                    _rs = intent.get("rise_scale", None)
+                    _mr = intent.get("max_rise_percent", None)
+                    try:
+                        rise_scale = float(0.35 if _rs is None else _rs)
+                    except (TypeError, ValueError):
+                        rise_scale = 0.35
+                    try:
+                        max_rise = float(4.0 if _mr is None else _mr)
+                    except (TypeError, ValueError):
+                        max_rise = 4.0
+                    if int(dyn_th) <= 0:
                         eff_rise = float(rise_pct)
                     else:
                         eff_rise = min(max_rise, float(rise_pct) + drop_from_trigger_pct * rise_scale)
@@ -1566,7 +1585,8 @@ def simulate_fills_with_ticks(
                     _el = _seconds_between(_t0, tick_dt) if _t0 is not None else 0.0
                     trigger_info = (
                         f"弹性买入: trigger={trigger:.2f}, lowest={float(state['lowest']):.2f}, "
-                        f"rise={rise_pct:.2f}%, target={target_price:.2f}, confirm={confirm_ticks}, cooldown={cooldown_ticks}, "
+                        f"rise={rise_pct:.2f}%/eff={eff_rise:.2f}% dyn={int(dyn_th)}, "
+                        f"target={target_price:.2f}, confirm={confirm_ticks}, cooldown={cooldown_ticks}, "
                         f"tick_idx={int(state['tick_idx'])}, hits={int(state.get('rebound_hit_count') or 0)}, "
                         f"first_hit={_fmt_trade_time(_t0)} elapsed_s={_el:.2f}"
                     )

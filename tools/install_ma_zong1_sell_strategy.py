@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""安装策略：卖：马总逻辑1-开盘涨幅弹性半仓+近涨停弹性半仓+1455破MA20清仓
+"""安装策略：卖：马总逻辑1-开盘涨幅弹性半仓+近涨停弹性半仓
 
 总仓位（半仓基准）= 本轮持仓周期累计买入；只随买入增加，半仓/部分卖不减；持仓归零重置。
-开盘涨幅腿：每日达标则按「总仓位」卖约 50%（OPEN50，每日可触发）。
+开盘涨幅腿：每日相对昨收达标则按「总仓位」卖约 50%（OPEN50，每日可触发；触发价=昨收×(1+阈值)）。
 LU10：按「总仓位」卖约 50%；整段持仓期只触发一次。
 两腿独立；同轮都挂则半仓+取整零头并入一腿；只挂一腿则半仓后若剩余不够一手或不够最小单笔金额则并入。
 params.positions=可卖；positions_volume=当前持股；positions_baseline=总仓位基准（半仓用）。
@@ -16,17 +16,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "strategy_generator_app" / "config" / "strategies"
 
-STRATEGY_NAME = "卖：马总逻辑1-开盘涨幅弹性半仓+近涨停弹性半仓+1455破MA20清仓"
+STRATEGY_NAME = "卖：马总逻辑1-开盘涨幅弹性半仓+近涨停弹性半仓"
+STRATEGY_NAME_ALIASES = (
+    STRATEGY_NAME,
+    "卖：马总逻辑1-开盘涨幅弹性半仓+近涨停弹性半仓+1455破MA20清仓",
+)
 
 STRATEGY_CODE = r'''# 卖：马总选股逻辑1
 # 总仓位=本轮累计买入（positions_baseline）；半仓按总仓位取半；卖出不降总仓位；持股<100重置
-# 开盘涨幅：每日按总仓位半仓(OPEN50)；近10日涨停价：按总仓位半仓(LU10，整段一次)
+# OPEN50：每日按总仓位半仓；触发价=昨收×(1+阈值)（主板默认5%/成长默认10%）
+# 近10日涨停价：按总仓位半仓(LU10，整段一次)
 # 只挂一腿：半仓后剩余不够一手或不够最小单笔金额，则并入本次（对照当前持股 positions_volume）
 # params.positions=可卖；positions_volume=当前持股；positions_baseline=总仓位基准
+# 两腿回落%%：下方 DROP_PERCENT_OPEN / DROP_PERCENT_LU；params.open_drop_percent / lu_drop_percent 可覆盖
+# 近涨停分档（可选）：drop_percent_when_lu_gt_open / drop_percent_when_lu_lt_open
+#   仅改近涨停腿：LU触发价>开盘腿触发价用 gt，否则用 lt；开盘腿仍用 DROP_PERCENT_OPEN
+#   相等回退 drop_percent_when_lu_eq_open 或 DROP_PERCENT_LU / lu_drop_percent
 # N = params.scheduled_clear_on_sell_day / sell_hold_trading_days / entry_window_trading_days
 
 NAME_OPEN50 = "马总1卖-开盘涨幅弹性半仓"
 NAME_LU10 = "马总1卖-近10日涨停价弹性半仓"
+
+# 两腿回落比例%%（缺省）；改这里即可分腿调弹性；params 同名键可覆盖
+DROP_PERCENT_OPEN = 1.5  # 开盘涨幅弹性半仓
+DROP_PERCENT_LU = 1.5    # 近10日涨停价弹性半仓
 
 def run(codes, prices, get_name, account, params):
     result = []
@@ -35,12 +48,41 @@ def run(codes, prices, get_name, account, params):
     positions_volume = params.get("positions_volume") or {}
     positions_baseline = params.get("positions_baseline") or {}
 
-    try:
-        drop_pct = float(params.get("drop_percent", 1.0) or 1.0)
-    except (TypeError, ValueError):
-        drop_pct = 1.0
-    if drop_pct < 0:
-        drop_pct = 0.0
+    def _leg_drop(key, code_default):
+        """分腿回落%%：params 覆盖，否则用代码前置常量。"""
+        v = params.get(key)
+        if v is None or v == "":
+            try:
+                x = float(code_default)
+            except (TypeError, ValueError):
+                x = 1.5
+            return 0.0 if x < 0 else x
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            try:
+                x = float(code_default)
+            except (TypeError, ValueError):
+                x = 1.5
+        return 0.0 if x < 0 else x
+
+    open_drop_pct = _leg_drop("open_drop_percent", DROP_PERCENT_OPEN)
+    lu_drop_pct = _leg_drop("lu_drop_percent", DROP_PERCENT_LU)
+
+    def _opt_drop(key):
+        v = params.get(key)
+        if v is None or v == "":
+            return None
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None
+        return 0.0 if x < 0 else x
+
+    drop_when_lu_gt = _opt_drop("drop_percent_when_lu_gt_open")
+    drop_when_lu_lt = _opt_drop("drop_percent_when_lu_lt_open")
+    drop_when_eq = _opt_drop("drop_percent_when_lu_eq_open")
+    use_lu_vs_open_drop = drop_when_lu_gt is not None or drop_when_lu_lt is not None
 
     from datetime import date as _date, datetime as _dt
     import json as _json
@@ -390,18 +432,21 @@ def run(codes, prices, get_name, account, params):
         if not isinstance(p, dict):
             continue
         try:
-            open_px = float(p.get("今开盘") or p.get("open") or 0)
+            prev_close = float(
+                p.get("昨收盘")
+                or p.get("昨收")
+                or p.get("lastClose")
+                or p.get("pre_close")
+                or p.get("前收盘")
+                or 0
+            )
         except (TypeError, ValueError):
-            open_px = 0.0
+            prev_close = 0.0
         try:
             limit_up = float(p.get("涨停板") or 0)
             limit_down = float(p.get("跌停板") or 0)
         except (TypeError, ValueError):
             limit_up, limit_down = 0.0, 0.0
-        try:
-            ma20 = float(p.get("20日") or 0)
-        except (TypeError, ValueError):
-            ma20 = 0.0
 
         name = (get_name(c6) if get_name else "") or ""
         # 开盘半仓每日可触发：leg_key 带当日，避免被「整段已成交」锁死
@@ -410,15 +455,39 @@ def run(codes, prices, get_name, account, params):
         half = _half_lot(base)
 
         thr = _open_thr(c6)
+        # 关系分档用「理论触发价」：即使某腿当日已成交/不挂，仍可比价选 drop
+        open_ref = 0.0
+        if prev_close > 0:
+            open_ref = _clamp(round(prev_close * (1.0 + thr), 2), limit_down, limit_up)
+        lu_ref = 0.0
+        lu_trig_raw = _recent_lu_trigger(c6, name, trade_d)
+        if lu_trig_raw is not None and lu_trig_raw > 0:
+            lu_ref = _clamp(round(float(lu_trig_raw), 2), limit_down, limit_up)
+
+        day_open_drop = float(open_drop_pct)
+        day_lu_drop = float(lu_drop_pct)
+        # 仅近涨停腿按「LU触发价 vs 开盘腿触发价」分档；开盘腿 drop 固定
+        if use_lu_vs_open_drop and open_ref > 0 and lu_ref > 0:
+            if lu_ref > open_ref:
+                day_lu_drop = float(
+                    drop_when_lu_gt if drop_when_lu_gt is not None else lu_drop_pct
+                )
+            elif lu_ref < open_ref:
+                day_lu_drop = float(
+                    drop_when_lu_lt if drop_when_lu_lt is not None else lu_drop_pct
+                )
+            else:
+                day_lu_drop = float(
+                    drop_when_eq if drop_when_eq is not None else lu_drop_pct
+                )
+
         open_trig = 0.0
-        # OPEN50：不看整段 filled，只避开「当日已成交」
-        if leg_open not in filled and open_px > 0 and half >= 100:
-            open_trig = _clamp(round(open_px * (1.0 + thr), 2), limit_down, limit_up)
+        # OPEN50：触发价=昨收×(1+阈值)；不看整段 filled，只避开「当日已成交」
+        if leg_open not in filled and open_ref > 0 and half >= 100:
+            open_trig = float(open_ref)
         lu_trig = 0.0
-        if leg_lu not in filled and half >= 100:
-            lu_trig_raw = _recent_lu_trigger(c6, name, trade_d)
-            if lu_trig_raw is not None and lu_trig_raw > 0:
-                lu_trig = _clamp(round(float(lu_trig_raw), 2), limit_down, limit_up)
+        if leg_lu not in filled and lu_ref > 0 and half >= 100:
+            lu_trig = float(lu_ref)
         want_open = open_trig > 0
         want_lu = lu_trig > 0
 
@@ -433,11 +502,11 @@ def run(codes, prices, get_name, account, params):
                 if lu_vol < 100:
                     open_vol, lu_vol = pair_cap, 0
         elif want_open:
-            px_min = open_trig * (1.0 - float(drop_pct) / 100.0) if open_trig > 0 else 0.0
+            px_min = open_trig * (1.0 - float(day_open_drop) / 100.0) if open_trig > 0 else 0.0
             open_vol = _fold_dust(half, hold, px_min)
             lu_vol = 0
         elif want_lu:
-            px_min = lu_trig * (1.0 - float(drop_pct) / 100.0) if lu_trig > 0 else 0.0
+            px_min = lu_trig * (1.0 - float(day_lu_drop) / 100.0) if lu_trig > 0 else 0.0
             lu_vol = _fold_dust(half, hold, px_min)
             open_vol = 0
         else:
@@ -451,7 +520,7 @@ def run(codes, prices, get_name, account, params):
                 "name": NAME_OPEN50,
                 "leg_key": leg_open,
                 "trigger_price": float(open_trig),
-                "drop_percent": float(drop_pct),
+                "drop_percent": float(day_open_drop),
                 "volume": int(open_vol),
                 "half_pair": True,
             })
@@ -464,7 +533,7 @@ def run(codes, prices, get_name, account, params):
                 "name": NAME_LU10,
                 "leg_key": leg_lu,
                 "trigger_price": float(lu_trig),
-                "drop_percent": float(drop_pct),
+                "drop_percent": float(day_lu_drop),
                 "volume": int(lu_vol),
                 "half_pair": True,
             })
@@ -480,20 +549,7 @@ def run(codes, prices, get_name, account, params):
                 "volume": int(avail),
             })
 
-        # 破 MA20：每天挂（条件清仓）；到点现价 < MA20 才卖，否则仅取消当日
-        if ma20 > 0 and avail >= 100:
-            result.append({
-                "stock_code": c6,
-                "stock_name": name,
-                "rule_type": "scheduled_clear",
-                "name": "马总1卖-1455破MA20清仓",
-                "price": float(round(ma20, 2)),
-                "volume": int(avail),
-                "scheduled_clear_time": "14:55:00",
-                "scheduled_clear_every_day": True,
-            })
-
-        # 第 N 日无条件清仓（N 来自运行交易日数/持有天数）；14:56 在破 MA20 之后兜底
+        # 第 N 日无条件清仓（N 来自运行交易日数/持有天数）
         hold_n = None
         for _hk in ("scheduled_clear_on_sell_day", "sell_hold_trading_days", "entry_window_trading_days"):
             _hv = params.get(_hk)
@@ -532,7 +588,7 @@ def main() -> None:
             raw = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if str(raw.get("name") or "") == STRATEGY_NAME:
+        if str(raw.get("name") or "") in STRATEGY_NAME_ALIASES:
             existing_id = str(raw.get("id") or "")
             if existing_id and p.name != ("%s.json" % existing_id):
                 try:
@@ -553,7 +609,7 @@ def main() -> None:
     sp = dict(prev.get("strategy_params") or {})
     sp.update(
         {
-            "drop_percent": float(sp.get("drop_percent") or 1.0),
+            "drop_percent": 1.5,
             "open_gain_main": float(sp.get("open_gain_main") or 0.05),
             "open_gain_growth": float(sp.get("open_gain_growth") or 0.10),
             "entry_window_trading_days": int(sp.get("entry_window_trading_days") or 4),
@@ -561,6 +617,10 @@ def main() -> None:
             "_filled_legs": list(sp.get("_filled_legs") or []),
         }
     )
+    # 分腿回落以代码前置 DROP_PERCENT_OPEN / DROP_PERCENT_LU 为准；
+    # 若历史 params 曾写入同名单键，清掉以免盖住代码缺省 1.5
+    sp.pop("open_drop_percent", None)
+    sp.pop("lu_drop_percent", None)
     out = {
         "id": sid,
         "name": STRATEGY_NAME,

@@ -108,6 +108,8 @@ OPTIONAL_STRATEGY_PARAM_KEYS = (
     # 马总逻辑1 三腿买入 / 卖出开盘涨幅
     "rise_percent",
     "drop_percent",
+    "open_drop_percent",
+    "lu_drop_percent",
     "open_gain_main",
     "open_gain_growth",
     "selection_date_by_code",

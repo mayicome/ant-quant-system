@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""买入规则：相对今开涨幅超限则停止未执行买入。
+"""买入规则：相对昨收涨幅超限则停止未执行买入。
 
 规则字段：
-  halt_on_open_gain: True 时启用
+  halt_on_open_gain: True 时启用（历史字段名保留，语义为昨收涨幅熔断）
 落状态：
   enabled=False
   halt_reason=\"open_gain\"
   halt_detail: 可读说明
-阈值：主板 5%，其它板块 10%（与涨跌停幅度档位一致的一半亦可）。
+阈值：主板 5%，其它板块 10%。
+口径：max(最高, 现价) 相对昨收涨幅；任何时候达到阈值即熔断。
 """
 from __future__ import annotations
 
@@ -77,25 +78,34 @@ def _f(v: Any) -> float:
     return x
 
 
-def resolve_open_and_ref_price(
+def resolve_prev_close_and_ref_price(
     *,
-    open_price: Any = None,
+    prev_close: Any = None,
     last_price: Any = None,
     high_price: Any = None,
     tick_or_row: Any = None,
 ) -> Tuple[float, float]:
-    """返回 (今开, 用于涨幅的参考价=max(最高,现价))。"""
-    o = _f(open_price)
+    """返回 (昨收, 用于涨幅的参考价=max(最高,现价))。"""
+    prev = _f(prev_close)
     last = _f(last_price)
     high = _f(high_price)
     getter = None
     if tick_or_row is not None and hasattr(tick_or_row, "get"):
         getter = tick_or_row.get
     if getter is not None:
-        if o <= 0:
-            for k in ("open", "openPrice", "open_price", "todayOpen", "今开盘"):
-                o = _f(getter(k))
-                if o > 0:
+        if prev <= 0:
+            for k in (
+                "lastClose",
+                "last_close",
+                "preClose",
+                "prevClose",
+                "pre_close",
+                "prev_close",
+                "昨收盘价",
+                "昨收",
+            ):
+                prev = _f(getter(k))
+                if prev > 0:
                     break
         if last <= 0:
             for k in ("lastPrice", "last_price", "price", "last", "最新价"):
@@ -108,16 +118,34 @@ def resolve_open_and_ref_price(
                 if high > 0:
                     break
     ref = max(high, last)
-    return o, ref
+    return prev, ref
 
 
-def open_gain_pct(open_price: float, ref_price: float) -> Optional[float]:
-    """相对今开涨幅（百分比）。无法计算时返回 None。"""
-    o = _f(open_price)
+# 兼容旧调用名（曾按今开解析）
+def resolve_open_and_ref_price(
+    *,
+    open_price: Any = None,
+    last_price: Any = None,
+    high_price: Any = None,
+    tick_or_row: Any = None,
+    prev_close: Any = None,
+) -> Tuple[float, float]:
+    """兼容旧名：实际返回 (昨收, max(最高,现价))。open_price 忽略。"""
+    return resolve_prev_close_and_ref_price(
+        prev_close=prev_close,
+        last_price=last_price,
+        high_price=high_price,
+        tick_or_row=tick_or_row,
+    )
+
+
+def open_gain_pct(prev_close: float, ref_price: float) -> Optional[float]:
+    """相对昨收涨幅（百分比）。无法计算时返回 None。"""
+    prev = _f(prev_close)
     r = _f(ref_price)
-    if o <= 0 or r <= 0:
+    if prev <= 0 or r <= 0:
         return None
-    return (r / o - 1.0) * 100.0
+    return (r / prev - 1.0) * 100.0
 
 
 def should_halt_on_open_gain(
@@ -125,12 +153,13 @@ def should_halt_on_open_gain(
     *,
     stock_code: str = "",
     stock_name: str = "",
-    open_price: Any = None,
+    prev_close: Any = None,
     last_price: Any = None,
     high_price: Any = None,
     tick_or_row: Any = None,
+    open_price: Any = None,  # 兼容旧调用，忽略
 ) -> Tuple[bool, str]:
-    """是否应因开盘涨幅超限停止该买入规则。
+    """是否应因相对昨收涨幅超限停止该买入规则。
 
     返回 (should_halt, detail)。
     """
@@ -144,21 +173,21 @@ def should_halt_on_open_gain(
         if rule.get("enabled") is False and rule.get("halt_reason"):
             return False, ""
 
-    o, ref = resolve_open_and_ref_price(
-        open_price=open_price,
+    prev, ref = resolve_prev_close_and_ref_price(
+        prev_close=prev_close,
         last_price=last_price,
         high_price=high_price,
         tick_or_row=tick_or_row,
     )
-    gain = open_gain_pct(o, ref)
+    gain = open_gain_pct(prev, ref)
     if gain is None:
         return False, ""
     thr = open_gain_halt_threshold_pct(stock_code, stock_name)
     if gain + 1e-9 < thr:
         return False, ""
     detail = (
-        f"相对今开涨幅 {gain:.2f}% ≥ {thr:.0f}% "
-        f"(开={o:.4f}, 参={ref:.4f})"
+        f"相对昨收涨幅 {gain:.2f}% ≥ {thr:.0f}% "
+        f"(昨收={prev:.4f}, 参={ref:.4f})"
     )
     return True, detail
 

@@ -2033,8 +2033,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_import_btn.clicked.connect(self._on_import_pool_codes)
         self.pool_batch_import_btn = QPushButton("批量导入选股文件")
         self.pool_batch_import_btn.setToolTip(
-            "按设置的前缀，在 history_data 与存档中匹配最近 N 个交易日的选股文件并入股票池。\n"
-            "可设置是否只导入「满足条件」为 True 的股票。"
+            "按设置的前缀，在 history_data 与存档中匹配「最近起始～截止」交易日的选股文件并入股票池。\n"
+            "可设置：只导入满足条件、相对选股日收盘最大涨幅剔除、\n"
+            "相对昨收盘单日最大涨幅剔除（主板/其他板块分档）。"
         )
         self.pool_batch_import_btn.clicked.connect(self._on_batch_import_pool_codes)
         self.pool_import_positions_btn = QPushButton("一键导入持仓")
@@ -2142,7 +2143,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "本策略运行交易日数（修改后自动保存到策略参数，换策略/重启不丢）。\n"
             "买入策略：入场窗口长度（选股日 T+1 起连续 N 天）；批量回测仿真长度同此值。\n"
             "卖出策略（马总等）：实盘注入持有天数——买入【次日】为第 1 日，第 N 日无条件清仓"
-            "（与官方 CLI / 回测页接续同口径）；破 MA20 每天挂，不受本值限制。\n"
+            "（与官方 CLI / 回测页接续同口径）。\n"
             "与回测页「下一轮接续→持有交易日数」独立，互不覆盖。"
         )
         params_form.addRow("运行交易日数：", self.param_entry_window_spin)
@@ -2555,6 +2556,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "不勾选：从选股日 T 当日（若为非交易日则顺延）起算。"
         )
         batch_opts_row.addWidget(self.backtest_batch_from_t1_cb)
+        self.backtest_batch_live_align_cb = QCheckBox("实盘对齐（近N日滚动建池）")
+        self.backtest_batch_live_align_cb.setChecked(True)
+        self.backtest_batch_live_align_cb.setToolTip(
+            "默认开启：与「批量导入选股文件」同一套设置——每个交易日用「最近起始～截止」\n"
+            "交易日选股并集建池，应用「满足条件」与两项涨幅剔除（through=盘前上一交易日），\n"
+            "连续仿真持仓/资金。关闭则恢复旧行为：按选股日分档、每档独立账户回测。"
+        )
+        batch_opts_row.addWidget(self.backtest_batch_live_align_cb)
         batch_opts_row.addStretch()
         backtest_layout.addLayout(batch_opts_row)
         backtest_btn_row1 = QHBoxLayout()
@@ -2562,11 +2571,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.backtest_run_btn.clicked.connect(self._on_run_backtest)
         self.backtest_batch_file_btn = QPushButton("批量回测(选股文件)…")
         self.backtest_batch_file_btn.setToolTip(
-            "选择板块筛选导出的、含「选股日」列的 Excel/CSV：按每个选股日单独用当日股票池跑回测。"
-            "区间：T+1/T 起，长度=策略参数「运行交易日数」。"
-            "卖出轮用「下一轮接续」里的持有交易日数。"
-            "若勾选「分时段组合回测」，则与单次回测相同：时段1=左侧当前策略，时段2=下方所选策略，"
-            "且要求第二段运行开始=第一段运行结束。使用当前初始资金；批量时忽略初始持仓表。"
+            "选择含「选股日」列的 Excel/CSV。\n"
+            "默认「实盘对齐」：按批量导入设置（最近起始/截止交易日）滚动建池 + 涨幅过滤，连续仿真；\n"
+            "关闭对齐：按每个选股日单独股票池回测（区间 T+1/T 起，长度=运行交易日数）。\n"
+            "卖出轮用「下一轮接续」里的持有交易日数。分时段组合规则与单次回测相同。"
         )
         self.backtest_batch_file_btn.clicked.connect(self._on_batch_backtest_from_selection_file)
         self.backtest_export_last_btn = QPushButton("导出上次回测结果…")
@@ -2681,28 +2689,59 @@ class StrategyGeneratorMainWindow(QMainWindow):
         merge_form.addRow("输出文件：", out_row)
 
         mark_row = QHBoxLayout()
-        self.merge_use_nth_cb = QCheckBox("使用选股日后第 N 个交易日盯市")
+        self.merge_hold_spin = QSpinBox()
+        self.merge_hold_spin.setRange(1, 120)
+        # 优先用买入策略「运行交易日数」作默认（常为10）；勿默认同接续卖出的2日
+        try:
+            if hasattr(self, "param_entry_window_spin"):
+                _def_hold = int(self.param_entry_window_spin.value())
+            elif hasattr(self, "sell_chain_hold_spin"):
+                _def_hold = int(self.sell_chain_hold_spin.value())
+            else:
+                _def_hold = 10
+        except Exception:
+            _def_hold = 10
+        self.merge_hold_spin.setValue(max(1, _def_hold))
+        self.merge_hold_spin.setToolTip(
+            "【汇总专用】持有交易日数（买入次日=第1日），用来算「计划持仓结束日」。\n"
+            "不要和回测「运行交易日数」搞混——以本框为准。\n"
+            "已清仓不盯市；已到结束日→按结束日收盘；未到结束日→按今天临时估值"
+            "（盯市类型=未到期临时，计划结束日仍是第N日）。"
+        )
+        self.merge_use_nth_cb = QCheckBox("改用选股日后第 N 日盯市")
         self.merge_use_nth_cb.setChecked(False)
-        self.merge_use_nth_cb.setToolTip(
-            "不勾选：未清仓按各票日线「最后可得交易日」收盘价盯市（数据不全时用本地能取到的最近收盘）。"
-            "勾选：按选股日后第 N 个交易日（旧版逻辑）。"
+        self.merge_last_avail_cb = QCheckBox("改用最后可得收盘")
+        self.merge_last_avail_cb.setChecked(False)
+        self.merge_last_avail_cb.setToolTip(
+            "排查用：未清仓一律用日线最后一根收盘（容易全落在同一天，如 9/7）。\n"
+            "默认请关闭：按买入日+持有天数的持仓结束日盯市。"
         )
 
         def _sync_merge_mark_spin():
             en = self.merge_use_nth_cb.isChecked()
             self.merge_mark_n_spin.setEnabled(en)
+            if en:
+                self.merge_last_avail_cb.setChecked(False)
+
+        def _sync_merge_last_avail():
+            if self.merge_last_avail_cb.isChecked():
+                self.merge_use_nth_cb.setChecked(False)
 
         self.merge_mark_n_spin = QSpinBox()
         self.merge_mark_n_spin.setRange(0, 120)
         self.merge_mark_n_spin.setValue(3)
         self.merge_mark_n_spin.setEnabled(False)
         self.merge_mark_n_spin.setToolTip(
-            "仅在勾选「使用选股日后第 N 个交易日盯市」时生效；N=0 表示选股日当日。"
+            "仅在勾选「改用选股日后第 N 日盯市」时生效；N=0 表示选股日当日。"
         )
         self.merge_use_nth_cb.stateChanged.connect(lambda _=None: _sync_merge_mark_spin())
+        self.merge_last_avail_cb.stateChanged.connect(lambda _=None: _sync_merge_last_avail())
+        mark_row.addWidget(QLabel("汇总持有N日"))
+        mark_row.addWidget(self.merge_hold_spin)
         mark_row.addWidget(self.merge_use_nth_cb)
         mark_row.addWidget(QLabel("第 N 个交易日"))
         mark_row.addWidget(self.merge_mark_n_spin)
+        mark_row.addWidget(self.merge_last_avail_cb)
         mark_row.addStretch()
         merge_form.addRow("未清仓盯市：", mark_row)
 
@@ -3097,8 +3136,6 @@ class StrategyGeneratorMainWindow(QMainWindow):
             for leg in ("OPEN50_REST", "OPEN50", "LU10", "MA5", "MA10", "MA20"):
                 if leg in su or leg in s:
                     out[c6].add(leg)
-            if "破MA20" in s or "破 MA20" in s:
-                out[c6].add("破MA20")
             if "无条件清仓" in s or "末日" in s or "强制清仓" in s:
                 out[c6].add("末日清仓")
 
@@ -4494,9 +4531,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
         """按设置：在 history_data/存档中匹配前缀+最近交易日选股文件，批量并入股票池。"""
         from batch_import_pool import (
             BatchImportPoolDialog,
-            filter_by_day_post_select_max_gain,
             find_selection_files_by_prefix,
             load_batch_import_settings,
+            normalize_lookback_bounds,
         )
         from utils.trading_day import get_trading_dates
 
@@ -4515,28 +4552,49 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
         settings = load_batch_import_settings()
         prefix = str(settings.get("file_prefix") or "").strip()
-        days_n = max(1, int(settings.get("recent_trading_days") or 5))
+        start_n, end_n = normalize_lookback_bounds(settings)
         only_meet = bool(settings.get("only_meet_condition", True))
         filter_max_gain = bool(settings.get("filter_post_select_max_gain", False))
         main_gain_pct = float(settings.get("main_board_max_gain_pct") or 5.0)
         other_gain_pct = float(settings.get("other_board_max_gain_pct") or 10.0)
+        filter_intraday_gain = bool(
+            settings.get("filter_post_select_max_intraday_gain", False)
+        )
+        main_intraday_pct = float(
+            settings.get("main_board_max_intraday_gain_pct") or 5.0
+        )
+        other_intraday_pct = float(
+            settings.get("other_board_max_intraday_gain_pct") or 10.0
+        )
         if not prefix:
             QMessageBox.warning(self, "批量导入", "请先在「设置」中填写选股文件前缀。")
             return
 
         history_dir = os.path.join(self._project_root(), "history_data")
-        trading_days = get_trading_dates(days_n)
-        if not trading_days:
+        # 先取最近 start_n 日，再截到 end_n（含）：倒数第 start～第 end
+        all_days = get_trading_dates(start_n)
+        if not all_days:
             QMessageBox.warning(self, "批量导入", "未能取得最近交易日，请检查交易日历。")
+            return
+        hi = start_n - end_n
+        trading_days = list(all_days[: hi + 1])
+        if not trading_days:
+            QMessageBox.warning(self, "批量导入", "交易日窗口为空，请检查起始/截止设置。")
             return
 
         paths = find_selection_files_by_prefix(history_dir, prefix, trading_days)
         if not paths:
             day_txt = "、".join(d.isoformat() for d in trading_days)
+            win_txt = (
+                f"最近第 {start_n} 个"
+                if start_n == end_n
+                else f"最近第 {start_n}～第 {end_n} 个"
+            )
             QMessageBox.warning(
                 self,
                 "批量导入",
-                f"未找到匹配文件。\n前缀：{prefix}\n最近交易日：{day_txt}\n"
+                f"未找到匹配文件。\n前缀：{prefix}\n交易日窗口：{win_txt}\n"
+                f"日期：{day_txt}\n"
                 f"查找目录：{history_dir} 及其存档。",
             )
             return
@@ -4552,8 +4610,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
         used_files: List[str] = []
         skip_notes: List[str] = []
         gain_dropped: List[Dict[str, object]] = []
+        intraday_dropped: List[Dict[str, object]] = []
         err: Optional[BaseException] = None
+        pool_info: Optional[Dict[str, Any]] = None
         try:
+            from batch_import_pool import build_pool_for_as_of
+
             for path in paths:
                 try:
                     by_day, strength_by_day, _hint = group_codes_and_clip_strength_by_selection_date(
@@ -4583,17 +4645,18 @@ class StrategyGeneratorMainWindow(QMainWindow):
                         c6 = _normalize_code(c6)
                         if c6 and isinstance(meta, dict):
                             sm[c6] = meta
-            if filter_max_gain and by_day_all:
-                by_day_all, strength_filtered, gain_dropped = (
-                    filter_by_day_post_select_max_gain(
-                        by_day_all,
-                        main_board_pct=main_gain_pct,
-                        other_board_pct=other_gain_pct,
-                        strength_by_day=strength_all,
-                    )
-                )
-                if strength_filtered is not None:
-                    strength_all = strength_filtered
+            # 与回测同一套：近 N 日切片 + 涨幅剔除(through=盘前) + 解析选股日
+            pool_info = build_pool_for_as_of(
+                by_day_all,
+                date.today(),
+                settings,
+                entry_window=entry_window,
+                resolve_selection_dates_fn=_resolve_selection_dates_by_code,
+                strength_by_day=strength_all,
+            )
+            by_day_all = dict(pool_info.get("by_day_filtered") or {})
+            gain_dropped = list(pool_info.get("gain_dropped") or [])
+            intraday_dropped = list(pool_info.get("intraday_dropped") or [])
         except Exception as e:
             err = e
         finally:
@@ -4602,12 +4665,20 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if err is not None:
             QMessageBox.critical(self, "批量导入失败", str(err))
             return
-        if not by_day_all:
+        if not by_day_all and not (pool_info or {}).get("codes"):
             detail = "\n".join(skip_notes[:12]) if skip_notes else "无有效股票行"
+            filter_bits = []
             if gain_dropped:
+                filter_bits.append(
+                    f"相对选股日收盘最大涨幅过滤剔除 {len(gain_dropped)} 只"
+                )
+            if intraday_dropped:
+                filter_bits.append(
+                    f"相对昨收盘单日最大涨幅过滤剔除 {len(intraday_dropped)} 只"
+                )
+            if filter_bits:
                 detail = (
-                    f"最大涨幅过滤后无剩余股票（剔除 {len(gain_dropped)} 只）。\n"
-                    + detail
+                    "；".join(filter_bits) + "，无剩余股票。\n" + detail
                 ).strip()
             QMessageBox.warning(
                 self,
@@ -4616,23 +4687,34 @@ class StrategyGeneratorMainWindow(QMainWindow):
             )
             return
 
-        incoming_dates = _resolve_selection_dates_by_code(
-            by_day_all, entry_window=entry_window
-        )
+        incoming_dates = dict((pool_info or {}).get("selection_date_by_code") or {})
+        if not incoming_dates:
+            incoming_dates = _resolve_selection_dates_by_code(
+                by_day_all, entry_window=entry_window
+            )
         codes: List[str] = []
         seen_codes = set()
-        for d in sorted(by_day_all.keys()):
-            for c6 in by_day_all.get(d) or []:
-                c6 = _normalize_code(c6)
-                if c6 and c6 not in seen_codes:
-                    seen_codes.add(c6)
-                    codes.append(c6)
-        merged_strength: Dict[str, Dict[str, object]] = {}
-        for day_map in strength_all.values():
-            for c6, meta in (day_map or {}).items():
-                c6 = _normalize_code(c6)
-                if c6 and isinstance(meta, dict):
-                    merged_strength[c6] = meta
+        for c6 in (pool_info or {}).get("codes") or []:
+            c6 = _normalize_code(c6)
+            if c6 and c6 not in seen_codes:
+                seen_codes.add(c6)
+                codes.append(c6)
+        if not codes:
+            for d in sorted(by_day_all.keys()):
+                for c6 in by_day_all.get(d) or []:
+                    c6 = _normalize_code(c6)
+                    if c6 and c6 not in seen_codes:
+                        seen_codes.add(c6)
+                        codes.append(c6)
+        merged_strength: Dict[str, Dict[str, object]] = dict(
+            (pool_info or {}).get("strength_by_code") or {}
+        )
+        if not merged_strength:
+            for day_map in strength_all.values():
+                for c6, meta in (day_map or {}).items():
+                    c6 = _normalize_code(c6)
+                    if c6 and isinstance(meta, dict):
+                        merged_strength[c6] = meta
 
         strength_note = ""
         if merged_strength:
@@ -4641,8 +4723,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
         gain_note = ""
         if filter_max_gain:
             gain_note = (
-                f"；最大涨幅过滤剔除 {len(gain_dropped)} 只"
+                f"；相对收盘最大涨幅过滤剔除 {len(gain_dropped)} 只"
                 f"（主板≤{main_gain_pct}%/其他≤{other_gain_pct}%）"
+            )
+        if filter_intraday_gain:
+            gain_note += (
+                f"；相对昨收盘单日最大涨幅过滤剔除 {len(intraday_dropped)} 只"
+                f"（主板≤{main_intraday_pct}%/其他≤{other_intraday_pct}%）"
             )
         file_note = f"匹配 {len(used_files)}/{len(paths)} 个文件"
 
@@ -7563,6 +7650,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sel_path = (getattr(self, "merge_selection_file_edit", None).text() or "").strip() if getattr(self, "merge_selection_file_edit", None) else ""
         mark_n = int(getattr(self, "merge_mark_n_spin", None).value()) if getattr(self, "merge_mark_n_spin", None) else 3
         use_nth = bool(getattr(self, "merge_use_nth_cb", None) and self.merge_use_nth_cb.isChecked())
+        use_last = bool(
+            getattr(self, "merge_last_avail_cb", None) and self.merge_last_avail_cb.isChecked()
+        ) and (not use_nth)
+        try:
+            hold_from_next = int(self.merge_hold_spin.value()) if getattr(self, "merge_hold_spin", None) else 2
+        except Exception:
+            hold_from_next = 2
+        hold_from_next = max(1, hold_from_next)
         if not buy_path or not os.path.isfile(buy_path):
             QMessageBox.warning(self, "提示", "请先选择有效的「买入明细」CSV。")
             return
@@ -7585,6 +7680,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             from tools.merge_backtest_trades_by_selection import (
                 aggregate,
                 build_position_corrected_ledger,
+                apply_hold_end_date_from_buy,
                 _build_prices_by_mark_date,
                 apply_mark_and_returns,
                 apply_selection_file_fields,
@@ -7597,11 +7693,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
         try:
             rows = aggregate(Path(buy_path), Path(sell_path))
+            end_warns = apply_hold_end_date_from_buy(
+                rows, hold_from_next_day=hold_from_next
+            )
             prices_by_mark, price_warn = _build_prices_by_mark_date(
                 rows,
                 mark_n=mark_n,
                 use_nth_trading_day=use_nth,
-                use_last_available=not use_nth,
+                use_last_available=use_last,
             )
             apply_mark_and_returns(
                 rows,
@@ -7609,7 +7708,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 price_warn,
                 mark_n=mark_n,
                 use_nth_trading_day=use_nth,
-                use_last_available=not use_nth,
+                use_last_available=use_last,
             )
             sel_hint = ""
             if sel_path and os.path.isfile(sel_path):
@@ -7626,6 +7725,22 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 buy_ma_hint = f"买入日MA5回填失败：{type(e).__name__}: {e}"
 
             df = pd.DataFrame(rows)
+            # 把持有天数 / 计划结束 / 盯市类型放到前面，避免误读「盯市日期」
+            _front = [
+                "选股日",
+                "首次选股日",
+                "代码",
+                "股票名称",
+                "买入日",
+                "持有交易日数",
+                "计划持仓结束日",
+                "end_date",
+                "盯市日期",
+                "盯市类型",
+            ]
+            cols = list(df.columns)
+            ordered = [c for c in _front if c in cols] + [c for c in cols if c not in _front]
+            df = df[ordered]
             # 补股票名称（便于阅读）：从本系统的 get_stock_name 获取
             try:
                 get_name = _get_stock_name_fn() or (lambda c: "")
@@ -7671,10 +7786,34 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 msg += f"\n已附「成交流水(持仓已校正)」{ledger_n} 行（买卖合并重算交易后持仓）"
             elif ledger_n < 0 and ledger_err:
                 msg += f"\n⚠ 成交流水未生成：{ledger_err}"
-            if not use_nth:
-                msg += "\n盯市：未清仓按卖出明细中的 end_date 收盘价"
+            if use_nth:
+                msg += f"\n盯市：未清仓按选股日后第 {mark_n} 个交易日收盘"
+            elif use_last:
+                msg += "\n盯市：未清仓按日线最后可得收盘（排查模式）"
             else:
-                msg += f"\n盯市：选股日后第 {mark_n} 个交易日（与明细 end_date 列可能不同）"
+                msg += (
+                    f"\n盯市：本次持有交易日数={hold_from_next}（买入次日起算）；"
+                    "未到期临时估值时「盯市日期」会是最近交易日，请看「计划持仓结束日」和「盯市类型」"
+                )
+                # 抽查：列出未清仓行的计划结束日，便于核对是否真用了10日
+                samples = []
+                for rr in rows:
+                    if int(rr.get("剩余持仓数量") or 0) <= 0:
+                        continue
+                    samples.append(
+                        f"{rr.get('代码')} 买{rr.get('买入日')} "
+                        f"持有{rr.get('持有交易日数')}日 "
+                        f"计划结束{rr.get('计划持仓结束日') or rr.get('end_date')} "
+                        f"盯市{rr.get('盯市日期')}({rr.get('盯市类型') or ''})"
+                    )
+                    if len(samples) >= 5:
+                        break
+                if samples:
+                    msg += "\n未清仓核对：\n  - " + "\n  - ".join(samples)
+            if end_warns:
+                msg += f"\n⚠ 持仓结束日：{len(end_warns)} 条告警（见信息栏前若干）"
+                for w in end_warns[:8]:
+                    msg += f"\n  - {w}"
             if price_warn:
                 msg += f"\n⚠ 行情提示：{price_warn}"
             if sel_hint:
@@ -7726,7 +7865,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             pass
 
     def _on_batch_backtest_from_selection_file(self):
-        """按选股文件中的「选股日」分组，对每个交易日单独跑回测并汇总（无需拆文件）。"""
+        """按选股文件回测：默认实盘对齐（近N日滚动建池连续仿真）；可关回按选股日分档。"""
         sid = self._get_selected_strategy_id()
         if not sid:
             QMessageBox.warning(self, "提示", "请先在左侧选择要回测的策略。")
@@ -7746,6 +7885,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "Excel (*.xlsx *.xls);;CSV (*.csv);;所有文件 (*.*)",
         )
         if not path:
+            return
+        live_align = bool(
+            getattr(self, "backtest_batch_live_align_cb", None)
+            and self.backtest_batch_live_align_cb.isChecked()
+        )
+        if live_align:
+            self._run_batch_backtest_live_align(path, cfg, use_dual=use_dual)
             return
         try:
             by_day, strength_by_day, hint = group_codes_and_clip_strength_by_selection_date(path)
@@ -7852,6 +7998,467 @@ class StrategyGeneratorMainWindow(QMainWindow):
         )
         if reply != QMessageBox.Yes:
             return
+        self._batch_backtest_run_by_selection_day(
+            path=path,
+            cfg=cfg,
+            by_day=by_day,
+            strength_by_day=strength_by_day,
+            hint=hint,
+            from_t1=from_t1,
+            entry_w=entry_w,
+            sim_hold=sim_hold,
+            mode_txt=mode_txt,
+            use_dual=use_dual,
+            segments_dual=segments_dual,
+            cfg_b_dual=cfg_b_dual,
+            carry_over_dual=carry_over_dual,
+            strategy_generation_time=strategy_generation_time,
+            strategy_run_start_time=strategy_run_start_time,
+            strategy_run_end_time=strategy_run_end_time,
+        )
+
+    def _run_batch_backtest_live_align(self, path: str, cfg, *, use_dual: bool = False) -> None:
+        """实盘对齐：近「起始～截止」日滚动建池 + 连续仿真。"""
+        from batch_import_pool import (
+            build_pool_for_as_of,
+            load_batch_import_settings,
+            normalize_lookback_bounds,
+        )
+
+        settings = load_batch_import_settings()
+        only_meet = bool(settings.get("only_meet_condition", True))
+        start_n, end_n = normalize_lookback_bounds(settings)
+        look_txt = (
+            f"最近第 {start_n} 个"
+            if start_n == end_n
+            else f"最近第 {start_n}～第 {end_n} 个"
+        )
+        try:
+            by_day, strength_by_day, hint = group_codes_and_clip_strength_by_selection_date(
+                path, only_meet_condition=only_meet
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "无法解析文件", str(e))
+            return
+        if not by_day:
+            QMessageBox.information(self, "提示", "没有可回测的选股日。")
+            return
+
+        cfg.strategy_params = self._merge_strategy_params_from_form(cfg.strategy_params or {})
+        _sp0 = cfg.strategy_params or {}
+        entry_w = _entry_window_trading_days_from_params(_sp0)
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            try:
+                entry_w = max(1, int(self.param_entry_window_spin.value()))
+            except (TypeError, ValueError):
+                pass
+        sim_hold = _batch_sim_days(entry_w)
+        from_t1 = self.backtest_batch_from_t1_cb.isChecked()
+        initial_cash = self.backtest_initial_cash.value()
+        gen_t = self.backtest_generation_time.time()
+        run_start_t = self.backtest_run_start_time.time()
+        run_end_t = self.backtest_run_end_time.time()
+        strategy_generation_time = f"{gen_t.hour():02d}:{gen_t.minute():02d}"
+        strategy_run_start_time = f"{run_start_t.hour():02d}:{run_start_t.minute():02d}"
+        strategy_run_end_time = f"{run_end_t.hour():02d}:{run_end_t.minute():02d}"
+
+        segments_dual = None
+        cfg_b_dual = None
+        carry_over_dual = False
+        if use_dual:
+            bid = self.backtest_seg2_combo.currentData()
+            cfg_b = self._find_strategy_by_id(bid) if bid else None
+            if not cfg_b:
+                QMessageBox.warning(self, "提示", "分时段批量回测：请在下方下拉框中选择第二段策略。")
+                return
+            rb2 = self._refresh_cfg_from_disk(bid) if bid else None
+            if rb2 is not None:
+                cfg_b = rb2
+            cfg_b_dual = cfg_b
+            gt2 = self.backtest_seg2_generation_time.time()
+            rs2 = self.backtest_seg2_run_start.time()
+            re2 = self.backtest_seg2_run_end.time()
+            if rs2 != run_end_t:
+                QMessageBox.warning(
+                    self,
+                    "提示",
+                    "分时段批量回测要求：第二段「运行开始」= 第一段「运行结束」。\n\n"
+                    f"第一段结束：{run_end_t.toString('HH:mm')}；第二段开始：{rs2.toString('HH:mm')}",
+                )
+                return
+            if re2 <= rs2:
+                QMessageBox.warning(self, "提示", "第二段运行结束时间必须晚于运行开始时间。")
+                return
+            carry_over_dual = bool(
+                getattr(self, "backtest_dual_carry_cb", None) and self.backtest_dual_carry_cb.isChecked()
+            )
+            segments_dual = [
+                {
+                    "strategy_code": cfg.strategy_code or "",
+                    "strategy_params": dict(cfg.strategy_params or {}),
+                    "strategy_generation_time": strategy_generation_time,
+                    "strategy_run_start_time": strategy_run_start_time,
+                    "strategy_run_end_time": strategy_run_end_time,
+                    "name": f"时段1·{cfg.name}",
+                },
+                {
+                    "strategy_code": cfg_b.strategy_code or "",
+                    "strategy_params": dict(cfg_b.strategy_params or {}),
+                    "strategy_generation_time": f"{gt2.hour():02d}:{gt2.minute():02d}",
+                    "strategy_run_start_time": f"{rs2.hour():02d}:{rs2.minute():02d}",
+                    "strategy_run_end_time": f"{re2.hour():02d}:{re2.minute():02d}",
+                    "name": f"时段2·{cfg_b.name}",
+                },
+            ]
+            for _seg in segments_dual:
+                _ew = _entry_window_trading_days_from_params(_seg.get("strategy_params") or {})
+                if _ew > entry_w:
+                    entry_w = _ew
+            sim_hold = _batch_sim_days(entry_w)
+
+        try:
+            from strategy_generator_app.trading_calendar import (
+                backtest_window_from_selection_day,
+                get_trading_dates_in_range_sorted,
+            )
+        except ImportError:
+            from trading_calendar import (
+                backtest_window_from_selection_day,
+                get_trading_dates_in_range_sorted,
+            )
+
+        sel_days = sorted(by_day.keys())
+        min_sel, max_sel = sel_days[0], sel_days[-1]
+        # 仿真：最早选股日后可交易日起 → 最晚选股日入场窗结束
+        _s0, _e0, _ = backtest_window_from_selection_day(
+            min_sel, start_next_trading_day=from_t1, hold_trading_days=sim_hold
+        )
+        _s1, end_d, _ = backtest_window_from_selection_day(
+            max_sel, start_next_trading_day=from_t1, hold_trading_days=sim_hold
+        )
+        start_d = _s0
+        if start_d is None or end_d is None:
+            QMessageBox.warning(self, "提示", "无法计算回测交易日区间（交易日历）。")
+            return
+
+        # 抽样 as_of 展示池规模
+        sample_asof = start_d
+        sample_pool = build_pool_for_as_of(
+            by_day,
+            sample_asof,
+            settings,
+            entry_window=entry_w,
+            resolve_selection_dates_fn=_resolve_selection_dates_by_code,
+            strength_by_day=strength_by_day,
+        )
+        filt_bits = []
+        if settings.get("only_meet_condition", True):
+            filt_bits.append("仅满足条件")
+        if settings.get("filter_post_select_max_gain"):
+            filt_bits.append("相对收盘最大涨幅剔除")
+        if settings.get("filter_post_select_max_intraday_gain"):
+            filt_bits.append("相对昨收单日最大涨幅剔除")
+        filt_txt = "、".join(filt_bits) if filt_bits else "无额外过滤"
+        reply = QMessageBox.question(
+            self,
+            "确认批量回测（实盘对齐）",
+            f"{hint}\n\n"
+            f"模式：{look_txt}交易日滚动建池连续仿真（与批量导入设置一致）。\n"
+            f"过滤：{filt_txt}\n"
+            f"区间：{start_d}～{end_d}；运行交易日数={entry_w}\n"
+            f"样例 as_of={sample_asof} 池内 {len(sample_pool.get('codes') or [])} 只"
+            f"（涨幅剔除 {len(sample_pool.get('gain_dropped') or [])}"
+            f"+{len(sample_pool.get('intraday_dropped') or [])}）\n"
+            f"{'分时段组合；' if use_dual else ''}"
+            f"每日涨幅过滤会扫日线，可能较慢。是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._last_batch_export_bundle = None
+        self._last_batch_bundle_strategy_id = None
+        self._chained_batch_segments = None
+        if hasattr(self, "sell_chain_run_btn"):
+            self.sell_chain_run_btn.setEnabled(False)
+        self._refresh_backtest_export_button()
+        self.backtest_batch_file_btn.setEnabled(False)
+        self.backtest_run_btn.setEnabled(False)
+        self.backtest_result_text.setPlainText("实盘对齐批量回测运行中…")
+        self.backtest_trades_table.setRowCount(0)
+        QApplication.processEvents()
+
+        pool_stats: List[str] = []
+
+        def _daily_pool(as_of: date):
+            info = build_pool_for_as_of(
+                by_day,
+                as_of,
+                settings,
+                entry_window=entry_w,
+                resolve_selection_dates_fn=_resolve_selection_dates_by_code,
+                strength_by_day=strength_by_day,
+            )
+            n_c = len(info.get("codes") or [])
+            n_g = len(info.get("gain_dropped") or [])
+            n_i = len(info.get("intraday_dropped") or [])
+            pool_stats.append(
+                f"{as_of}:池{n_c} 涨幅剔{n_g}+{n_i} lookback={len(info.get('lookback_days') or [])}"
+            )
+            if len(pool_stats) <= 5 or len(pool_stats) % 20 == 0:
+                print(
+                    f"[滚动建池] {as_of} codes={n_c} "
+                    f"gain_drop={n_g} intraday_drop={n_i} "
+                    f"through={info.get('through_date')}"
+                )
+            return info
+
+        try:
+            try:
+                from strategy_generator_app.backtest import (
+                    run_backtest,
+                    run_backtest_segmented,
+                    compute_metrics,
+                )
+            except ImportError:
+                from backtest import run_backtest, run_backtest_segmented, compute_metrics
+            import pandas as pd
+
+            get_name = _get_stock_name_fn() or (lambda c: "")
+            union_codes: List[str] = []
+            seen_c: set = set()
+            for codes in by_day.values():
+                for c in self._backtest_preflight_union_codes(codes or []):
+                    if c not in seen_c:
+                        seen_c.add(c)
+                        union_codes.append(c)
+
+            bt_progress, bt_dlg = self._backtest_progress_dialog("实盘对齐批量回测")
+            lines = [
+                f"批量回测文件：{path}\n{hint}\n"
+                f"实盘对齐：近 {n_look} 日滚动建池；{start_d}～{end_d}；"
+                f"运行交易日数 {entry_w}；过滤：{filt_txt}"
+                f"{'；分时段' if use_dual else ''}\n",
+                "=" * 60,
+            ]
+            try:
+                if union_codes:
+                    self.backtest_result_text.setPlainText(
+                        f"预热日线：{len(union_codes)} 只（{start_d}～{end_d}），含涨幅过滤与 first_ma_touch…"
+                    )
+                    QApplication.processEvents()
+                    pf_lines = self._run_backtest_preflight_ui(
+                        union_codes,
+                        start_d,
+                        end_d,
+                        status_prefix="实盘对齐预热",
+                        progress=self._scoped_backtest_progress(
+                            bt_progress, 0.0, 12.0, "预热 "
+                        ),
+                        use_tick_level=False,
+                    )
+                    if pf_lines:
+                        lines.append("预热 | " + " | ".join(pf_lines[:2]))
+                        lines.append("=" * 60)
+
+                sp_run = dict(cfg.strategy_params or {})
+                sp_run["_filled_legs"] = []
+                sp_run["selection_date_by_code"] = {}
+                sp_run["entry_window_trading_days"] = entry_w
+
+                bt_sub = self._scoped_backtest_progress(bt_progress, 12.0, 100.0, "回测 ")
+                if use_dual and segments_dual:
+                    segs_run = []
+                    for seg0 in segments_dual:
+                        sp = dict(seg0.get("strategy_params") or {})
+                        sp["_filled_legs"] = []
+                        sp["selection_date_by_code"] = {}
+                        sp["entry_window_trading_days"] = entry_w
+                        segs_run.append({**seg0, "strategy_params": sp})
+                    result = run_backtest_segmented(
+                        segs_run,
+                        union_codes,
+                        start_d,
+                        end_d,
+                        initial_cash=initial_cash,
+                        get_stock_name=get_name,
+                        use_engine_form=False,
+                        use_tick_level=True,
+                        initial_positions=None,
+                        carry_over_pending_intents=carry_over_dual,
+                        progress=bt_sub,
+                        clear_ticks_on_finish=False,
+                        daily_pool_provider=_daily_pool,
+                    )
+                else:
+                    result = run_backtest(
+                        strategy_code=cfg.strategy_code or "",
+                        strategy_params=sp_run,
+                        stock_codes_6=union_codes,
+                        start_date=start_d,
+                        end_date=end_d,
+                        initial_cash=initial_cash,
+                        get_stock_name=get_name,
+                        use_engine_form=False,
+                        use_tick_level=True,
+                        strategy_generation_time=strategy_generation_time,
+                        strategy_run_start_time=strategy_run_start_time,
+                        strategy_run_end_time=strategy_run_end_time,
+                        initial_positions=None,
+                        progress=bt_sub,
+                        clear_ticks_on_finish=False,
+                        daily_pool_provider=_daily_pool,
+                    )
+
+                metrics = compute_metrics(
+                    result.get("equity_curve") or [],
+                    result.get("trades") or [],
+                    initial_cash,
+                    result.get("final_positions"),
+                    result.get("last_prices"),
+                    initial_positions=None,
+                    buy_and_hold_total=result.get("buy_and_hold_total"),
+                )
+                tr = metrics.get("total_return", 0) * 100
+                tc = metrics.get("trade_count", 0)
+                ft = metrics.get("final_total", initial_cash)
+                diag_remark = _summarize_backtest_diagnosis(result, tc)
+                tick_cols = _batch_summary_tick_columns(result)
+                summary_rows = [
+                    {
+                        "选股日": f"滚动N={n_look}",
+                        "回测开始": start_d.strftime("%Y-%m-%d"),
+                        "回测结束": end_d.strftime("%Y-%m-%d"),
+                        "股票数": len(union_codes),
+                        **tick_cols,
+                        "总收益率%": round(tr, 4),
+                        "成交笔数": tc,
+                        "期末总资产": round(ft, 2),
+                        "备注": diag_remark or "实盘对齐连续仿真",
+                    }
+                ]
+                lines.append(
+                    f"连续仿真 | [{start_d}~{end_d}] 文件股票 {len(union_codes)} 只 | "
+                    f"收益 {tr:.2f}% | 成交 {tc} | 期末 {ft:,.0f}"
+                )
+                if pool_stats:
+                    lines.append("建池抽样：")
+                    for s in pool_stats[:8]:
+                        lines.append("  " + s)
+                    if len(pool_stats) > 8:
+                        lines.append(f"  …共 {len(pool_stats)} 个交易日")
+                # 提示：日线已触达跳过腿由策略 _already_touched 完成（不写 filled_legs）
+                lines.append(
+                    "分支跳过：已成交→_filled_legs；日线已触达MA→_already_touched（不落盘）。"
+                )
+
+                all_batch_trades: List[dict] = []
+                for t in result.get("trades") or []:
+                    td = dict(t)
+                    ti = (td.get("trigger_info") or "").strip()
+                    td["trigger_info"] = f"[实盘对齐滚动] {ti}".strip()
+                    td["选股日"] = ""
+                    td["start_date"] = start_d.strftime("%Y-%m-%d")
+                    td["end_date"] = end_d.strftime("%Y-%m-%d")
+                    # 尽量从 params 回填选股日：成交后策略 params 可能已变；用 selection in trade if any
+                    all_batch_trades.append(td)
+
+                # 用成交代码在最终/中途无法取每日 sel；从 by_day 无法一一对应。
+                # 导出时仍可按选股文件回填。
+                payload = self._make_backtest_export_payload(
+                    cfg,
+                    result,
+                    initial_cash,
+                    start_d,
+                    end_d,
+                    0,
+                    bool(use_dual),
+                    cfg_b_dual,
+                )
+                payload["batch_selection_date"] = f"live_align_N{n_look}"
+                payload["batch_mode"] = True
+                payload["batch_live_align"] = True
+                segment_payloads = [payload]
+
+                self._last_batch_selection_file = path
+                stock_summary_rows: List[dict] = []
+                if path and all_batch_trades:
+                    from pathlib import Path
+                    from tools.merge_backtest_trades_by_selection import apply_selection_file_fields
+
+                    stock_summary_rows = _unique_traded_rows_for_selection_copy(all_batch_trades)
+                    apply_selection_file_fields(stock_summary_rows, Path(path))
+                if stock_summary_rows:
+                    lines.append(
+                        f"有交易股票：{len(stock_summary_rows)} 只（保存时从选股文件复制全部列）。"
+                    )
+                sdf = pd.DataFrame(summary_rows)
+                self.backtest_result_text.setPlainText(
+                    "\n".join(lines)
+                    + ("\n\n" + sdf.to_string(index=False) if not sdf.empty else "")
+                )
+                self._fill_backtest_trades_table(all_batch_trades)
+                self._last_batch_export_bundle = {
+                    "version": 2,
+                    "kind": "batch_backtest",
+                    "live_align": True,
+                    "selection_file": path,
+                    "segments": segment_payloads,
+                    "summary_rows": summary_rows,
+                }
+                self._last_batch_bundle_strategy_id = self._get_selected_strategy_id()
+                self._refresh_backtest_export_button()
+                self._notify_batch_backtest_server_chan(
+                    "批量回测完成（实盘对齐）",
+                    f"{cfg.name}\n{start_d}～{end_d}\n收益 {tr:.2f}% 成交 {tc}",
+                )
+            finally:
+                try:
+                    from strategy_generator_app.backtest.data_provider import (
+                        clear_tick_memory_cache as _clr_ticks,
+                    )
+                    _clr_ticks(None)
+                except Exception:
+                    pass
+                try:
+                    bt_progress("完成", 100)
+                    bt_dlg.setValue(100)
+                    bt_dlg.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.backtest_result_text.setPlainText(f"实盘对齐批量回测失败：{e}")
+            self._notify_batch_backtest_server_chan(
+                "批量回测失败（实盘对齐）", f"{cfg.name}\n{e}"
+            )
+            QMessageBox.critical(self, "批量回测失败", str(e))
+        finally:
+            self.backtest_batch_file_btn.setEnabled(True)
+            self.backtest_run_btn.setEnabled(True)
+
+    def _batch_backtest_run_by_selection_day(
+        self,
+        *,
+        path: str,
+        cfg,
+        by_day,
+        strength_by_day,
+        hint: str,
+        from_t1: bool,
+        entry_w: int,
+        sim_hold: int,
+        mode_txt: str,
+        use_dual: bool,
+        segments_dual,
+        cfg_b_dual,
+        carry_over_dual: bool,
+        strategy_generation_time: str,
+        strategy_run_start_time: str,
+        strategy_run_end_time: str,
+    ) -> None:
+        """旧模式：按选股日分档独立回测。"""
+        initial_cash = self.backtest_initial_cash.value()
         self._last_batch_export_bundle = None
         self._last_batch_bundle_strategy_id = None
         self._chained_batch_segments = None
@@ -7964,12 +8571,21 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     )
                     try:
                         day_strength = strength_by_day.get(d) or {}
+                        sel_s = d.strftime("%Y-%m-%d")
+                        # 必须注入选股日，否则策略 _already_touched（日线首次跌破）不会生效，只靠成交腿去重
+                        day_sel_map = {
+                            _normalize_code(c): sel_s
+                            for c in (codes or [])
+                            if _normalize_code(c)
+                        }
                         if use_dual and segments_dual:
                             segs_run = []
                             for seg0 in segments_dual:
                                 sp = dict(seg0.get("strategy_params") or {})
                                 if day_strength:
                                     sp["clip_strength_by_code"] = day_strength
+                                sp["selection_date_by_code"] = dict(day_sel_map)
+                                sp["_filled_legs"] = []
                                 segs_run.append({**seg0, "strategy_params": sp})
                             result = run_backtest_segmented(
                                 segs_run,
@@ -7989,6 +8605,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
                             sp_run = dict(cfg.strategy_params or {})
                             if day_strength:
                                 sp_run["clip_strength_by_code"] = day_strength
+                            sp_run["selection_date_by_code"] = dict(day_sel_map)
+                            sp_run["_filled_legs"] = []
                             result = run_backtest(
                                 strategy_code=cfg.strategy_code or "",
                                 strategy_params=sp_run,
@@ -8043,7 +8661,6 @@ class StrategyGeneratorMainWindow(QMainWindow):
                         lines.append(
                             f"{d} | [{start_d}~{end_d}] {len(codes)}只 | 收益 {tr:.2f}% | 成交 {tc} | 期末 {ft:,.0f}{line_extra}"
                         )
-                        sel_s = d.strftime("%Y-%m-%d")
                         sd_s = start_d.strftime("%Y-%m-%d")
                         ed_s = end_d.strftime("%Y-%m-%d")
                         for t in result.get("trades") or []:
@@ -8123,90 +8740,28 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 )
             sdf = pd.DataFrame(summary_rows)
             self.backtest_result_text.setPlainText(
-                "\n".join(lines) + "\n\n—— 汇总表 ——\n" + sdf.to_string(index=False)
+                "\n".join(lines)
+                + ("\n\n" + sdf.to_string(index=False) if not sdf.empty else "")
             )
             self._fill_backtest_trades_table(all_batch_trades)
             if segment_payloads:
                 self._last_batch_export_bundle = {
                     "version": 2,
                     "kind": "batch_backtest",
-                    "exported_at": datetime.now().isoformat(timespec="seconds"),
-                    "source_strategy_id": cfg.id,
-                    "source_strategy_name": cfg.name,
                     "selection_file": path,
-                    "batch_rule": (
-                        f"{'T+1' if from_t1 else 'T当日'}，仿真{sim_hold}日"
-                        f"（运行交易日数{entry_w}）"
-                        + (f"；分时段+{cfg_b_dual.name}" if use_dual and cfg_b_dual else "")
-                    ),
                     "segments": segment_payloads,
+                    "summary_rows": summary_rows,
                 }
-                self._last_batch_bundle_strategy_id = cfg.id
-                self._backtest_export_by_strategy[cfg.id] = segment_payloads[-1]
-            else:
-                self._last_batch_export_bundle = None
-                self._last_batch_bundle_strategy_id = None
+                self._last_batch_bundle_strategy_id = self._get_selected_strategy_id()
             self._refresh_backtest_export_button()
-            n_ok = sum(1 for r in summary_rows if r.get("总收益率%") is not None)
-            n_fail = len(summary_rows) - n_ok
-            sct_body = (
-                f"策略：{cfg.name}\n"
-                f"规则：{mode_txt}\n"
-                f"完成：{len(summary_rows)} 日（成功 {n_ok} / 失败 {n_fail}）\n"
-                f"成交明细：{len(all_batch_trades)} 笔"
-            )
-            if stock_summary_rows:
-                sct_body += f"\n有交易股票：{len(stock_summary_rows)} 只"
-            self._notify_batch_backtest_server_chan("批量回测完成", sct_body)
-            if summary_rows:
-                save_ask = QMessageBox.question(
-                    self,
-                    "批量回测完成",
-                    f"已完成 {len(summary_rows)} 日回测"
-                    + (
-                        f"，有交易股票 {len(stock_summary_rows)} 只"
-                        if stock_summary_rows
-                        else ""
-                    )
-                    + "，是否将汇总表保存为 Excel？",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes,
-                )
-                if save_ask == QMessageBox.Yes:
-                    default_name = os.path.join(
-                        os.path.dirname(path),
-                        f"批量回测汇总_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    )
-                    save_path, _ = QFileDialog.getSaveFileName(
-                        self,
-                        "保存批量回测汇总表",
-                        default_name,
-                        "Excel (*.xlsx)",
-                    )
-                    if save_path:
-                        try:
-                            export_rows = _batch_excel_summary_rows(
-                                summary_rows, stock_summary_rows
-                            )
-                            with pd.ExcelWriter(save_path, engine="openpyxl") as w:
-                                pd.DataFrame(export_rows).to_excel(
-                                    w, index=False, sheet_name="汇总"
-                                )
-                            QMessageBox.information(
-                                self,
-                                "已保存",
-                                f"汇总表：\n{save_path}\n共 {len(export_rows)} 行",
-                            )
-                        except Exception as ex:
-                            QMessageBox.warning(self, "保存失败", str(ex))
-        except Exception as e:
             self._notify_batch_backtest_server_chan(
-                "批量回测失败",
-                f"策略：{getattr(cfg, 'name', '')}\n{e}",
+                "批量回测完成",
+                f"{cfg.name}\n{hint}\n档数 {len(segment_payloads)}",
             )
-            QMessageBox.critical(self, "批量回测错误", str(e))
+        except Exception as e:
             self.backtest_result_text.setPlainText(f"批量回测失败：{e}")
-            self._fill_backtest_trades_table([])
+            self._notify_batch_backtest_server_chan("批量回测失败", str(e))
+            QMessageBox.critical(self, "批量回测失败", str(e))
         finally:
             self.backtest_batch_file_btn.setEnabled(True)
             self.backtest_run_btn.setEnabled(True)

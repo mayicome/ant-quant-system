@@ -77,6 +77,10 @@ append_stock_event = _rio.append_stock_event
 collect_subscribe_codes = _rio.collect_subscribe_codes
 default_paths = _rio.default_paths
 empty_results = _rio.empty_results
+ensure_results_trade_date = getattr(_rio, "ensure_results_trade_date", None)
+if ensure_results_trade_date is None:
+    def ensure_results_trade_date(results, trade_date):  # type: ignore
+        return False
 extract_tick_price = _rio.extract_tick_price
 load_json = _rio.load_json
 load_rules_armed = _rio.load_rules_armed
@@ -2027,6 +2031,12 @@ def init(ContextInfo):
     _RESULTS.setdefault("stocks", {})
     _RESULTS.setdefault("orders", [])
     try:
+        if ensure_results_trade_date(_RESULTS, str(rules.get("trade_date") or "")):
+            print("[交易核心] 换日清空盘中OHLC trade_date=%s" % rules.get("trade_date"))
+            _flush_results_to_disk(force=True)
+    except Exception:
+        pass
+    try:
         _RUNNER.hydrate_elastic_states(_RESULTS.get("elastic_states") or {})
         if hasattr(_RUNNER, "hydrate_cage_states"):
             _RUNNER.hydrate_cage_states(_RESULTS.get("cage_states") or {})
@@ -2340,7 +2350,15 @@ def reload_rules_if_changed(ContextInfo, *, allow_resubscribe: bool = True):
         tasks_changed, codes_changed = _RUNNER.reload_rules(rules)
     _RULES_SIG = sig
     if _RESULTS is not None:
-        _RESULTS["trade_date"] = str(rules.get("trade_date") or _RESULTS.get("trade_date") or "")
+        td = str(rules.get("trade_date") or _RESULTS.get("trade_date") or "")
+        try:
+            if ensure_results_trade_date(_RESULTS, td):
+                print("[交易核心] 规则重载换日清空盘中OHLC trade_date=%s" % td)
+                _flush_results_to_disk(force=True)
+            else:
+                _RESULTS["trade_date"] = td
+        except Exception:
+            _RESULTS["trade_date"] = td
     subscribe_codes = collect_subscribe_codes(
         rules.get("tasks") or [],
         rules.get("watch_codes"),

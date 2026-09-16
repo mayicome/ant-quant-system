@@ -184,6 +184,30 @@ def _norm_code6_simple(c: str) -> str:
     return s
 
 
+def _filter_buy_intents_outside_rolling_pool(
+    intents: List[Dict[str, Any]],
+    pool_set: Optional[Set[str]],
+) -> List[Dict[str, Any]]:
+    """滚动建池模式下：不在今日备选池内的标的禁止新开买入（卖出意图保留）。
+
+    持仓代码仍会进入 codes_union；若因涨幅过滤移出池，不能再挂剩余买入腿。
+    """
+    if pool_set is None:
+        return intents or []
+    out: List[Dict[str, Any]] = []
+    for it in intents or []:
+        if not isinstance(it, dict):
+            continue
+        rt = str(it.get("rule_type") or "").strip().lower()
+        if "sell" in rt or rt in ("scheduled_clear",):
+            out.append(it)
+            continue
+        c6 = _norm_code6_simple(it.get("stock_code") or "")
+        if c6 and c6 in pool_set:
+            out.append(it)
+    return out
+
+
 def _tick_entry_valid(df: Any) -> bool:
     """tick 缓存条目是否为非空有效 DataFrame。"""
     if df is None:
@@ -979,6 +1003,7 @@ def run_backtest_segmented(
     clear_ticks_on_finish: bool = True,
     scheduled_buy_fills: Optional[List[Dict[str, Any]]] = None,
     first_buy_date_hints: Optional[Dict[str, date]] = None,
+    daily_pool_provider: Optional[Callable[[date], Optional[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """
     每个交易日 T：
@@ -989,6 +1014,10 @@ def run_backtest_segmented(
 
     scheduled_buy_fills：接续卖出时按买入成交明细按日注入仓位（只加量、不改现金；T+1 不可当日卖）。
     first_buy_date_hints：注入时若尚无首次买入日，优先用上轮导出的首次买入日。
+
+    daily_pool_provider(day) -> {"codes": [...], "selection_date_by_code": {...}, ...} | None
+      若提供：每个交易日开盘前替换股票池，并写入各段 strategy_params.selection_date_by_code
+      （保留跨日 _filled_legs）。用于近 N 日滚动建池与实盘对齐。
 
     segments 每项建议包含：
       - strategy_code: str
@@ -1171,6 +1200,7 @@ def run_backtest_segmented(
     lu_deferred_codes: Set[str] = set()
     effective_end_box: List[date] = [end_date]
     lu_extension_once_box: List[bool] = [False]
+    rolling_pool_set_box: List[Optional[Set[str]]] = [None]
 
     current = start_date
     days_with_data = 0
@@ -1188,6 +1218,50 @@ def run_backtest_segmented(
         if prev_trade_day is not None:
             settle_positions_t1(positions)
         prev_trade_day = current
+
+        # 近 N 日滚动建池：替换当日股票池与 selection_date_by_code（保留 _filled_legs）
+        if daily_pool_provider is not None:
+            try:
+                pool_info = daily_pool_provider(current)
+            except Exception as _pool_ex:
+                failure_reasons.append(
+                    f"[{current}] 滚动建池失败: {type(_pool_ex).__name__}: {_pool_ex}"
+                )
+                pool_info = None
+            if isinstance(pool_info, dict):
+                _codes = [
+                    _norm_code6_simple(c)
+                    for c in (pool_info.get("codes") or [])
+                ]
+                stock_codes_6 = [c for c in _codes if c]
+                _pool_set = set(stock_codes_6)
+                _sel = pool_info.get("selection_date_by_code") or {}
+                if isinstance(_sel, dict):
+                    _sel_norm = {
+                        _norm_code6_simple(k): str(v or "").strip()[:10]
+                        for k, v in _sel.items()
+                        if _norm_code6_simple(k) and str(v or "").strip()[:10]
+                    }
+                    for _seg in segments:
+                        _sp = dict(_seg.get("strategy_params") or {})
+                        # 合并选股日：今日池覆盖；被涨幅过滤移出池但仍有持仓/未完成腿的，保留旧选股日
+                        # （否则 sel 丢失 → _already_touched 失效 → 仍会挂剩余买入腿）
+                        _prev = dict(_sp.get("selection_date_by_code") or {})
+                        _merged = dict(_prev)
+                        _merged.update(_sel_norm)
+                        _sp["selection_date_by_code"] = _merged
+                        _sp["rolling_pool_codes"] = sorted(_pool_set)
+                        _str = pool_info.get("strength_by_code")
+                        if isinstance(_str, dict) and _str:
+                            _prev_str = dict(_sp.get("clip_strength_by_code") or {})
+                            _prev_str.update(_str)
+                            _sp["clip_strength_by_code"] = _prev_str
+                        _seg["strategy_params"] = _sp
+                # 供当日意图过滤：移出池的标的不再新开买入（仍可在 codes_union 里因持仓被策略看到）
+                rolling_pool_set_box[0] = _pool_set
+            else:
+                rolling_pool_set_box[0] = None
+
         # 接续卖出：按上轮买入成交注入当日（及积压）仓位；策略只见 available
         # 同时写入买入流水，position_after 为扣减已卖后的真实持仓
         if fills_by_date:
@@ -1320,6 +1394,9 @@ def run_backtest_segmented(
                 intents1 = _filter_sell_intents_before_first_buy_t1(
                     intents1, first_buy_date_by_code, fill_day
                 )
+                intents1 = _filter_buy_intents_outside_rolling_pool(
+                    intents1, rolling_pool_set_box[0]
+                )
                 if intents1:
                     generated_intents_log.append(
                         {
@@ -1396,6 +1473,9 @@ def run_backtest_segmented(
                     intents2 = _filter_hold_day_force_intents_for_sim_day(intents2, params2)
                     intents2 = _filter_sell_intents_before_first_buy_t1(
                         intents2, first_buy_date_by_code, fill_day
+                    )
+                    intents2 = _filter_buy_intents_outside_rolling_pool(
+                        intents2, rolling_pool_set_box[0]
                     )
                     if intents2:
                         generated_intents_log.append(
@@ -1612,6 +1692,10 @@ def run_backtest_segmented(
                             f"[{fill_day}] [{seg_name}] 策略 run() 失败: {type(e).__name__}: {e}"
                         )
                         intents = []
+
+            intents = _filter_buy_intents_outside_rolling_pool(
+                intents, rolling_pool_set_box[0]
+            )
 
             # tick 级回测下：时段2是否继承上一段未成交 intents
             effective_intents: List[Dict[str, Any]] = intents
@@ -1873,6 +1957,7 @@ def run_backtest(
     clear_ticks_on_finish: bool = True,
     scheduled_buy_fills: Optional[List[Dict[str, Any]]] = None,
     first_buy_date_hints: Optional[Dict[str, date]] = None,
+    daily_pool_provider: Optional[Callable[[date], Optional[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """
     单策略回测（兼容旧接口）：内部转为单元素 run_backtest_segmented。
@@ -1900,6 +1985,7 @@ def run_backtest(
         clear_ticks_on_finish=clear_ticks_on_finish,
         scheduled_buy_fills=scheduled_buy_fills,
         first_buy_date_hints=first_buy_date_hints,
+        daily_pool_provider=daily_pool_provider,
     )
     # 与历史 UI 期望的单段文案一致
     if out.get("equity_curve"):

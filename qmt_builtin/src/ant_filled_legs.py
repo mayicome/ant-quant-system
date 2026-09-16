@@ -71,8 +71,6 @@ def infer_leg_id(name: Any, leg_key: Any = None) -> str:
     for leg in _KNOWN_LEGS:
         if leg in su or leg in s:
             return leg
-    if "破MA20" in s or "破 MA20" in s:
-        return "破MA20"
     if "无条件清仓" in s or "末日" in s or "强制清仓" in s:
         return "末日清仓"
     return ""
@@ -156,7 +154,7 @@ def _save_compat_sell(legs: Iterable[str]) -> None:
         if not s or ":" not in s:
             continue
         lid = s.split(":", 1)[1].upper()
-        if any(x in lid for x in ("OPEN50", "LU10", "破MA20", "末日")):
+        if any(x in lid for x in ("OPEN50", "LU10", "末日")):
             sell_legs.append(s)
     path = _compat_sell_path()
     parent = os.path.dirname(path)

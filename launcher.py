@@ -176,6 +176,16 @@ class AntLauncherWindow(QMainWindow):
                 "order": 63,
                 "enabled": True,
             },
+            {
+                "id": "post_market_batch_manual",
+                "name": "盘后批跑",
+                "script": "run_all_if_trading_day_gui.py",
+                "category": "tool",
+                "description": "手动盘后批跑（有 data/qmt_live_only.flag 时自动仅实盘步骤；否则全量。"
+                "目标日按15:00规则，先看齐全再重跑）",
+                "order": 70,
+                "enabled": True,
+            },
         ]
         if not os.path.isfile(cfg_path):
             return sorted([a for a in default_apps if a.get("enabled", True)], key=lambda x: x.get("order", 0))

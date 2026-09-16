@@ -2,16 +2,14 @@
 """把马总选股逻辑1 结果写入买入策略股票池。
 
 默认目标：买：马总逻辑1-涨停后跌破MA5/10/20各1/3
-也可用 --name 写入单点版：买：马总逻辑1-涨停后跌破MA5/10/20各1/3-单点
-
-- stock_codes = 文件内代码并集
-- selection_date_by_code[code] = 该票最早选股日（多日出现取最早）
-- 清空 _filled_legs
+也可用 --name 写入：
+  买：马总逻辑1-涨停后跌破MA10/20各1/2
+  买：马总逻辑1-涨停后跌破MA10/20各1/2-单点
 
 用法：
   python tools/load_ma_zong1_pool_into_strategy.py
   python tools/load_ma_zong1_pool_into_strategy.py path/to/选股结果_马总选股逻辑1_....xls
-  python tools/load_ma_zong1_pool_into_strategy.py --name "买：马总逻辑1-涨停后跌破MA5/10/20各1/3-单点"
+  python tools/load_ma_zong1_pool_into_strategy.py --name "买：马总逻辑1-涨停后跌破MA10/20各1/2"
 """
 from __future__ import annotations
 
@@ -51,7 +49,8 @@ def _find_strategy(strategy_name: str) -> Path:
         if str(raw.get("name") or "") == strategy_name:
             return p
     raise SystemExit(
-        "未找到策略：%s（弹性版: install_ma_zong1_ma_legs_strategy.py；"
+        "未找到策略：%s（弹性1/3: install_ma_zong1_ma_legs_strategy.py；"
+        "弹性MA10/20各1/2: install_ma_zong1_ma10_20_half_strategy.py；"
         "单点版: install_ma_zong1_ma_legs_single_buy_strategy.py；"
         "独立腿: install_ma_zong1_single_ma_leg_strategies.py → 买：跌MA5/10/20）"
         % strategy_name

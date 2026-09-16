@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from datetime import date, timedelta
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -31,12 +31,18 @@ _DATE_COMPACT = re.compile(r"(20\d{2})(\d{2})(\d{2})")
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "file_prefix": "选股结果_马总选股逻辑-盘后",
-    "recent_trading_days": 5,
+    # 最近起始/截止：例如 10 与 5 → 取「倒数第10个～倒数第5个」交易日（含两端）
+    "recent_start_trading_days": 5,
+    "recent_end_trading_days": 1,
     "only_meet_condition": True,
     # 剔除：选股日后最高价相对选股日收盘涨幅超限
     "filter_post_select_max_gain": False,
     "main_board_max_gain_pct": 5.0,
     "other_board_max_gain_pct": 10.0,
+    # 剔除：选股日后单日最大涨幅超限（相对昨收盘）
+    "filter_post_select_max_intraday_gain": False,
+    "main_board_max_intraday_gain_pct": 5.0,
+    "other_board_max_intraday_gain_pct": 10.0,
 }
 
 _EXTS = (".xls", ".xlsx", ".csv")
@@ -50,6 +56,48 @@ def _clamp_gain_pct(value: Any, default: float) -> float:
     return max(0.0, min(100.0, v))
 
 
+def _clamp_lookback_n(value: Any, default: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = int(default)
+    return max(1, min(120, n))
+
+
+def normalize_lookback_bounds(settings: Optional[Dict[str, Any]] = None) -> Tuple[int, int]:
+    """解析最近起始/截止交易日数量。
+
+    - ``recent_start_trading_days``：窗口远端（更大=更早），如 10
+    - ``recent_end_trading_days``：窗口近端（更小=更新），如 5 → 取倒数第10～第5个交易日
+    - 兼容旧字段 ``recent_trading_days=N`` → 起始 N、截止 1
+    - 若起始 < 截止则自动对调
+    """
+    raw = settings if isinstance(settings, dict) else {}
+    # 仅当调用方未显式给新字段时，才用旧 recent_trading_days 迁移
+    has_new = (
+        "recent_start_trading_days" in raw or "recent_end_trading_days" in raw
+    )
+    if has_new:
+        start_raw = raw.get("recent_start_trading_days")
+        end_raw = raw.get("recent_end_trading_days")
+    elif "recent_trading_days" in raw:
+        start_raw = raw.get("recent_trading_days")
+        end_raw = 1
+    else:
+        start_raw = DEFAULT_SETTINGS["recent_start_trading_days"]
+        end_raw = DEFAULT_SETTINGS["recent_end_trading_days"]
+    start_n = _clamp_lookback_n(
+        start_raw, int(DEFAULT_SETTINGS["recent_start_trading_days"])
+    )
+    end_n = _clamp_lookback_n(
+        end_raw if end_raw is not None else 1,
+        int(DEFAULT_SETTINGS["recent_end_trading_days"]),
+    )
+    if start_n < end_n:
+        start_n, end_n = end_n, start_n
+    return start_n, end_n
+
+
 def load_batch_import_settings() -> Dict[str, Any]:
     out = dict(DEFAULT_SETTINGS)
     if not os.path.isfile(SETTINGS_PATH):
@@ -60,11 +108,27 @@ def load_batch_import_settings() -> Dict[str, Any]:
         if isinstance(data, dict):
             if "file_prefix" in data:
                 out["file_prefix"] = str(data.get("file_prefix") or "").strip()
-            try:
-                n = int(data.get("recent_trading_days") or out["recent_trading_days"])
-                out["recent_trading_days"] = max(1, min(120, n))
-            except (TypeError, ValueError):
-                pass
+            # 新字段优先；否则从旧 recent_trading_days 迁移
+            if "recent_start_trading_days" in data or "recent_end_trading_days" in data:
+                out["recent_start_trading_days"] = _clamp_lookback_n(
+                    data.get("recent_start_trading_days"),
+                    int(DEFAULT_SETTINGS["recent_start_trading_days"]),
+                )
+                out["recent_end_trading_days"] = _clamp_lookback_n(
+                    data.get("recent_end_trading_days"),
+                    int(DEFAULT_SETTINGS["recent_end_trading_days"]),
+                )
+            elif "recent_trading_days" in data:
+                out["recent_start_trading_days"] = _clamp_lookback_n(
+                    data.get("recent_trading_days"),
+                    int(DEFAULT_SETTINGS["recent_start_trading_days"]),
+                )
+                out["recent_end_trading_days"] = 1
+            start_n, end_n = normalize_lookback_bounds(out)
+            out["recent_start_trading_days"] = start_n
+            out["recent_end_trading_days"] = end_n
+            # 兼容旧读取方
+            out["recent_trading_days"] = start_n
             out["only_meet_condition"] = bool(data.get("only_meet_condition", True))
             out["filter_post_select_max_gain"] = bool(
                 data.get("filter_post_select_max_gain", False)
@@ -77,17 +141,28 @@ def load_batch_import_settings() -> Dict[str, Any]:
                 data.get("other_board_max_gain_pct"),
                 float(DEFAULT_SETTINGS["other_board_max_gain_pct"]),
             )
+            out["filter_post_select_max_intraday_gain"] = bool(
+                data.get("filter_post_select_max_intraday_gain", False)
+            )
+            out["main_board_max_intraday_gain_pct"] = _clamp_gain_pct(
+                data.get("main_board_max_intraday_gain_pct"),
+                float(DEFAULT_SETTINGS["main_board_max_intraday_gain_pct"]),
+            )
+            out["other_board_max_intraday_gain_pct"] = _clamp_gain_pct(
+                data.get("other_board_max_intraday_gain_pct"),
+                float(DEFAULT_SETTINGS["other_board_max_intraday_gain_pct"]),
+            )
     except Exception:
         pass
     return out
 
 
 def save_batch_import_settings(settings: Dict[str, Any]) -> None:
+    start_n, end_n = normalize_lookback_bounds(settings)
     payload = {
         "file_prefix": str(settings.get("file_prefix") or "").strip(),
-        "recent_trading_days": max(
-            1, min(120, int(settings.get("recent_trading_days") or 5))
-        ),
+        "recent_start_trading_days": start_n,
+        "recent_end_trading_days": end_n,
         "only_meet_condition": bool(settings.get("only_meet_condition", True)),
         "filter_post_select_max_gain": bool(
             settings.get("filter_post_select_max_gain", False)
@@ -99,6 +174,17 @@ def save_batch_import_settings(settings: Dict[str, Any]) -> None:
         "other_board_max_gain_pct": _clamp_gain_pct(
             settings.get("other_board_max_gain_pct"),
             float(DEFAULT_SETTINGS["other_board_max_gain_pct"]),
+        ),
+        "filter_post_select_max_intraday_gain": bool(
+            settings.get("filter_post_select_max_intraday_gain", False)
+        ),
+        "main_board_max_intraday_gain_pct": _clamp_gain_pct(
+            settings.get("main_board_max_intraday_gain_pct"),
+            float(DEFAULT_SETTINGS["main_board_max_intraday_gain_pct"]),
+        ),
+        "other_board_max_intraday_gain_pct": _clamp_gain_pct(
+            settings.get("other_board_max_intraday_gain_pct"),
+            float(DEFAULT_SETTINGS["other_board_max_intraday_gain_pct"]),
         ),
     }
     os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
@@ -170,7 +256,7 @@ def find_selection_files_by_prefix(
     prefix: str,
     trading_days: Sequence[date],
 ) -> List[str]:
-    """在 history_data 与存档中递归查找：文件名以前缀开头，且日期匹配最近交易日。
+    """在 history_data 与存档中递归查找：文件名以前缀开头，且日期匹配给定交易日窗口。
 
     同名文件现行目录优先于存档；同路径只保留一次。
     """
@@ -343,19 +429,68 @@ def max_gain_threshold_pct_for_code(
     return other_thr
 
 
-def filter_by_day_post_select_max_gain(
+def post_select_max_intraday_gain_pct(
+    stock_code: Any,
+    selection_date: Any,
+    *,
+    through_date: Optional[date] = None,
+) -> Optional[float]:
+    """选股日后各交易日「最高价相对昨收盘」涨幅的最大值（百分比）。
+
+    昨收取日线上一交易日收盘价。无日线 / 选股日后无有效昨收+最高价时返回 None。
+    """
+    c6 = _norm_code6(stock_code)
+    sel = _as_date(selection_date)
+    if not c6 or sel is None:
+        return None
+    through = _as_date(through_date) or date.today()
+    if through < sel:
+        return None
+
+    df = _load_daily_for_gain(c6, through)
+    if df is None or getattr(df, "empty", True):
+        return None
+
+    try:
+        import pandas as pd
+
+        dates = df["date"]
+        closes = pd.to_numeric(df["close"], errors="coerce")
+        highs = pd.to_numeric(df["high"], errors="coerce")
+        prev_closes = closes.shift(1)
+        after = (
+            (dates > sel)
+            & prev_closes.notna()
+            & highs.notna()
+            & (prev_closes > 0)
+            & (highs > 0)
+        )
+        if not after.any():
+            return None
+        day_gain = (highs.loc[after] / prev_closes.loc[after] - 1.0) * 100.0
+        mx = float(day_gain.max())
+        if mx != mx:  # NaN
+            return None
+        return mx
+    except Exception:
+        return None
+
+
+def _filter_by_day_gain_metric(
     by_day: Dict[date, List[str]],
     *,
+    gain_fn,
     main_board_pct: float = 5.0,
     other_board_pct: float = 10.0,
     through_date: Optional[date] = None,
     strength_by_day: Optional[Dict[date, Dict[str, Dict[str, object]]]] = None,
+    drop_gain_key: str = "max_gain_pct",
 ) -> Tuple[
     Dict[date, List[str]],
     Optional[Dict[date, Dict[str, Dict[str, object]]]],
     List[Dict[str, Any]],
 ]:
-    """按选股日后最大涨幅过滤 by_day（及可选 strength）。
+    """按选股日后某涨幅指标过滤 by_day（及可选 strength）。
 
     返回 (过滤后 by_day, 过滤后 strength_by_day, 被剔除明细)。
     无法判定（缺日线等）的股票保留。
@@ -385,13 +520,13 @@ def filter_by_day_post_select_max_gain(
             thr = max_gain_threshold_pct_for_code(
                 c6, main_board_pct=main_board_pct, other_board_pct=other_board_pct
             )
-            gain = post_select_max_gain_pct(c6, sel, through_date=through)
+            gain = gain_fn(c6, sel, through_date=through)
             if gain is not None and gain > thr:
                 dropped.append(
                     {
                         "code": c6,
                         "selection_date": sel.isoformat(),
-                        "max_gain_pct": round(gain, 4),
+                        drop_gain_key: round(gain, 4),
                         "threshold_pct": thr,
                     }
                 )
@@ -406,16 +541,245 @@ def filter_by_day_post_select_max_gain(
     return out_by, out_strength, dropped
 
 
+def filter_by_day_post_select_max_gain(
+    by_day: Dict[date, List[str]],
+    *,
+    main_board_pct: float = 5.0,
+    other_board_pct: float = 10.0,
+    through_date: Optional[date] = None,
+    strength_by_day: Optional[Dict[date, Dict[str, Dict[str, object]]]] = None,
+) -> Tuple[
+    Dict[date, List[str]],
+    Optional[Dict[date, Dict[str, Dict[str, object]]]],
+    List[Dict[str, Any]],
+]:
+    """按选股日后最大涨幅（相对选股日收盘）过滤 by_day。"""
+    return _filter_by_day_gain_metric(
+        by_day,
+        gain_fn=post_select_max_gain_pct,
+        main_board_pct=main_board_pct,
+        other_board_pct=other_board_pct,
+        through_date=through_date,
+        strength_by_day=strength_by_day,
+        drop_gain_key="max_gain_pct",
+    )
+
+
+def filter_by_day_post_select_max_intraday_gain(
+    by_day: Dict[date, List[str]],
+    *,
+    main_board_pct: float = 5.0,
+    other_board_pct: float = 10.0,
+    through_date: Optional[date] = None,
+    strength_by_day: Optional[Dict[date, Dict[str, Dict[str, object]]]] = None,
+) -> Tuple[
+    Dict[date, List[str]],
+    Optional[Dict[date, Dict[str, Dict[str, object]]]],
+    List[Dict[str, Any]],
+]:
+    """按选股日后单日最大涨幅（相对昨收盘）过滤 by_day。"""
+    return _filter_by_day_gain_metric(
+        by_day,
+        gain_fn=post_select_max_intraday_gain_pct,
+        main_board_pct=main_board_pct,
+        other_board_pct=other_board_pct,
+        through_date=through_date,
+        strength_by_day=strength_by_day,
+        drop_gain_key="max_intraday_gain_pct",
+    )
+
+
+def lookback_selection_days(as_of: date, n: int) -> List[date]:
+    """盘前口径：近 N 个已落地选股日（等价于起始=N、截止=1）。
+
+    与实盘上午「批量导入」一致：``get_trading_dates(N)`` 在 15:00 前以昨日为终点，
+    故此处用 ``as_of - 1 自然日`` 作为终点，避免把「当日盘后选股」提前进早盘池。
+    """
+    return lookback_selection_days_range(as_of, n, 1)
+
+
+def lookback_selection_days_range(
+    as_of: date,
+    start_n: int,
+    end_n: int = 1,
+) -> List[date]:
+    """盘前口径：最近起始～最近截止交易日窗口（含两端）。
+
+    例如 start_n=10、end_n=5：取倒数第10个交易日到倒数第5个交易日。
+    end_n=1 时退化为近 start_n 个交易日（含最近一日）。
+    """
+    try:
+        from utils.trading_day import get_trading_dates
+    except Exception:
+        from trading_day import get_trading_dates  # type: ignore
+
+    start_n, end_n = normalize_lookback_bounds(
+        {
+            "recent_start_trading_days": start_n,
+            "recent_end_trading_days": end_n,
+        }
+    )
+    as_of = _as_date(as_of) or date.today()
+    days = list(get_trading_dates(start_n, as_of_date=as_of - timedelta(days=1)) or [])
+    if not days:
+        return []
+    # days 升序：index0=最远，index-1=最近；取 [0 .. start_n-end_n] 含端
+    hi = start_n - end_n  # inclusive
+    return list(days[: hi + 1])
+
+
+def through_date_for_morning_as_of(as_of: date) -> date:
+    """涨幅剔除截止日：as_of 盘前只用上一交易日完整日线（避免回测用当日高点前视）。"""
+    days = lookback_selection_days(as_of, 1)
+    if days:
+        return days[-1]
+    as_of = _as_date(as_of) or date.today()
+    return as_of - timedelta(days=1)
+
+
+def slice_by_day_lookback(
+    by_day: Dict[date, List[str]],
+    lookback_days: Sequence[date],
+) -> Dict[date, List[str]]:
+    """只保留 lookback 选股日上的代码行。"""
+    want = { _as_date(d) for d in (lookback_days or []) }
+    want.discard(None)
+    out: Dict[date, List[str]] = {}
+    for d, codes in (by_day or {}).items():
+        dd = _as_date(d)
+        if dd is None or dd not in want:
+            continue
+        kept = [_norm_code6(c) for c in (codes or [])]
+        kept = [c for c in kept if c]
+        if kept:
+            out[dd] = kept
+    return out
+
+
+def build_pool_for_as_of(
+    by_day: Dict[date, List[str]],
+    as_of: date,
+    settings: Optional[Dict[str, Any]] = None,
+    *,
+    entry_window: int = 10,
+    resolve_selection_dates_fn: Optional[
+        Callable[..., Dict[str, str]]
+    ] = None,
+    strength_by_day: Optional[Dict[date, Dict[str, Dict[str, object]]]] = None,
+) -> Dict[str, Any]:
+    """按实盘上午导入口径，为某个 as_of 交易日滚动建池。
+
+    步骤：近「起始～截止」日选股并集 →（可选）两项涨幅剔除 through=上一交易日 → 解析选股日。
+    ``by_day`` 应已按 only_meet 解析好。
+
+    resolve_selection_dates_fn(by_day, entry_window=..., as_of=...) -> {code6: yyyy-mm-dd}
+    若未传，则退化为每码取 lookback 内最早选股日。
+    """
+    cfg = dict(DEFAULT_SETTINGS)
+    if isinstance(settings, dict):
+        cfg.update(settings)
+    as_of = _as_date(as_of) or date.today()
+    start_n, end_n = normalize_lookback_bounds(cfg)
+    try:
+        ew = max(1, int(entry_window or 1))
+    except (TypeError, ValueError):
+        ew = 1
+
+    lookback = lookback_selection_days_range(as_of, start_n, end_n)
+    through = through_date_for_morning_as_of(as_of)
+    sliced = slice_by_day_lookback(by_day, lookback)
+    strength_sliced: Optional[Dict[date, Dict[str, Dict[str, object]]]] = None
+    if strength_by_day is not None:
+        strength_sliced = {
+            d: dict(strength_by_day.get(d) or {})
+            for d in sliced.keys()
+            if strength_by_day.get(d)
+        }
+
+    gain_dropped: List[Dict[str, Any]] = []
+    intraday_dropped: List[Dict[str, Any]] = []
+    filtered = sliced
+    strength_f = strength_sliced
+
+    if bool(cfg.get("filter_post_select_max_gain", False)) and filtered:
+        filtered, strength_f, gain_dropped = filter_by_day_post_select_max_gain(
+            filtered,
+            main_board_pct=float(cfg.get("main_board_max_gain_pct") or 5.0),
+            other_board_pct=float(cfg.get("other_board_max_gain_pct") or 10.0),
+            through_date=through,
+            strength_by_day=strength_f,
+        )
+    if bool(cfg.get("filter_post_select_max_intraday_gain", False)) and filtered:
+        filtered, strength_f, intraday_dropped = filter_by_day_post_select_max_intraday_gain(
+            filtered,
+            main_board_pct=float(cfg.get("main_board_max_intraday_gain_pct") or 5.0),
+            other_board_pct=float(cfg.get("other_board_max_intraday_gain_pct") or 10.0),
+            through_date=through,
+            strength_by_day=strength_f,
+        )
+
+    if resolve_selection_dates_fn is not None:
+        sel_map = resolve_selection_dates_fn(
+            filtered, entry_window=ew, as_of=as_of
+        ) or {}
+    else:
+        # 无 resolve 时：每码取 lookback 内最早选股日
+        sel_map = {}
+        for d in sorted(filtered.keys()):
+            ds = d.isoformat()
+            for c6 in filtered.get(d) or []:
+                c6 = _norm_code6(c6)
+                if c6 and c6 not in sel_map:
+                    sel_map[c6] = ds
+
+    codes: List[str] = []
+    seen: Set[str] = set()
+    for c6 in sel_map.keys():
+        c6 = _norm_code6(c6)
+        if c6 and c6 not in seen:
+            seen.add(c6)
+            codes.append(c6)
+
+    strength_by_code: Dict[str, Dict[str, object]] = {}
+    if strength_f:
+        for day_map in strength_f.values():
+            for c6, meta in (day_map or {}).items():
+                c6 = _norm_code6(c6)
+                if c6 and isinstance(meta, dict):
+                    strength_by_code[c6] = meta
+
+    return {
+        "codes": codes,
+        "selection_date_by_code": {
+            _norm_code6(k): str(v)[:10]
+            for k, v in (sel_map or {}).items()
+            if _norm_code6(k) and str(v or "").strip()[:10]
+        },
+        "by_day_filtered": filtered,
+        "lookback_days": list(lookback),
+        "through_date": through,
+        "gain_dropped": gain_dropped,
+        "intraday_dropped": intraday_dropped,
+        "strength_by_code": strength_by_code,
+        "as_of": as_of,
+        "recent_start_trading_days": start_n,
+        "recent_end_trading_days": end_n,
+        # 兼容旧字段：取窗口远端
+        "recent_trading_days": start_n,
+    }
+
+
 class BatchImportPoolSettingsDialog(QDialog):
-    """设置：选股文件前缀、最近交易日数量、是否只导入满足条件、最大涨幅剔除。"""
+    """设置：选股文件前缀、最近起始/截止交易日、是否只导入满足条件、涨幅剔除。"""
 
     def __init__(self, parent=None, settings: Optional[Dict[str, Any]] = None):
         super().__init__(parent)
         self.setWindowTitle("批量导入选股文件 — 设置")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         cur = dict(DEFAULT_SETTINGS)
         if isinstance(settings, dict):
             cur.update(settings)
+        start_n, end_n = normalize_lookback_bounds(cur)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -428,14 +792,23 @@ class BatchImportPoolSettingsDialog(QDialog):
         )
         form.addRow("选股文件前缀：", self.prefix_edit)
 
-        self.days_spin = QSpinBox()
-        self.days_spin.setRange(1, 120)
-        try:
-            self.days_spin.setValue(int(cur.get("recent_trading_days") or 5))
-        except (TypeError, ValueError):
-            self.days_spin.setValue(5)
-        self.days_spin.setToolTip("按最近 N 个交易日匹配文件名中的日期。")
-        form.addRow("最近交易日数量：", self.days_spin)
+        self.start_days_spin = QSpinBox()
+        self.start_days_spin.setRange(1, 120)
+        self.start_days_spin.setValue(int(start_n))
+        self.start_days_spin.setToolTip(
+            "窗口远端：倒数第 N 个交易日（更大=更早）。\n"
+            "例如填 10，与截止 5 组合 → 导入最近第10～第5个交易日的选股。"
+        )
+        form.addRow("最近起始交易日：", self.start_days_spin)
+
+        self.end_days_spin = QSpinBox()
+        self.end_days_spin.setRange(1, 120)
+        self.end_days_spin.setValue(int(end_n))
+        self.end_days_spin.setToolTip(
+            "窗口近端：倒数第 M 个交易日（更小=更新；1=含最近一个交易日）。\n"
+            "须 ≤ 起始；若填反会在保存时自动对调。"
+        )
+        form.addRow("最近截止交易日：", self.end_days_spin)
 
         self.meet_cb = QCheckBox("只导入「满足条件」为 True 的股票")
         self.meet_cb.setChecked(bool(cur.get("only_meet_condition", True)))
@@ -461,8 +834,10 @@ class BatchImportPoolSettingsDialog(QDialog):
                 float(DEFAULT_SETTINGS["main_board_max_gain_pct"]),
             )
         )
-        self.main_gain_spin.setToolTip("沪深主板（非创/科/北）允许的最大涨幅上限。")
-        form.addRow("主板涨幅上限：", self.main_gain_spin)
+        self.main_gain_spin.setToolTip(
+            "相对选股日收盘：沪深主板（非创/科/北）允许的最大涨幅上限。"
+        )
+        form.addRow("主板涨幅上限（相对收盘）：", self.main_gain_spin)
 
         self.other_gain_spin = QDoubleSpinBox()
         self.other_gain_spin.setRange(0.0, 100.0)
@@ -475,22 +850,73 @@ class BatchImportPoolSettingsDialog(QDialog):
             )
         )
         self.other_gain_spin.setToolTip(
-            "创业板 / 科创板 / 北交所等非主板允许的最大涨幅上限。"
+            "相对选股日收盘：创业板 / 科创板 / 北交所等非主板允许的最大涨幅上限。"
         )
-        form.addRow("其他板块涨幅上限：", self.other_gain_spin)
+        form.addRow("其他板块涨幅上限（相对收盘）：", self.other_gain_spin)
 
-        def _sync_gain_enabled(checked: bool = False) -> None:
+        self.intraday_gain_cb = QCheckBox(
+            "剔除选股日后单日最大涨幅超限的股票（相对昨收盘）"
+        )
+        self.intraday_gain_cb.setChecked(
+            bool(cur.get("filter_post_select_max_intraday_gain", False))
+        )
+        self.intraday_gain_cb.setToolTip(
+            "勾选后：对选股日后每个交易日算 (最高价/昨收盘-1)，取最大值；\n"
+            "超过主板/其他板块指定上限的股票不导入。缺日线无法判定时仍保留。"
+        )
+        form.addRow("", self.intraday_gain_cb)
+
+        self.main_intraday_spin = QDoubleSpinBox()
+        self.main_intraday_spin.setRange(0.0, 100.0)
+        self.main_intraday_spin.setDecimals(2)
+        self.main_intraday_spin.setSuffix(" %")
+        self.main_intraday_spin.setValue(
+            _clamp_gain_pct(
+                cur.get("main_board_max_intraday_gain_pct"),
+                float(DEFAULT_SETTINGS["main_board_max_intraday_gain_pct"]),
+            )
+        )
+        self.main_intraday_spin.setToolTip(
+            "相对昨收盘：沪深主板（非创/科/北）允许的单日最大涨幅上限。"
+        )
+        form.addRow("主板单日涨幅上限（相对昨收）：", self.main_intraday_spin)
+
+        self.other_intraday_spin = QDoubleSpinBox()
+        self.other_intraday_spin.setRange(0.0, 100.0)
+        self.other_intraday_spin.setDecimals(2)
+        self.other_intraday_spin.setSuffix(" %")
+        self.other_intraday_spin.setValue(
+            _clamp_gain_pct(
+                cur.get("other_board_max_intraday_gain_pct"),
+                float(DEFAULT_SETTINGS["other_board_max_intraday_gain_pct"]),
+            )
+        )
+        self.other_intraday_spin.setToolTip(
+            "相对昨收盘：创业板 / 科创板 / 北交所等非主板允许的单日最大涨幅上限。"
+        )
+        form.addRow("其他板块单日涨幅上限（相对昨收）：", self.other_intraday_spin)
+
+        def _sync_gain_enabled(_checked: bool = False) -> None:
             on = bool(self.gain_cb.isChecked())
             self.main_gain_spin.setEnabled(on)
             self.other_gain_spin.setEnabled(on)
 
+        def _sync_intraday_enabled(_checked: bool = False) -> None:
+            on = bool(self.intraday_gain_cb.isChecked())
+            self.main_intraday_spin.setEnabled(on)
+            self.other_intraday_spin.setEnabled(on)
+
         self.gain_cb.toggled.connect(_sync_gain_enabled)
+        self.intraday_gain_cb.toggled.connect(_sync_intraday_enabled)
         _sync_gain_enabled()
+        _sync_intraday_enabled()
 
         layout.addLayout(form)
 
         tip = QLabel(
-            "保存后立即生效。导入时在 history_data 与存档目录中按前缀+交易日找文件。"
+            "保存后立即生效。导入时在 history_data 与存档目录中按前缀+交易日找文件。\n"
+            "起始/截止示例：10 与 5 → 取最近第10个到第5个交易日（不含最近4个）；"
+            "5 与 1 → 等价于旧版「最近5个交易日」。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet("color: #666;")
@@ -510,11 +936,21 @@ class BatchImportPoolSettingsDialog(QDialog):
         save_batch_import_settings(
             {
                 "file_prefix": prefix,
-                "recent_trading_days": int(self.days_spin.value()),
+                "recent_start_trading_days": int(self.start_days_spin.value()),
+                "recent_end_trading_days": int(self.end_days_spin.value()),
                 "only_meet_condition": bool(self.meet_cb.isChecked()),
                 "filter_post_select_max_gain": bool(self.gain_cb.isChecked()),
                 "main_board_max_gain_pct": float(self.main_gain_spin.value()),
                 "other_board_max_gain_pct": float(self.other_gain_spin.value()),
+                "filter_post_select_max_intraday_gain": bool(
+                    self.intraday_gain_cb.isChecked()
+                ),
+                "main_board_max_intraday_gain_pct": float(
+                    self.main_intraday_spin.value()
+                ),
+                "other_board_max_intraday_gain_pct": float(
+                    self.other_intraday_spin.value()
+                ),
             }
         )
         self.accept()
@@ -529,7 +965,7 @@ class BatchImportPoolDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("批量导入选股文件")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(420)
         self.do_import = False
 
         layout = QVBoxLayout(self)
@@ -554,6 +990,7 @@ class BatchImportPoolDialog(QDialog):
 
     def _refresh_summary(self) -> None:
         s = load_batch_import_settings()
+        start_n, end_n = normalize_lookback_bounds(s)
         meet = "是" if s.get("only_meet_condition") else "否"
         if s.get("filter_post_select_max_gain"):
             gain_txt = (
@@ -562,11 +999,25 @@ class BatchImportPoolDialog(QDialog):
             )
         else:
             gain_txt = "否"
+        if s.get("filter_post_select_max_intraday_gain"):
+            intraday_txt = (
+                f"是（主板≤{s.get('main_board_max_intraday_gain_pct')}%，"
+                f"其他≤{s.get('other_board_max_intraday_gain_pct')}%）"
+            )
+        else:
+            intraday_txt = "否"
+        if start_n == end_n:
+            look_txt = f"仅最近第 {start_n} 个交易日"
+        elif end_n == 1:
+            look_txt = f"最近 {start_n} 个交易日（第{start_n}～第1）"
+        else:
+            look_txt = f"最近第 {start_n}～第 {end_n} 个交易日"
         self.summary_label.setText(
             f"前缀：{s.get('file_prefix') or '（未设置）'}\n"
-            f"最近交易日：{s.get('recent_trading_days')} 天\n"
+            f"交易日窗口：{look_txt}\n"
             f"只导入满足条件：{meet}\n"
-            f"剔除选股日后最大涨幅超限：{gain_txt}\n\n"
+            f"剔除选股日后最大涨幅超限（相对选股日收盘）：{gain_txt}\n"
+            f"剔除选股日后单日最大涨幅超限（相对昨收盘）：{intraday_txt}\n\n"
             "选股文件查找范围：history_data（含子目录）与 history_data/存档。"
         )
 

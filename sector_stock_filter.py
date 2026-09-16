@@ -70,26 +70,37 @@ if __name__ == "__main__":
 
         _EARLY_APP = QApplication.instance() or QApplication(sys.argv)
 
-        # 单例：第二实例只激活已有窗口并立即退出，不加载重依赖、不弹 splash
-        _sock = QLocalSocket()
-        _sock.connectToServer(_SINGLETON_SERVER_NAME)
-        if _sock.waitForConnected(200):
+        # 交互启动：单例（第二实例只激活已有窗口并退出）
+        # --auto-run：独立实例，不占用/不关闭已开着的选股窗口
+        _wants_autorun = "--auto-run" in sys.argv
+        if _wants_autorun:
+            _EARLY_SINGLETON_SERVER = QLocalServer()
+            _autorun_name = f"{_SINGLETON_SERVER_NAME}_autorun_{os.getpid()}"
             try:
-                _sock.write(b"activate")
-                _sock.flush()
-                _sock.waitForBytesWritten(200)
+                QLocalServer.removeServer(_autorun_name)
             except Exception:
                 pass
-            _sock.disconnectFromServer()
-            sys.exit(0)
-        _sock.abort()
+            _EARLY_SINGLETON_SERVER.listen(_autorun_name)
+        else:
+            _sock = QLocalSocket()
+            _sock.connectToServer(_SINGLETON_SERVER_NAME)
+            if _sock.waitForConnected(200):
+                try:
+                    _sock.write(b"activate")
+                    _sock.flush()
+                    _sock.waitForBytesWritten(200)
+                except Exception:
+                    pass
+                _sock.disconnectFromServer()
+                sys.exit(0)
+            _sock.abort()
 
-        _EARLY_SINGLETON_SERVER = QLocalServer()
-        try:
-            QLocalServer.removeServer(_SINGLETON_SERVER_NAME)
-        except Exception:
-            pass
-        _EARLY_SINGLETON_SERVER.listen(_SINGLETON_SERVER_NAME)
+            _EARLY_SINGLETON_SERVER = QLocalServer()
+            try:
+                QLocalServer.removeServer(_SINGLETON_SERVER_NAME)
+            except Exception:
+                pass
+            _EARLY_SINGLETON_SERVER.listen(_SINGLETON_SERVER_NAME)
 
         _EARLY_SPLASH = QLabel("正在加载选股系统")
         _EARLY_SPLASH.setWindowTitle("蚂蚁量化选股系统")
@@ -1337,6 +1348,8 @@ class SectorStockFilterThread(QThread):
 
         经 load_daily_dataframe：近期优先 daily_cache；历史日（或 cache 回溯不足）
         合并 data/daily_full；缺失时再回退 xtdata（mini）。
+
+        批跑/筛选路径避免默认 180s 按票同步等待（尾部缺票会把进度钉死数十分钟）。
         """
         try:
             if through_date is not None:
@@ -1344,10 +1357,25 @@ class SectorStockFilterThread(QThread):
             else:
                 end_date = self._as_of_date if getattr(self, "_as_of_date", None) is not None else date.today()
 
+            parent = self.parent()
+            auto_run = bool(getattr(parent, "_auto_run", False)) if parent is not None else False
+            # 批跑：盘后流水线已等过日线门禁，缺票直接用本地/回退，勿逐票卡 180s
+            # 交互：仍允许短时按需同步，但封顶，避免尾部假死
+            if auto_run:
+                allow_on_demand = False
+                on_demand_timeout_sec = None
+            else:
+                allow_on_demand = True
+                on_demand_timeout_sec = float(
+                    os.environ.get("SECTOR_FILTER_ON_DEMAND_TIMEOUT_SEC", "8")
+                )
+
             daily_data = load_daily_dataframe(
                 stock_code,
                 through_date=end_date,
                 allow_xtdata_fallback=True,
+                allow_on_demand=allow_on_demand,
+                on_demand_timeout_sec=on_demand_timeout_sec,
             )
             if daily_data is None or daily_data.empty:
                 return None
@@ -2322,7 +2350,16 @@ class SectorStockFilterThread(QThread):
             self._mode1_limitup_detected_checks = 0
 
             self._last_progress_emit_unit = 0
-            self._progress_emit_every = int(os.environ.get("SECTOR_FILTER_PROGRESS_EVERY", "200"))
+            # 批跑默认更勤刷新，避免长时间停在同一进度像卡住
+            _parent = self.parent()
+            _auto = bool(getattr(_parent, "_auto_run", False)) if _parent is not None else False
+            _default_every = "25" if _auto else "200"
+            self._progress_emit_every = int(
+                os.environ.get("SECTOR_FILTER_PROGRESS_EVERY", _default_every)
+            )
+            self._progress_heartbeat_sec = float(
+                os.environ.get("SECTOR_FILTER_PROGRESS_HEARTBEAT_SEC", "10" if _auto else "30")
+            )
             # 检查输入参数
             if not self.stock_list:
                 self.error_occurred.emit("股票列表为空，无法筛选")
@@ -2702,6 +2739,7 @@ class SectorStockFilterThread(QThread):
                 self.progress_updated.emit(
                     day_base + 50, total_units, f"筛选 {key} · {day_n}只"
                 )
+                _last_progress_mono = time.monotonic()
 
                 for stock_i, stock_code in enumerate(day_stocks):
                     if not self.is_running:
@@ -2710,7 +2748,36 @@ class SectorStockFilterThread(QThread):
                     sectors = stock_dict[stock_code]["sectors"]
                     stocks_touched.add(stock_code)
 
-                    if stock_code not in daily_cache:
+                    # 进度在读日线前刷新。批跑已关闭按需同步，用普通节流即可；
+                    # 交互仍可能短时等待，遇未缓存票时强制刷一条，避免 UI 假死。
+                    frac = int(((stock_i + 1) / max(day_n, 1)) * 949)
+                    pos = min(day_base + 50 + frac, (day_i + 1) * PROGRESS_PER_DAY - 1)
+                    due_heartbeat = (
+                        (time.monotonic() - _last_progress_mono)
+                        >= max(3.0, float(self._progress_heartbeat_sec))
+                    )
+                    need_daily = stock_code not in daily_cache
+                    _parent = self.parent()
+                    _auto = bool(getattr(_parent, "_auto_run", False)) if _parent is not None else False
+                    force_before_fetch = bool(need_daily and not _auto)
+                    if (
+                        stock_i == 0
+                        or stock_i + 1 == day_n
+                        or force_before_fetch
+                        or (processed_units - self._last_progress_emit_unit)
+                        >= self._progress_emit_every
+                        or due_heartbeat
+                    ):
+                        tip = f"{stock_code} [{screen_str}]"
+                        if need_daily:
+                            tip = f"读日线 {tip}"
+                        self.progress_updated.emit(pos, total_units, tip)
+                        self._last_progress_emit_unit = max(
+                            self._last_progress_emit_unit, processed_units
+                        )
+                        _last_progress_mono = time.monotonic()
+
+                    if need_daily:
                         daily_cache[stock_code] = self._get_daily_data(
                             stock_code, through_date=fetch_through, apply_as_of_slice=False
                         )
@@ -2720,21 +2787,6 @@ class SectorStockFilterThread(QThread):
                     daily_full = daily_cache[stock_code]
 
                     processed_units += 1
-                    # 日进度：50–999；全日完成顶到 (day_i+1)*1000
-                    frac = int(((stock_i + 1) / max(day_n, 1)) * 949)
-                    pos = min(day_base + 50 + frac, (day_i + 1) * PROGRESS_PER_DAY - 1)
-                    if (
-                        stock_i == 0
-                        or stock_i + 1 == day_n
-                        or (processed_units - self._last_progress_emit_unit)
-                        >= self._progress_emit_every
-                    ):
-                        self.progress_updated.emit(
-                            pos,
-                            total_units,
-                            f"{stock_code} [{screen_str}]",
-                        )
-                        self._last_progress_emit_unit = processed_units
 
                     if daily_full is None or getattr(daily_full, "empty", True):
                         continue
@@ -4812,23 +4864,30 @@ class SectorStockFilterDialog(QDialog):
                     QMessageBox.warning(self, "错误", "请至少启用一条选股规则")
                 return
             if self._rule_code_dirty:
-                mb = QMessageBox(self)
-                mb.setIcon(QMessageBox.Warning)
-                mb.setWindowTitle("规则代码未保存")
-                mb.setText("当前规则代码有未保存的修改。")
-                mb.setInformativeText(
-                    "请先点击「保存当前规则代码」，修改才会写入磁盘并生效。\n"
-                    "您也可以直接保存并继续开始筛选。"
-                )
-                save_btn = mb.addButton("保存并继续", QMessageBox.AcceptRole)
-                cancel_btn = mb.addButton("取消", QMessageBox.RejectRole)
-                mb.exec_()
-                if mb.clickedButton() == cancel_btn:
-                    return
-                if mb.clickedButton() == save_btn and not self._save_current_rule_code(
-                    show_success_message=False
-                ):
-                    return
+                if self._auto_run:
+                    # 批跑无交互：尽量保存后继续；保存失败也不弹窗卡住
+                    try:
+                        self._save_current_rule_code(show_success_message=False)
+                    except Exception:
+                        logger.warning("自动运行：保存未落盘规则代码失败", exc_info=True)
+                else:
+                    mb = QMessageBox(self)
+                    mb.setIcon(QMessageBox.Warning)
+                    mb.setWindowTitle("规则代码未保存")
+                    mb.setText("当前规则代码有未保存的修改。")
+                    mb.setInformativeText(
+                        "请先点击「保存当前规则代码」，修改才会写入磁盘并生效。\n"
+                        "您也可以直接保存并继续开始筛选。"
+                    )
+                    save_btn = mb.addButton("保存并继续", QMessageBox.AcceptRole)
+                    cancel_btn = mb.addButton("取消", QMessageBox.RejectRole)
+                    mb.exec_()
+                    if mb.clickedButton() == cancel_btn:
+                        return
+                    if mb.clickedButton() == save_btn and not self._save_current_rule_code(
+                        show_success_message=False
+                    ):
+                        return
             # 每次执行前保存一次规则，避免忘记保存
             save_sector_rules(self.rules or [])
             rid = str(self._current_rule_id or "")
@@ -5216,6 +5275,12 @@ class SectorStockFilterDialog(QDialog):
         if ready:
             self._auto_run_pending = False
             QTimer.singleShot(100, self._start_filter_auto)
+            return
+        # 启动初期可能先收到「未选中板块」的空列表回调；稍后再试，避免误杀 auto-run
+        soft = reason in ("未选中任何板块",) and self._auto_run_retry_count < 40
+        if soft:
+            self._auto_run_retry_count += 1
+            QTimer.singleShot(300, self.update_stock_list)
             return
         self._auto_run_pending = False
         if self._auto_run_started:
@@ -5634,32 +5699,36 @@ def main():
 
     server = _EARLY_SINGLETON_SERVER
     if server is None:
-        # 与备份目录（原版 AntStockFilterSingleton）并存，便于 A/B 对比
-        server_name = _SINGLETON_SERVER_NAME
-
-        # 先尝试作为“第二实例”：连到已有的本地服务器，若成功则发送激活请求并退出
-        socket = QLocalSocket()
-        socket.connectToServer(server_name)
-        if socket.waitForConnected(200):
+        # early 启动失败时的兜底：auto-run 用独立名；交互仍走单例
+        if bool(args.auto_run):
+            server = QLocalServer()
+            server_name = f"{_SINGLETON_SERVER_NAME}_autorun_{os.getpid()}"
             try:
-                socket.write(b"activate")
-                socket.flush()
-                socket.waitForBytesWritten(200)
+                QLocalServer.removeServer(server_name)
             except Exception:
                 pass
-            socket.disconnectFromServer()
-            # 已有实例在运行，本实例直接退出
-            return
-        socket.abort()
+            server.listen(server_name)
+        else:
+            server_name = _SINGLETON_SERVER_NAME
+            socket = QLocalSocket()
+            socket.connectToServer(server_name)
+            if socket.waitForConnected(200):
+                try:
+                    socket.write(b"activate")
+                    socket.flush()
+                    socket.waitForBytesWritten(200)
+                except Exception:
+                    pass
+                socket.disconnectFromServer()
+                sys.exit(0)
+            socket.abort()
 
-        # 没有已运行实例：创建本地服务器，供后续实例发送“activate”指令
-        server = QLocalServer()
-        # 防止残留的同名服务器阻止绑定
-        try:
-            QLocalServer.removeServer(server_name)
-        except Exception:
-            pass
-        server.listen(server_name)
+            server = QLocalServer()
+            try:
+                QLocalServer.removeServer(server_name)
+            except Exception:
+                pass
+            server.listen(server_name)
 
     splash = _EARLY_SPLASH
     if splash is None:
@@ -5683,6 +5752,11 @@ def main():
             pass
 
     dialog = SectorStockFilterDialog(initial_as_of=initial_as_of, auto_run=bool(args.auto_run))
+    if bool(args.auto_run):
+        try:
+            dialog.setWindowTitle("蚂蚁量化选股系统（自动批跑）")
+        except Exception:
+            pass
 
     if splash is not None:
         try:
@@ -5697,11 +5771,11 @@ def main():
             return
         try:
             if client.waitForReadyRead(200):
-                _ = client.readAll()  # 当前只关心有无消息，不解析内容
-                # 收到激活请求：把窗口前置显示
-                dialog.showNormal()
-                dialog.raise_()
-                dialog.activateWindow()
+                _ = client.readAll()
+            # 仅交互单例会收到 activate：前置窗口
+            dialog.showNormal()
+            dialog.raise_()
+            dialog.activateWindow()
         except Exception:
             pass
         finally:

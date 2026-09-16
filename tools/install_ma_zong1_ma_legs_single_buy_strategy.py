@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """安装策略：买：马总逻辑1-涨停后跌破MA10/20各1/2-单点
 
-参照「买：马总逻辑1-涨停后跌破MA5/10/20各1/3」（弹性 best_buy），
+参照「买：马总逻辑1-涨停后跌破MA10/20各1/2」（弹性 best_buy + 昨收涨幅熔断 + 首次跌破），
 改为单点买入 single_buy：现价 <= 均线触发价即买；仅 MA10/MA20，不买 MA5。
 
 - 触发：均线重合点（行情「10日」「20日」），single_buy 跌至触发价或更低即买
 - 仓位：单股拟买入金额 / 2
+- 首次跌破：生成时查日线（选股日后～今天前，挂单窗内 low<=早盘MA）已破则不挂
+- 熔断：halt_on_open_gain（相对昨收；主板约5% / 其它约10%，由主程序按板块判定）
 - 回测：params.selection_date_by_code + backtest_trade_date
   → 选股日 T+1 起，连续 entry_window_trading_days（默认10）个交易日可挂腿
 - 已买腿：params._filled_legs（引擎按 leg_key 回写）；实盘靠规则名合并 executed
@@ -21,15 +23,15 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "strategy_generator_app" / "config" / "strategies"
 
 STRATEGY_NAME = "买：马总逻辑1-涨停后跌破MA10/20各1/2-单点"
-LEGACY_NAMES = (
-    STRATEGY_NAME,
-    "买：马总逻辑1-涨停后跌破MA5/10/20各1/3-单点",
-)
+LEGACY_NAMES = (STRATEGY_NAME,)
 PREFERRED_ID = "strategy_dacdcef1"
 
-STRATEGY_CODE = r'''# 买：马总选股逻辑1 — 涨停后第一次跌至 MA10/MA20 各买 1/2（单点买入；不买 MA5）
-# - 触发价 = 均线重合点（行情字段「10日」「20日」）
+STRATEGY_CODE = r'''# 买：马总选股逻辑1 — 涨停后第一次跌破 MA10/MA20 各买 1/2（单点买入；不买 MA5）
+# - 触发价 = 均线重合点（行情字段「10日」「20日」）；不买 MA5
 # - 规则类型 single_buy：现价 <= 触发价即买（与弹性 best_buy 相对）
+# - halt_on_open_gain：开盘相对涨幅超限则停买（主板5%/其它10%）
+# - 首次跌破：生成时用日线查选股日之后～今天之前，挂单窗内是否已有 low<=早盘MA；
+#   已破过的腿不再挂（不落盘记状态；缺日线无法判定则仍挂）
 # - 腿名固定：马总1单点-跌破MA10 / MA20（实盘重启靠同名合并 executed）
 # - 回测：params.selection_date_by_code[code]=选股日
 #   挂单窗口：选股日下一交易日起，连续 entry_window_trading_days 个交易日（默认 10）
@@ -44,8 +46,8 @@ STRATEGY_CODE = r'''# 买：马总选股逻辑1 — 涨停后第一次跌至 MA1
 #         ex_div_lookback(=20)
 
 LEG_SPECS = (
-    ("MA10", "10日", "马总1单点-跌破MA10"),
-    ("MA20", "20日", "马总1单点-跌破MA20"),
+    ("MA10", "10日", "马总1单点-跌破MA10", 10),
+    ("MA20", "20日", "马总1单点-跌破MA20", 20),
 )
 
 
@@ -155,6 +157,38 @@ def run(codes, prices, get_name, account, params):
 
     half = amount_per / 2.0
 
+    def _already_touched(c6, sel_d, start_d, end_d, ma_period):
+        """选股日后～今天前，挂单窗内日线是否已跌破该 MA（首次已过则不再挂）。"""
+        if sel_d is None or start_d is None or end_d is None:
+            return False
+        try:
+            from utils.first_ma_touch import already_touched_ma_in_entry_window
+
+            hit, _ = already_touched_ma_in_entry_window(
+                c6,
+                selection_date=sel_d,
+                before_date=trade_d,
+                ma_period=int(ma_period),
+                entry_start=start_d,
+                entry_end=end_d,
+            )
+            return bool(hit)
+        except Exception:
+            try:
+                from first_ma_touch import already_touched_ma_in_entry_window as _fn  # type: ignore
+
+                hit, _ = _fn(
+                    c6,
+                    selection_date=sel_d,
+                    before_date=trade_d,
+                    ma_period=int(ma_period),
+                    entry_start=start_d,
+                    entry_end=end_d,
+                )
+                return bool(hit)
+            except Exception:
+                return False
+
     # 预计算每只股票入场窗口，避免每票反复扫交易日历
     entry_range_by_code = {}
     if sel_map:
@@ -199,14 +233,16 @@ def run(codes, prices, get_name, account, params):
         if not c6:
             continue
 
+        sel_d = _parse_d(sel_map.get(c6) or sel_map.get(code))
         win = entry_range_by_code.get(c6)
         if win is None:
-            sel_d = _parse_d(sel_map.get(c6) or sel_map.get(code))
             if sel_d is not None:
                 start_d = _next_td(sel_d)
                 end_d = _nth_td(start_d, entry_window)
                 if trade_d < start_d or trade_d > end_d:
                     continue
+            else:
+                start_d = end_d = None
         else:
             start_d, end_d = win
             if trade_d < start_d or trade_d > end_d:
@@ -259,9 +295,13 @@ def run(codes, prices, get_name, account, params):
         if blocked:
             continue
 
-        for leg_id, field, rule_name in LEG_SPECS:
+        for leg_id, field, rule_name, ma_period in LEG_SPECS:
             leg_key = "%s:%s" % (c6, leg_id)
             if leg_key in filled:
+                print('[马总1单点] skip filled %s' % leg_key)
+                continue
+            if _already_touched(c6, sel_d, start_d, end_d, ma_period):
+                print('[马总1单点] skip already_touched %s' % leg_key)
                 continue
             raw = p.get(field)
             if raw is None or raw == "":
@@ -286,9 +326,9 @@ def run(codes, prices, get_name, account, params):
                 "leg_key": leg_key,
                 "price": trig,
                 "volume": int(v),
+                "halt_on_open_gain": True,
             })
-    return result
-'''
+    return result'''
 
 
 def main() -> None:

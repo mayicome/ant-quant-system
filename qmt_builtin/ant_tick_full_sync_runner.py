@@ -2,6 +2,7 @@
 """大 QMT 内：盘后全 A 当日 tick 落盘到 data/ticks/{YYYYMMDD}/*.parquet。
 
 由日线同步（15:35）完成后串行触发；落盘含至约 15:31 的盘后 tick。
+落盘成功后用 tick 末笔对账覆盖 daily_cache 当日收盘/量（纠正 15:35 未定稿日 K）。
 主路径（迅投官方）：
   1) ContextInfo.get_local_data / get_market_data_ex(subscribe=False) 读本地
   2) 内置 download_history_data(code,"tick",YYYYMMDD,YYYYMMDD) 补本地（非 xtdata）
@@ -87,6 +88,8 @@ _ABORT_HOLD_UNTIL = 0.0
 _ABORT_HOLD_REASON = ""
 _ABORT_HOLD_LOG_TS = 0.0
 _PROTECT_DEFER_LOG_TS = 0.0
+_DAILY_PATCHED_SESSION = 0
+_DAILY_PATCH_FAIL_SESSION = 0
 _PAUSE_DEFER_LOG_TS = 0.0
 _MANUAL_KEEP_LOG_TS = 0.0
 _MANUAL_HOLD_LOG_TS = 0.0
@@ -966,6 +969,65 @@ def _notify_ctx_empty(day_s, detail):
         _log("server酱告警异常: %s" % e)
 
 
+def _last_tick_row_dict(data):
+    # type: (Any) -> Optional[Dict[str, Any]]
+    """取用于校正日线的 tick 行：优先 <=15:00 最后一笔，否则末行。"""
+    if data is None or len(data) == 0:
+        return None
+    row = None
+    try:
+        if "datetime" in getattr(data, "columns", []):
+            dt = data["datetime"]
+            # 已是上海时区 aware 或 naive；用 hour/minute
+            try:
+                minutes = dt.dt.hour * 60 + dt.dt.minute
+                sub = data.loc[minutes <= 15 * 60]
+                if len(sub) > 0:
+                    row = sub.iloc[-1]
+            except Exception:
+                row = None
+    except Exception:
+        row = None
+    if row is None:
+        try:
+            row = data.iloc[-1]
+        except Exception:
+            return None
+    try:
+        return row.to_dict()
+    except Exception:
+        try:
+            return dict(row)
+        except Exception:
+            return None
+
+
+def _patch_daily_cache_from_tick_df(full_code, trade_d, data):
+    # type: (str, date, Any) -> str
+    """tick 落盘后校正 daily_cache 当日 K。返回 patched/same/skip/fail。"""
+    global _DAILY_PATCHED_SESSION, _DAILY_PATCH_FAIL_SESSION
+    row = _last_tick_row_dict(data)
+    if not row:
+        return "skip"
+    try:
+        try:
+            import ant_daily_sync_runner as daily
+        except ImportError:
+            import qmt_builtin.ant_daily_sync_runner as daily  # type: ignore
+        fn = getattr(daily, "patch_daily_cache_today_from_tick_row", None)
+        if not callable(fn):
+            return "skip"
+        st = str(fn(full_code, trade_d, row) or "skip")
+        if st == "patched":
+            _DAILY_PATCHED_SESSION += 1
+        elif st == "fail":
+            _DAILY_PATCH_FAIL_SESSION += 1
+        return st
+    except Exception:
+        _DAILY_PATCH_FAIL_SESSION += 1
+        return "fail"
+
+
 def _write_one_from_raw(tick_io, full_code, trade_d, raw, overwrite=False):
     # type: (Any, str, date, Any, bool) -> Tuple[str, Optional[str]]
     c6 = _code6(full_code)
@@ -980,6 +1042,8 @@ def _write_one_from_raw(tick_io, full_code, trade_d, raw, overwrite=False):
             return "fail", "empty_tick"
         if not tick_io.write_tick_cache(c6, trade_d, data):
             return "fail", "write_tick_cache"
+        # 15:35 日 K 可能未定稿；用完整 tick 末笔覆盖当日收盘/量
+        _patch_daily_cache_from_tick_df(full_code, trade_d, data)
         return "ok", None
     except Exception as e:
         return "fail", "%s" % e
@@ -1040,6 +1104,7 @@ def run_tick_full_sync(
     """
     global _BUSY, _LAST_DONE_DAY, _ABORT_HOLD_LOG_TS, _PROTECT_DEFER_LOG_TS
     global _PAUSE_DEFER_LOG_TS
+    global _DAILY_PATCHED_SESSION, _DAILY_PATCH_FAIL_SESSION
 
     if _BUSY:
         _log("忙碌中，跳过")
@@ -1051,6 +1116,9 @@ def run_tick_full_sync(
             _PAUSE_DEFER_LOG_TS = ts
             _log("已暂停：删除 data/tick_full_sync/PAUSE 后继续")
         return False
+
+    _DAILY_PATCHED_SESSION = 0
+    _DAILY_PATCH_FAIL_SESSION = 0
 
     if (not allow_intraday) and _in_market_hours_protect():
         ts = time.time()
@@ -1690,12 +1758,14 @@ def run_tick_full_sync(
             _LAST_DONE_DAY = day_s
         removed = _purge_old_tick_dirs()
         msg = (
-            "完成 成功=%d 失败=%d 总数=%d 已清理=%d 耗时=%.1fmin (%.0fs) %s -> %s"
+            "完成 成功=%d 失败=%d 总数=%d 已清理=%d 日线校正=%d/%d失败 耗时=%.1fmin (%.0fs) %s -> %s"
             % (
                 ok_total,
                 fail_total,
                 total,
                 len(removed),
+                int(_DAILY_PATCHED_SESSION),
+                int(_DAILY_PATCH_FAIL_SESSION),
                 elapsed_min,
                 elapsed,
                 started_at,

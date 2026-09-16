@@ -372,7 +372,7 @@ def _make_rule_dict(
         lk = str(intent.get("leg_key") or "").strip()
         if lk:
             out["leg_key"] = lk
-        # 买入开盘涨幅熔断开关（意图显式打开时落盘）
+        # 买入昨收涨幅熔断开关（意图显式打开时落盘；字段名 halt_on_open_gain 历史兼容）
         if _truthy_flag(intent.get("halt_on_open_gain")):
             rtype = str(out.get("type") or "").strip()
             if rtype in (

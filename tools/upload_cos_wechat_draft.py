@@ -23,6 +23,8 @@ from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DEFAULT_MP_ROOT = Path(os.environ.get("ANT_WECHAT_MP_ROOT") or r"D:\蚂蚁量化研习社公众号")
 
 EXIT_IP_WHITELIST = 64
@@ -56,6 +58,27 @@ def _looks_like_ip_whitelist(text: str) -> bool:
     )
 
 
+def _safe_print(text: str) -> None:
+    """Windows 控制台常为 GBK：避免因 \\ufffd 等字符 print 崩掉把成功误判成失败。"""
+    s = str(text or "")
+    try:
+        print(s)
+        return
+    except UnicodeEncodeError:
+        pass
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        sys.stdout.buffer.write(
+            (s + "\n").encode(enc, errors="replace")
+        )
+        sys.stdout.buffer.flush()
+    except Exception:
+        try:
+            print(s.encode("ascii", errors="replace").decode("ascii"))
+        except Exception:
+            pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="COS 日更 → 微信公众号草稿箱")
     ap.add_argument("--date", default="", help="YYYY-MM-DD，默认今天")
@@ -77,10 +100,11 @@ def main() -> int:
 
     env = os.environ.copy()
     env["ANT_WECHAT_CONFIG"] = str(cfg)
-    print("[wechat-draft] mp_root=", mp_root)
-    print("[wechat-draft] config=", cfg)
-    print("[wechat-draft] python=", py)
-    print("[wechat-draft] cmd=", " ".join(cmd))
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    _safe_print("[wechat-draft] mp_root= %s" % mp_root)
+    _safe_print("[wechat-draft] config= %s" % cfg)
+    _safe_print("[wechat-draft] python= %s" % py)
+    _safe_print("[wechat-draft] cmd= %s" % " ".join(cmd))
 
     proc = subprocess.run(
         cmd,
@@ -93,12 +117,43 @@ def main() -> int:
     )
     out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
     if out.strip():
-        print(out.rstrip())
+        _safe_print(out.rstrip())
 
     rc = int(proc.returncode or 0)
     if rc == EXIT_IP_WHITELIST or (rc != 0 and _looks_like_ip_whitelist(out)):
-        print("[wechat-draft] IP 不在公众号白名单，退出码=%d" % EXIT_IP_WHITELIST)
+        public_ip = ""
+        try:
+            from get_public_ip import get_public_ip
+
+            public_ip = str(get_public_ip() or "").strip()
+        except Exception as e:
+            _safe_print("[wechat-draft] 获取公网IP失败: %s" % e)
+        if public_ip:
+            # 供批跑 GUI / 日志解析
+            _safe_print("[wechat-ip-whitelist] public_ip=%s" % public_ip)
+            _safe_print(
+                "[wechat-draft] IP 不在公众号白名单，当前公网IP=%s，退出码=%d"
+                % (public_ip, EXIT_IP_WHITELIST)
+            )
+        else:
+            _safe_print(
+                "[wechat-draft] IP 不在公众号白名单（未能解析公网IP），退出码=%d"
+                % EXIT_IP_WHITELIST
+            )
         return EXIT_IP_WHITELIST
+    if rc == 0 and not args.dry_run:
+        try:
+            from utils.post_market_step_status import mark_step_finished
+
+            mark_step_finished(
+                trade,
+                "wechat_draft",
+                ok=True,
+                detail="upload_cos_wechat_draft 成功",
+            )
+            _safe_print("[wechat-draft] 已写入本地完成记录 trade_date=%s" % trade)
+        except Exception as e:
+            _safe_print("[wechat-draft] 本地完成记录写入失败: %s" % e)
     return rc
 
 

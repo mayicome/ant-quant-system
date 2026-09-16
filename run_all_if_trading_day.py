@@ -1,22 +1,11 @@
 # -*- coding: utf-8 -*-
-"""交易日盘后自动批跑入口（由 D:\\limit_up.bat 计划任务调用）。
+"""交易日盘后自动批跑入口。
 
-流程（全量，默认）：
-1. 非交易日直接跳过
-2. 先 wait_daily_cache_ready；失败则中止，后续全部不跑（Server酱中止通知）
-3. 主流程各关键步骤失败即时 Server酱报警（不阻断后续，除非门禁）
-4. 导出 before COS：wait_after_hours_rank_ready（等今日 top10）；超时则报警仍继续导出/上传
-5. 导出 after_hours、上传 COS、写公众号草稿（IP 白名单失败则报警并每分钟重试）
-6. 市场行情日度描绘增量
-7. 结束后 Server酱汇总通知（保留）
+推荐：
+  - 定时任务：D:\\run_all_if_trading_day.bat → run_all_if_trading_day_gui.py --scheduled
+  - 手动补跑：直接运行 run_all_if_trading_day_gui.py（最近交易日 + 齐全度面板）
 
-实盘精简模式（另一台只服务实盘的机器）：
-  python run_all_if_trading_day.py --live-only
-  或环境变量 ANT_LIVE_ONLY=1
-
-仅跑：日线门禁、涨停日/排名、主力资金流、东财板块快照、选股、F10 标签、归档（根目录选股结果不归档）；
-跳过：研究类 GUI、盘后量能等待、COS、公众号、行情描绘。
-Server酱标题带 [仅实盘] / [全量]，正文首行标明模式。
+本文件保留无界面 CLI 批跑（兼容旧调用）。
 """
 from __future__ import annotations
 
@@ -79,11 +68,19 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--live-only",
         action="store_true",
-        help="仅实盘相关步骤（跳过研究 GUI / COS / 公众号 / 行情描绘；归档时不挪选股结果）；也可用 ANT_LIVE_ONLY=1",
+        help="仅实盘相关步骤（跳过研究 GUI / COS / 公众号 / 行情描绘；归档时不挪选股结果）；"
+        "也可放 data/qmt_live_only.flag 或环境变量 ANT_LIVE_ONLY / ANT_QMT_LIVE_ONLY=1",
     )
     args = p.parse_args(list(argv) if argv is not None else None)
-    if not args.live_only and _env_truthy("ANT_LIVE_ONLY"):
-        args.live_only = True
+    if not args.live_only:
+        try:
+            from utils.live_only import is_live_only_machine
+
+            if is_live_only_machine():
+                args.live_only = True
+        except Exception:
+            if _env_truthy("ANT_LIVE_ONLY"):
+                args.live_only = True
     return args
 
 

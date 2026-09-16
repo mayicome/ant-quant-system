@@ -18,6 +18,11 @@ RESULTS_VERSION = 1
 # QMT 内置策略轮询 rules_armed.json 的间隔（秒）
 RULES_RELOAD_INTERVAL_SEC = 1
 RESULTS_FLUSH_INTERVAL_SEC = 1
+# 盘中 OHLC 跟随 tick 字段；允许随行情纠正（不锁死只升不降）
+HL_SOURCE_TICK_FOLLOW = "tick_follow"
+# 兼容旧常量名
+HL_SOURCE_TRADES_V2 = HL_SOURCE_TICK_FOLLOW
+HL_SOURCE_TRADES_V3 = HL_SOURCE_TICK_FOLLOW
 
 
 def default_paths(root: Optional[str] = None) -> Tuple[str, str]:
@@ -155,6 +160,8 @@ def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
     if "early_order_enabled" in raw:
         out["early_order_enabled"] = bool(raw.get("early_order_enabled"))
+    if "halt_on_open_gain" in raw:
+        out["halt_on_open_gain"] = bool(raw.get("halt_on_open_gain"))
     if "require_true_breakthrough" in raw:
         out["require_true_breakthrough"] = bool(raw.get("require_true_breakthrough"))
     if "wait_unseal" in raw:
@@ -257,6 +264,37 @@ def collect_live_subscribe_codes(
 ) -> List[str]:
     """tasks + watch_codes（不含 strategy_pool_watch）；仅用于 pool 已释放后的缩订阅。"""
     return collect_subscribe_codes(tasks, watch_codes, strategy_pool_watch=None)
+
+
+def clear_intraday_ohl_fields(bucket: Dict[str, Any], *, clear_open: bool = True) -> None:
+    """清空单票盘中 OHLC（换日 / 迁移时用）。"""
+    if not isinstance(bucket, dict):
+        return
+    if clear_open:
+        bucket["today_open"] = 0.0
+    bucket["today_high"] = 0.0
+    bucket["today_low"] = 0.0
+    bucket.pop("hl_from_trades", None)
+    bucket["hl_source"] = HL_SOURCE_TICK_FOLLOW
+
+
+def ensure_results_trade_date(results: Dict[str, Any], trade_date: str) -> bool:
+    """results.trade_date 与当日不一致时清空全部盘中 OHLC，避免昨高残留。"""
+    if not isinstance(results, dict):
+        return False
+    td = str(trade_date or "").strip()
+    if not td:
+        return False
+    old = str(results.get("trade_date") or "").strip()
+    if old == td:
+        return False
+    results["trade_date"] = td
+    stocks = results.get("stocks")
+    if isinstance(stocks, dict):
+        for bucket in stocks.values():
+            if isinstance(bucket, dict):
+                clear_intraday_ohl_fields(bucket, clear_open=True)
+    return True
 
 
 def prune_results_stocks(results: Dict[str, Any], keep_codes: Any) -> int:
@@ -501,13 +539,14 @@ def update_price_snapshot(
     last_tick_time: str = "",
     tick_row: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """更新现价；tick_row 存在时同步今开/当日高低（交易时段策略生成用）。
+    """更新现价；tick_row 存在时同步今开/当日高低。
 
-    每次成功调用都会刷新 quote_recv_at / quotes_recv_at（本机收到推送墙钟），
-    即使价格与 timetag 未变——供外部健康检查判断订阅是否存活。
+    每次成功调用都会刷新 quote_recv_at / quotes_recv_at。
 
-    今日高低只认「开盘后成交价」轨迹，避免 9:15–9:24 集合竞价虚拟匹配价
-    （常摸到涨跌停）污染 today_low/today_high。
+    规则（按用户结论）：
+    - 9:15–9:24 集合竞价虚拟阶段：不写今开/最高/最低（脏数据源）
+    - 9:25 后：直接跟随 tick 的 open/high/low，可上可下，不锁死
+    - 偶发脏值随下一笔正确 tick 纠正即可
     """
     code = str(stock_code or "").strip().upper()
     if not code or last_price <= 0:
@@ -535,7 +574,6 @@ def update_price_snapshot(
     if tick_time and bucket.get("last_tick_time") != tick_time:
         bucket["last_tick_time"] = tick_time
         changed = True
-    # 本机收到推送的墙钟：价格/timetag 不变也要刷新，供健康检查判断订阅是否存活
     recv_at = _now_iso()
     if bucket.get("quote_recv_at") != recv_at:
         bucket["quote_recv_at"] = recv_at
@@ -544,93 +582,36 @@ def update_price_snapshot(
         results["quotes_recv_at"] = recv_at
         changed = True
 
+    if str(bucket.get("hl_source") or "") != HL_SOURCE_TICK_FOLLOW:
+        bucket["hl_source"] = HL_SOURCE_TICK_FOLLOW
+        changed = True
+
     row = tick_row if isinstance(tick_row, dict) else {}
     last_close = extract_tick_last_close(row) if row else 0.0
     if last_close > 0 and abs(float(bucket.get("last_close") or 0) - last_close) > 1e-9:
         bucket["last_close"] = float(last_close)
         changed = True
-    open_px = extract_tick_open(row) if row else 0.0
-    if open_px > 0 and float(bucket.get("today_open") or 0) <= 0:
-        bucket["today_open"] = open_px
-        changed = True
-    elif (
-        float(bucket.get("today_open") or 0) <= 0
-        and new_price > 0
-        and not _in_call_auction_indicative_window()
-    ):
-        # 9:15–9:24 不用虚拟价锁死今开
-        bucket["today_open"] = new_price
-        changed = True
 
-    open_px = float(bucket.get("today_open") or 0) or float(open_px or 0)
-
-    # 虚拟竞价阶段：不写今日高低
+    # 集合竞价虚拟阶段：只更新现价/昨收，绝不采 open/high/low
     if _in_call_auction_indicative_window():
         if changed:
             results["updated_at"] = _now_iso()
         return changed
 
-    # 9:25 后：以开盘+成交价维护高低；行情源 low 若像竞价虚拟极值则忽略
+    tick_open = extract_tick_open(row) if row else 0.0
     tick_hi, tick_lo = extract_tick_high_low(row) if row else (0.0, 0.0)
-    cur_hi = float(bucket.get("today_high") or 0)
-    cur_lo = float(bucket.get("today_low") or 0)
 
-    trusted_lo = 0.0
-    if tick_lo > 0:
-        if new_price > 0 and new_price <= float(tick_lo) + 1e-6:
-            trusted_lo = float(tick_lo)
-        elif open_px > 0 and float(tick_lo) + 1e-9 >= open_px:
-            trusted_lo = float(tick_lo)
-        elif open_px > 0 and new_price + 1e-9 >= open_px * 0.98 and float(tick_lo) < open_px * 0.92:
-            trusted_lo = 0.0  # 现价已回开盘附近，官方 low 却深砸（常为竞价跌停虚拟价）
-        else:
-            trusted_lo = float(tick_lo)
-
-    polluted = (
-        open_px > 0
-        and cur_lo > 0
-        and cur_lo + 1e-9 < open_px * 0.92
-        and new_price + 1e-9 >= open_px * 0.98
-    )
-    seed_needed = (not bool(bucket.get("hl_from_trades"))) or polluted
-    trade_pts = [p for p in (open_px, new_price) if p and float(p) > 0]
-
-    if seed_needed and trade_pts:
-        hi0 = float(max(trade_pts))
-        lo0 = float(min(trade_pts))
-        if trusted_lo > 0:
-            lo0 = min(lo0, trusted_lo)
-        if tick_hi > 0:
-            hi0 = max(hi0, float(tick_hi))
-        bucket["today_high"] = hi0
-        bucket["today_low"] = lo0
-        bucket["hl_from_trades"] = True
+    if tick_open > 0 and abs(float(bucket.get("today_open") or 0) - tick_open) > 1e-9:
+        bucket["today_open"] = float(tick_open)
         changed = True
-    elif trade_pts:
-        if new_price > 0 and (cur_hi <= 0 or new_price > cur_hi + 1e-12):
-            bucket["today_high"] = new_price if cur_hi <= 0 else max(cur_hi, new_price)
-            changed = True
-        if tick_hi > 0:
-            cur_hi = float(bucket.get("today_high") or 0)
-            if cur_hi <= 0 or tick_hi > cur_hi + 1e-12:
-                bucket["today_high"] = float(tick_hi)
-                changed = True
-        if new_price > 0 and (cur_lo <= 0 or new_price < cur_lo - 1e-12):
-            bucket["today_low"] = new_price if cur_lo <= 0 else min(cur_lo, new_price)
-            changed = True
-        if trusted_lo > 0:
-            cur_lo = float(bucket.get("today_low") or 0)
-            if cur_lo <= 0 or trusted_lo < cur_lo - 1e-12:
-                bucket["today_low"] = trusted_lo if cur_lo <= 0 else min(cur_lo, trusted_lo)
-                changed = True
-            elif (
-                cur_lo > 0
-                and trusted_lo > cur_lo + 1e-12
-                and open_px > 0
-                and cur_lo + 1e-9 < open_px
-            ):
-                bucket["today_low"] = float(trusted_lo)
-                changed = True
+
+    if tick_hi > 0 and abs(float(bucket.get("today_high") or 0) - tick_hi) > 1e-9:
+        bucket["today_high"] = float(tick_hi)
+        changed = True
+
+    if tick_lo > 0 and abs(float(bucket.get("today_low") or 0) - tick_lo) > 1e-9:
+        bucket["today_low"] = float(tick_lo)
+        changed = True
 
     if changed:
         results["updated_at"] = _now_iso()

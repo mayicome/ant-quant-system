@@ -1,4 +1,4 @@
-#coding:gbk
+# -*- coding: utf-8 -*-
 """15:35 全 A 日线同步 + on-demand；manifest 失败恢复见 15:35 / init。"""
 import csv
 import json
@@ -57,7 +57,8 @@ BACKFILL_FIRST_DATE_SLACK_DAYS = 14
 # v8: (reverted) tick last-bar reconcile was too expensive for full-universe after hours.
 # v9: after-hours incremental re-pulls from CSV last trade day only.
 # v10: drop full_tick close/vol reconcile; keep last-trade-day 1d refresh only.
-QUALITY_VERSION = 10
+# v11: tick 全量落盘时用末笔对账覆盖 daily_cache 当日 K（见 patch_daily_cache_today_from_tick_row）。
+QUALITY_VERSION = 11
 # Touch under data/daily_cache/ to force one-shot backfill.
 # Empty file => start at BACKFILL_START_DATE; optional JSON {"start":"YYYYMMDD"}
 # or plain YYYYMMDD text overrides the floor for this FORCE run.
@@ -2371,6 +2372,62 @@ def _tick_row_to_daily_bar(row: Any, day: date) -> Optional[Dict[str, Any]]:
     return bar
 
 
+def _bar_field_float(bar: Dict[str, Any], key: str) -> float:
+    try:
+        return float(bar.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _daily_today_bar_differs(old: Dict[str, Any], new: Dict[str, Any]) -> bool:
+    """收盘价差 >= 1 分，或量/额相对偏差 >= 1%（且绝对量差 > 1）。"""
+    if not old:
+        return True
+    for key in ("open", "high", "low", "close"):
+        if abs(_bar_field_float(old, key) - _bar_field_float(new, key)) >= 0.009:
+            return True
+    for key in ("volume", "amount"):
+        ov = _bar_field_float(old, key)
+        nv = _bar_field_float(new, key)
+        if abs(ov - nv) <= 1.0:
+            continue
+        base = max(abs(ov), abs(nv), 1.0)
+        if abs(ov - nv) / base >= 0.01:
+            return True
+    return False
+
+
+def patch_daily_cache_today_from_tick_row(
+    full_code: str,
+    trade_d: date,
+    tick_row: Any,
+) -> str:
+    """用 tick 末笔（或指定行）覆盖 daily_cache 当日 K。
+
+    供 tick 全量落盘后调用：只改 data/daily_cache/{code}.csv，不做 qfq/hfq 镜像。
+    返回: patched / same / skip / fail
+    """
+    try:
+        bar = _tick_row_to_daily_bar(tick_row, trade_d)
+        if not bar:
+            return "skip"
+        code = str(full_code or "").strip()
+        if not code:
+            return "skip"
+        _, cache_dir, _, _ = _data_paths()
+        csv_path = os.path.join(cache_dir, "%s.csv" % code)
+        day_s = trade_d.isoformat()
+        rows = _read_csv_rows(csv_path)
+        old = rows.get(day_s) if isinstance(rows.get(day_s), dict) else None
+        if old is not None and not _daily_today_bar_differs(old, bar):
+            return "same"
+        rows[day_s] = bar
+        _write_csv_atomic(csv_path, rows)
+        return "patched"
+    except Exception:
+        return "fail"
+
+
 def _lookup_tick_row(tick_map: Dict[str, Any], code: str) -> Optional[Dict[str, Any]]:
     if not isinstance(tick_map, dict):
         return None
@@ -4257,7 +4314,7 @@ def _sync_start_date(
     if last > end_d:
         return end_d + timedelta(days=1)
     # After-hours: re-pull from the CSV's last trade day (most likely incomplete
-    # freeze) through end_d. Tick reconcile still covers end_d when last==end_d.
+    # freeze) through end_d. 当日 K 的收盘/量对账改由 tick 落盘时 patch。
     if refresh_today:
         return last
     if last == end_d:

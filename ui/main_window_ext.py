@@ -4457,6 +4457,10 @@ class MainWindowExt(Ui_mainWindow):
         self.logger.info(f"[定时重载] 启动结果: 成功={started} 失败={failed}")
         if tcv:
             try:
+                if hasattr(tcv, "_rebind_all_cached_charts"):
+                    n_bind = tcv._rebind_all_cached_charts()
+                    if n_bind:
+                        self.logger.info(f"[定时重载] 已纠正缓存图表绑定: {n_bind}")
                 n = tcv.sync_charts_with_running_tasks()
                 self.logger.info(f"[定时重载] 已同步图表运行态: {n}")
             except Exception as e:

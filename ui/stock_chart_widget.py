@@ -114,7 +114,7 @@ class StockChartWidget(QWidget):
         
         # 昨收盘价格（用于计算涨跌停）
         self.prev_close_price = 0.0
-        
+
         # 关键价格点数据
         self.key_points = []  # [(名称, 价格), ...]
         self.limit_up_price = 0.0
@@ -1743,6 +1743,56 @@ class StockChartWidget(QWidget):
             # 更新图表显示
             self.update_chart()
     
+    def _resolve_live_task_id(self):
+        """解析当前应操作的 task_id。
+
+        彻夜不关时图表缓存可能仍挂着旧 task_id（预约生成已换成新任务），
+        此时按股票代码回退到 TaskManager 中的现行任务。
+        """
+        task_id = getattr(self, "task_id", None)
+        tm = getattr(self, "task_manager", None)
+        tasks_map = getattr(tm, "tasks", None) if tm else None
+        if isinstance(tasks_map, dict) and task_id and task_id in tasks_map:
+            return task_id
+
+        # task 字典里的 id 也可能已过期
+        if isinstance(getattr(self, "task", None), dict):
+            nested = self.task.get("task_id")
+            if isinstance(tasks_map, dict) and nested and nested in tasks_map:
+                self.task_id = nested
+                return nested
+
+        if not isinstance(tasks_map, dict):
+            return task_id
+
+        sc = str(getattr(self, "stock_code", "") or "").strip()
+        if not sc:
+            return task_id
+
+        def _norm(code):
+            s = str(code or "").strip().upper()
+            s = s.replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
+            digits = "".join(c for c in s if c.isdigit())
+            return digits.zfill(6)[-6:] if digits else ""
+
+        norm = _norm(sc)
+        for tid, task in tasks_map.items():
+            if not isinstance(task, dict):
+                continue
+            tsc = str(task.get("stock_code") or "").strip()
+            if tsc == sc or (norm and _norm(tsc) == norm):
+                old = task_id
+                self.task_id = tid
+                self.task = task
+                try:
+                    self.logger.info(
+                        f"[{sc}] 图表 task_id 已纠偏: {old} -> {tid}"
+                    )
+                except Exception:
+                    pass
+                return tid
+        return task_id
+
     def start_task(self):
         """启动任务"""
         from PyQt5.QtWidgets import QMessageBox
@@ -1927,7 +1977,7 @@ class StockChartWidget(QWidget):
             # btn_start 则直接启动
         
         # 优先通过任务管理器启动真实任务进程，避免仅UI置状态导致“看起来暂停但实际仍在运行”
-        task_id = getattr(self, 'task_id', None)
+        task_id = self._resolve_live_task_id()
         if self.task_manager and task_id:
             if not self.task_manager.start_task(task_id):
                 # 仍在 running_tasks：对齐为运行中，避免「显示未运行却提示已在运行」
@@ -1986,7 +2036,7 @@ class StockChartWidget(QWidget):
     def pause_task(self):
         """暂停任务"""
         # 优先通过任务管理器停止真实任务进程，避免退出时仍被判定有运行任务
-        task_id = getattr(self, 'task_id', None)
+        task_id = self._resolve_live_task_id()
         if self.task_manager and task_id:
             ok = False
             try:
@@ -4332,7 +4382,7 @@ class StockChartWidget(QWidget):
                 and str(rule.get("halt_reason") or "").strip() == "open_gain"
             ):
                 info_action = menu.addAction(
-                    f"[已停止-开盘涨幅超限] {rule_name} ({type_name})"
+                    f"[已停止-昨收涨幅超限] {rule_name} ({type_name})"
                 )
                 info_action.setEnabled(False)
                 hd = str(rule.get("halt_detail") or "").strip()
@@ -4343,12 +4393,12 @@ class StockChartWidget(QWidget):
                 info_action = menu.addAction(f"📋 {rule_name} ({type_name})")
                 info_action.setEnabled(False)  # 只显示，不可点击
 
-        # 开盘涨幅熔断：仅在右键菜单标明开关（不改节点名称）
+        # 昨收涨幅熔断：仅在右键菜单标明开关（不改节点名称）
         try:
             from core.open_gain_halt import rule_wants_open_gain_halt
 
             if rule_wants_open_gain_halt(rule):
-                halt_status = menu.addAction("  已启用开盘涨幅熔断")
+                halt_status = menu.addAction("  已启用昨收涨幅熔断")
                 halt_status.setEnabled(False)
         except Exception:
             pass
@@ -6273,63 +6323,31 @@ class StockChartWidget(QWidget):
             self._maybe_reset_true_breakthrough_state_for_tick(tick_data)
             self.update_current_price(current_price)
         
-        # 在价格更新时间段（9:25:01-15:00）实时更新今日最高、最低、开盘
-        # 集合竞价在9:25:00结束，此时已有开盘价，所以从9:25:01开始更新
-        # 注意：这部分更新应该在检查task_paused之前执行，确保即使任务暂停也能更新显示
+        # 在价格更新时间段（9:25:01-15:00）跟随 tick 的今开/最高/最低（可上可下，不锁死）
+        # 9:25 前不更新（_is_price_update_time 已排除集合竞价虚拟阶段）
         if self._is_price_update_time():
             today_open = float(tick_data.get('open', 0) or 0)
             today_high = float(tick_data.get('high', 0) or 0)
             today_low = float(tick_data.get('low', 0) or 0)
-            last_px = float(current_price or 0)
-            # 拒绝集合竞价虚拟跌停价污染：官方 low 远低于开盘且现价已回开盘附近时，改用成交轨迹
-            if (
-                today_open > 0
-                and today_low > 0
-                and today_low + 1e-9 < today_open * 0.92
-                and last_px + 1e-9 >= today_open * 0.98
-            ):
-                today_low = 0.0
-            # 无可靠官方 low 时，用开盘/现价维护最低（与 results 快照逻辑一致）
-            if today_low <= 0 and today_open > 0 and last_px > 0:
-                today_low = min(today_open, last_px)
-            elif today_low <= 0 and last_px > 0:
-                today_low = last_px
-            if today_high <= 0 and today_open > 0 and last_px > 0:
-                today_high = max(today_open, last_px)
-            elif today_high <= 0 and last_px > 0:
-                today_high = last_px
             precision = self._get_price_precision()
             min_tick = 10 ** (-precision)
-            
-            # 更新key_points中的今日最高、最低、开盘（仅当值有效且发生变化时）
+
             if today_open > 0 or today_high > 0 or today_low > 0:
                 updated = False
                 for i, (name, price) in enumerate(self.key_points):
                     if name == '今开盘' and today_open > 0:
-                        if abs(price - today_open) > min_tick * 0.5:
+                        if abs(float(price or 0) - today_open) > min_tick * 0.5:
                             self.key_points[i] = (name, round(today_open, precision))
                             updated = True
                     elif name == '今日最高' and today_high > 0:
-                        # 只抬高，避免脏数据回退
-                        if today_high > float(price or 0) + min_tick * 0.5:
+                        if abs(float(price or 0) - today_high) > min_tick * 0.5:
                             self.key_points[i] = (name, round(today_high, precision))
                             updated = True
                     elif name == '今日最低' and today_low > 0:
-                        old = float(price or 0)
-                        # 污染纠偏：缓存最低远低于开盘且新 low 更合理时允许抬升
-                        if today_low + min_tick * 0.5 < old:
+                        if abs(float(price or 0) - today_low) > min_tick * 0.5:
                             self.key_points[i] = (name, round(today_low, precision))
                             updated = True
-                        elif (
-                            today_open > 0
-                            and old + 1e-9 < today_open * 0.92
-                            and today_low + 1e-9 >= min(today_open, last_px or today_open) - 1e-6
-                            and today_low > old + min_tick * 0.5
-                        ):
-                            self.key_points[i] = (name, round(today_low, precision))
-                            updated = True
-                
-                # 如果key_points中还没有这些项，且数据有效，则添加它们
+
                 key_point_names = [name for name, _ in self.key_points]
                 if today_open > 0 and '今开盘' not in key_point_names:
                     self.key_points.append(('今开盘', round(today_open, precision)))
@@ -6340,13 +6358,15 @@ class StockChartWidget(QWidget):
                 if today_low > 0 and '今日最低' not in key_point_names:
                     self.key_points.append(('今日最低', round(today_low, precision)))
                     updated = True
-                
-                # 如果更新了key_points，按价格重新排序（从高到低）
+
                 if updated:
-                    # 按价格从高到低排序
-                    self.key_points.sort(key=lambda x: x[1] if isinstance(x[1], (int, float)) else float('-inf'), reverse=True)
+                    self.key_points.sort(
+                        key=lambda x: x[1] if isinstance(x[1], (int, float)) else float('-inf'),
+                        reverse=True,
+                    )
                     self._redraw_price_chart_throttled()
-        
+
+        # 如果任务已暂停，不执行交易规则（定时清仓由 scheduled_clear_manager 独立调度）
         # 如果任务已暂停，不执行交易规则（定时清仓由 scheduled_clear_manager 独立调度）
         if self.task_paused:
             if _time.time() - _t0 > 0.5 and hasattr(self, 'logger'):
@@ -6414,7 +6434,7 @@ class StockChartWidget(QWidget):
         
         from core.rule_activation import rule_activation_allows_trigger
 
-        # 开盘涨幅熔断：先停掉带开关且已超限的未执行买入
+        # 昨收涨幅熔断：先停掉带开关且已超限的未执行买入
         try:
             from core.open_gain_halt import (
                 apply_open_gain_halt,
@@ -6441,7 +6461,7 @@ class StockChartWidget(QWidget):
                     try:
                         self.logger.info(
                             f"[{getattr(self, 'stock_code', '')}] "
-                            f"开盘涨幅熔断停止买入规则 "
+                            f"昨收涨幅熔断停止买入规则 "
                             f"{rule.get('name')}: {detail}"
                         )
                     except Exception:
@@ -6457,7 +6477,7 @@ class StockChartWidget(QWidget):
                     pass
         except Exception as e:
             try:
-                self.logger.debug(f"开盘涨幅熔断检查失败: {e}")
+                self.logger.debug(f"昨收涨幅熔断检查失败: {e}")
             except Exception:
                 pass
 
@@ -6953,6 +6973,13 @@ class StockChartWidget(QWidget):
             _r_cool = rule.get("cooldown_after_extreme_ticks", None)
             confirm_ticks = int(cfg_confirm) if _r_confirm is None else int(_r_confirm)
             cooldown_ticks = int(cfg_cooldown) if _r_cool is None else int(_r_cool)
+            # 与实盘 QMT / 回测一致：规则显式 dynamic_thresholds（含 0）优先于全局
+            _r_dyn = rule.get("dynamic_thresholds", None)
+            if _r_dyn is not None:
+                try:
+                    cfg_dyn = int(_r_dyn)
+                except (TypeError, ValueError):
+                    pass
             if confirm_ticks < 0:
                 confirm_ticks = 2
             if confirm_ticks == 0:
@@ -6988,13 +7015,21 @@ class StockChartWidget(QWidget):
             if triggered and lowest_price is not None and lowest_price > 0:
                 # 计算反弹目标价：最低价 * (1 + 反弹百分比/100)
                 # 动态反弹阈值：跌得越深，允许更“松”的反弹阈值（减少快速下跌后的小反弹误触发）
-                # rule可选参数：rise_scale（默认0.35）、max_rise_percent（默认4.0）
+                # rule可选参数：rise_scale / max_rise_percent（显式 0 有效，不能用 `or`）
                 try:
                     drop_from_trigger_pct = max(0.0, (trigger_price / lowest_price - 1.0) * 100.0) if trigger_price and lowest_price else 0.0
                 except Exception:
                     drop_from_trigger_pct = 0.0
-                rise_scale = float(rule.get("rise_scale") or 0.35)
-                max_rise = float(rule.get("max_rise_percent") or 4.0)
+                _rs = rule.get("rise_scale", None)
+                _mr = rule.get("max_rise_percent", None)
+                try:
+                    rise_scale = float(0.35 if _rs is None else _rs)
+                except (TypeError, ValueError):
+                    rise_scale = 0.35
+                try:
+                    max_rise = float(4.0 if _mr is None else _mr)
+                except (TypeError, ValueError):
+                    max_rise = 4.0
                 if int(cfg_dyn) <= 0:
                     eff_rise = float(rise_percent)
                 else:
@@ -9768,8 +9803,8 @@ class StockChartWidget(QWidget):
                         rule_name = f"[已执行] {rule_name_with_time}"
                 elif not rule_enabled:
                     if str(rule.get("halt_reason") or "").strip() == "open_gain":
-                        color = '#FFC107'  # 开盘涨幅熔断：黄色节点
-                        rule_name = f"[已停止-开盘涨幅超限] {rule_name_with_time}"
+                        color = '#FFC107'  # 昨收涨幅熔断：黄色节点
+                        rule_name = f"[已停止-昨收涨幅超限] {rule_name_with_time}"
                     else:
                         color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）
                         rule_name = f"[已禁用] {rule_name_with_time}"
@@ -9830,8 +9865,8 @@ class StockChartWidget(QWidget):
                         rule_name = f"[已执行] {rule_name}"
                 elif not rule_enabled:
                     if str(rule.get("halt_reason") or "").strip() == "open_gain":
-                        color = '#FFC107'  # 开盘涨幅熔断：黄色节点，区别于普通禁用黑点
-                        rule_name = f"[已停止-开盘涨幅超限] {rule_name}"
+                        color = '#FFC107'  # 昨收涨幅熔断：黄色节点，区别于普通禁用黑点
+                        rule_name = f"[已停止-昨收涨幅超限] {rule_name}"
                     else:
                         # 禁用的规则显示为黑色
                         color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）

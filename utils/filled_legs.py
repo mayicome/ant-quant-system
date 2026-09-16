@@ -81,8 +81,6 @@ def infer_leg_id(name: Any, leg_key: Any = None) -> str:
     for leg in _KNOWN_LEGS:
         if leg in su or leg in s:
             return leg
-    if "破MA20" in s or "破 MA20" in s:
-        return "破MA20"
     if "无条件清仓" in s or "末日" in s or "强制清仓" in s:
         return "末日清仓"
     return ""

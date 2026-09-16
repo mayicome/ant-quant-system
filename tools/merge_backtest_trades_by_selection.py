@@ -7,15 +7,21 @@
 选股日优先读 CSV 独立列「选股日」（与批量/下一轮回测导出列一致）；无该列时再从「触发信息」
 中解析 [选股日 yyyy-mm-dd]，避免仅靠长文本解析导致混批或漏解析。
 
+仅接受可解析的日历日作为选股日键；``live_align`` / ``live_align_N*`` 等实盘对齐占位
+视为「无选股日」。卖出侧无选股日时按代码回挂买入腿，同码多笔按买入日 FIFO 分摊数量与金额。
+
 收益率（收益率pct）统一为相对买入金额的盈亏比例：
   (卖出金额合计 + 剩余持仓数量 × 收盘价 − 买入金额合计) / 买入金额合计 × 100
 已清仓时剩余为 0，等价于 (卖−买)/买。
 
-汇总表中的 **end_date** 由「选股日 + 区间起算（T+1 或 T 当日）+ 持有交易日数」经 **trading_calendar**
-与批量回测相同公式精确计算，不采用 CSV 中 end_date 的众数或对齐。
+汇总表中的 **end_date** 默认按「买入日 + 持有交易日数」经交易日历推算（与下一轮接续
+口径一致：买入次日=持有第1日）；无买入日时回退「选股日 T+1 起」。CSV 卖出明细里的
+end_date 仅作参考，汇总时会被上述规则覆盖。
 
-未清仓盯市：默认取该票日线「能够获取到的最后交易日」收盘价；可选改为按 end_date，
-或按「选股日后第 N 个交易日」盯市。
+未清仓盯市：默认用该票 **持仓结束日（end_date）** 收盘价；已清仓不写盯市日。
+若结束日晚于今天（或本地尚无该日K线），则按「今天及之前最近交易日」做**临时盯市**，
+备注标明「持仓未到期…计划结束日=…」；end_date 列仍保留计划清仓日。
+可选：选股日后第 N 日，或「最后可得收盘」（数据排查用）。
 
 拉取收盘价优先用本地 daily_cache；缺数据时再尝试 data_provider / xtquant（未开 QMT 也可生成汇总）。
 
@@ -93,30 +99,37 @@ def _parse_sel(trigger: str) -> str:
     return m.group(1) if m else ""
 
 
+def _calendar_sel_str(raw: Any) -> str:
+    """仅接受可解析日历日；live_align 等占位 / 非日期字符串一律视为空。"""
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s or s.lower() in ("nan", "none", "null"):
+        return ""
+    sl = s.lower()
+    if sl.startswith("live_align") or "live_align" in sl:
+        return ""
+    d = _parse_row_date(s)
+    if d is not None:
+        return d.strftime("%Y-%m-%d")
+    return ""
+
+
 def _sel_from_row(r: dict, *, fallback_trade_date: bool = False) -> str:
     """
     汇总键「选股日」：优先使用导出 CSV 独立列（与触发信息解析解耦，避免漏解析/混批）。
     兼容列名：选股日、selection_date、选股日期；否则回退 [选股日 yyyy-mm-dd] 触发信息。
 
+    仅返回 YYYY-MM-DD；live_align 等占位当作缺失。
     fallback_trade_date：列与触发信息都空时，用成交「日期」兜底（盘中当日买、无选股文件时）。
     """
     if not isinstance(r, dict):
         return ""
     for key in ("选股日", "selection_date", "选股日期"):
-        v = r.get(key)
-        if v is None:
-            continue
-        s = str(v).strip()
-        if not s or s.lower() == "nan":
-            continue
-        d = _parse_row_date(s)
-        if d:
-            return d.strftime("%Y-%m-%d")
-        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-            return s[:10]
-        if len(s) >= 10:
-            return s[:10].replace("/", "-")
-    from_trig = _parse_sel(r.get("触发信息") or "")
+        cal = _calendar_sel_str(r.get(key))
+        if cal:
+            return cal
+    from_trig = _calendar_sel_str(_parse_sel(r.get("触发信息") or ""))
     if from_trig:
         return from_trig
     if fallback_trade_date:
@@ -155,6 +168,117 @@ def _resolve_sell_sel_when_missing(
             return le[0][0]
     cands.sort(key=lambda x: x[1] or date.max)
     return cands[0][0]
+
+
+def _fifo_open_lots(
+    code: str,
+    sell_d: Optional[date],
+    st: Dict[Tuple[str, str], dict],
+    buy_sels_by_code: Dict[str, List[Tuple[str, Optional[date]]]],
+) -> List[Tuple[date, str, int, Tuple[str, str]]]:
+    """同码未清仓买入腿，按买入日升序：(buy_date, sel, rem_vol, key)。"""
+    lots: List[Tuple[date, str, int, Tuple[str, str]]] = []
+    for sel, bd in buy_sels_by_code.get(code) or []:
+        k = (sel, code)
+        v = st.get(k)
+        if not v or int(v.get("buy_n") or 0) <= 0:
+            continue
+        rem = int(v.get("buy_vol") or 0) - int(v.get("sell_vol") or 0)
+        if rem <= 0:
+            continue
+        if sell_d is not None and bd is not None and bd > sell_d:
+            continue
+        lots.append((bd or date.min, sel, rem, k))
+    lots.sort(key=lambda x: x[0])
+    return lots
+
+
+def _apply_sell_to_group(
+    st: Dict[Tuple[str, str], dict],
+    k: Tuple[str, str],
+    *,
+    sell_vol: int,
+    sell_amt: float,
+    sell_n: int = 1,
+    end_d: Optional[date] = None,
+) -> None:
+    st[k]["sell_vol"] += int(sell_vol)
+    st[k]["sell_amt"] += float(sell_amt)
+    st[k]["sell_n"] += int(sell_n)
+    if end_d is not None:
+        cur = st[k]["end_date"]
+        if cur is None:
+            st[k]["end_date"] = end_d
+        elif cur != end_d:
+            st[k]["end_date_warn"] = True
+
+
+def _allocate_sell_fifo(
+    st: Dict[Tuple[str, str], dict],
+    buy_sels_by_code: Dict[str, List[Tuple[str, Optional[date]]]],
+    *,
+    code: str,
+    sell_vol: int,
+    sell_amt: float,
+    sell_d: Optional[date],
+    end_d: Optional[date] = None,
+) -> None:
+    """
+    卖出无真实选股日时：按买入日 FIFO 把数量/金额摊到仍有剩余仓位的买入腿。
+    超出买入合计的部分挂到最后一腿（或回挂解析出的选股日），保留「含初始仓」语义。
+    """
+    vol = int(sell_vol or 0)
+    amt = float(sell_amt or 0.0)
+    if vol <= 0 and end_d is None:
+        return
+
+    lots = _fifo_open_lots(code, sell_d, st, buy_sels_by_code)
+    if vol <= 0:
+        # 仅 end_date 占位：写到仍有剩余的腿，否则回挂一腿
+        targets = [k for _bd, _sel, _rem, k in lots]
+        if not targets:
+            sel = _resolve_sell_sel_when_missing(code, sell_d, buy_sels_by_code)
+            if sel:
+                targets = [(sel, code)]
+        for k in targets:
+            if end_d is not None:
+                cur = st[k]["end_date"]
+                if cur is None:
+                    st[k]["end_date"] = end_d
+                elif cur != end_d:
+                    st[k]["end_date_warn"] = True
+        return
+
+    if not lots:
+        sel = _resolve_sell_sel_when_missing(code, sell_d, buy_sels_by_code)
+        if not sel:
+            return
+        _apply_sell_to_group(st, (sel, code), sell_vol=vol, sell_amt=amt, end_d=end_d)
+        return
+
+    left_v = vol
+    left_a = amt
+    for i, (_bd, _sel, rem, k) in enumerate(lots):
+        if left_v <= 0:
+            break
+        take_v = min(rem, left_v)
+        if take_v <= 0:
+            continue
+        if take_v == left_v:
+            take_a = left_a
+        else:
+            take_a = round(left_a * (take_v / float(left_v)), 2) if left_v else 0.0
+        _apply_sell_to_group(
+            st, k, sell_vol=take_v, sell_amt=take_a, sell_n=1, end_d=end_d
+        )
+        left_v -= take_v
+        left_a = round(left_a - take_a, 2)
+
+    if left_v > 0:
+        # 卖超买入：挂到最后一腿
+        _apply_sell_to_group(
+            st, lots[-1][3], sell_vol=left_v, sell_amt=left_a, sell_n=0, end_d=end_d
+        )
 
 
 def _read_rows(path: Path) -> List[dict]:
@@ -246,16 +370,8 @@ def _norm_time_str(val) -> str:
 
 
 def _norm_sel_key(raw: str) -> str:
-    """汇总分组键：选股日统一为 YYYY-MM-DD，避免同一日多种写法拆成多组。"""
-    s = (raw or "").strip()
-    if not s:
-        return ""
-    d = _parse_row_date(s)
-    if d:
-        return d.strftime("%Y-%m-%d")
-    if len(s) >= 10 and s[4] in "-/":
-        return s[:10].replace("/", "-")
-    return s
+    """汇总分组键：仅 YYYY-MM-DD；live_align 等占位归一为空。"""
+    return _calendar_sel_str(raw)
 
 
 def apply_end_date_from_trading_calendar(
@@ -319,6 +435,86 @@ def apply_end_date_from_trading_calendar(
         elif sk:
             note = str(r.get("备注") or "").strip()
             r["备注"] = (note + "；" if note else "") + "无法由交易日历写入 end_date（请检查选股日格式与日历）"
+    return warns
+
+
+def apply_hold_end_date_from_buy(
+    rows: List[dict],
+    *,
+    hold_from_next_day: int,
+) -> List[str]:
+    """按买入日写入持仓结束日 end_date（覆盖 CSV / 选股日窗算出的 end_date）。
+
+    口径与「下一轮接续→持有交易日数」一致：
+    - 界面 N = 买入【次日】起持有第 1…N 日，第 N 日为结束日
+    - 等价于含买入日共 N+1 个交易日：trading_day_window_from_start(买入日, N+1)
+
+    无买入日时：回退选股日，按 T+1 起连续 N 个交易日（与选股后首买日对齐的近似）。
+    仅买入金额>0 的行写入（纯卖出挂账行不改）。
+    """
+    _root = Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    try:
+        from strategy_generator_app.trading_calendar import (
+            backtest_window_from_selection_day,
+            trading_day_window_from_start,
+        )
+    except ImportError:
+        from trading_calendar import (  # type: ignore
+            backtest_window_from_selection_day,
+            trading_day_window_from_start,
+        )
+
+    try:
+        ui_n = int(hold_from_next_day)
+    except (TypeError, ValueError):
+        ui_n = 2
+    ui_n = max(1, ui_n)
+    engine_n = ui_n + 1  # 含买入日
+    warns: List[str] = []
+    # 必须带 hold 天数：同一买入日不同 N 不能共用缓存
+    cache_buy: Dict[Tuple[date, int], Optional[date]] = {}
+    cache_sel: Dict[Tuple[date, int], Optional[date]] = {}
+
+    for r in rows:
+        if float(r.get("买入金额合计") or 0) <= 0:
+            r["持有交易日数"] = ""
+            continue
+        r["持有交易日数"] = int(ui_n)
+        buy_d = _parse_row_date(r.get("买入日"))
+        end_d: Optional[date] = None
+        if buy_d is not None:
+            bkey = (buy_d, engine_n)
+            if bkey not in cache_buy:
+                _s, e, msg = trading_day_window_from_start(buy_d, engine_n)
+                if e is None:
+                    warns.append(
+                        f"{r.get('代码') or ''} 买入日 {buy_d}: {msg or '无法推算持仓结束日'}"
+                    )
+                cache_buy[bkey] = e
+            end_d = cache_buy.get(bkey)
+        else:
+            sel_d = _parse_row_date(r.get("选股日"))
+            if sel_d is None:
+                note = str(r.get("备注") or "").strip()
+                r["备注"] = (note + "；" if note else "") + "无买入日/选股日，无法推算持仓结束日"
+                continue
+            key = (sel_d, ui_n)
+            if key not in cache_sel:
+                _s, e, msg = backtest_window_from_selection_day(
+                    sel_d,
+                    start_next_trading_day=True,
+                    hold_trading_days=ui_n,
+                )
+                if e is None:
+                    warns.append(f"选股日 {sel_d}: {msg or '无法推算持仓结束日'}")
+                cache_sel[key] = e
+            end_d = cache_sel.get(key)
+        if end_d is not None:
+            end_s = end_d.strftime("%Y-%m-%d")
+            r["end_date"] = end_s
+            r["计划持仓结束日"] = end_s
     return warns
 
 
@@ -522,7 +718,12 @@ def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, floa
             if px is not None:
                 out[c] = px
             else:
-                missing.append(c)
+                # 停牌等：用 as_of 及之前最后一根收盘（through_date 已截断）
+                _md, last_px = _df_last_bar(df)
+                if last_px is not None and float(last_px) > 0:
+                    out[c] = float(last_px)
+                else:
+                    missing.append(c)
     else:
         missing = list(codes_6)
 
@@ -841,49 +1042,47 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
         side = (r.get("方向") or "").strip()
         if side != "卖出":
             continue
-        # 与持仓回放一致：汇总占位 0 股卖出不计入清仓
-        if _int_vol(r.get("数量") or r.get("volume")) <= 0:
-            # 仍可从占位行取 end_date（仅当该组尚无 end_date）
-            sel = _norm_sel_key(_sel_from_row(r))
-            code = _code6_from_row(r)
-            if not sel and code:
-                sel = _norm_sel_key(
-                    _resolve_sell_sel_when_missing(
-                        code,
-                        _parse_row_date(r.get("日期") or r.get("date")),
-                        buy_sels_by_code,
-                    )
-                )
-            if sel and code:
-                k = (sel, code)
-                ed = _parse_row_date(r.get("end_date"))
-                if ed and st[k]["end_date"] is None:
-                    st[k]["end_date"] = ed
+        code = _code6_from_row(r)
+        if not code:
             continue
         sel = _norm_sel_key(_sel_from_row(r))
-        code = _code6_from_row(r)
-        if not sel and code:
-            sel = _norm_sel_key(
-                _resolve_sell_sel_when_missing(
-                    code,
-                    _parse_row_date(r.get("日期") or r.get("date")),
-                    buy_sels_by_code,
-                )
-            )
-        if not sel or not code:
-            continue
-        k = (sel, code)
-        st[k]["sell_amt"] += _num(r.get("金额"))
-        st[k]["sell_vol"] += _int_vol(r.get("数量"))
-        st[k]["sell_n"] += 1
+        sell_d = _parse_row_date(r.get("日期") or r.get("date"))
         ed = _parse_row_date(r.get("end_date"))
-        if ed:
-            cur = st[k]["end_date"]
-            if cur is None:
-                st[k]["end_date"] = ed
-            elif cur != ed:
-                # 同组多笔卖出应同属一档回测；若不一致保留首次并略作提示
-                st[k]["end_date_warn"] = True
+        sell_vol = _int_vol(r.get("数量") or r.get("volume"))
+        # 与持仓回放一致：汇总占位 0 股卖出不计入清仓，但仍可写 end_date
+        if sell_vol <= 0:
+            if sel:
+                k = (sel, code)
+                if ed and st[k]["end_date"] is None:
+                    st[k]["end_date"] = ed
+            else:
+                _allocate_sell_fifo(
+                    st,
+                    buy_sels_by_code,
+                    code=code,
+                    sell_vol=0,
+                    sell_amt=0.0,
+                    sell_d=sell_d,
+                    end_d=ed,
+                )
+            continue
+        sell_amt = _num(r.get("金额"))
+        if sel:
+            # 买卖两侧都有真实选股日：按原键合并
+            _apply_sell_to_group(
+                st, (sel, code), sell_vol=sell_vol, sell_amt=sell_amt, end_d=ed
+            )
+        else:
+            # live_align / 空选股日：按代码 FIFO 挂回买入腿
+            _allocate_sell_fifo(
+                st,
+                buy_sels_by_code,
+                code=code,
+                sell_vol=sell_vol,
+                sell_amt=sell_amt,
+                sell_d=sell_d,
+                end_d=ed,
+            )
 
     out: List[dict] = []
     for (sel, code) in sorted(st.keys(), key=lambda x: (x[0], x[1])):
@@ -922,13 +1121,18 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
             "剩余持仓数量": rem,
             "净现金流_卖减买": net_cash,
             "盯市日期": "",
+            "盯市类型": "",
             "收盘价": "",
             "剩余市值_盯市": "",
             "收益率pct": "",
             "备注": note,
+            "持有交易日数": "",
+            "计划持仓结束日": "",
         }
         bd = v.get("buy_date")
         row_out["买入日"] = bd.strftime("%Y-%m-%d") if bd else ""
+        if end_s:
+            row_out["计划持仓结束日"] = end_s
         bp = v.get("buy_price")
         row_out["买入成交价"] = round(float(bp), 2) if bp else ""
         row_out["触发信息"] = str(v.get("trigger_info") or "")
@@ -949,16 +1153,66 @@ def _uncleared_codes(rows: List[dict]) -> List[str]:
     return list(dict.fromkeys(codes))
 
 
+def _last_trading_day_on_or_before(d: date) -> date:
+    """含 d 的最近交易日（日历失败则退化为周一～周五）。"""
+    try:
+        from strategy_generator_app.trading_calendar import get_trading_dates_in_range_sorted
+
+        lo = d - timedelta(days=40)
+        lst = get_trading_dates_in_range_sorted(lo, d)
+        if lst:
+            return lst[-1]
+    except Exception:
+        pass
+    try:
+        from trading_calendar import get_trading_dates_in_range_sorted as _g2  # type: ignore
+
+        lo = d - timedelta(days=40)
+        lst = _g2(lo, d)
+        if lst:
+            return lst[-1]
+    except Exception:
+        pass
+    x = d
+    while x.weekday() >= 5:
+        x -= timedelta(days=1)
+    return x
+
+
+def _resolve_hold_mark_as_of(
+    end_d: Optional[date],
+    *,
+    data_cap: Optional[date] = None,
+) -> Tuple[Optional[date], bool]:
+    """持仓结束日 → 实际盯市日。
+
+    若结束日晚于「数据截止日」（默认今天及之前最近交易日），则按截止日临时盯市，
+    返回 (实际盯市日, True=未到期临时盯市)。
+    """
+    if end_d is None:
+        return None, False
+    cap = data_cap or _last_trading_day_on_or_before(date.today())
+    if end_d > cap:
+        return cap, True
+    return end_d, False
+
+
 def _lookup_mark_price(
     prices_by_mark: Dict[date, Dict[str, float]],
     code: str,
     preferred: Optional[date] = None,
 ) -> Tuple[Optional[date], float]:
-    """在 prices_by_mark 中取某代码收盘；preferred 有则优先，否则扫表。"""
+    """在 prices_by_mark 中取某代码收盘。
+
+    preferred 有值时只取该日（持仓结束日/第N日/未到期临时日），禁止回退到其它盯市日
+    （否则会把无关的「最后可得」日误当成目标盯市）。
+    preferred 为空时才扫表（最后可得模式）。
+    """
     if preferred is not None:
         px = float((prices_by_mark.get(preferred) or {}).get(code) or 0)
         if px > 0:
             return preferred, px
+        return None, 0.0
     for md in sorted(prices_by_mark.keys(), reverse=True):
         px = float((prices_by_mark.get(md) or {}).get(code) or 0)
         if px > 0:
@@ -971,14 +1225,16 @@ def _build_prices_by_mark_date(
     mark_n: int = 3,
     *,
     use_nth_trading_day: bool = False,
-    use_last_available: bool = True,
+    use_last_available: bool = False,
+    data_cap: Optional[date] = None,
 ) -> Tuple[Dict[date, Dict[str, float]], str]:
     """
     未清仓行拉收盘价。
 
-    - 默认 use_last_available：每票取日线能获取到的最后交易日收盘
+    - 默认：按行内 end_date；若结束日尚未到来/无该日K线，则按 data_cap（默认今天及之前
+      最近交易日）临时盯市
     - use_nth_trading_day：选股日后第 N 个交易日
-    - 否则：按行内 end_date
+    - use_last_available：每票日线最后可得交易日（排查用）
     """
     if use_nth_trading_day:
         use_last_available = False
@@ -990,6 +1246,7 @@ def _build_prices_by_mark_date(
             prices_by_mark.setdefault(md, {})[code] = px
         return prices_by_mark, warn
 
+    cap = data_cap or _last_trading_day_on_or_before(date.today())
     by_mark: Dict[date, List[str]] = defaultdict(list)
     mark_n = int(mark_n or 0)
     if mark_n < 0:
@@ -1005,10 +1262,14 @@ def _build_prices_by_mark_date(
             if not sel_d:
                 continue
             md = _nth_trading_day_after(sel_d, mark_n)
+            md, _interim = _resolve_hold_mark_as_of(md, data_cap=cap)
         else:
-            md = _parse_row_date(r.get("end_date"))
-            if not md:
+            end_d = _parse_row_date(r.get("end_date"))
+            if not end_d:
                 continue
+            md, _interim = _resolve_hold_mark_as_of(end_d, data_cap=cap)
+        if not md:
+            continue
         by_mark[md].append(code)
 
     prices_by_mark = {}
@@ -1030,13 +1291,15 @@ def apply_mark_and_returns(
     mark_n: int = 3,
     *,
     use_nth_trading_day: bool = False,
-    use_last_available: bool = True,
+    use_last_available: bool = False,
+    data_cap: Optional[date] = None,
 ) -> None:
     mark_n = int(mark_n or 0)
     if mark_n < 0:
         mark_n = 0
     if use_nth_trading_day:
         use_last_available = False
+    cap = data_cap or _last_trading_day_on_or_before(date.today())
 
     for r in rows:
         rem = int(r.get("剩余持仓数量") or 0)
@@ -1044,11 +1307,16 @@ def apply_mark_and_returns(
         sell_amt = float(r.get("卖出金额合计") or 0)
         code = _norm_code_6(str(r.get("代码") or ""))
 
-        if rem < 0 or buy_amt <= 0:
+        # 已清仓：只算卖出收益，不写盯市日
+        if rem == 0 and buy_amt > 0:
+            r["盯市日期"] = ""
+            r["收盘价"] = ""
+            r["剩余市值_盯市"] = ""
+            r["盯市类型"] = "已清仓"
+            r["收益率pct"] = round((sell_amt - buy_amt) / buy_amt * 100, 4)
             continue
 
-        if rem == 0:
-            r["收益率pct"] = round((sell_amt - buy_amt) / buy_amt * 100, 4)
+        if rem < 0 or buy_amt <= 0:
             continue
 
         base_note = (r.get("备注") or "").strip()
@@ -1057,39 +1325,75 @@ def apply_mark_and_returns(
             base_note = base_note.replace("；未清仓但卖出明细缺少 end_date（严格模式不回退买入）", "")
             base_note = base_note.replace("未清仓但卖出明细缺少 end_date（严格模式不回退买入）", "")
             base_note = base_note.strip("；").strip()
+        for old in (
+            "；持仓结束日盯市",
+            "持仓结束日盯市",
+            "；持仓未到期，按最近可得交易日盯市",
+            "持仓未到期，按最近可得交易日盯市",
+        ):
+            if old in base_note:
+                base_note = base_note.replace(old, "")
+        # 去掉「（计划结束日=…）」残留
+        base_note = re.sub(r"；?（计划结束日=\d{4}-\d{2}-\d{2}）", "", base_note)
+        base_note = base_note.strip("；").strip()
 
         preferred: Optional[date] = None
+        interim = False
+        planned_end: Optional[date] = None
         if use_nth_trading_day:
             sel_d = _parse_row_date(r.get("选股日"))
             if not sel_d:
                 r["备注"] = base_note + "；无法解析选股日，无法推算盯市日"
                 continue
-            preferred = _nth_trading_day_after(sel_d, mark_n)
+            planned_end = _nth_trading_day_after(sel_d, mark_n)
+            preferred, interim = _resolve_hold_mark_as_of(planned_end, data_cap=cap)
         elif not use_last_available:
-            preferred = _parse_row_date(r.get("end_date"))
-            if not preferred:
+            planned_end = _parse_row_date(r.get("end_date"))
+            if not planned_end:
                 r["备注"] = (
                     base_note
-                    + "；未清仓但缺少 end_date（请使用含 end_date 的卖出明细，或改用最后可得收盘盯市）"
+                    + "；未清仓但缺少持仓结束日 end_date（请设置持有交易日数后重算）"
                 )
                 continue
+            preferred, interim = _resolve_hold_mark_as_of(planned_end, data_cap=cap)
+        # use_last_available：preferred 保持 None，由 lookup 扫表
 
         mark_d, close = _lookup_mark_price(prices_by_mark, code, preferred)
         if mark_d is None or close <= 0:
             extra = "；无可用盯市收盘价，收益率未算"
+            if interim and planned_end is not None:
+                extra = (
+                    f"；持仓未到期（计划结束日={planned_end}）且最近交易日无收盘价，收益率未算"
+                )
+            elif planned_end is not None and not use_last_available:
+                extra = f"；持仓结束日 {planned_end} 无可用收盘价，收益率未算"
             if price_warn:
                 extra += f"（{price_warn}）"
             r["备注"] = (base_note + extra) if base_note else extra.lstrip("；")
             continue
 
         r["盯市日期"] = mark_d.strftime("%Y-%m-%d")
+        note = base_note or f"未清仓，余{rem}股"
         if use_last_available:
-            note = base_note or f"未清仓，余{rem}股"
+            r["盯市类型"] = "最后可得"
             if "最后可得收盘盯市" not in note:
                 note = (note + "；" if note else "") + "最后可得收盘盯市"
-            r["备注"] = note
+        elif interim and planned_end is not None:
+            r["盯市类型"] = "未到期临时"
+            r["计划持仓结束日"] = planned_end.strftime("%Y-%m-%d")
+            note = (
+                (note + "；" if note else "")
+                + f"持仓未到期，按最近可得交易日临时估值（不是持仓结束；计划结束日={planned_end}）"
+            )
+        elif not use_nth_trading_day:
+            r["盯市类型"] = "持仓到期"
+            if planned_end is not None:
+                r["计划持仓结束日"] = planned_end.strftime("%Y-%m-%d")
+            if "持仓结束日盯市" not in note:
+                note = (note + "；" if note else "") + "持仓结束日盯市"
         else:
-            r["备注"] = base_note
+            r["盯市类型"] = "选股日后第N日"
+        r["备注"] = note
 
         mv = round(rem * close, 2)
         r["收盘价"] = round(close, 4)
@@ -1193,11 +1497,69 @@ def _build_selection_file_index(df) -> Tuple[Dict[Tuple[str, str], dict], List[s
     return index, col_order
 
 
+def apply_first_selection_date_from_file(rows: List[dict], selection_file: Path) -> str:
+    """按股票代码从选股文件回填「首次选股日」（该码在文件中最早出现的选股日）。
+
+    实盘对齐滚动等导出常无真实选股日列，汇总时用买入日兜底，导致「选股日==买入日」。
+    本函数不改动原「选股日」列，另写「首次选股日」便于对照。
+    """
+    try:
+        df = _read_selection_file(selection_file)
+    except Exception as e:
+        return f"读取选股文件失败（首次选股日）：{type(e).__name__}: {e}"
+    if df is None or len(df) == 0:
+        return "选股文件为空，未回填首次选股日。"
+
+    day_col = None
+    code_col = None
+    for c in df.columns:
+        n = str(c).strip()
+        nl = n.lower()
+        if day_col is None and (
+            n in ("选股日", "选股日期", "日期", "as_of")
+            or "选股日" in n
+            or nl in ("selection_date", "screen_as_of", "as_of")
+        ):
+            day_col = c
+        if code_col is None and (
+            n in ("代码", "股票代码", "证券代码", "code", "stock_code")
+            or ("代码" in n and "概念" not in n)
+        ):
+            code_col = c
+    if day_col is None or code_col is None:
+        return "选股文件缺少选股日/代码列，未回填首次选股日。"
+
+    first_by_code: Dict[str, date] = {}
+    for _, row in df.iterrows():
+        c6 = _norm_code_6(str(row.get(code_col) or ""))
+        d = _parse_row_date(row.get(day_col))
+        if not c6 or d is None:
+            continue
+        prev = first_by_code.get(c6)
+        if prev is None or d < prev:
+            first_by_code[c6] = d
+
+    if not first_by_code:
+        return "选股文件未能解析出任何首次选股日。"
+
+    hit = 0
+    for r in rows:
+        c6 = _norm_code_6(str(r.get("代码") or ""))
+        d0 = first_by_code.get(c6)
+        if d0 is None:
+            r.setdefault("首次选股日", "")
+            continue
+        r["首次选股日"] = d0.strftime("%Y-%m-%d")
+        hit += 1
+    return f"已回填首次选股日：命中 {hit}/{len(rows)} 行（按代码取选股文件最早日）"
+
+
 def apply_selection_file_fields(rows: List[dict], selection_file: Path) -> str:
     """
     对 rows 中每个 (选股日, 代码) 组合，从选股文件中找对应行，
     将选股文件中的**全部列**复制到 rows（找不到则跳过该行回填）。
     汇总侧已有字段（买卖金额、收益率等）在列名冲突时保留汇总值。
+    另外按代码回填「首次选股日」（与表内选股日可能不同）。
     """
     try:
         df = _read_selection_file(selection_file)
@@ -1209,7 +1571,8 @@ def apply_selection_file_fields(rows: List[dict], selection_file: Path) -> str:
 
     index, col_order = _build_selection_file_index(df)
     if not index:
-        return "选股文件缺少关键列（需要「选股日/日期」与「代码/股票代码」），未回填。"
+        first_hint = apply_first_selection_date_from_file(rows, selection_file)
+        return f"选股文件缺少关键列（需要「选股日/日期」与「代码/股票代码」），未回填明细列。{first_hint}"
 
     hit = 0
     # 优先使用项目内交易日判断（支持法定节假日）
@@ -1266,7 +1629,8 @@ def apply_selection_file_fields(rows: List[dict], selection_file: Path) -> str:
             r.setdefault("选股日为涨停后第几日", "")
         hit += 1
 
-    return f"已从选股文件回填全部列：命中 {hit}/{len(rows)} 行"
+    first_hint = apply_first_selection_date_from_file(rows, selection_file)
+    return f"已从选股文件回填全部列：命中 {hit}/{len(rows)} 行；{first_hint}"
 
 
 def apply_ma_fields_from_daily_cache(rows: List[dict]) -> str:
@@ -1600,7 +1964,7 @@ def apply_buy_day_ma5_ref_fields(rows: List[dict]) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="按选股日汇总买卖 CSV（未清仓默认按最后可得收盘盯市）"
+        description="按选股日汇总买卖 CSV（未清仓默认按买入日推算的持仓结束日盯市）"
     )
     ap.add_argument("--buy", required=True, help="买入侧成交明细 CSV")
     ap.add_argument("--sell", required=True, help="卖出侧成交明细 CSV")
@@ -1611,9 +1975,14 @@ def main() -> int:
         help="未清仓按选股日后第 --mark-n 个交易日盯市",
     )
     ap.add_argument(
+        "--last-available",
+        action="store_true",
+        help="未清仓改用日线最后可得收盘盯市（排查用；默认按买入日推算的持仓结束日）",
+    )
+    ap.add_argument(
         "--mark-at-end-date",
         action="store_true",
-        help="未清仓按交易日历算出的 end_date 盯市（旧默认）；省略则用最后可得收盘",
+        help="（兼容旧开关）按持仓结束日盯市；现为默认，可省略",
     )
     ap.add_argument(
         "--mark-n",
@@ -1624,13 +1993,13 @@ def main() -> int:
     ap.add_argument(
         "--hold-days",
         type=int,
-        default=5,
-        help="持有交易日数：与批量回测一致，用于由选股日精确计算 end_date（默认 5）",
+        default=2,
+        help="持有交易日数（买入次日起算，与下一轮接续同口径；默认 2）",
     )
     ap.add_argument(
         "--from-t0",
         action="store_true",
-        help="区间从选股日当日起（默认从下一交易日起 T+1）",
+        help="无买入日回退选股日时：区间从选股日当日起（默认 T+1）",
     )
     args = ap.parse_args()
 
@@ -1644,14 +2013,22 @@ def main() -> int:
         return 1
 
     rows = aggregate(buy_p, sell_p)
-    apply_end_date_from_trading_calendar(
-        rows,
-        from_t1=not bool(args.from_t0),
-        hold_n=int(args.hold_days),
+    # 优先：按买入日 + 持有天数写 end_date；再可选覆盖为纯选股日窗
+    end_warns = apply_hold_end_date_from_buy(
+        rows, hold_from_next_day=int(args.hold_days)
     )
+    if bool(args.from_t0):
+        # 显式要求选股日 T0 窗时覆盖（少见）
+        apply_end_date_from_trading_calendar(
+            rows,
+            from_t1=False,
+            hold_n=int(args.hold_days),
+        )
+    for w in end_warns[:12]:
+        print(f"⚠ {w}", file=sys.stderr)
 
     use_nth = bool(args.use_nth_trading_day)
-    use_last = not bool(args.mark_at_end_date) and not use_nth
+    use_last = bool(args.last_available) and not use_nth
     prices_by_mark, price_warn = _build_prices_by_mark_date(
         rows,
         mark_n=int(args.mark_n),
@@ -1672,7 +2049,7 @@ def main() -> int:
             )
         else:
             print(
-                f"未清仓行：盯市日 = 各「end_date」（由选股日+交易日历计算），共 {n_mark} 个不同盯市日已拉取行情",
+                f"未清仓行：盯市日 = 各票持仓结束日（买入日+持有{int(args.hold_days)}日），共 {n_mark} 个不同盯市日已拉取行情",
                 file=sys.stderr,
             )
     if price_warn:
@@ -1683,7 +2060,11 @@ def main() -> int:
         hint = (
             "检查选股日格式"
             if use_nth
-            else ("检查 daily_cache 是否有日线" if use_last else "检查选股日是否可解析且 end_date 能否由交易日历算出")
+            else (
+                "检查 daily_cache 是否有日线"
+                if use_last
+                else "检查买入日/持有天数能否算出 end_date"
+            )
         )
         print(f"⚠ 有未清仓行但未能构建任何盯市日（{hint}）", file=sys.stderr)
 
@@ -1729,6 +2110,9 @@ def main() -> int:
 
     fieldnames = [
         "选股日",
+        "首次选股日",
+        "持有交易日数",
+        "计划持仓结束日",
         "end_date",
         "涨停日期",
         "选股日为涨停后第几日",
@@ -1743,6 +2127,7 @@ def main() -> int:
         "剩余持仓数量",
         "净现金流_卖减买",
         "盯市日期",
+        "盯市类型",
         "收盘价",
         "剩余市值_盯市",
         "收益率pct",

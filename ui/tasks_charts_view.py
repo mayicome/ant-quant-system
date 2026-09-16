@@ -1133,8 +1133,7 @@ class TasksChartsView(QWidget):
                         chart.canvas.setMinimumHeight(400)
                     
                     # 更新任务数据和规则（可能已变化）；补齐曾为「未知」的名称
-                    chart.task = task
-                    chart.task_id = task_id
+                    self._bind_chart_to_task(chart, task_id, task, update_rules=True)
                     if stock_name and stock_name not in ("未知", "未知名称"):
                         chart.stock_name = stock_name
                         try:
@@ -1145,9 +1144,6 @@ class TasksChartsView(QWidget):
                                     child.setText(f"{stock_name} ({short})")
                         except Exception:
                             pass
-                    params = task.get('params', {})
-                    rules = params.get('rules', [])
-                    chart.set_rules(rules)
                     
                     # 更新任务运行状态：优先图表实况 / running_tasks，避免切列后被陈旧 params 刷成已暂停
                     task_running, task_paused = self._resolve_task_run_state(task_id, task, chart)
@@ -1246,16 +1242,8 @@ class TasksChartsView(QWidget):
                         chart.canvas.setMinimumHeight(400)
                     
                     # 设置task和task_manager，用于拖动结束后保存
-                    chart.task = task
-                    chart.task_id = task_id
                     chart.task_manager = self.task_manager
-                    
-                    # 设置任务数据和规则
-                    params = task.get('params', {})
-                    
-                    # 传递规则列表给图表
-                    rules = params.get('rules', [])
-                    chart.set_rules(rules)
+                    self._bind_chart_to_task(chart, task_id, task, update_rules=True)
                     
                     # 传递任务运行状态给图表：优先实况，避免 UI 显示滞后/被陈旧 params 覆盖
                     task_running, task_paused = self._resolve_task_run_state(task_id, task, chart)
@@ -1524,6 +1512,14 @@ class TasksChartsView(QWidget):
             # 更新分页按钮状态
             self.prev_btn.setEnabled(self.current_page > 0)
             self.next_btn.setEnabled(self.current_page < total_pages - 1)
+
+            # 本页之外的缓存图也可能挂着旧 task_id（彻夜不关 + 预约换新任务）
+            try:
+                n_rebind = self._rebind_all_cached_charts()
+                if n_rebind:
+                    self.logger.info(f"[图表绑定] load_tasks 已纠正 {n_rebind} 个缓存图表的 task_id")
+            except Exception as e:
+                self.logger.warning(f"[图表绑定] load_tasks 全量重绑失败: {e}")
             
             try:
                 self._restore_chart_run_states(run_snap)
@@ -2100,6 +2096,14 @@ class TasksChartsView(QWidget):
                         # 确保容器和图表可见
                         chart_container.show()
                         if chart:
+                            # 快速翻页也必须刷新 task_id：否则预约换新任务后仍点旧 ID 启动失败
+                            self._bind_chart_to_task(chart, task_id, task, update_rules=True)
+                            cached_data['task'] = task
+                            try:
+                                running, paused = self._resolve_task_run_state(task_id, task, chart)
+                                chart.set_task_status(running, paused)
+                            except Exception:
+                                pass
                             chart.show()
                             # 同步当前列数并刷新显示，避免从多列切回1列时标签不显示（只有坐标轴和节点）
                             chart.current_columns = self.columns
@@ -2687,6 +2691,82 @@ class TasksChartsView(QWidget):
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.critical(self, "错误", f"打开执行记录对话框失败：{str(e)}")
     
+    def _find_task_for_stock(self, stock_code):
+        """按股票代码在当前任务表中查找 (task_id, task)。优先 all_tasks，再 TaskManager。"""
+        sc = str(stock_code or "").strip()
+        if not sc:
+            return None, None
+        norm = self._norm_stock_code6(sc)
+        for tid, task in getattr(self, "all_tasks", None) or []:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("stock_code") or "").strip() == sc:
+                return tid, task
+            if norm and self._norm_stock_code6(task.get("stock_code")) == norm:
+                return tid, task
+        tasks_map = getattr(self.task_manager, "tasks", None) if self.task_manager else None
+        if isinstance(tasks_map, dict):
+            for tid, task in tasks_map.items():
+                if not isinstance(task, dict):
+                    continue
+                if str(task.get("stock_code") or "").strip() == sc:
+                    return tid, task
+                if norm and self._norm_stock_code6(task.get("stock_code")) == norm:
+                    return tid, task
+        return None, None
+
+    def _bind_chart_to_task(self, chart, task_id, task, *, update_rules=True):
+        """把图表控件绑到当前任务（刷新 task_id / task / 规则），避免缓存残留旧 ID。"""
+        if not chart or not isinstance(task, dict):
+            return False
+        chart.task = task
+        chart.task_id = task_id
+        if getattr(chart, "task_manager", None) is None and self.task_manager is not None:
+            chart.task_manager = self.task_manager
+        if update_rules:
+            params = task.get("params") if isinstance(task.get("params"), dict) else {}
+            rules = params.get("rules", [])
+            try:
+                chart.set_rules(rules if isinstance(rules, list) else [])
+            except Exception:
+                pass
+        return True
+
+    def _rebind_all_cached_charts(self) -> int:
+        """预约重载/翻页后：按股票代码把缓存图表全部绑到最新 task_id。返回更新数量。"""
+        cache = getattr(self, "_chart_cache", None) or {}
+        updated = 0
+        for stock_code, cached in list(cache.items()):
+            if not isinstance(cached, dict):
+                continue
+            chart = cached.get("chart")
+            if not chart:
+                continue
+            tid, task = self._find_task_for_stock(stock_code)
+            if not tid or not task:
+                continue
+            old_tid = getattr(chart, "task_id", None)
+            self._bind_chart_to_task(chart, tid, task, update_rules=True)
+            cached["task"] = task
+            if old_tid != tid:
+                updated += 1
+                try:
+                    self.logger.info(
+                        f"[图表绑定] {stock_code} task_id {old_tid} -> {tid}"
+                    )
+                except Exception:
+                    pass
+            try:
+                running, paused = self._resolve_task_run_state(tid, task, chart)
+                chart.set_task_status(running, paused)
+            except Exception:
+                pass
+            cw = getattr(self, "chart_widgets", None) or {}
+            if stock_code in cw and isinstance(cw.get(stock_code), dict):
+                cw[stock_code]["task"] = task
+                cw[stock_code]["chart"] = chart
+        return updated
+
     def _resolve_task_run_state(self, task_id, task, chart=None):
         """解析任务运行/暂停显示状态。
 
@@ -2694,6 +2774,19 @@ class TasksChartsView(QWidget):
         再：params 明确「已暂停」时覆盖图表残留的 live 态（重新加载意图暂停）；
         再回退图表实况 / status / params。避免切列重排后用陈旧 params 把「运行中」刷成「已暂停」。
         """
+        # 图表挂着旧 task_id 时，改用当前任务表判断，避免误显示「已暂停/未运行」
+        if self.task_manager and task_id and task_id not in getattr(self.task_manager, "tasks", {}):
+            sc = ""
+            if isinstance(task, dict):
+                sc = str(task.get("stock_code") or "")
+            if not sc and chart is not None:
+                sc = str(getattr(chart, "stock_code", "") or "")
+            fresh_tid, fresh_task = self._find_task_for_stock(sc)
+            if fresh_tid and fresh_task:
+                task_id, task = fresh_tid, fresh_task
+                if chart is not None:
+                    self._bind_chart_to_task(chart, fresh_tid, fresh_task, update_rules=False)
+
         params = task.get('params') if isinstance(task.get('params'), dict) else {}
         in_tm = bool(
             task_id and task_id in getattr(self.task_manager, 'running_tasks', {})
@@ -2786,6 +2879,14 @@ class TasksChartsView(QWidget):
                 if not chart:
                     continue
                 task_id = getattr(chart, 'task_id', None)
+                # 缓存图可能仍挂着已被替换的旧 task_id
+                if self.task_manager and (
+                    not task_id or task_id not in getattr(self.task_manager, "tasks", {})
+                ):
+                    fresh_tid, fresh_task = self._find_task_for_stock(stock_code)
+                    if fresh_tid and fresh_task:
+                        task_id = fresh_tid
+                        self._bind_chart_to_task(chart, fresh_tid, fresh_task, update_rules=False)
                 in_tm = bool(task_id and task_id in running_tasks)
 
                 # 重载意图暂停：强制 UI 为已暂停，且不要 start_task 拉回
@@ -2854,7 +2955,10 @@ class TasksChartsView(QWidget):
         """按 TaskManager.running_tasks 同步当前缓存/本页图表的运行态。返回同步为运行中的数量。"""
         if not self.task_manager:
             return 0
-        running_tasks = getattr(self.task_manager, 'running_tasks', {}) or {}
+        try:
+            self._rebind_all_cached_charts()
+        except Exception as e:
+            self.logger.warning(f"[图表绑定] sync 前重绑失败: {e}")
         synced = 0
         seen = set()
         for source in (
@@ -2870,6 +2974,13 @@ class TasksChartsView(QWidget):
                 seen.add(stock_code)
                 task_id = getattr(chart, 'task_id', None)
                 task = getattr(chart, 'task', None)
+                if not isinstance(task, dict) or (
+                    task_id and task_id not in getattr(self.task_manager, "tasks", {})
+                ):
+                    fresh_tid, fresh_task = self._find_task_for_stock(stock_code)
+                    if fresh_tid and fresh_task:
+                        task_id, task = fresh_tid, fresh_task
+                        self._bind_chart_to_task(chart, task_id, task, update_rules=False)
                 if not isinstance(task, dict):
                     task = self.task_manager.tasks.get(task_id) if task_id else None
                 try:
