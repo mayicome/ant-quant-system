@@ -1,5 +1,5 @@
 #coding:gbk
-"""Shadow 真突破 tick 状态机。"""
+"""Shadow 锟斤拷突锟斤拷 tick 状态锟斤拷锟斤拷"""
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -139,7 +139,7 @@ class ShadowTickRunner:
         self._best_buy: Dict[str, Dict[str, Any]] = {}
         self._cage: Dict[str, Dict[str, Any]] = {}
         self._early: Dict[str, Dict[str, Any]] = {}
-        # code -> (limit_up, pre_close)，供近板缩小弹性；tick 缺字段时沿用
+        # code -> (limit_up, pre_close)锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷小锟斤拷锟皆ｏ拷tick 缺锟街讹拷时锟斤拷锟斤拷
         self._limit_cache: Dict[str, Tuple[float, float]] = {}
         self.early_order_enabled = bool(rules.get("early_order_enabled"))
         for t in self.tasks:
@@ -196,7 +196,7 @@ class ShadowTickRunner:
         new_sig = self._tasks_signature()
         tasks_changed = new_sig != old_sig
         codes_changed = old_codes != new_codes
-        # 清理已不存在的弹性任务状态
+        # 锟斤拷锟斤拷锟窖诧拷锟斤拷锟节的碉拷锟斤拷锟斤拷锟斤拷状态
         live_ids = {str(t.get("task_id") or "") for t in self.tasks}
         for tid in list(self._best_sell.keys()):
             if tid and tid not in live_ids:
@@ -211,7 +211,7 @@ class ShadowTickRunner:
             base = str(ekey).split("@g")[0]
             if base and base not in live_ids:
                 self._early.pop(ekey, None)
-        # 从武装任务回填 cage_entered
+        # 锟斤拷锟斤拷装锟斤拷锟斤拷锟斤拷锟� cage_entered
         for t in self.tasks:
             tid = str(t.get("task_id") or "")
             if not tid or str(t.get("rule_type") or "") not in ("cage_buy", "cage_sell"):
@@ -427,7 +427,7 @@ class ShadowTickRunner:
         grid_index: Optional[int] = None,
         early_enabled: Optional[bool] = None,
     ) -> Tuple[List[Dict[str, Any]], bool]:
-        """提前挂单 FSM。返回 (events, skip_normal_hit)。"""
+        """锟斤拷前锟揭碉拷 FSM锟斤拷锟斤拷锟斤拷 (events, skip_normal_hit)锟斤拷"""
         events: List[Dict[str, Any]] = []
         use_early = (
             self.early_order_enabled if early_enabled is None else bool(early_enabled)
@@ -437,7 +437,7 @@ class ShadowTickRunner:
         ekey = self._early_key(tid, grid_index)
         est = self._early.get(ekey) or {}
         active = bool(est.get("active"))
-        # 未开提前且无挂单：跳过；若已挂（active）仍处理撤/确认
+        # 未锟斤拷锟斤拷前锟斤拷锟睫挂碉拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟窖挂ｏ拷active锟斤拷锟皆达拷锟斤拷锟斤拷/确锟斤拷
         if not use_early and not active:
             return events, False
         is_buy = rule_type in ("single_buy", "grid_buy")
@@ -445,7 +445,7 @@ class ShadowTickRunner:
         direction_ok = (target < lp) if is_buy else (target > lp)
 
         if active:
-            # 价差过大：撤单
+            # 锟桔诧拷锟斤拷螅撼锟斤拷锟�
             if diff_pct > 1.0:
                 events.append(
                     self._event(
@@ -463,7 +463,7 @@ class ShadowTickRunner:
                 )
                 self.clear_early_state(ekey)
                 return events, True
-            # 价格到达：确认（不再发追价单）
+            # 锟桔格到达：确锟较ｏ拷锟斤拷锟劫凤拷追锟桔碉拷锟斤拷
             reached = (lp <= target) if is_buy else (lp >= target)
             if reached:
                 events.append(
@@ -482,10 +482,10 @@ class ShadowTickRunner:
                 )
                 self.clear_early_state(ekey)
                 return events, True
-            # 挂单中，跳过常规触发
+            # 锟揭碉拷锟叫ｏ拷锟斤拷锟斤拷锟斤拷锟芥触锟斤拷
             return events, True
 
-        # 未挂单：靠近且方向正确则提前挂（仅当前任务允许提前时）
+        # 未锟揭碉拷锟斤拷锟斤拷锟斤拷锟揭凤拷锟斤拷锟斤拷确锟斤拷锟斤拷前锟揭ｏ拷锟斤拷锟斤拷前锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷前时锟斤拷
         if use_early and diff_pct < 0.5 and direction_ok:
             uid = tid.replace(":", "_")
             if grid_index is not None:
@@ -590,7 +590,7 @@ class ShadowTickRunner:
         return ""
 
     def evaluate_price_map(self, stocks: Any) -> List[Dict[str, Any]]:
-        """用 results.stocks 快照判触发（tick 回调停掉时的兜底）。"""
+        """锟斤拷 results.stocks 锟斤拷锟斤拷锟叫达拷锟斤拷锟斤拷tick 锟截碉拷停锟斤拷时锟侥讹拷锟阶ｏ拷锟斤拷"""
         events: List[Dict[str, Any]] = []
         if not isinstance(stocks, dict):
             return events
@@ -677,7 +677,7 @@ class ShadowTickRunner:
 
     @staticmethod
     def _grid_point_price(rule_type: str, start_price: float, end_price: float, num_grids: int, index: int) -> float:
-        """与图表一致的网格点价格。"""
+        """锟斤拷图锟斤拷一锟铰碉拷锟斤拷锟斤拷锟桔革拷"""
         n = int(num_grids or 0)
         i = int(index or 0)
         if n < 1:
@@ -686,7 +686,7 @@ class ShadowTickRunner:
             return float(start_price or 0)
         if i >= n:
             return float(end_price or 0)
-        # 中间点线性插值；精度由调用方再 round
+        # 锟叫硷拷锟斤拷锟斤拷圆锟街碉拷锟斤拷锟斤拷锟斤拷傻锟斤拷梅锟斤拷锟� round
         try:
             px = float(start_price) + (float(end_price) - float(start_price)) * float(i) / float(n)
         except Exception:
@@ -720,7 +720,7 @@ class ShadowTickRunner:
             tid = str(task.get("task_id") or "")
             rule_type = str(task.get("rule_type") or "breakthrough_buy").strip()
 
-            # 定时清仓：到点后首笔有效 tick 一次性判定（现价 < 触发价则卖，否则跳过）
+            # 锟斤拷时锟斤拷郑锟斤拷锟斤拷锟斤拷锟阶憋拷锟斤拷效 tick 一锟斤拷锟斤拷锟叫讹拷锟斤拷锟街硷拷 < 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷
             if rule_type == "scheduled_clear":
                 if not tid:
                     continue
@@ -799,7 +799,7 @@ class ShadowTickRunner:
                 st.done_task_ids.add(tid)
                 continue
 
-            # 网格：每 tick 最多触发一个未执行点位（与图表一致）
+            # 锟斤拷锟斤拷每 tick 锟斤拷啻ワ拷锟揭伙拷锟轿粗达拷械锟轿伙拷锟斤拷锟酵硷拷锟揭伙拷拢锟�
             if rule_type in ("grid_buy", "grid_sell"):
                 if not tid:
                     continue
@@ -815,7 +815,7 @@ class ShadowTickRunner:
                         executed.add(int(x))
                     except (TypeError, ValueError):
                         pass
-                # 内存里已触发的点位也排除
+                # 锟节达拷锟斤拷锟窖达拷锟斤拷锟侥碉拷位也锟脚筹拷
                 for i in range(num_grids + 1):
                     if ("%s@g%d" % (tid, i)) in st.done_task_ids:
                         executed.add(i)
@@ -876,7 +876,7 @@ class ShadowTickRunner:
                     break
                 continue
 
-            # 笼子：先进内区间，再破端点触发（与图表一致）
+            # 锟斤拷锟接ｏ拷锟饺斤拷锟斤拷锟斤拷锟戒，锟斤拷锟狡端点触锟斤拷锟斤拷锟斤拷图锟斤拷一锟铰ｏ拷
             if rule_type in ("cage_buy", "cage_sell"):
                 if not tid:
                     continue
@@ -892,7 +892,7 @@ class ShadowTickRunner:
                 cst["kind"] = rule_type
                 entered = bool(cst.get("entered")) or bool(task.get("cage_entered"))
 
-                # 开盘价在内区间内：视为已进入（与回测一致）
+                # 锟斤拷锟教硷拷锟斤拷锟斤拷锟斤拷锟斤拷锟节ｏ拷锟斤拷为锟窖斤拷锟诫（锟斤拷夭锟揭伙拷拢锟�
                 if not entered:
                     open_px = float(
                         row.get("open")
@@ -972,8 +972,8 @@ class ShadowTickRunner:
             if trig <= 0:
                 continue
 
-            # 单点买入：现价 <= 触发价（与主程序图表一致）
-            # 开盘买入扩展：wait_unseal=涨停开盘等开板后触发
+            # 锟斤拷锟斤拷锟斤拷锟诫：锟街硷拷 <= 锟斤拷锟斤拷锟桔ｏ拷锟斤拷锟斤拷锟斤拷锟斤拷图锟斤拷一锟铰ｏ拷
+            # 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷展锟斤拷wait_unseal=锟斤拷停锟斤拷锟教等匡拷锟斤拷蟠シ锟�
             if rule_type == "single_buy":
                 vol = int(task.get("max_volume") or 0)
                 wait_unseal = bool(task.get("wait_unseal"))
@@ -1016,7 +1016,7 @@ class ShadowTickRunner:
                             "single_buy_hit",
                             tick_time,
                             order_px,
-                            msg="开盘买入-涨停等开板",
+                            msg="锟斤拷锟斤拷锟斤拷锟斤拷-锟斤拷停锟饺匡拷锟斤拷",
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
@@ -1045,7 +1045,7 @@ class ShadowTickRunner:
                     continue
                 if lp <= trig:
                     msg = (
-                        "开盘买入-卖一"
+                        "锟斤拷锟斤拷锟斤拷锟斤拷-锟斤拷一"
                         if task.get("open_buy_ask")
                         else "\u5355\u70b9\u4e70\u5165\u89e6\u53d1"
                     )
@@ -1065,7 +1065,7 @@ class ShadowTickRunner:
                         st.done_task_ids.add(tid)
                 continue
 
-            # 单点卖出：现价 >= 触发价（与主程序图表一致）
+            # 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟街硷拷 >= 锟斤拷锟斤拷锟桔ｏ拷锟斤拷锟斤拷锟斤拷锟斤拷图锟斤拷一锟铰ｏ拷
             if rule_type == "single_sell":
                 vol = int(task.get("max_volume") or 0)
                 early_ev, skip_hit = self._early_eval(
@@ -1102,7 +1102,7 @@ class ShadowTickRunner:
                         st.done_task_ids.add(tid)
                 continue
 
-            # 突破卖出：与图表一致 —— 现价 < 触发价即卖（不要求先上破）
+            # 突锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷图锟斤拷一锟斤拷 锟斤拷锟斤拷 锟街硷拷 < 锟斤拷锟斤拷锟桔硷拷锟斤拷锟斤拷锟斤拷要锟斤拷锟斤拷锟斤拷锟狡ｏ拷
             if rule_type == "breakthrough_sell":
                 r_lp = round_price_like_display(_code6(code), lp)
                 r_trig = round_price_like_display(_code6(code), trig)
@@ -1123,7 +1123,7 @@ class ShadowTickRunner:
                         st.done_task_ids.add(tid)
                 continue
 
-            # 弹性买入：跌破触发价 → 跟踪最低价 → 反弹确认买入
+            # 锟斤拷锟斤拷锟斤拷锟诫：锟斤拷锟狡达拷锟斤拷锟斤拷 锟斤拷 锟斤拷锟斤拷锟斤拷图锟� 锟斤拷 锟斤拷锟斤拷确锟斤拷锟斤拷锟斤拷
             if rule_type == "best_buy":
                 if compute_best_buy_rebound_from_rule is None:
                     continue
@@ -1161,7 +1161,7 @@ class ShadowTickRunner:
                 except (TypeError, ValueError):
                     lowest_price = None
 
-                # 图表：严格 < 触发价开始追踪
+                # 图锟斤拷锟斤拷锟较革拷 < 锟斤拷锟斤拷锟桔匡拷始追锟斤拷
                 if lp < trig:
                     if not triggered:
                         bbt["triggered"] = True
@@ -1229,7 +1229,7 @@ class ShadowTickRunner:
                             bbt["rebound_hit_count"] = 0
                 continue
 
-            # 弹性卖出：上破触发价 → 跟踪最高价 → 回落确认卖出
+            # 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟狡达拷锟斤拷锟斤拷 锟斤拷 锟斤拷锟斤拷锟斤拷呒锟� 锟斤拷 锟斤拷锟斤拷确锟斤拷锟斤拷锟斤拷
             if rule_type == "best_sell":
                 if compute_best_sell_fallback_from_rule is None:
                     continue
@@ -1357,18 +1357,18 @@ class ShadowTickRunner:
                         )
                         if tid:
                             st.done_task_ids.add(tid)
-                        # 命中后清状态，避免重复
+                        # 锟斤拷锟叫猴拷锟斤拷状态锟斤拷锟斤拷锟斤拷锟截革拷
                         self._best_sell.pop(tid, None)
                     else:
                         if bst.get("pullback_hit_count"):
                             bst["pullback_hit_count"] = 0
                 continue
 
-            # 突破买入（默认）：跌破 → 上穿 → 真突破
+            # 突锟斤拷锟斤拷锟诫（默锟较ｏ拷锟斤拷锟斤拷锟斤拷 锟斤拷 锟较达拷 锟斤拷 锟斤拷突锟斤拷
             if rule_type not in ("breakthrough_buy", ""):
                 continue
 
-            # 价格带硬pass：监控带内真突破；深位或买入参考价>MA5作废（不改普通突破路径）
+            # 锟桔革拷锟接瞤ass锟斤拷锟斤拷卮锟斤拷锟斤拷锟酵伙拷疲锟斤拷锟轿伙拷锟斤拷锟斤拷锟轿匡拷锟斤拷>MA5锟斤拷锟较ｏ拷锟斤拷锟斤拷锟斤拷通突锟斤拷路锟斤拷锟斤拷
             try:
                 band_lo = float(task.get("band_low") or 0)
                 band_hi = float(task.get("band_high") or 0)
@@ -1404,7 +1404,7 @@ class ShadowTickRunner:
                     lookback_prior=lookback_prior,
                 )
                 if not ok:
-                    # 带内未过真突破：继续盯
+                    # 锟斤拷锟斤拷未锟斤拷锟斤拷突锟狡ｏ拷锟斤拷锟斤拷锟斤拷
                     continue
                 try:
                     accept_lo = task.get("band_accept_low")
@@ -1413,7 +1413,7 @@ class ShadowTickRunner:
                     accept_lo = float(accept_lo) if accept_lo is not None and str(accept_lo).strip() != "" else None
                 except (TypeError, ValueError):
                     accept_lo = None
-                # 买入参考价：卖一(+1跳)，与回测成交预估一致；死卡硬上沿=band_high(MA5)
+                # 锟斤拷锟斤拷慰锟斤拷郏锟斤拷锟揭�(+1锟斤拷)锟斤拷锟斤拷夭锟缴斤拷预锟斤拷一锟铰ｏ拷锟斤拷锟斤拷硬锟斤拷锟斤拷=band_high(MA5)
                 buy_ref = float(lp)
                 try:
                     ask_raw = row.get("askPrice") if isinstance(row, dict) else None
@@ -1431,13 +1431,13 @@ class ShadowTickRunner:
                 hp_detail = None
                 if accept_lo is not None and float(lp) + 1e-12 < float(accept_lo):
                     hp_detail = (
-                        f"首次真突破放弃: 现价={float(lp):.2f}<有效下沿={float(accept_lo):.2f}"
-                        f"（监控带[{band_lo:.2f},{band_hi:.2f}]）; {detail}"
+                        f"锟阶达拷锟斤拷突锟狡凤拷锟斤拷: 锟街硷拷={float(lp):.2f}<锟斤拷效锟斤拷锟斤拷={float(accept_lo):.2f}"
+                        f"锟斤拷锟斤拷卮锟絒{band_lo:.2f},{band_hi:.2f}]锟斤拷; {detail}"
                     )
                 elif band_hi > 0 and float(buy_ref) > float(band_hi) + 1e-12:
                     hp_detail = (
-                        f"首次真突破放弃: 买入参考价={float(buy_ref):.2f}>硬上沿MA5={float(band_hi):.2f}"
-                        f"（现价={float(lp):.2f}，监控带[{band_lo:.2f},{band_hi:.2f}]）; {detail}"
+                        f"锟阶达拷锟斤拷突锟狡凤拷锟斤拷: 锟斤拷锟斤拷慰锟斤拷锟�={float(buy_ref):.2f}>硬锟斤拷锟斤拷MA5={float(band_hi):.2f}"
+                        f"锟斤拷锟街硷拷={float(lp):.2f}锟斤拷锟斤拷卮锟絒{band_lo:.2f},{band_hi:.2f}]锟斤拷; {detail}"
                     )
                 if hp_detail:
                     events.append(
@@ -1465,8 +1465,8 @@ class ShadowTickRunner:
                         trig,
                         msg=msg,
                         detail=(
-                            f"价格带量价买入: 现价={float(lp):.2f} "
-                            f"带=[{band_lo:.2f},{band_hi:.2f}]; {detail}"
+                            f"锟桔革拷锟斤拷锟斤拷锟斤拷锟斤拷锟�: 锟街硷拷={float(lp):.2f} "
+                            f"锟斤拷=[{band_lo:.2f},{band_hi:.2f}]; {detail}"
                         ),
                         metrics=metrics,
                         task_id=tid,
@@ -1496,76 +1496,69 @@ class ShadowTickRunner:
                         )
                     )
 
+            # 锟斤拷锟饺碉拷锟斤拷=True锟斤拷前锟斤拷<=锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷>锟斤拷锟斤拷锟斤拷False锟斤拷锟斤拷前锟斤拷锟斤拷锟斤拷锟斤拷>锟斤拷锟斤拷
             crossed = is_breakthrough_buy_price_cross_tick(
-                code, lp, trig, st.prev_last_price
+                code,
+                lp,
+                trig,
+                st.prev_last_price,
+                require_upward_cross=bool(task.get("require_break_below")),
             )
             if crossed:
-                if bool(task.get("require_break_below")) and not st.break_below_done:
+                # 未要锟斤拷锟斤拷突锟狡ｏ拷锟较达拷/站锟较硷拷锟斤拷锟斤拷图锟斤拷 require_tb=False 一锟铰ｏ拷
+                require_tb = True
+                if "require_true_breakthrough" in task:
+                    require_tb = bool(task.get("require_true_breakthrough"))
+                if not require_tb:
                     events.append(
                         self._event(
                             code,
-                            "cross_skip",
+                            "tb_pass",
                             tick_time,
                             trig,
-                            msg="\u4e0a\u7a7f\u4f46\u672a\u5148\u8dcc\u7834",
+                            msg="\u7a81\u7834\u4e70\u5165",
+                            detail="no_true_breakthrough_required",
                             task_id=tid,
+                            last_price=lp,
+                            max_volume=int(task.get("max_volume") or 0),
                         )
                     )
+                    if tid:
+                        st.done_task_ids.add(tid)
                 else:
-                    # 未要求真突破：上穿即买（与图表 require_tb=False 一致）
-                    require_tb = True
-                    if "require_true_breakthrough" in task:
-                        require_tb = bool(task.get("require_true_breakthrough"))
-                    if not require_tb:
-                        events.append(
-                            self._event(
-                                code,
-                                "tb_pass",
-                                tick_time,
-                                trig,
-                                msg="\u7a81\u7834\u4e70\u5165",
-                                detail="no_true_breakthrough_required",
-                                task_id=tid,
-                                last_price=lp,
-                                max_volume=int(task.get("max_volume") or 0),
-                            )
-                        )
-                        if tid:
-                            st.done_task_ids.add(tid)
-                    else:
-                        cond1_mode = normalize_true_breakthrough_cond1_mode(
-                            task.get("true_breakthrough_cond1_mode")
-                        )
-                        avg_before = (
-                            (st.prefix_sum / st.prefix_cnt) if st.prefix_cnt > 0 else None
-                        )
-                        ok, msg, detail, metrics = evaluate_true_breakthrough_tick_with_detail(
+                    cond1_mode = normalize_true_breakthrough_cond1_mode(
+                        task.get("true_breakthrough_cond1_mode")
+                    )
+                    avg_before = (
+                        (st.prefix_sum / st.prefix_cnt) if st.prefix_cnt > 0 else None
+                    )
+                    ok, msg, detail, metrics = evaluate_true_breakthrough_tick_with_detail(
+                        code,
+                        row,
+                        st.prev_row,
+                        st.vol_mul,
+                        avg_before,
+                        v_break,
+                        (st.recent_rows + [row])[-5:],
+                        recent_vols=st.recent_vols,
+                        cond1_mode=cond1_mode,
+                    )
+                    events.append(
+                        self._event(
                             code,
-                            row,
-                            st.prev_row,
-                            st.vol_mul,
-                            avg_before,
-                            v_break,
-                            (st.recent_rows + [row])[-5:],
-                            recent_vols=st.recent_vols,
-                            cond1_mode=cond1_mode,
+                            "tb_pass" if ok else "tb_fail",
+                            tick_time,
+                            trig,
+                            msg=msg,
+                            detail=detail,
+                            metrics=metrics,
+                            task_id=tid,
+                            last_price=lp,
+                            max_volume=int(task.get("max_volume") or 0),
                         )
-                        events.append(
-                            self._event(
-                                code,
-                                "tb_pass" if ok else "tb_fail",
-                                tick_time,
-                                trig,
-                                msg=msg,
-                                detail=detail,
-                                metrics=metrics,
-                                task_id=tid,
-                                last_price=lp,
-                                max_volume=int(task.get("max_volume") or 0),
-                            )
-                        )
-                        if tid:
-                            st.done_task_ids.add(tid)
+                    )
+                    if tid:
+                        st.done_task_ids.add(tid)
 
         self._advance_prefix(code, st, row, v_break)
         st.prev_last_price = lp
@@ -1573,13 +1566,13 @@ class ShadowTickRunner:
 
     @staticmethod
     def _format_tick_time(raw: Any) -> str:
-        """格式化 tick 时间 → HH:MM:SS。
+        """锟斤拷式锟斤拷 tick 时锟斤拷 锟斤拷 HH:MM:SS锟斤拷
 
-        支持：
+        支锟街ｏ拷
         - '20240620 14:13:30' / '2024-06-20 14:13:30' / ISO
         - '14:13:30'
-        - '20240620141330' / '20240620 141330'（无冒号）
-        - unix 秒(10位) / 毫秒(13位)（部分 QMT 全推只给 time 不给 timetag）
+        - '20240620141330' / '20240620 141330'锟斤拷锟斤拷冒锟脚ｏ拷
+        - unix 锟斤拷(10位) / 锟斤拷锟斤拷(13位)锟斤拷锟斤拷锟斤拷 QMT 全锟斤拷只锟斤拷 time 锟斤拷锟斤拷 timetag锟斤拷
         """
         if raw is None:
             return ""
@@ -1593,7 +1586,7 @@ class ShadowTickRunner:
             try:
                 n = float(s)
                 abs_n = abs(n)
-                # 10 位秒 / 13 位毫秒；14+ 位是 YYYYMMDDHHMMSS，走下面
+                # 10 位锟斤拷 / 13 位锟斤拷锟诫；14+ 位锟斤拷 YYYYMMDDHHMMSS锟斤拷锟斤拷锟斤拷锟斤拷
                 nd = "".join(c for c in s if c.isdigit())
                 if len(nd) in (10, 13) or (1e9 < abs_n < 2e10) or (1e12 < abs_n < 2e13):
                     if abs_n > 1e12:
@@ -1618,7 +1611,7 @@ class ShadowTickRunner:
                 pass
         if len(s) >= 8 and s[2] == ":":
             return s[:8]
-        # "20240620141330" / 纯数字时分秒
+        # "20240620141330" / 锟斤拷锟斤拷锟斤拷时锟斤拷锟斤拷
         digits = "".join(c for c in s if c.isdigit())
         if len(digits) >= 14:
             return "%s:%s:%s" % (digits[8:10], digits[10:12], digits[12:14])
@@ -1628,7 +1621,7 @@ class ShadowTickRunner:
 
     @staticmethod
     def _tick_row_timetag(row: Dict[str, Any]) -> Any:
-        """优先官方 timetag；直播回调常只有 time/stime，缺则兜底以免 last_tick_time 冻住。"""
+        """锟斤拷锟饺官凤拷 timetag锟斤拷直锟斤拷锟截碉拷锟斤拷只锟斤拷 time/stime锟斤拷缺锟津兜碉拷锟斤拷锟斤拷 last_tick_time 锟斤拷住锟斤拷"""
         if not isinstance(row, dict):
             return None
         for key in ("timetag", "time", "stime", "timeStamp", "timestamp"):

@@ -2704,6 +2704,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.merge_hold_spin.setValue(max(1, _def_hold))
         self.merge_hold_spin.setToolTip(
             "【汇总专用】持有交易日数（买入次日=第1日），用来算「计划持仓结束日」。\n"
+            "有第二腿时从末笔买入日次日起算。\n"
+            "汇总前会按该结束日截断卖出（去掉买入前/窗外的 live_align 错挂），避免卖出多于买入。\n"
             "不要和回测「运行交易日数」搞混——以本框为准。\n"
             "已清仓不盯市；已到结束日→按结束日收盘；未到结束日→按今天临时估值"
             "（盯市类型=未到期临时，计划结束日仍是第N日）。"
@@ -5141,6 +5143,97 @@ class StrategyGeneratorMainWindow(QMainWindow):
             return None
         return date.fromisoformat(s[:10])
 
+    @staticmethod
+    def _norm_trade_code6(code: Any) -> str:
+        s = str(code or "").strip().upper()
+        if "." in s:
+            s = s.split(".", 1)[0]
+        if s.isdigit():
+            return s.zfill(6)
+        return s
+
+    def _stamp_trades_selection_dates(
+        self,
+        trades: List[dict],
+        sel_by_code: Optional[Dict[str, Any]] = None,
+        *,
+        live_align_ctx: Optional[Dict[str, Any]] = None,
+    ) -> List[dict]:
+        """给成交明细写入「选股日」，并在触发信息前加 [选股日 yyyy-mm-dd]。
+
+        - sel_by_code：单次回测 / 分档回测，直接用 params.selection_date_by_code
+        - live_align_ctx：实盘对齐连续仿真，按成交日滚动建池取当日映射；
+          卖出若无映射则回挂同代码最近一笔买入的选股日
+        """
+        trades = list(trades or [])
+        if not trades:
+            return []
+
+        static_map: Dict[str, str] = {}
+        if isinstance(sel_by_code, dict):
+            for k, v in sel_by_code.items():
+                c6 = self._norm_trade_code6(k)
+                s = str(v or "").strip()[:10]
+                if c6 and s:
+                    static_map[c6] = s
+
+        pool_cache: Dict[date, Dict[str, str]] = {}
+        live_ctx = live_align_ctx if isinstance(live_align_ctx, dict) else None
+
+        def _sel_for_buy(code6: str, trade_d: Optional[date]) -> str:
+            if code6 and code6 in static_map:
+                return static_map[code6]
+            if live_ctx is None or trade_d is None or not code6:
+                return ""
+            if trade_d not in pool_cache:
+                try:
+                    from batch_import_pool import build_pool_for_as_of
+                except ImportError:
+                    from strategy_generator_app.batch_import_pool import build_pool_for_as_of
+                info = build_pool_for_as_of(
+                    live_ctx.get("by_day") or {},
+                    trade_d,
+                    live_ctx.get("settings") or {},
+                    entry_window=int(live_ctx.get("entry_window") or 10),
+                    resolve_selection_dates_fn=live_ctx.get("resolve_selection_dates_fn"),
+                    strength_by_day=live_ctx.get("strength_by_day"),
+                )
+                raw = (info or {}).get("selection_date_by_code") or {}
+                pool_cache[trade_d] = {
+                    self._norm_trade_code6(k): str(v or "").strip()[:10]
+                    for k, v in (raw.items() if isinstance(raw, dict) else [])
+                    if self._norm_trade_code6(k) and str(v or "").strip()[:10]
+                }
+            return str((pool_cache.get(trade_d) or {}).get(code6) or "")
+
+        out: List[dict] = []
+        last_buy_sel: Dict[str, str] = {}
+        for t in trades:
+            td = dict(t)
+            code6 = self._norm_trade_code6(td.get("code"))
+            trade_d = self._parse_iso_date_val(td.get("date") or td.get("trade_date"))
+            side = str(td.get("side") or "").strip().lower()
+            sel = str(td.get("选股日") or "").strip()[:10]
+            if not sel or sel.startswith("live_align") or "滚动" in sel:
+                sel = ""
+            if not sel:
+                if side == "sell":
+                    sel = last_buy_sel.get(code6) or _sel_for_buy(code6, trade_d)
+                else:
+                    sel = _sel_for_buy(code6, trade_d)
+            td["选股日"] = sel
+            if side != "sell" and code6 and sel:
+                last_buy_sel[code6] = sel
+            ti = str(td.get("trigger_info") or "").strip()
+            if sel:
+                prefix = f"[选股日 {sel}]"
+                if not ti.startswith(prefix):
+                    if ti.startswith("[实盘对齐滚动]"):
+                        ti = ti[len("[实盘对齐滚动]") :].strip()
+                    td["trigger_info"] = f"{prefix} {ti}".strip()
+            out.append(td)
+        return out
+
     def _codes_from_export_positions(self, seg: dict) -> List[str]:
         out: List[str] = []
         seen: set = set()
@@ -7343,13 +7436,18 @@ class StrategyGeneratorMainWindow(QMainWindow):
             self.backtest_result_text.setPlainText(msg)
             sd_s = start_date.strftime("%Y-%m-%d")
             ed_s = end_date.strftime("%Y-%m-%d")
+            sel_map = {}
+            try:
+                sel_map = dict((cfg.strategy_params or {}).get("selection_date_by_code") or {})
+            except Exception:
+                sel_map = {}
             trades_out = []
             for t in result.get("trades") or []:
                 td = dict(t)
-                td["选股日"] = ""
                 td["start_date"] = sd_s
                 td["end_date"] = ed_s
                 trades_out.append(td)
+            trades_out = self._stamp_trades_selection_dates(trades_out, sel_map)
             self._fill_backtest_trades_table(trades_out)
             export_payload = self._make_backtest_export_payload(
                 cfg, result, initial_cash, start_date, end_date, skipped_init, use_dual, cfg_b_dual
@@ -7678,7 +7776,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
             _ensure_repo_root_on_sys_path()
             from tools.merge_backtest_trades_by_selection import (
-                aggregate,
+                aggregate_with_hold_sell_filter,
                 build_position_corrected_ledger,
                 apply_hold_end_date_from_buy,
                 _build_prices_by_mark_date,
@@ -7692,7 +7790,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
             return
 
         try:
-            rows = aggregate(Path(buy_path), Path(sell_path))
+            rows, sell_filt_st = aggregate_with_hold_sell_filter(
+                Path(buy_path), Path(sell_path), hold_from_next_day=hold_from_next
+            )
             end_warns = apply_hold_end_date_from_buy(
                 rows, hold_from_next_day=hold_from_next
             )
@@ -7732,6 +7832,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 "代码",
                 "股票名称",
                 "买入日",
+                "末笔买入日",
                 "持有交易日数",
                 "计划持仓结束日",
                 "end_date",
@@ -7782,6 +7883,17 @@ class StrategyGeneratorMainWindow(QMainWindow):
             self._last_merge_out_path = out_path_abs
             self.merge_open_btn.setEnabled(True)
             msg = f"已生成汇总：{out_path_abs}\n共 {len(rows)} 行"
+            n_over = sum(1 for rr in rows if int(rr.get("剩余持仓数量") or 0) < 0)
+            msg += (
+                f"\n卖出截断（持有{hold_from_next}日窗）："
+                f"保留 {sell_filt_st.get('sell_kept_full', 0)}"
+                f"+拆薄{sell_filt_st.get('sell_kept_partial', 0)}"
+                f" / 入{sell_filt_st.get('sell_in', 0)}，"
+                f"丢弃 {sell_filt_st.get('sell_dropped', 0)}；"
+                f"量 {sell_filt_st.get('vol_kept', 0)}/{sell_filt_st.get('vol_in', 0)}"
+            )
+            if n_over:
+                msg += f"\n⚠ 仍有 {n_over} 行卖出多于买入，请核对买卖 CSV"
             if ledger_n > 0:
                 msg += f"\n已附「成交流水(持仓已校正)」{ledger_n} 行（买卖合并重算交易后持仓）"
             elif ledger_n < 0 and ledger_err:
@@ -8237,7 +8349,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             bt_progress, bt_dlg = self._backtest_progress_dialog("实盘对齐批量回测")
             lines = [
                 f"批量回测文件：{path}\n{hint}\n"
-                f"实盘对齐：近 {n_look} 日滚动建池；{start_d}～{end_d}；"
+                f"实盘对齐：{look_txt}交易日滚动建池；{start_d}～{end_d}；"
                 f"运行交易日数 {entry_w}；过滤：{filt_txt}"
                 f"{'；分时段' if use_dual else ''}\n",
                 "=" * 60,
@@ -8327,7 +8439,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 tick_cols = _batch_summary_tick_columns(result)
                 summary_rows = [
                     {
-                        "选股日": f"滚动N={n_look}",
+                        "选股日": f"滚动={look_txt}",
                         "回测开始": start_d.strftime("%Y-%m-%d"),
                         "回测结束": end_d.strftime("%Y-%m-%d"),
                         "股票数": len(union_codes),
@@ -8356,16 +8468,19 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 all_batch_trades: List[dict] = []
                 for t in result.get("trades") or []:
                     td = dict(t)
-                    ti = (td.get("trigger_info") or "").strip()
-                    td["trigger_info"] = f"[实盘对齐滚动] {ti}".strip()
-                    td["选股日"] = ""
                     td["start_date"] = start_d.strftime("%Y-%m-%d")
                     td["end_date"] = end_d.strftime("%Y-%m-%d")
-                    # 尽量从 params 回填选股日：成交后策略 params 可能已变；用 selection in trade if any
                     all_batch_trades.append(td)
-
-                # 用成交代码在最终/中途无法取每日 sel；从 by_day 无法一一对应。
-                # 导出时仍可按选股文件回填。
+                all_batch_trades = self._stamp_trades_selection_dates(
+                    all_batch_trades,
+                    live_align_ctx={
+                        "by_day": by_day,
+                        "settings": settings,
+                        "entry_window": entry_w,
+                        "resolve_selection_dates_fn": _resolve_selection_dates_by_code,
+                        "strength_by_day": strength_by_day,
+                    },
+                )
                 payload = self._make_backtest_export_payload(
                     cfg,
                     result,
@@ -8376,7 +8491,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     bool(use_dual),
                     cfg_b_dual,
                 )
-                payload["batch_selection_date"] = f"live_align_N{n_look}"
+                payload["batch_selection_date"] = f"live_align_{start_n}to{end_n}"
                 payload["batch_mode"] = True
                 payload["batch_live_align"] = True
                 segment_payloads = [payload]

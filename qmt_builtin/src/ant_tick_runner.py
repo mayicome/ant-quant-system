@@ -1496,76 +1496,69 @@ class ShadowTickRunner:
                         )
                     )
 
+            # 须先跌破=True：前价<=触发且最新>触发；False：有前价且最新>触发
             crossed = is_breakthrough_buy_price_cross_tick(
-                code, lp, trig, st.prev_last_price
+                code,
+                lp,
+                trig,
+                st.prev_last_price,
+                require_upward_cross=bool(task.get("require_break_below")),
             )
             if crossed:
-                if bool(task.get("require_break_below")) and not st.break_below_done:
+                # 未要求真突破：上穿/站上即买（与图表 require_tb=False 一致）
+                require_tb = True
+                if "require_true_breakthrough" in task:
+                    require_tb = bool(task.get("require_true_breakthrough"))
+                if not require_tb:
                     events.append(
                         self._event(
                             code,
-                            "cross_skip",
+                            "tb_pass",
                             tick_time,
                             trig,
-                            msg="\u4e0a\u7a7f\u4f46\u672a\u5148\u8dcc\u7834",
+                            msg="\u7a81\u7834\u4e70\u5165",
+                            detail="no_true_breakthrough_required",
                             task_id=tid,
+                            last_price=lp,
+                            max_volume=int(task.get("max_volume") or 0),
                         )
                     )
+                    if tid:
+                        st.done_task_ids.add(tid)
                 else:
-                    # 未要求真突破：上穿即买（与图表 require_tb=False 一致）
-                    require_tb = True
-                    if "require_true_breakthrough" in task:
-                        require_tb = bool(task.get("require_true_breakthrough"))
-                    if not require_tb:
-                        events.append(
-                            self._event(
-                                code,
-                                "tb_pass",
-                                tick_time,
-                                trig,
-                                msg="\u7a81\u7834\u4e70\u5165",
-                                detail="no_true_breakthrough_required",
-                                task_id=tid,
-                                last_price=lp,
-                                max_volume=int(task.get("max_volume") or 0),
-                            )
-                        )
-                        if tid:
-                            st.done_task_ids.add(tid)
-                    else:
-                        cond1_mode = normalize_true_breakthrough_cond1_mode(
-                            task.get("true_breakthrough_cond1_mode")
-                        )
-                        avg_before = (
-                            (st.prefix_sum / st.prefix_cnt) if st.prefix_cnt > 0 else None
-                        )
-                        ok, msg, detail, metrics = evaluate_true_breakthrough_tick_with_detail(
+                    cond1_mode = normalize_true_breakthrough_cond1_mode(
+                        task.get("true_breakthrough_cond1_mode")
+                    )
+                    avg_before = (
+                        (st.prefix_sum / st.prefix_cnt) if st.prefix_cnt > 0 else None
+                    )
+                    ok, msg, detail, metrics = evaluate_true_breakthrough_tick_with_detail(
+                        code,
+                        row,
+                        st.prev_row,
+                        st.vol_mul,
+                        avg_before,
+                        v_break,
+                        (st.recent_rows + [row])[-5:],
+                        recent_vols=st.recent_vols,
+                        cond1_mode=cond1_mode,
+                    )
+                    events.append(
+                        self._event(
                             code,
-                            row,
-                            st.prev_row,
-                            st.vol_mul,
-                            avg_before,
-                            v_break,
-                            (st.recent_rows + [row])[-5:],
-                            recent_vols=st.recent_vols,
-                            cond1_mode=cond1_mode,
+                            "tb_pass" if ok else "tb_fail",
+                            tick_time,
+                            trig,
+                            msg=msg,
+                            detail=detail,
+                            metrics=metrics,
+                            task_id=tid,
+                            last_price=lp,
+                            max_volume=int(task.get("max_volume") or 0),
                         )
-                        events.append(
-                            self._event(
-                                code,
-                                "tb_pass" if ok else "tb_fail",
-                                tick_time,
-                                trig,
-                                msg=msg,
-                                detail=detail,
-                                metrics=metrics,
-                                task_id=tid,
-                                last_price=lp,
-                                max_volume=int(task.get("max_volume") or 0),
-                            )
-                        )
-                        if tid:
-                            st.done_task_ids.add(tid)
+                    )
+                    if tid:
+                        st.done_task_ids.add(tid)
 
         self._advance_prefix(code, st, row, v_break)
         st.prev_last_price = lp

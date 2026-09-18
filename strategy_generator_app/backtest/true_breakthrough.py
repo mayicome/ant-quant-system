@@ -485,10 +485,12 @@ def is_breakthrough_buy_price_cross_tick(
     last_price: float,
     trigger_price: float,
     prev_last_price: Optional[float] = None,
+    require_upward_cross: bool = True,
 ) -> bool:
     """
-    仅在价格由 <= 触发价 上穿至 > 触发价 的首 tick 返回 True。
-    与实盘 stock_chart / breakbuycheck 突破时刻一致。
+    突破买入价条件（无前价只记账、不触发）：
+    - require_upward_cross=True（勾选「须先跌破」）：前价<=触发价 且 最新价>触发价
+    - require_upward_cross=False（未勾选）：有前价且 最新价>触发价
     """
     lp = float(last_price or 0)
     trig = float(trigger_price or 0)
@@ -501,9 +503,11 @@ def is_breakthrough_buy_price_cross_tick(
         return False
     prev = prev_last_price
     if prev is None or float(prev) <= 0:
+        return False
+    if not require_upward_cross:
         return True
     r_prev = round_price_like_display(code6, float(prev))
-    return r_prev <= r_trig and r_lp > r_trig
+    return r_prev <= r_trig
 
 
 def is_breakthrough_break_below_trigger_tick(

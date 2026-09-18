@@ -1,17 +1,12 @@
 # -*- coding: utf-8 -*-
 """安装策略：买：马总逻辑1-涨停后跌破MA10/20各1/2-单点
 
-参照「买：马总逻辑1-涨停后跌破MA10/20各1/2」（弹性 best_buy + 昨收涨幅熔断 + 首次跌破），
-改为单点买入 single_buy：现价 <= 均线触发价即买；仅 MA10/MA20，不买 MA5。
+与「买：马总逻辑1-涨停后跌破MA10/20各1/2」对齐；唯一差异：
+- 弹性版：best_buy（先跌破触发价，再按 rise_percent 反弹确认；默认 rise≈0）
+- 本单点版：single_buy（现价 <= 均线触发价即买）
 
-- 触发：均线重合点（行情「10日」「20日」），single_buy 跌至触发价或更低即买
-- 仓位：单股拟买入金额 / 2
-- 首次跌破：生成时查日线（选股日后～今天前，挂单窗内 low<=早盘MA）已破则不挂
-- 熔断：halt_on_open_gain（相对昨收；主板约5% / 其它约10%，由主程序按板块判定）
-- 回测：params.selection_date_by_code + backtest_trade_date
-  → 选股日 T+1 起，连续 entry_window_trading_days（默认10）个交易日可挂腿
-- 已买腿：params._filled_legs（引擎按 leg_key 回写）；实盘靠规则名合并 executed
-- 批量回测：有 entry_window 时仿真长度=窗口本身；「持有交易日数」留给下一轮卖出
+其余相同：仅 MA10/MA20 各 1/2、首次跌破过滤、昨收涨幅熔断、除权停买、
+选股日 T+1 起 entry_window 挂单窗、_filled_legs / 固定腿名合并 executed。
 """
 from __future__ import annotations
 
@@ -29,7 +24,7 @@ PREFERRED_ID = "strategy_dacdcef1"
 STRATEGY_CODE = r'''# 买：马总选股逻辑1 — 涨停后第一次跌破 MA10/MA20 各买 1/2（单点买入；不买 MA5）
 # - 触发价 = 均线重合点（行情字段「10日」「20日」）；不买 MA5
 # - 规则类型 single_buy：现价 <= 触发价即买（与弹性 best_buy 相对）
-# - halt_on_open_gain：开盘相对涨幅超限则停买（主板5%/其它10%）
+# - halt_on_open_gain：相对昨收涨幅超限则停买（主板5%/其它10%）
 # - 首次跌破：生成时用日线查选股日之后～今天之前，挂单窗内是否已有 low<=早盘MA；
 #   已破过的腿不再挂（不落盘记状态；缺日线无法判定则仍挂）
 # - 腿名固定：马总1单点-跌破MA10 / MA20（实盘重启靠同名合并 executed）
@@ -298,10 +293,13 @@ def run(codes, prices, get_name, account, params):
         for leg_id, field, rule_name, ma_period in LEG_SPECS:
             leg_key = "%s:%s" % (c6, leg_id)
             if leg_key in filled:
-                print('[马总1单点] skip filled %s' % leg_key)
+                print("[马总1单点] skip filled %s" % leg_key)
                 continue
             if _already_touched(c6, sel_d, start_d, end_d, ma_period):
-                print('[马总1单点] skip already_touched %s' % leg_key)
+                print(
+                    "[马总1单点] skip already_touched %s (日线已触达,不落盘)"
+                    % leg_key
+                )
                 continue
             raw = p.get(field)
             if raw is None or raw == "":
@@ -328,7 +326,8 @@ def run(codes, prices, get_name, account, params):
                 "volume": int(v),
                 "halt_on_open_gain": True,
             })
-    return result'''
+    return result
+'''
 
 
 def main() -> None:

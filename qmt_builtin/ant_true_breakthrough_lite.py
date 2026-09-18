@@ -1,5 +1,5 @@
 #coding:gbk
-"""ÕæÍ»ÆÆ tick ÅÐ¶¨£¨¾«¼ò°æ£¬ÎÞ PyQt ÒÀÀµ£©¡£"""
+"""ï¿½ï¿½?ï¿½ï¿½ tick ï¿½?ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½?ï¿½ï¿½ PyQt ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
 # docstring removed for QMT gbk loader
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -469,7 +469,7 @@ def cond1_mode_description(
 
 
 def window_prior_ticks_from_seconds(window_sec: Any, tick_sec: float = 3.0) -> int:
-    """Ê±¼ä´° -> Ìõ¼þ¢Ù lookback_prior£¨²»º¬±¾Ö¡£©£»Ä¬ÈÏÔ¼ 3 Ãë/tick¡£"""
+    """?ï¿½? -> ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ lookback_priorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½?ï¿½ï¿½ï¿½ï¿½?ï¿½ï¿½? 3 ï¿½ï¿½/tickï¿½ï¿½"""
     try:
         sec = float(window_sec)
     except (TypeError, ValueError):
@@ -486,6 +486,7 @@ def is_breakthrough_buy_price_cross_tick(
     last_price: float,
     trigger_price: float,
     prev_last_price: Optional[float] = None,
+    require_upward_cross: bool = True,
 ) -> bool:
 # docstring removed for QMT gbk loader
 # docstring removed for QMT gbk loader
@@ -500,9 +501,11 @@ def is_breakthrough_buy_price_cross_tick(
         return False
     prev = prev_last_price
     if prev is None or float(prev) <= 0:
+        return False
+    if not require_upward_cross:
         return True
     r_prev = round_price_like_display(code6, float(prev))
-    return r_prev <= r_trig and r_lp > r_trig
+    return r_prev <= r_trig
 
 
 def is_breakthrough_break_below_trigger_tick(
@@ -535,7 +538,7 @@ def is_breakthrough_sell_price_cross_tick(
     trigger_price: float,
     prev_last_price: Optional[float] = None,
 ) -> bool:
-    """Í»ÆÆÂô³ö£ºÕ¹Ê¾¼ÛÊ×´ÎÏÂ´©´¥·¢¼Û¡£"""
+    """?ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½??ï¿½ï¿½ï¿½?ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½?ï¿½"""
     lp = float(last_price or 0)
     trig = float(trigger_price or 0)
     if lp <= 0 or trig <= 0:
@@ -547,7 +550,7 @@ def is_breakthrough_sell_price_cross_tick(
         return False
     prev = prev_last_price
     if prev is None or float(prev) <= 0:
-        return True
+        return False
     r_prev = round_price_like_display(code6, float(prev))
     return r_prev >= r_trig and r_lp < r_trig
 
@@ -558,7 +561,7 @@ def is_breakthrough_break_above_trigger_tick(
     trigger_price: float,
     prev_last_price: Optional[float] = None,
 ) -> bool:
-    """Í»ÆÆÂô³öÇ°ÖÃ£ºÐëÏÈÉÏÆÆ´¥·¢¼Û£¬ÔÙÏÂ´©²ÅÔÊÐíÂô¡£"""
+    """?ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½?ï¿½?ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½?ï¿½ï¿½ï¿½ï¿½?ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     lp = float(last_price or 0)
     trig = float(trigger_price or 0)
     if lp <= 0 or trig <= 0:

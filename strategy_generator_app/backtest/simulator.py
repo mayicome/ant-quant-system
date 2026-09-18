@@ -1676,12 +1676,12 @@ def simulate_fills_with_ticks(
                             crossed_up = band_lo <= float(last_price) <= band_hi
                         else:
                             crossed_up = is_breakthrough_buy_price_cross_tick(
-                                code_6, float(last_price), trig_px, prev_lp
+                                code_6,
+                                float(last_price),
+                                trig_px,
+                                prev_lp,
+                                require_upward_cross=_intent_require_break_below(intent),
                             )
-                            if crossed_up and _intent_require_break_below(intent):
-                                if not break_below_state.get(idx):
-                                    if prev_lp is None or float(prev_lp) > trig_px:
-                                        crossed_up = False
                     if crossed_up:
                         planned_vol = volume
                         min_amt = float(intent.get("min_order_amount") or 5000)

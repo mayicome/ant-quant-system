@@ -14,9 +14,10 @@
   (卖出金额合计 + 剩余持仓数量 × 收盘价 − 买入金额合计) / 买入金额合计 × 100
 已清仓时剩余为 0，等价于 (卖−买)/买。
 
-汇总表中的 **end_date** 默认按「买入日 + 持有交易日数」经交易日历推算（与下一轮接续
-口径一致：买入次日=持有第1日）；无买入日时回退「选股日 T+1 起」。CSV 卖出明细里的
-end_date 仅作参考，汇总时会被上述规则覆盖。
+汇总表中的 **end_date** 默认按「锚定买入日 + 持有交易日数」经交易日历推算（与下一轮接续
+口径一致：买入次日=持有第1日；有第二腿时锚定=末笔买入日）；无买入日时回退「选股日 T+1 起」。
+生成汇总前会按该结束日**截断卖出**（丢弃早于该腿买入日、或晚于结束日的 live_align 错挂），
+避免「卖出数量多于买入」。CSV 卖出明细里的 end_date 仅作参考，汇总时会被上述规则覆盖。
 
 未清仓盯市：默认用该票 **持仓结束日（end_date）** 收盘价；已清仓不写盯市日。
 若结束日晚于今天（或本地尚无该日K线），则按「今天及之前最近交易日」做**临时盯市**，
@@ -121,23 +122,31 @@ def _sel_from_row(r: dict, *, fallback_trade_date: bool = False) -> str:
     兼容列名：选股日、selection_date、选股日期；否则回退 [选股日 yyyy-mm-dd] 触发信息。
 
     仅返回 YYYY-MM-DD；live_align 等占位当作缺失。
+    若「选股日」列等于成交日、但触发信息里另有选股日，则信触发信息
+    （兼容旧实盘对齐把选股日写成买入日的导出）。
     fallback_trade_date：列与触发信息都空时，用成交「日期」兜底（盘中当日买、无选股文件时）。
     """
     if not isinstance(r, dict):
         return ""
+    col_sel = ""
     for key in ("选股日", "selection_date", "选股日期"):
         cal = _calendar_sel_str(r.get(key))
         if cal:
-            return cal
+            col_sel = cal
+            break
     from_trig = _calendar_sel_str(_parse_sel(r.get("触发信息") or ""))
+    trade_d = _parse_row_date(
+        r.get("date") or r.get("日期") or r.get("买入日期") or r.get("trade_date")
+    )
+    trade_s = trade_d.strftime("%Y-%m-%d") if trade_d is not None else ""
+    if col_sel and from_trig and col_sel != from_trig and trade_s and col_sel == trade_s:
+        return from_trig
+    if col_sel:
+        return col_sel
     if from_trig:
         return from_trig
-    if fallback_trade_date:
-        bd = _parse_row_date(
-            r.get("date") or r.get("日期") or r.get("买入日期") or r.get("trade_date")
-        )
-        if bd is not None:
-            return bd.strftime("%Y-%m-%d")
+    if fallback_trade_date and trade_d is not None:
+        return trade_s
     return ""
 
 
@@ -446,8 +455,10 @@ def apply_hold_end_date_from_buy(
     """按买入日写入持仓结束日 end_date（覆盖 CSV / 选股日窗算出的 end_date）。
 
     口径与「下一轮接续→持有交易日数」一致：
-    - 界面 N = 买入【次日】起持有第 1…N 日，第 N 日为结束日
-    - 等价于含买入日共 N+1 个交易日：trading_day_window_from_start(买入日, N+1)
+    - 界面 N = 锚定买入日【次日】起持有第 1…N 日，第 N 日为结束日
+    - 等价于含锚定日共 N+1 个交易日：trading_day_window_from_start(锚定日, N+1)
+    - 默认锚定=首买日（买入日）；若有第二腿（买入笔数>=2 且有末笔买入日），
+      则锚定改为末笔买入日（通常即第二腿），持仓截止相应延后
 
     无买入日时：回退选股日，按 T+1 起连续 N 个交易日（与选股后首买日对齐的近似）。
     仅买入金额>0 的行写入（纯卖出挂账行不改）。
@@ -483,14 +494,25 @@ def apply_hold_end_date_from_buy(
             continue
         r["持有交易日数"] = int(ui_n)
         buy_d = _parse_row_date(r.get("买入日"))
+        last_d = _parse_row_date(r.get("末笔买入日"))
+        try:
+            buy_n = int(r.get("买入笔数") or 0)
+        except (TypeError, ValueError):
+            buy_n = 0
+        # 有第二腿：从末笔买入日次日起算持仓 N 日
+        anchor_d = buy_d
+        if buy_n >= 2 and last_d is not None:
+            anchor_d = last_d
+        elif last_d is not None and buy_d is not None and last_d > buy_d:
+            anchor_d = last_d
         end_d: Optional[date] = None
-        if buy_d is not None:
-            bkey = (buy_d, engine_n)
+        if anchor_d is not None:
+            bkey = (anchor_d, engine_n)
             if bkey not in cache_buy:
-                _s, e, msg = trading_day_window_from_start(buy_d, engine_n)
+                _s, e, msg = trading_day_window_from_start(anchor_d, engine_n)
                 if e is None:
                     warns.append(
-                        f"{r.get('代码') or ''} 买入日 {buy_d}: {msg or '无法推算持仓结束日'}"
+                        f"{r.get('代码') or ''} 锚定买入日 {anchor_d}: {msg or '无法推算持仓结束日'}"
                     )
                 cache_buy[bkey] = e
             end_d = cache_buy.get(bkey)
@@ -975,6 +997,7 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
             "sell_n": 0,
             "buy_time_min": "",
             "buy_date": None,
+            "last_buy_date": None,
             "buy_price": None,
             "trigger_info": "",
             "end_date": None,  # 严格模式：仅来自卖出明细 end_date 列
@@ -1003,6 +1026,13 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
         )
         buy_px = _num(r.get("价格") or r.get("price") or 0)
         trig = str(r.get("触发信息") or "").strip()
+        if bd is not None:
+            cur_last = st[k].get("last_buy_date")
+            if cur_last is None or bd >= cur_last:
+                st[k]["last_buy_date"] = bd
+            # 无时间戳时仍记下首买日，避免末笔有、首买空
+            if st[k].get("buy_date") is None:
+                st[k]["buy_date"] = bd
         if bt:
             cur_bt = (st[k].get("buy_time_min") or "").strip()
             cur_bd = st[k].get("buy_date")
@@ -1131,6 +1161,8 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
         }
         bd = v.get("buy_date")
         row_out["买入日"] = bd.strftime("%Y-%m-%d") if bd else ""
+        lbd = v.get("last_buy_date")
+        row_out["末笔买入日"] = lbd.strftime("%Y-%m-%d") if lbd else ""
         if end_s:
             row_out["计划持仓结束日"] = end_s
         bp = v.get("buy_price")
@@ -1140,6 +1172,35 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
             row_out[fk] = str(v.get(fk) or "")
         out.append(row_out)
     return out
+
+
+def aggregate_with_hold_sell_filter(
+    buy_path: Path,
+    sell_path: Path,
+    hold_from_next_day: int,
+) -> Tuple[List[dict], dict]:
+    """按持仓窗截断卖出后再汇总。
+
+    解决卖出 CSV 选股日为 live_align 时，FIFO 把上一轮卖出挂到本轮买入、
+    出现「卖出数量多于买入」的问题。截断规则与 summarize_hold_days_from_trades
+    一致：卖出不得早于该腿买入日，且不得晚于选股锚定结束日（多腿按末笔买入起算）。
+    """
+    import tempfile
+
+    from tools.summarize_hold_days_from_trades import (  # noqa: WPS433
+        _write_csv,
+        filter_sells_within_hold,
+    )
+
+    hold_n = max(1, int(hold_from_next_day))
+    buy_rows = _read_rows(buy_path)
+    sell_rows = _read_rows(sell_path)
+    filt, st = filter_sells_within_hold(buy_rows, sell_rows, hold_n)
+    with tempfile.TemporaryDirectory() as td:
+        sell_filtered = Path(td) / f"sell_hold{hold_n}_filtered.csv"
+        _write_csv(filt, sell_filtered)
+        rows = aggregate(buy_path, sell_filtered)
+    return rows, st
 
 
 def _uncleared_codes(rows: List[dict]) -> List[str]:
@@ -1500,8 +1561,8 @@ def _build_selection_file_index(df) -> Tuple[Dict[Tuple[str, str], dict], List[s
 def apply_first_selection_date_from_file(rows: List[dict], selection_file: Path) -> str:
     """按股票代码从选股文件回填「首次选股日」（该码在文件中最早出现的选股日）。
 
-    实盘对齐滚动等导出常无真实选股日列，汇总时用买入日兜底，导致「选股日==买入日」。
-    本函数不改动原「选股日」列，另写「首次选股日」便于对照。
+    实盘对齐滚动等导出若曾把「选股日」写成买入日，本函数另写「首次选股日」便于对照；
+    真正纠正「选股日」列请看 ``repair_selection_dates_from_file``。
     """
     try:
         df = _read_selection_file(selection_file)
@@ -1554,6 +1615,130 @@ def apply_first_selection_date_from_file(rows: List[dict], selection_file: Path)
     return f"已回填首次选股日：命中 {hit}/{len(rows)} 行（按代码取选股文件最早日）"
 
 
+def repair_selection_dates_from_file(
+    rows: List[dict],
+    selection_file: Path,
+    *,
+    entry_window: int = 10,
+) -> str:
+    """纠正汇总表「选股日」：为空，或与买入日相同（旧实盘对齐导出用买入日兜底）时，
+    按选股文件用「买入日前最近一次选股日」回填（可选限制在入场窗 entry_window 内）。
+    """
+    try:
+        df = _read_selection_file(selection_file)
+    except Exception as e:
+        return f"读取选股文件失败（纠正选股日）：{type(e).__name__}: {e}"
+    if df is None or len(df) == 0:
+        return "选股文件为空，未纠正选股日。"
+
+    day_col = None
+    code_col = None
+    for c in df.columns:
+        n = str(c).strip()
+        nl = n.lower()
+        if day_col is None and (
+            n in ("选股日", "选股日期", "日期", "as_of")
+            or "选股日" in n
+            or nl in ("selection_date", "screen_as_of", "as_of")
+        ):
+            day_col = c
+        if code_col is None and (
+            n in ("代码", "股票代码", "证券代码", "code", "stock_code")
+            or ("代码" in n and "概念" not in n)
+        ):
+            code_col = c
+    if day_col is None or code_col is None:
+        return "选股文件缺少选股日/代码列，未纠正选股日。"
+
+    dates_by_code: Dict[str, List[date]] = defaultdict(list)
+    for _, row in df.iterrows():
+        c6 = _norm_code_6(str(row.get(code_col) or ""))
+        d = _parse_row_date(row.get(day_col))
+        if not c6 or d is None:
+            continue
+        dates_by_code[c6].append(d)
+    for c6, ds in list(dates_by_code.items()):
+        dates_by_code[c6] = sorted(set(ds))
+
+    if not dates_by_code:
+        return "选股文件未能解析出选股日，未纠正。"
+
+    try:
+        ew = max(1, int(entry_window or 1))
+    except (TypeError, ValueError):
+        ew = 10
+
+    # 交易日历：用于「选股日后第 1～ew 个交易日」覆盖买入日
+    cal_dates = None
+    try:
+        try:
+            from strategy_generator_app.trading_calendar import get_trading_dates_in_range_sorted
+        except ImportError:
+            from trading_calendar import get_trading_dates_in_range_sorted  # type: ignore
+        all_ds = [d for ds in dates_by_code.values() for d in ds]
+        buy_ds = []
+        for r in rows:
+            bd = _parse_row_date(r.get("买入日") or r.get("date") or r.get("日期"))
+            if bd is not None:
+                buy_ds.append(bd)
+        if all_ds or buy_ds:
+            d0 = min(all_ds + buy_ds)
+            d1 = max(all_ds + buy_ds)
+            cal_dates = get_trading_dates_in_range_sorted(
+                d0 - timedelta(days=5),
+                d1 + timedelta(days=ew * 3 + 10),
+            )
+    except Exception:
+        cal_dates = None
+
+    def _in_entry_window(sel_d: date, buy_d: date) -> bool:
+        if buy_d <= sel_d:
+            return False
+        if not cal_dates:
+            # 无日历：日历日差粗判（约 ew*1.6 天）
+            return 0 < (buy_d - sel_d).days <= max(ew * 2, ew + 5)
+        # 选股日下一交易日起连续 ew 日
+        after = [d for d in cal_dates if d > sel_d]
+        if not after:
+            return False
+        window = after[:ew]
+        return buy_d in window or (window and window[0] <= buy_d <= window[-1])
+
+    fixed = 0
+    skipped = 0
+    for r in rows:
+        c6 = _norm_code_6(str(r.get("代码") or ""))
+        buy_d = _parse_row_date(r.get("买入日") or r.get("date") or r.get("日期"))
+        sel_s = _norm_sel_key(str(r.get("选股日") or ""))
+        buy_s = buy_d.strftime("%Y-%m-%d") if buy_d else ""
+        need = (not sel_s) or (bool(buy_s) and sel_s == buy_s)
+        if not need or not c6:
+            continue
+        cands = dates_by_code.get(c6) or []
+        if not cands:
+            skipped += 1
+            continue
+        chosen = None
+        if buy_d is not None:
+            before = [d for d in cands if d < buy_d]
+            # 优先：买入落在该选股日入场窗内的最近选股日
+            in_win = [d for d in before if _in_entry_window(d, buy_d)]
+            if in_win:
+                chosen = in_win[-1]
+            elif before:
+                chosen = before[-1]
+        if chosen is None:
+            chosen = cands[0]
+        new_s = chosen.strftime("%Y-%m-%d")
+        if new_s != sel_s:
+            r["选股日"] = new_s
+            fixed += 1
+    return (
+        f"已纠正选股日（空或等于买入日→选股文件）：{fixed} 行"
+        + (f"；无匹配 {skipped} 行" if skipped else "")
+    )
+
+
 def apply_selection_file_fields(rows: List[dict], selection_file: Path) -> str:
     """
     对 rows 中每个 (选股日, 代码) 组合，从选股文件中找对应行，
@@ -1561,18 +1746,19 @@ def apply_selection_file_fields(rows: List[dict], selection_file: Path) -> str:
     汇总侧已有字段（买卖金额、收益率等）在列名冲突时保留汇总值。
     另外按代码回填「首次选股日」（与表内选股日可能不同）。
     """
+    repair_hint = repair_selection_dates_from_file(rows, selection_file)
     try:
         df = _read_selection_file(selection_file)
     except Exception as e:
-        return f"读取选股文件失败：{type(e).__name__}: {e}"
+        return f"{repair_hint}；读取选股文件失败：{type(e).__name__}: {e}"
 
     if df is None or len(df) == 0:
-        return "选股文件为空，未回填字段。"
+        return f"{repair_hint}；选股文件为空，未回填字段。"
 
     index, col_order = _build_selection_file_index(df)
     if not index:
         first_hint = apply_first_selection_date_from_file(rows, selection_file)
-        return f"选股文件缺少关键列（需要「选股日/日期」与「代码/股票代码」），未回填明细列。{first_hint}"
+        return f"{repair_hint}；选股文件缺少关键列（需要「选股日/日期」与「代码/股票代码」），未回填明细列。{first_hint}"
 
     hit = 0
     # 优先使用项目内交易日判断（支持法定节假日）
@@ -1630,7 +1816,9 @@ def apply_selection_file_fields(rows: List[dict], selection_file: Path) -> str:
         hit += 1
 
     first_hint = apply_first_selection_date_from_file(rows, selection_file)
-    return f"已从选股文件回填全部列：命中 {hit}/{len(rows)} 行；{first_hint}"
+    return (
+        f"{repair_hint}；已从选股文件回填全部列：命中 {hit}/{len(rows)} 行；{first_hint}"
+    )
 
 
 def apply_ma_fields_from_daily_cache(rows: List[dict]) -> str:
@@ -2012,7 +2200,17 @@ def main() -> int:
         print(f"找不到卖出文件: {sell_p}", file=sys.stderr)
         return 1
 
-    rows = aggregate(buy_p, sell_p)
+    rows, sell_filt_st = aggregate_with_hold_sell_filter(
+        buy_p, sell_p, hold_from_next_day=int(args.hold_days)
+    )
+    print(
+        f"卖出截断: kept {sell_filt_st.get('sell_kept_full', 0)}"
+        f"+partial{sell_filt_st.get('sell_kept_partial', 0)}"
+        f" / in{sell_filt_st.get('sell_in', 0)}；"
+        f"vol {sell_filt_st.get('vol_kept', 0)}/{sell_filt_st.get('vol_in', 0)}；"
+        f"dropped {sell_filt_st.get('sell_dropped', 0)}",
+        file=sys.stderr,
+    )
     # 优先：按买入日 + 持有天数写 end_date；再可选覆盖为纯选股日窗
     end_warns = apply_hold_end_date_from_buy(
         rows, hold_from_next_day=int(args.hold_days)
@@ -2118,6 +2316,8 @@ def main() -> int:
         "选股日为涨停后第几日",
         "代码",
         "买入时间",
+        "买入日",
+        "末笔买入日",
         "买入笔数",
         "卖出笔数",
         "买入金额合计",

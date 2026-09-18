@@ -3291,7 +3291,8 @@ class StockChartWidget(QWidget):
 
         - MA5 价格带：只在监控带 [band_low, band_high] 内评估；现价在带外
           （含已高于上沿/突破价）不会立即触发，不应弹窗。
-        - 普通突破：现价已高于触发价时，首 tick 无前价也可能按上穿处理，仍提示。
+        - 普通突破：无前价不触发；未勾选「须先跌破」且现价已高于触发价时，
+          有前价后下一笔可能立刻买；勾选后须先回到触发价及以下再上穿。
         返回 (will_trigger, reason)。
         """
         lp = float(
@@ -3321,10 +3322,10 @@ class StockChartWidget(QWidget):
             # 现价在带外：等待回落进带，启动瞬间不会触发
             return False, ""
 
-        if trig > 0 and lp > trig:
+        if trig > 0 and lp > trig and not self._rule_require_break_below(r):
             return (
                 True,
-                f"突破买入价({trig:.2f}元) < 当前价({lp:.2f}元)",
+                f"未勾选须先跌破且当前价({lp:.2f}元)>突破价({trig:.2f}元)，有前价后可能立即买入",
             )
         return False, ""
 
@@ -4845,7 +4846,7 @@ class StockChartWidget(QWidget):
                     will_trigger = True
                     trigger_reason = f"买入价格({price:.2f}元) >= 当前价格({self.current_price:.2f}元)"
             elif rule_type == 'breakthrough_buy' and self.current_price > 0:
-                # 创建时：价格带已在 band_fields 分支排除；普通突破仍按「已在触发价上方」提示
+                # 创建时：仅价格带在监控带内可能立刻判真突破；普通突破无前价不买
                 if isinstance(band_fields, dict) and band_fields.get("use_band"):
                     probe = {
                         "type": "breakthrough_buy",
@@ -6666,21 +6667,9 @@ class StockChartWidget(QWidget):
                     self._save_rules()
 
             if not self._is_breakthrough_buy_price_cross_tick(
-                tick_data, trigger_price
+                tick_data, trigger_price, require_upward_cross=require_break_below
             ):
                 return False, None
-
-            if require_break_below and not rule.get("break_below_trigger_done"):
-                prev = self._last_tick_price
-                lp = float(tick_data.get("lastPrice") or 0)
-                trig = float(trigger_price or 0)
-                from_below_cross = (
-                    prev is not None
-                    and float(prev) <= trig
-                    and lp > trig
-                )
-                if not from_below_cross:
-                    return False, None
 
             rearm = rule.get('breakthrough_probe_rearm')
             if not isinstance(rearm, dict):
@@ -7628,8 +7617,10 @@ class StockChartWidget(QWidget):
             self._tb_last_cum_volume = None
             self._last_tick_price = None
 
-    def _is_breakthrough_buy_price_cross_tick(self, tick_data, trigger_price) -> bool:
-        """仅在价格由 <= 触发价 上穿至 > 触发价 的首 tick 返回 True（与 breakbuycheck 突破时刻一致）。"""
+    def _is_breakthrough_buy_price_cross_tick(
+        self, tick_data, trigger_price, require_upward_cross: bool = True
+    ) -> bool:
+        """突破买入价条件：无前价不触发；须先跌破时要求前价<=触发且最新>触发。"""
         if not isinstance(tick_data, dict):
             return False
         try:
@@ -7644,7 +7635,11 @@ class StockChartWidget(QWidget):
         lp = float(tick_data.get("lastPrice") or 0)
         prev = self._last_tick_price
         return is_breakthrough_buy_price_cross_tick(
-            code6, lp, float(trigger_price or 0), prev
+            code6,
+            lp,
+            float(trigger_price or 0),
+            prev,
+            require_upward_cross=bool(require_upward_cross),
         )
 
     def _is_breakthrough_break_below_tick(self, tick_data, trigger_price) -> bool:
