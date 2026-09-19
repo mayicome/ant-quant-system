@@ -1502,8 +1502,15 @@ def _inject_clip_strength_into_prices(
     return n
 
 
+# 这些策略的买点是「选股日后第一次跌到 MA10」。池维护要能查出已经触达过的票。
+_MA10_TOUCH_SCAN_STRATEGY_NAMES = (
+    "买：跌MA10",
+    "买：马总逻辑1-涨停后跌破MA10/20各1/2",
+)
+
+
 def _strategy_wants_ma_touch_import_scan(cfg: Any) -> bool:
-    """跌MA10 等策略：导入后扫描「选股日后已触达 MA」。"""
+    """跌MA10、马总逻辑1（MA10/20 各 1/2）：导入后扫描「选股日后已触达 MA10」。"""
     if cfg is None:
         return False
     sp = getattr(cfg, "strategy_params", None) or {}
@@ -1515,7 +1522,7 @@ def _strategy_wants_ma_touch_import_scan(cfg: Any) -> bool:
             return v.strip().lower() not in ("0", "false", "no", "off")
         return bool(v)
     name = str(getattr(cfg, "name", "") or "").strip()
-    return name in ("买：跌MA10",) or "跌MA10" in name
+    return name in _MA10_TOUCH_SCAN_STRATEGY_NAMES or "跌MA10" in name
 
 
 def _scan_pool_already_touched_ma10(
@@ -2057,7 +2064,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_del_ended_btn.clicked.connect(self._on_pool_delete_ended)
         self.pool_check_touched_ma10_btn = QPushButton("检查已触达MA10")
         self.pool_check_touched_ma10_btn.setToolTip(
-            "「买：跌MA10」用：按本地日线扫描池内是否已跌破过 MA10（不等待 QMT）。\n"
+            "按本地日线扫描池内是否已跌破过 MA10（不等待 QMT）。\n"
+            "用于「买：跌MA10」和「买：马总逻辑1-涨停后跌破MA10/20各1/2」。\n"
             "导入时只扫本次新增；整池复查请点此按钮。"
         )
         self.pool_check_touched_ma10_btn.clicked.connect(
@@ -4795,7 +4803,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         )
 
     def _on_check_already_touched_ma10(self) -> None:
-        """手动复查：选股日之后是否已触达 MA10（跌MA10 池日常维护）。"""
+        """手动复查：选股日之后是否已触达 MA10（跌MA10 / 马总逻辑1 池日常维护）。"""
         sid = self._get_selected_strategy_id()
         if not sid:
             QMessageBox.information(self, "提示", "请先在左侧选择一个策略。")
@@ -4807,7 +4815,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "提示",
-                "当前策略不是「买：跌MA10」一类，无需此检查。",
+                "当前策略不检查「选股日后已触达 MA10」。\n"
+                "该检查用于「买：跌MA10」和「买：马总逻辑1-涨停后跌破MA10/20各1/2」。",
             )
             return
         # 以界面当前池为准（含未点保存的改动）

@@ -64,10 +64,9 @@ _data_cache = {
     'lock': threading.Lock()
 }
 
-# 历史数据存储目录
+# 历史数据存储目录（含涨停日数据子目录；没有则创建）
 HISTORY_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'history_data')
-if not os.path.exists(HISTORY_DATA_DIR):
-    os.makedirs(HISTORY_DATA_DIR)
+ensure_limit_up_day_data_dir(HISTORY_DATA_DIR)
 
 # HTML模板
 HTML_TEMPLATE = """

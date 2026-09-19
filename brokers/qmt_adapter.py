@@ -1,8 +1,27 @@
-import xtquant.xttrader as xttrader
-from xtquant.xttype import StockAccount
-import xtquant.xtdata as xtdata
-from xtquant import xtconstant
-from xtquant.xttrader import XtQuantTraderCallback
+# miniQMT / xtquant 已停用。内置模式下单走大 QMT passorder，这里不再在导入时加载 xtquant。
+try:
+    import xtquant.xttrader as xttrader
+    from xtquant.xttype import StockAccount
+    import xtquant.xtdata as xtdata
+    from xtquant.xttrader import XtQuantTraderCallback
+except ImportError:
+    xttrader = None
+    StockAccount = None
+    xtdata = None
+    XtQuantTraderCallback = object
+
+from brokers.order_side import FIX_PRICE, SH_MARKET, STOCK_BUY, STOCK_SELL, SZ_MARKET
+
+
+class _OrderSide:
+    STOCK_BUY = STOCK_BUY
+    STOCK_SELL = STOCK_SELL
+    FIX_PRICE = FIX_PRICE
+    SH_MARKET = SH_MARKET
+    SZ_MARKET = SZ_MARKET
+
+
+xtconstant = _OrderSide
 from PyQt5.QtCore import QObject, pyqtSignal, QMetaObject, Q_ARG, Qt, QTimer
 from PyQt5.QtWidgets import QApplication
 import logging
@@ -23,7 +42,8 @@ import queue
 import json
 import subprocess
 
-xtdata.enable_hello = False
+if xtdata is not None:
+    xtdata.enable_hello = False
 
 
 def _is_continuous_auction_trading(now: datetime = None) -> bool:
@@ -174,6 +194,8 @@ class QMTManager(QThread):
 
     def _ensure_stock_account(self) -> bool:
         """保证 self.account 为 StockAccount，避免 query 时 account_type 报错。"""
+        if StockAccount is None:
+            return False
         if isinstance(self.account, StockAccount):
             return True
         raw = str(self.account or "").strip()
@@ -359,17 +381,18 @@ class QMTManager(QThread):
         self.last_log_time = 0  # 记录上次输出日志的时间
         self._reconnect_completed_time = 0  # 重连完成时间，用于防止重连后立即触发第二次重连
         
-        #self.logger.info("[QMTManager] 开始初始化QMT连接...")
-        if isinstance(self.account, str):
-            self.account = StockAccount(self.account, 'STOCK')
-
         skip_xt = self._relax_xt_trader_health() and not self._has_xt_trader_path()
+        if not skip_xt and (xttrader is None or StockAccount is None):
+            self.logger.error("xtquant 不可用，已跳过 miniQMT 交易连接")
+            skip_xt = True
         if skip_xt:
             self.xt_trader = None
             self._is_initialized = True
             self._xt_trader_connected = False
             self._log_builtin_trader_optional_once()
         else:
+            if isinstance(self.account, str):
+                self.account = StockAccount(self.account, 'STOCK')
             # 初始化连接
             self.xt_trader = xttrader.XtQuantTrader(self.path, self.session)
             time.sleep(1)
@@ -917,8 +940,8 @@ class QMTManager(QThread):
         method_start = time.time()
         
         try:
-            # 检查account类型
-            if not isinstance(self.account, StockAccount):
+            # 检查account类型。无 xtquant 时账号保持字符串，builtin 走 results.json。
+            if StockAccount is not None and not isinstance(self.account, StockAccount):
                 if not self._ensure_stock_account():
                     self.logger.error(f"account类型错误: {type(self.account)}，期望类型: StockAccount")
                     return None, {}
@@ -1319,8 +1342,6 @@ class QMTManager(QThread):
         查询当日委托，判断订单是否已成交/可撤/已结束。
         返回 (status, order_sysid, traded_volume)，status 为 filled | cancelable | gone | unknown。
         """
-        from xtquant import xtconstant
-
         if orders is None:
             orders = self.get_today_orders() or []
 
@@ -1986,10 +2007,8 @@ class QMTManager(QThread):
                 return []
             
             # 确保account是StockAccount对象
-            if isinstance(self.account, str):
-                from xtquant.xttype import StockAccount
+            if isinstance(self.account, str) and StockAccount is not None:
                 self.account = StockAccount(self.account, 'STOCK')
-                #self.logger.info(f"已将account字符串转换为StockAccount对象: {self.account}")
             
             
             # 获取当日所有订单

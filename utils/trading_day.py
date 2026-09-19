@@ -6,6 +6,8 @@
 使用 akshare 替代 chncal
 """
 
+import json
+import os
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Optional, Any, List, Set, Tuple
 import pandas as pd
@@ -23,6 +25,8 @@ _cache_built_on = None
 _same_day_missing_today_refresh_on: Optional[date] = None
 # 今日 weekday 兜底告警是否已打印
 _today_weekday_fallback_logged_on: Optional[date] = None
+# 当天日历源已失败：不要在逐日判断里反复打新浪
+_calendar_build_failed_on: Optional[date] = None
 # 警告标志（避免重复打印警告）
 _warning_printed = False
 # 成功标志（避免重复打印成功信息）
@@ -31,11 +35,96 @@ _success_printed = False
 
 def invalidate_trading_day_cache() -> None:
     """清除交易日历缓存。QMT 刚连接或重连后调用，避免早盘不完整日历被缓存一整天。"""
-    global _trade_date_cache, _cache_date_range, _cache_built_on, _same_day_missing_today_refresh_on
+    global _trade_date_cache, _cache_date_range, _cache_built_on
+    global _same_day_missing_today_refresh_on, _calendar_build_failed_on
     _trade_date_cache = None
     _cache_date_range = None
     _cache_built_on = None
     _same_day_missing_today_refresh_on = None
+    _calendar_build_failed_on = None
+
+
+def _calendar_disk_path() -> str:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "data", "trade_calendar.json")
+
+
+def _load_disk_trade_dates() -> Set[date]:
+    path = _calendar_disk_path()
+    if not os.path.isfile(path):
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        raw = payload.get("dates") if isinstance(payload, dict) else None
+        out: Set[date] = set()
+        for item in raw or []:
+            s = str(item or "").strip()[:10]
+            if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                out.add(date.fromisoformat(s))
+        return out
+    except Exception:
+        return set()
+
+
+def _save_disk_trade_dates(dates: Set[date]) -> None:
+    if not dates:
+        return
+    path = _calendar_disk_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {
+            "saved_on": date.today().isoformat(),
+            "dates": [d.isoformat() for d in sorted(dates)],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _fetch_sina_trade_dates() -> Set[date]:
+    """经当前环境代理拉新浪交易日历（akshare）。"""
+    import akshare as ak
+
+    if hasattr(ak, "tool_trade_date_hist_sina"):
+        trade_date_df = ak.tool_trade_date_hist_sina()
+    elif hasattr(ak, "tool") and hasattr(ak.tool, "trade_date_hist_sina"):
+        trade_date_df = ak.tool.trade_date_hist_sina()
+    else:
+        raise RuntimeError("akshare 没有新浪交易日历接口")
+    if trade_date_df is None or getattr(trade_date_df, "empty", True):
+        raise RuntimeError("akshare 返回的交易日历为空")
+    if "trade_date" not in trade_date_df.columns:
+        if "date" in trade_date_df.columns:
+            trade_date_df = trade_date_df.rename(columns={"date": "trade_date"})
+        else:
+            trade_date_df = trade_date_df.rename(columns={trade_date_df.columns[0]: "trade_date"})
+    parsed = pd.to_datetime(trade_date_df["trade_date"], errors="coerce").dt.date
+    return {d for d in parsed.tolist() if isinstance(d, date)}
+
+
+def _apply_trade_dates(
+    dates: Set[date], cache_start: date, cache_end: date, today: date, source: str
+) -> bool:
+    global _trade_date_cache, _cache_date_range, _cache_built_on, _success_printed
+    window = {d for d in dates if cache_start <= d <= cache_end}
+    if not window:
+        return False
+    if _trade_date_cache:
+        _trade_date_cache = set(_trade_date_cache) | window
+    else:
+        _trade_date_cache = window
+    _cache_date_range = (cache_start, cache_end)
+    _cache_built_on = today
+    if not _success_printed:
+        print(f"✓ 成功从 {source} 获取交易日历（批量）")
+        print(
+            f"  - 缓存范围: {cache_start} 至 {cache_end} "
+            f"(共{len(_trade_date_cache)}个交易日)"
+        )
+        _success_printed = True
+    return True
 
 
 def _build_trade_date_cache(cache_start: date, cache_end: date, today: date) -> bool:
@@ -95,54 +184,26 @@ def _build_trade_date_cache(cache_start: date, cache_end: date, today: date) -> 
         if not trade_dates_set:
             last_xt_error = RuntimeError("xtdata 返回的交易日期为空")
 
-    # 2) akshare（xtdata 失败或缺「今天」时）
+    # 2) 新浪交易日历（走当前环境代理）
     try:
-        import akshare as ak
-        trade_date_df = None
-        if hasattr(ak, "tool_trade_date_hist_sina"):
-            trade_date_df = ak.tool_trade_date_hist_sina()
-        elif hasattr(ak, "tool") and hasattr(ak.tool, "trade_date_hist_sina"):
-            trade_date_df = ak.tool.trade_date_hist_sina()
-
-        if trade_date_df is None or getattr(trade_date_df, "empty", True):
-            raise RuntimeError("akshare 返回的交易日历为空")
-
-        if "trade_date" not in trade_date_df.columns:
-            if "date" in trade_date_df.columns:
-                trade_date_df = trade_date_df.rename(columns={"date": "trade_date"})
-            else:
-                first_col = trade_date_df.columns[0]
-                trade_date_df = trade_date_df.rename(columns={first_col: "trade_date"})
-
-        trade_date_df["trade_date"] = pd.to_datetime(trade_date_df["trade_date"]).dt.date
-        trade_date_df = trade_date_df[
-            (trade_date_df["trade_date"] >= cache_start)
-            & (trade_date_df["trade_date"] <= cache_end)
-        ]
-        akshare_set = set(trade_date_df["trade_date"].tolist())
-        if not akshare_set:
-            raise RuntimeError("akshare 筛选后交易日历为空")
-
-        if _trade_date_cache:
-            _trade_date_cache = _trade_date_cache | akshare_set
-        else:
-            _trade_date_cache = akshare_set
-        _cache_date_range = (cache_start, cache_end)
-        _cache_built_on = today
-        if not _success_printed:
-            src = "akshare 补充" if xtdata_had_partial else "akshare"
-            print(f"✓ 成功从 {src} 获取交易日历（批量）")
-            print(f"  - 缓存范围: {cache_start} 至 {cache_end} (共{len(_trade_date_cache)}个交易日)")
-            _success_printed = True
-        return True
+        sina_dates = _fetch_sina_trade_dates()
+        if _apply_trade_dates(sina_dates, cache_start, cache_end, today, "新浪交易日历"):
+            _save_disk_trade_dates(sina_dates)
+            return True
+        raise RuntimeError("新浪交易日历筛选后为空")
     except Exception as e_ak:
+        disk_dates = _load_disk_trade_dates()
+        if disk_dates and _apply_trade_dates(
+            disk_dates, cache_start, cache_end, today, "本地交易日历缓存"
+        ):
+            return True
         if _trade_date_cache and today in _trade_date_cache:
             _cache_date_range = (cache_start, cache_end)
             _cache_built_on = today
             return True
         if not _warning_printed:
             print(
-                f"警告: 交易日历获取失败（xtdata/akshare均失败），"
+                f"警告: 交易日历获取失败（xtdata/新浪均失败），"
                 f"使用简单周末判断（{type(last_xt_error).__name__}/{type(e_ak).__name__}）"
             )
             _warning_printed = True
@@ -184,11 +245,16 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
     3) 仍失败则回退简单“周末判断”
     """
     global _trade_date_cache, _cache_date_range, _cache_built_on, _same_day_missing_today_refresh_on
+    global _calendar_build_failed_on
 
     if check_date is None:
         check_date = date.today()
 
     today = date.today()
+    if _trade_date_cache is None and _calendar_build_failed_on == today:
+        if check_date == today:
+            return _today_weekday_fallback(check_date)
+        return check_date.weekday() < 5
     cache_start = today.replace(year=today.year - 3)  # 从3年前开始
     cache_end = today.replace(year=today.year + 1)    # 到明年结束
     # 历史回测/选股若问到更早日期，把缓存起点前推（含约 60 自然日缓冲，供「前 N 交易日」）
@@ -236,7 +302,9 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
             cache_start = min(cache_start, check_date - timedelta(days=60))
             cache_end = max(cache_end, _cache_date_range[1])
         if not _build_trade_date_cache(cache_start, cache_end, today):
+            _calendar_build_failed_on = today
             return _today_weekday_fallback(check_date) if check_date == today else check_date.weekday() < 5
+        _calendar_build_failed_on = None
 
     if _trade_date_cache and check_date in _trade_date_cache:
         return True
@@ -311,13 +379,8 @@ def get_trading_dates_set_for_range(start_date: date, end_date: date) -> Set[dat
     _warm_trade_date_cache(start_date, end_date)
     if _trade_date_cache:
         return {d for d in _trade_date_cache if start_date <= d <= end_date}
-    out: Set[date] = set()
-    cur = start_date
-    while cur <= end_date:
-        if is_tradeday(cur):
-            out.add(cur)
-        cur += timedelta(days=1)
-    return out
+    # 日历源失败时不要用工作日冒充，也不要逐日再打网络
+    return set()
 
 
 def get_trading_dates(count: int, as_of_date: Optional[date] = None) -> List[date]:

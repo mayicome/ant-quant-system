@@ -34,21 +34,23 @@ from datetime import datetime
 
 import traceback  # 添加这行
 
-# 重依赖（xtquant / main_window_ext 等）延后到「使用前必读」同意后再加载，
+# 重依赖（主窗口等）延后到「使用前必读」同意后再加载，
 # 否则启动后要等数秒才弹出确认窗，用户会以为程序没起来。
+# 买卖方向用本地常量，不再导入已停用的 miniQMT / xtquant。
+from brokers.order_side import STOCK_BUY, STOCK_SELL
+
 Ui_mainWindow = None
 MainWindowExt = None
 Config = None
 create_broker_gateway = None
 Logger = None
 TaskManager = None
-xtconstant = None
 
 
 def _load_trading_deps():
     """加载主窗口与交易相关依赖（仅在用户同意使用条款后调用）。"""
     global Ui_mainWindow, MainWindowExt, Config, create_broker_gateway
-    global Logger, TaskManager, xtconstant
+    global Logger, TaskManager
     if Ui_mainWindow is not None:
         return
     from ui.main_window import Ui_mainWindow as _Ui_mainWindow
@@ -57,7 +59,6 @@ def _load_trading_deps():
     from brokers.broker_gateway import create_broker_gateway as _create_broker_gateway
     from utils.logger import Logger as _Logger
     from core.task_manager import TaskManager as _TaskManager
-    import xtquant.xtconstant as _xtconstant
 
     Ui_mainWindow = _Ui_mainWindow
     MainWindowExt = _MainWindowExt
@@ -65,7 +66,6 @@ def _load_trading_deps():
     create_broker_gateway = _create_broker_gateway
     Logger = _Logger
     TaskManager = _TaskManager
-    xtconstant = _xtconstant
 
 # Windows multiprocessing 配置
 if sys.platform.startswith('win'):
@@ -685,11 +685,11 @@ class TradingApp(QMainWindow):
             
             # 修正QMT返回的错误策略名称（QMT会根据订单类型自动修改策略名称）
             if strategy_name:
-                if getattr(order, 'order_type', None) == xtconstant.STOCK_SELL:  # 卖出订单
+                if getattr(order, 'order_type', None) == STOCK_SELL:  # 卖出订单
                     # 如果策略名称包含"买入"，将其改为"卖出"
                     if '买入' in strategy_name:
                         strategy_name = strategy_name.replace('买入', '卖出')
-                elif getattr(order, 'order_type', None) == xtconstant.STOCK_BUY:  # 买入订单
+                elif getattr(order, 'order_type', None) == STOCK_BUY:  # 买入订单
                     # 如果策略名称包含"卖出"，将其改为"买入"
                     if '卖出' in strategy_name:
                         strategy_name = strategy_name.replace('卖出', '买入')
@@ -723,7 +723,7 @@ class TradingApp(QMainWindow):
                 'stock_code': stock_code,
                 'stock_name': stock_name,
                 'order_id': str(order.order_sysid),  # 使用真实的订单系统ID
-                'type': '卖出' if getattr(order, 'order_type', None) == xtconstant.STOCK_SELL else '买入',
+                'type': '卖出' if getattr(order, 'order_type', None) == STOCK_SELL else '买入',
                 # 委托/均价里的「委托价」必须使用订单的委托价：order.price
                 # 否则一旦成交后 traded_price 存在，会把委托价替换成成交均价，导致 UI 显示成“委托价=均价”
                 'price': getattr(order, 'price', 0) if getattr(order, 'price', 0) is not None else 0,
@@ -755,7 +755,7 @@ class TradingApp(QMainWindow):
 
             if tasks_charts_view:
                 order_price = getattr(order, 'price', 0)
-                order_type = 'buy' if getattr(order, 'order_type', None) == xtconstant.STOCK_BUY else 'sell'
+                order_type = 'buy' if getattr(order, 'order_type', None) == STOCK_BUY else 'sell'
                 order_status_code = getattr(order, 'order_status', 255)
 
                 tasks_charts_view.update_early_order_id(
@@ -786,7 +786,7 @@ class TradingApp(QMainWindow):
                 
                 if tasks_charts_view:
                     order_price = getattr(order, 'price', 0)
-                    order_type = 'buy' if getattr(order, 'order_type', None) == xtconstant.STOCK_BUY else 'sell'
+                    order_type = 'buy' if getattr(order, 'order_type', None) == STOCK_BUY else 'sell'
                     order_status_code = getattr(order, 'order_status', 255)
                     
                     # 调用TasksChartsView的方法更新夜市委托规则状态

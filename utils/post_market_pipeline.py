@@ -278,7 +278,16 @@ def run_step(
             return StepRunResult(ok=rc == 0, exit_code=rc)
 
         if step_id == "limit_up":
-            rc = run("limit_up_sector_monitor_web.py", ("--once",), freeze=True)
+            from utils.limit_up_day_path import ensure_limit_up_day_data_dir
+
+            ensure_limit_up_day_data_dir(os.path.join(root, "history_data"))
+            # 按目标交易日下载。非交易日补跑昨天时不要冻日历：
+            # 缺 freezegun 会在抓取前退出，界面只能看到「文件缺失」。
+            rc = run(
+                "limit_up_sector_monitor_web.py",
+                ("--once", "--date", d),
+                freeze=False,
+            )
             return _ok_after_run(step_id, day, rc)
 
         if step_id == "lu_board_rank":
@@ -290,8 +299,13 @@ def run_step(
             return _ok_after_run(step_id, day, rc)
 
         if step_id == "capital_flow":
-            args: Tuple[str, ...] = (f"--save-date={d8}",) if use_asof_freeze else ()
-            rc = run("get_capital_flow_selenium.py", args, freeze=True)
+            # 始终按目标交易日保存。非交易日补跑不要冻日历，否则缺 freezegun 时
+            # 脚本还没开始抓取就退出，界面只能看到文件缺失。
+            rc = run(
+                "get_capital_flow_selenium.py",
+                (f"--save-date={d8}",),
+                freeze=False,
+            )
             return _ok_after_run(step_id, day, rc)
 
         if step_id == "board_snapshot":
@@ -351,9 +365,8 @@ def run_step(
             from utils.history_data_archive import archive_history_before
 
             history_dir = os.path.join(root, "history_data")
-            exclude = ("选股结果",) if live_only else ()
             moved, skipped, errors = archive_history_before(
-                history_dir, day, exclude_prefixes=exclude or None
+                history_dir, day, exclude_prefixes=("选股结果",)
             )
             detail = f"moved={moved} skipped={skipped} errors={len(errors)}"
             return StepRunResult(ok=not errors, exit_code=1 if errors else 0, detail=detail)

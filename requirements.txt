@@ -1,4 +1,4 @@
-# Flask相关依赖（用于multi_port_web.py）
+﻿# Flask相关依赖（用于multi_port_web.py）
 Flask==2.3.3
 Werkzeug==2.3.7
 Jinja2==3.1.2
@@ -13,8 +13,10 @@ PyQt5>=5.15.0
 # 数据处理依赖
 pandas>=1.5.0
 numpy>=1.23.0
-# intelligentbuy 读取 .xls 涨停表/股票列表（pandas read_excel）
-xlrd==1.2.0
+# 读取 .xls（pandas 2.x 要求 xlrd>=2.0.1；.xlsx 走 openpyxl）
+xlrd>=2.0.1
+# 非交易日手动补跑：把分析脚本的「今天」冻到目标交易日
+freezegun>=1.5.1
 
 # 系统工具
 psutil>=5.9.0

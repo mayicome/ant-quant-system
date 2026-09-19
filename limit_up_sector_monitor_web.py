@@ -117,10 +117,9 @@ _data_cache = {
     'last_browser_update_time': None  # 记录上次浏览器更新的时间
 }
 
-# 历史数据存储目录
+# 历史数据存储目录（含涨停日数据子目录；没有则创建）
 HISTORY_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'history_data')
-if not os.path.exists(HISTORY_DATA_DIR):
-    os.makedirs(HISTORY_DATA_DIR)
+ensure_limit_up_day_data_dir(HISTORY_DATA_DIR)
 
 # HTML模板
 HTML_TEMPLATE = """
@@ -5126,16 +5125,20 @@ def _restore_today_cache_from_history(today_str: str) -> bool:
     return True
 
 
-def save_daily_data(stocks, plate_stats, concept_stats=None, sector_plate_stats=None):
-    """保存每日数据到文件（每次刷新都保存，非交易日不保存）"""
+def save_daily_data(stocks, plate_stats, concept_stats=None, sector_plate_stats=None, save_date=None):
+    """保存每日数据。指定 save_date 时按该交易日落盘（非交易日补抓昨天也会写文件）。"""
     try:
-        # 非交易日不保存
-        if not is_trading_day():
-            print("非交易日，跳过数据保存")
-            return
-        
-        today = date.today()
-        today_str = today.strftime('%Y-%m-%d')
+        explicit_date = str(save_date or "").strip()
+        if explicit_date:
+            if len(explicit_date) == 8 and explicit_date.isdigit():
+                explicit_date = f"{explicit_date[:4]}-{explicit_date[4:6]}-{explicit_date[6:8]}"
+            today_str = explicit_date
+        else:
+            # 实时监控：非交易日不保存
+            if not is_trading_day():
+                print("非交易日，跳过数据保存")
+                return
+            today_str = date.today().strftime('%Y-%m-%d')
 
         if not stocks and _existing_daily_limit_up_file_has_rows(today_str):
             print(f"跳过保存：本次未获取到涨停数据，保留已有文件（{today_str}）")
@@ -6372,9 +6375,122 @@ def background_update_thread():
             time.sleep(60)
 
 
-def run_fetch_once() -> int:
-    """抓取并保存一次涨停板数据后退出（不启动 Web 服务）。"""
+def _attach_board_info(stocks):
+    """用全A股票信息补概念/板块，与 Selenium 路径一致。"""
+    json_path = os.path.join(current_dir, 'data', 'all_a_stock_info.json')
+    stock_info_dict = {}
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                stock_info_dict = json.load(f)
+        except Exception as e:
+            print(f"加载股票信息文件失败: {e}")
+    if not isinstance(stock_info_dict, dict):
+        stock_info_dict = {}
+    for stock in stocks:
+        code = str(stock.get('code', '')).zfill(6)
+        info = stock_info_dict.get(code, {})
+        if not isinstance(info, dict):
+            info = {}
+        concepts = info.get('concepts', [])
+        plates = info.get('plates', [])
+        stock['concepts'] = concepts if isinstance(concepts, list) else []
+        stock['plates'] = plates if isinstance(plates, list) else []
+    return stocks
+
+
+def fetch_limit_up_pool_for_date(date_str: str):
+    """按交易日从东财涨停池接口拉取（周末/节假日补昨天用，不依赖当天页面）。"""
+    ds = str(date_str or "").strip().replace("-", "")
+    if len(ds) != 8 or not ds.isdigit():
+        raise ValueError(f"无效日期: {date_str}")
+    stocks = []
+    page = 0
+    page_size = 200
+    total = None
+    while page < 20:
+        url = (
+            "https://push2ex.eastmoney.com/getTopicZTPool"
+            "?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wz.ztzt"
+            f"&Pageindex={page}&pagesize={page_size}&sort=fbt:asc&date={ds}"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        data = (payload or {}).get("data") or {}
+        pool = data.get("pool") or []
+        if total is None:
+            try:
+                total = int(data.get("tc") or 0)
+            except (TypeError, ValueError):
+                total = 0
+        for item in pool:
+            code = str(item.get("c") or "").strip().zfill(6)
+            name = str(item.get("n") or "").strip()
+            if not code or code == "000000" or not name:
+                continue
+            try:
+                price = float(item.get("p") or 0) / 1000.0
+            except (TypeError, ValueError):
+                price = 0.0
+            try:
+                change_pct = float(item.get("zdp") or 0)
+            except (TypeError, ValueError):
+                change_pct = 0.0
+            industry = str(item.get("hybk") or "").strip() or None
+            stocks.append({
+                "code": code,
+                "name": name,
+                "price": price,
+                "change_pct": change_pct,
+                "industry": industry,
+            })
+        page += 1
+        if not pool or (total and len(stocks) >= total):
+            break
+    _attach_board_info(stocks)
+    print(f"东财涨停池 {date_str}: {len(stocks)} 只" + (f"（接口合计 {total}）" if total else ""))
+    return stocks
+
+
+def run_fetch_once(target_date: str = "") -> int:
+    """抓取并保存一次涨停板数据后退出（不启动 Web 服务）。
+
+    target_date 有值时按该交易日下载并落盘，今天是否交易日不影响保存。
+    """
+    target_date = str(target_date or "").strip()
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [--once] 开始单次抓取...")
+    if target_date:
+        print(f"[--once] 目标交易日 {target_date}，非交易日也会下载该日涨停并保存")
+        try:
+            stocks = fetch_limit_up_pool_for_date(target_date)
+            if not stocks:
+                print(f"[--once] 未获取到 {target_date} 涨停股票，返回失败")
+                return 1
+            plate_stats = calculate_plate_stats(stocks)
+            concept_stats = calculate_concept_stats(stocks)
+            sector_plate_stats = calculate_sector_plate_stats(stocks)
+            _data_cache['limit_up_stocks'] = stocks
+            _data_cache['plate_stats'] = plate_stats
+            _data_cache['concept_stats'] = concept_stats
+            _data_cache['sector_plate_stats'] = sector_plate_stats
+            save_daily_data(
+                stocks, plate_stats, concept_stats, sector_plate_stats, save_date=target_date
+            )
+            saved = limit_up_day_json_path(target_date, HISTORY_DATA_DIR)
+            if not os.path.isfile(saved) or os.path.getsize(saved) < 20:
+                print(f"[--once] 已抓到数据但文件未写成: {saved}")
+                return 1
+            print(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [--once] 完成，"
+                f"涨停 {len(stocks)} 只，已保存 {saved}"
+            )
+            return 0
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [--once] 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
     try:
         update_data()
         stocks = _data_cache.get('limit_up_stocks') or []
@@ -6401,10 +6517,15 @@ def main():
         action="store_true",
         help="仅抓取并保存一次数据后退出（不启动 Web 服务与后台循环）",
     )
+    parser.add_argument(
+        "--date",
+        default="",
+        help="目标交易日 YYYY-MM-DD。非交易日补跑时下载该日涨停，而不是只检查文件是否存在",
+    )
     args = parser.parse_args()
 
     if args.once:
-        sys.exit(run_fetch_once())
+        sys.exit(run_fetch_once(args.date))
 
     import socket
 

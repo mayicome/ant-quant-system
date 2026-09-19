@@ -141,22 +141,15 @@ def _run_job(script_dir: str, script_name: str, extra_args: Sequence[str] = ()) 
     return int(result.returncode or 0)
 
 
-def _archive_old_history(
-    script_dir: str,
-    keep_day,
-    *,
-    skip_selection_results: bool = False,
-) -> None:
+def _archive_old_history(script_dir: str, keep_day) -> None:
     """批跑结束后归档：只处理 history_data 根目录，子目录不动。
 
-    skip_selection_results=True 时不归档文件名以「选股结果」开头的文件（实盘机常用）。
+    文件名以「选股结果」开头的文件不归档（全量、仅实盘都跳过）。
     """
     history_dir = os.path.join(script_dir, "history_data")
-    exclude = ("选股结果",) if skip_selection_results else ()
-    tip = "（跳过选股结果）" if skip_selection_results else ""
-    print(f"[归档] 将根目录中 {keep_day} 之前的文件移到存档{tip}（子目录不归档）…")
+    print(f"[归档] 将根目录中 {keep_day} 之前的文件移到存档（跳过选股结果，子目录不归档）…")
     moved, skipped, errors = archive_history_before(
-        history_dir, keep_day, exclude_prefixes=exclude or None
+        history_dir, keep_day, exclude_prefixes=("选股结果",)
     )
     print(f"[归档] 已移动 {moved} 个，保留/跳过 {skipped} 个。")
     if errors:
@@ -448,11 +441,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 live_only=live_only,
             )
 
-    # 4) 批跑结束后归档旧文件（无论中间是否有失败，都执行；仅实盘不归档选股结果）
+    # 4) 批跑结束后归档旧文件（无论中间是否有失败，都执行；选股结果不归档）
     try:
-        _archive_old_history(
-            script_dir, today, skip_selection_results=live_only
-        )
+        _archive_old_history(script_dir, today)
     except Exception as e:
         print(f"[归档] 失败: {e}")
         _record_fail(
