@@ -220,9 +220,7 @@ class BenchWindow(QMainWindow):
         brow.addWidget(self.btn_order_stop)
         brow.addStretch()
         of.addRow("", brow)
-        self.lab_order = QLabel(
-            "未预约。买入限价约为卖一上浮 0.3%，卖出限价约为买一下浮 0.3%。"
-        )
+        self.lab_order = QLabel("未预约。到点由大 QMT 下 513130 市价单。")
         self.lab_order.setWordWrap(True)
         of.addRow(self.lab_order)
         lay.addWidget(order)
@@ -315,7 +313,7 @@ class BenchWindow(QMainWindow):
         data = {
             "id": sid,
             "cmd": cmd,
-            "code": "513130.SZ",
+            "code": "513130.SH",
             "machine": machine,
             "side": side,
             "volume": vol,
@@ -493,13 +491,26 @@ class BenchWindow(QMainWindow):
                         self._quote_end.strftime("%H:%M:%S"),
                     )
                 )
-        if self._order_fire is not None and now < self._order_fire:
-            if not any(e.get("kind") == "order_sent" for e in self._events):
-                sec = int((self._order_fire - now).total_seconds()) + 1
+        if self._order_fire is not None and not any(
+            e.get("kind") == "order_sent" for e in self._events
+        ):
+            if now < self._order_fire:
+                sec = max(0, int((self._order_fire - now).total_seconds()) + 1)
                 self.lab_order.setText(
                     "等待下单：还有 %d 秒（%s）"
                     % (sec, self._order_fire.strftime("%H:%M:%S"))
                 )
+            else:
+                late = (now - self._order_fire).total_seconds()
+                seen = any(e.get("kind") == "probe_seen" for e in self._events)
+                if seen and late < 8:
+                    self.lab_order.setText("已到点，正在下单…")
+                elif late < 8:
+                    self.lab_order.setText("已到点，等待大 QMT …")
+                else:
+                    self.lab_order.setText(
+                        "已到点，但还没有下单回报。模型交易输出里若没有「测速」，请停止并重新启动「蚂蚁量化规则」后再预约。"
+                    )
 
     def _refresh_stats(self):
         quotes = [e for e in self._events if e.get("kind") == "quote"]

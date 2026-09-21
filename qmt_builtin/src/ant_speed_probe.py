@@ -5,8 +5,6 @@
 日志：data/qmt_speed_logs/<id>.jsonl
 无请求或 cmd=stop 时几乎不做功。真单仅当 confirm_real_order 且数量为 100 或 200。
 """
-from __future__ import annotations
-
 import json
 import os
 import time
@@ -22,13 +20,26 @@ except Exception:
 _REQ = None
 _REQ_MTIME = None
 _FIRED_IDS = set()
+_SEEN_IDS = set()
 _SUMMARY_IDS = set()
 _LAST = {"price": 0.0, "ask": 0.0, "bid": 0.0, "code": ""}
 _SAMPLE_N = {}
+_PRICE_LOGGED = set()
+PROBE_REV = 4
+TARGET_CODE = "513130.SH"
+
+
+def _data_dir():
+    """请求文件在项目 data 下；QMT 里 import 到的 DATA_DIR 有时不是这一份。"""
+    alt = "D:\\" + "\u8682\u8681\u91cf\u5316\u7cfb\u7edf" + "\\data"
+    for folder in (DATA_DIR, alt):
+        if folder and os.path.isfile(os.path.join(folder, "qmt_speed_probe_request.json")):
+            return folder
+    return DATA_DIR or alt
 
 
 def _request_path():
-    return os.path.join(DATA_DIR, "qmt_speed_probe_request.json")
+    return os.path.join(_data_dir(), "qmt_speed_probe_request.json")
 
 
 def _now_ms():
@@ -74,7 +85,7 @@ def _log(req, event):
     sid = str((req or {}).get("id") or "").strip()
     if not sid:
         return
-    folder = os.path.join(DATA_DIR, "qmt_speed_logs")
+    folder = os.path.join(_data_dir(), "qmt_speed_logs")
     try:
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, sid + ".jsonl")
@@ -96,7 +107,7 @@ def _code6(code):
 
 
 def _target6(req):
-    return _code6(req.get("code") or "513130.SZ") or "513130"
+    return _code6(req.get("code") or TARGET_CODE) or "513130"
 
 
 def _row_price(row):
@@ -233,7 +244,7 @@ def _order_ready(req):
     if _target6(req) != "513130":
         return False
     sid = str(req.get("id") or "")
-    if not sid or sid in _FIRED_IDS:
+    if not sid or sid in _FIRED_IDS or _already_claimed(sid):
         return False
     fire = _parse_dt(req.get("fire_at"))
     if fire is None:
@@ -278,63 +289,164 @@ def _aggressive_sell_price(last, bid):
     return round(px + 1e-9, 3)
 
 
+def _claim_path(sid):
+    return os.path.join(_data_dir(), "qmt_speed_logs", sid + ".fired")
+
+
+def _already_claimed(sid):
+    return bool(sid) and os.path.isfile(_claim_path(sid))
+
+
+def _claim_fire(sid):
+    """跨模块只发一次。失败且尚未调用 passorder 时删锁，允许重试。"""
+    folder = os.path.join(_data_dir(), "qmt_speed_logs")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        fd = os.open(_claim_path(sid), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
+def _release_claim(sid):
+    try:
+        os.remove(_claim_path(sid))
+    except OSError:
+        pass
+
+
+def _passorder_mod():
+    """用进程里已经绑定过的 passorder，不要 import 出一份没绑定的新模块。"""
+    import importlib.util
+    import sys
+
+    donors = []
+    fn = None
+    for name, mod in list(sys.modules.items()):
+        if name == "ant_passorder" or str(name).startswith("ant_passorder_"):
+            donors.append(mod)
+            cand = getattr(mod, "_PASSORDER", None)
+            if callable(cand):
+                fn = cand
+                break
+    if not callable(fn):
+        try:
+            import builtins
+
+            fn = getattr(builtins, "passorder", None)
+        except Exception:
+            fn = None
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ant_passorder.py")
+    if not os.path.isfile(path):
+        return None
+    mod_name = "ant_passorder_speed_%d" % int(os.path.getmtime(path))
+    mod = sys.modules.get(mod_name)
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        spec.loader.exec_module(mod)
+    if callable(fn):
+        try:
+            mod._PASSORDER = fn
+        except Exception:
+            pass
+        try:
+            import builtins
+
+            builtins.passorder = fn
+        except Exception:
+            pass
+    elif hasattr(mod, "bind_runtime_globals"):
+        try:
+            mod.bind_runtime_globals(None)
+        except Exception:
+            pass
+    return mod if hasattr(mod, "place_market_order") else None
+
+
+def _find_context():
+    import sys
+
+    fallback = None
+    for mod in list(sys.modules.values()):
+        if mod is None:
+            continue
+        ctx = getattr(mod, "_CONTEXT", None)
+        if ctx is None:
+            continue
+        if hasattr(mod, "reload_rules_if_changed"):
+            return ctx
+        fallback = ctx
+    return fallback
+
+
+def from_runner():
+    """已在跑的 tick_runner 热加载后调用，不依赖策略重启。"""
+    ctx = _find_context()
+    if ctx is None:
+        return
+    on_periodic(ctx)
+
+
 def _fire_order(ContextInfo, req, source):
     sid = str(req.get("id") or "")
-    if sid in _FIRED_IDS:
+    if not sid or sid in _FIRED_IDS or _already_claimed(sid):
+        if sid:
+            _FIRED_IDS.add(sid)
         return
     side = str(req.get("side") or "buy").strip().lower()
     if side not in ("buy", "sell"):
         side = "buy"
     vol = int(req.get("volume") or 0)
-    last = float(_LAST.get("price") or 0)
-    ask = float(_LAST.get("ask") or 0)
-    bid = float(_LAST.get("bid") or 0)
-    if _LAST.get("code") not in ("", "513130"):
-        last, ask, bid = 0.0, 0.0, 0.0
-    if side == "sell":
-        px = _aggressive_sell_price(last, bid)
-    else:
-        px = _aggressive_buy_price(last, ask)
-    if px <= 0:
-        _log(req, {"kind": "order_wait_price", "source": source, "side": side})
+    po = _passorder_mod()
+    if po is None:
+        _log(req, {"kind": "order_error", "msg": "no_passorder", "side": side})
         return
-    try:
-        import ant_passorder as po
-    except Exception as e:
-        _log(req, {"kind": "order_error", "msg": "no_passorder:%s" % e, "side": side})
+    _fill_price(ContextInfo)
+    if side == "sell":
+        px = _aggressive_sell_price(float(_LAST.get("price") or 0), float(_LAST.get("bid") or 0))
+        place = getattr(po, "place_limit_sell", None)
+    else:
+        px = _aggressive_buy_price(float(_LAST.get("price") or 0), float(_LAST.get("ask") or 0))
+        place = getattr(po, "place_limit_buy", None)
+    if px <= 0 or not callable(place):
+        if sid not in _PRICE_LOGGED:
+            _PRICE_LOGGED.add(sid)
+            _log(req, {"kind": "order_error", "msg": "no_price", "side": side, "px": px})
+        return
+    if not _claim_fire(sid):
+        _FIRED_IDS.add(sid)
         return
     _FIRED_IDS.add(sid)
+    name = "测速513130卖" if side == "sell" else "测速513130买"
+    uid = ("spd" + sid)[-32:]
     t0 = time.perf_counter()
-    if side == "sell":
-        ok, reason, record = po.place_limit_sell(
-            ContextInfo,
-            "513130.SZ",
-            px,
-            vol,
-            strategy_name="测速513130卖",
-            user_order_id=("spd" + sid)[-32:],
-        )
-    else:
-        ok, reason, record = po.place_limit_buy(
-            ContextInfo,
-            "513130.SZ",
-            px,
-            vol,
-            strategy_name="测速513130买",
-            user_order_id=("spd" + sid)[-32:],
-        )
+    ok, reason, record = place(
+        ContextInfo,
+        "513130.SH",
+        px,
+        vol,
+        strategy_name=name,
+        user_order_id=uid,
+        quick_trade=2,
+    )
+    if not ok and reason in ("passorder_unbound", "no_account_id", "no_context", "bad_params"):
+        _FIRED_IDS.discard(sid)
+        _release_claim(sid)
     call_us = round((time.perf_counter() - t0) * 1e6, 1)
     _log(
         req,
         {
             "kind": "order_sent",
             "side": side,
+            "price_type": "limit",
+            "price": (record or {}).get("price"),
             "ok": bool(ok),
             "reason": reason,
-            "price": px,
-            "ask": ask,
-            "bid": bid,
-            "last": last,
             "volume": vol,
             "call_us": call_us,
             "source": source,
@@ -342,8 +454,8 @@ def _fire_order(ContextInfo, req, source):
         },
     )
     print(
-        "[测速] 513130 %s vol=%s px=%s ok=%s call_us=%s"
-        % ("卖出" if side == "sell" else "买入", vol, px, ok, call_us)
+        "[测速] 513130 限价%s vol=%s px=%s ok=%s reason=%s"
+        % ("卖出" if side == "sell" else "买入", vol, (record or {}).get("price"), ok, reason)
     )
 
 
@@ -393,7 +505,7 @@ def on_strategy_tick(ContextInfo, datas, strategy_us):
                 req,
                 {
                     "kind": "quote",
-                    "code": "513130.SZ",
+                    "code": "513130.SH",
                     "last": _row_price(hit_row),
                     "ask": _row_ask(hit_row),
                     "timetag": "" if raw_tt is None else str(raw_tt),
@@ -409,12 +521,91 @@ def on_strategy_tick(ContextInfo, datas, strategy_us):
 
 
 def on_periodic(ContextInfo):
+    if not getattr(on_periodic, "_booted", False):
+        on_periodic._booted = True
+        print("[测速] 限价通道已加载")
     req = _load_request()
     if not req:
         return
     _maybe_summary(req)
-    if _order_ready(req) and float(_LAST.get("price") or 0) > 0:
-        _fire_order(ContextInfo, req, "periodic")
+    sid = str(req.get("id") or "")
+    if str(req.get("cmd") or "") == "order" and sid and sid not in _SEEN_IDS:
+        _SEEN_IDS.add(sid)
+        _log(req, {"kind": "probe_seen", "fire_at": str(req.get("fire_at") or "")})
+    if not _order_ready(req):
+        return
+    _fire_order(ContextInfo, req, "periodic")
+
+
+def _row_from_obj(raw):
+    if isinstance(raw, dict):
+        return raw
+    if raw is None:
+        return None
+    out = {}
+    for key in ("lastPrice", "last_price", "price", "askPrice", "bidPrice"):
+        try:
+            val = getattr(raw, key, None)
+        except Exception:
+            val = None
+        if val is not None:
+            out[key] = val
+    return out or None
+
+
+def _fill_price(ContextInfo):
+    code = TARGET_CODE
+
+    def _take(tick_map):
+        if not isinstance(tick_map, dict):
+            return False
+        row = tick_map.get(code) or tick_map.get("513130")
+        if not isinstance(row, dict):
+            row = _row_from_obj(row)
+        if isinstance(row, dict):
+            _remember_price(code, row)
+            return float(_LAST.get("price") or 0) > 0
+        return False
+
+    try:
+        fn = getattr(ContextInfo, "get_full_tick", None)
+        if callable(fn) and _take(fn([code])):
+            return
+    except Exception:
+        pass
+    if float(_LAST.get("price") or 0) > 0 and _LAST.get("code") == "513130":
+        return
+    try:
+        import xtquant.xtdata as xtdata
+
+        try:
+            xtdata.enable_hello = False
+        except Exception:
+            pass
+        if _take(xtdata.get_full_tick([code])):
+            return
+    except Exception:
+        pass
+    path = os.path.join(_data_dir(), "results.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+    stocks = data.get("stocks") if isinstance(data, dict) else None
+    if not isinstance(stocks, dict):
+        return
+    for key, bucket in stocks.items():
+        if _code6(key) != "513130" or not isinstance(bucket, dict):
+            continue
+        try:
+            px = float(bucket.get("last_price") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px > 0:
+            _LAST["code"] = "513130"
+            _LAST["price"] = px
+            break
 
 
 def _deal_code_volume(dealInfo):
@@ -465,7 +656,7 @@ def on_deal(ContextInfo, dealInfo):
         req,
         {
             "kind": "fill",
-            "code": "513130.SZ",
+            "code": "513130.SH",
             "volume": vol,
             "price": price,
             "trade_time": trade_time,

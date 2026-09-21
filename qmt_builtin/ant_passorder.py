@@ -19,6 +19,7 @@ OP_STOCK_BUY = 23
 OP_STOCK_SELL = 24
 ORDER_TYPE_SHARES = 1101  # 单股单账号按股数
 PR_LIMIT = 11  # 指定价
+PR_MARKET = 12  # 市价（price 无效）
 
 
 _CANCEL = None
@@ -212,6 +213,7 @@ def place_limit_buy(
     *,
     strategy_name: str = "蚂蚁-单点买入",
     user_order_id: str = "",
+    quick_trade: int = 1,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """
     限价买入。返回 (ok, reason, record)。
@@ -270,7 +272,7 @@ def place_limit_buy(
             float(px),
             int(vol),
             str(strategy_name or "蚂蚁-单点买入"),
-            1,
+            int(quick_trade),
             pass_uid,
             ContextInfo,
         )
@@ -295,6 +297,7 @@ def place_limit_sell(
     *,
     strategy_name: str = "蚂蚁-单点卖出",
     user_order_id: str = "",
+    quick_trade: int = 1,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """
     限价卖出。返回 (ok, reason, record)。
@@ -350,7 +353,7 @@ def place_limit_sell(
             float(px),
             int(vol),
             str(strategy_name or "蚂蚁-单点卖出"),
-            1,
+            int(quick_trade),
             pass_uid,
             ContextInfo,
         )
@@ -364,6 +367,86 @@ def place_limit_sell(
     except Exception as e:
         record["msg"] = "%s: %s" % (type(e).__name__, e)
         print("[下单] 卖出失败 %s: %s" % (code, record["msg"]))
+        return False, record["msg"], record
+
+
+def place_market_order(
+    ContextInfo,
+    stock_code: str,
+    volume: int,
+    *,
+    side: str = "buy",
+    strategy_name: str = "测速市价",
+    user_order_id: str = "",
+    quick_trade: int = 2,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """市价买卖。prType=12，不需要行情价。返回 (ok, reason, record)。"""
+    code = str(stock_code or "").strip().upper()
+    vol = _norm_volume(int(volume or 0))
+    is_sell = str(side or "").strip().lower() == "sell"
+    record: Dict[str, Any] = {
+        "side": "sell" if is_sell else "buy",
+        "price_type": "market",
+        "stock_code": code,
+        "price": 0,
+        "volume": vol,
+        "strategy_name": str(strategy_name or "测速市价"),
+        "user_order_id": str(user_order_id or ""),
+        "at": _now_iso(),
+        "status": "error",
+        "msg": "",
+    }
+    if not code or vol <= 0:
+        record["msg"] = "bad_params"
+        return False, record["msg"], record
+    if ContextInfo is None:
+        record["msg"] = "no_context"
+        return False, record["msg"], record
+    fn = _PASSORDER
+    if not callable(fn):
+        try:
+            import builtins
+
+            fn = getattr(builtins, "passorder", None)
+        except Exception:
+            fn = None
+    if not callable(fn):
+        record["msg"] = "passorder_unbound"
+        return False, record["msg"], record
+    aid = _resolve_account_id(ContextInfo)
+    if not aid:
+        record["msg"] = "no_account_id"
+        return False, record["msg"], record
+    record["account_id"] = aid
+    raw_uid = str(user_order_id or "")
+    pass_uid = raw_uid[-32:] if len(raw_uid) > 32 else raw_uid
+    record["user_order_id"] = raw_uid
+    record["pass_uid"] = pass_uid
+    op = OP_STOCK_SELL if is_sell else OP_STOCK_BUY
+    try:
+        fn(
+            op,
+            ORDER_TYPE_SHARES,
+            aid,
+            code,
+            PR_MARKET,
+            -1,
+            int(vol),
+            str(strategy_name or "测速市价"),
+            int(quick_trade),
+            pass_uid,
+            ContextInfo,
+        )
+        record["status"] = "submitted"
+        record["msg"] = "passorder_called"
+        print(
+            "[下单] 市价%s %s vol=%s account=%s uid=%s"
+            % ("卖出" if is_sell else "买入", code, vol, aid, user_order_id)
+        )
+        return True, "ok", record
+    except Exception as e:
+        record["msg"] = "%s: %s" % (type(e).__name__, e)
+        print("[下单] 市价失败 %s: %s" % (code, record["msg"]))
         return False, record["msg"], record
 
 

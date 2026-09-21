@@ -555,7 +555,37 @@ class ShadowTickRunner:
             )
         return ";".join(parts)
 
+    def _speed_probe(self) -> None:
+        """测速单：本文件被热加载后即可发，不必重启模型。"""
+        try:
+            import importlib.util
+            import os
+            import sys
+
+            from ant_qmt_paths import QMT_BUILTIN_DIR
+
+            path = os.path.join(QMT_BUILTIN_DIR, "ant_speed_probe.py")
+            if not os.path.isfile(path):
+                return
+            mod_name = "ant_speed_probe_%d" % int(os.path.getmtime(path))
+            mod = sys.modules.get(mod_name)
+            if mod is None:
+                spec = importlib.util.spec_from_file_location(mod_name, path)
+                if spec is None or spec.loader is None:
+                    return
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[mod_name] = mod
+                spec.loader.exec_module(mod)
+            fn = getattr(mod, "from_runner", None)
+            if callable(fn):
+                fn()
+        except Exception as e:
+            if not getattr(self, "_speed_probe_err", None):
+                self._speed_probe_err = str(e)
+                print("[测速] runner接入失败: %s" % e)
+
     def on_quote_dict(self, quote: Any) -> List[Dict[str, Any]]:
+        self._speed_probe()
         if not isinstance(quote, dict):
             return []
         events: List[Dict[str, Any]] = []
@@ -591,6 +621,7 @@ class ShadowTickRunner:
 
     def evaluate_price_map(self, stocks: Any) -> List[Dict[str, Any]]:
         """用 results.stocks 快照判触发（tick 回调停掉时的兜底）。"""
+        self._speed_probe()
         events: List[Dict[str, Any]] = []
         if not isinstance(stocks, dict):
             return events
