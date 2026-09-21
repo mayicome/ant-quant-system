@@ -33,6 +33,17 @@ _warning_printed = False
 _success_printed = False
 
 
+def _safe_print(msg: str) -> None:
+    """启动器把子进程 stdout 重定向到日志时，控制台编码常是 GBK，特殊符号不能把窗口打崩。"""
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        try:
+            print(msg.encode("gbk", errors="replace").decode("gbk"))
+        except Exception:
+            pass
+
+
 def invalidate_trading_day_cache() -> None:
     """清除交易日历缓存。QMT 刚连接或重连后调用，避免早盘不完整日历被缓存一整天。"""
     global _trade_date_cache, _cache_date_range, _cache_built_on
@@ -118,12 +129,12 @@ def _apply_trade_dates(
     _cache_date_range = (cache_start, cache_end)
     _cache_built_on = today
     if not _success_printed:
-        print(f"✓ 成功从 {source} 获取交易日历（批量）")
-        print(
+        _success_printed = True
+        _safe_print(f"成功从 {source} 获取交易日历（批量）")
+        _safe_print(
             f"  - 缓存范围: {cache_start} 至 {cache_end} "
             f"(共{len(_trade_date_cache)}个交易日)"
         )
-        _success_printed = True
     return True
 
 
@@ -170,9 +181,12 @@ def _build_trade_date_cache(cache_start: date, cache_end: date, today: date) -> 
                 _cache_date_range = (cache_start, cache_end)
                 _cache_built_on = today
                 if not _success_printed:
-                    print("✓ 成功从 xtdata 获取交易日历")
-                    print(f"  - 缓存范围: {cache_start} 至 {cache_end} (共{len(_trade_date_cache)}个交易日)")
                     _success_printed = True
+                    _safe_print("成功从 xtdata 获取交易日历")
+                    _safe_print(
+                        f"  - 缓存范围: {cache_start} 至 {cache_end} "
+                        f"(共{len(_trade_date_cache)}个交易日)"
+                    )
                 return True
             # xtdata 有历史日历但缺「今天」（早盘 QMT 未就绪时常见），继续用 akshare 补充
             _trade_date_cache = trade_dates_set
@@ -202,11 +216,11 @@ def _build_trade_date_cache(cache_start: date, cache_end: date, today: date) -> 
             _cache_built_on = today
             return True
         if not _warning_printed:
-            print(
+            _warning_printed = True
+            _safe_print(
                 f"警告: 交易日历获取失败（xtdata/新浪均失败），"
                 f"使用简单周末判断（{type(last_xt_error).__name__}/{type(e_ak).__name__}）"
             )
-            _warning_printed = True
         return False
 
 
@@ -217,11 +231,11 @@ def _today_weekday_fallback(check_date: date) -> bool:
     if check_date != today or check_date.weekday() >= 5:
         return False
     if _today_weekday_fallback_logged_on != today:
-        print(
+        _today_weekday_fallback_logged_on = today
+        _safe_print(
             f"警告: 交易日历未包含今日({today})，暂按工作日兜底判定为交易日；"
             f"若今日为法定节假日，请稍后重连 QMT 或重启程序刷新日历"
         )
-        _today_weekday_fallback_logged_on = today
     return True
 
 

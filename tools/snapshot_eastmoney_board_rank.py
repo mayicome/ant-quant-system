@@ -7,6 +7,7 @@
 
 实现上优先调用 akshare；失败时用本脚本多 host / 去代理直连兜底（列与 akshare 一致）。
 直连 host 优先 ``push2delay``（主站 push2 在部分环境会被掐断）。
+push2 被对端直接断开时，再改走 data.eastmoney.com 的 dataapi（同一批板块，字段按列拼回）。
 
 可选（--with-fund-flow）：
   - stock_sector_fund_flow_rank 同源：概念/行业资金流排行
@@ -299,6 +300,176 @@ def fetch_fund_flow_direct(sector_type: str) -> pd.DataFrame:
     return df
 
 
+_BKZJ_URL = "https://data.eastmoney.com/dataapi/bkzj/getbkzj"
+# m:90+t:3 概念、m:90+t:2 行业，与 push2 clist 的 fs 一致。
+_BKZJ_CODE = {"concept": "m:90+t:3", "industry": "m:90+t:2"}
+
+
+def _bkzj_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": _HEADERS["User-Agent"],
+        "Referer": "https://data.eastmoney.com/bkzj/hy.html",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+
+def _fetch_bkzj_rows(code: str, key: str) -> List[dict]:
+    """data.eastmoney.com 板块榜。push2 被对端断开时仍可用，每次只带一个排序字段。"""
+    session = _session()
+    last_err: Optional[BaseException] = None
+    for attempt in range(3):
+        try:
+            r = session.get(
+                _BKZJ_URL,
+                params={"key": key, "code": code},
+                headers=_bkzj_headers(),
+                timeout=30,
+            )
+            r.raise_for_status()
+            diff = ((r.json() or {}).get("data") or {}).get("diff") or []
+            if isinstance(diff, dict):
+                diff = list(diff.values())
+            rows = [x for x in diff if isinstance(x, dict)]
+            if rows:
+                return rows
+            last_err = RuntimeError("empty payload")
+        except Exception as e:
+            last_err = e
+            time.sleep(0.4 * (attempt + 1))
+    raise RuntimeError(f"东财 dataapi 失败 code={code} key={key}: {last_err}")
+
+
+def _as_float(v: Any) -> Optional[float]:
+    if v is None or v == "" or v == "-":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _maybe_div100(values: List[Optional[float]]) -> List[Optional[float]]:
+    """dataapi 的涨跌幅、价格等常为真实值×100 的整数。中位数很大时才缩放。"""
+    nums = sorted(abs(v) for v in values if v is not None)
+    if not nums:
+        return values
+    if nums[len(nums) // 2] < 30:
+        return values
+    return [None if v is None else v / 100.0 for v in values]
+
+
+def _merge_bkzj(code: str, specs: Sequence[tuple]) -> Dict[str, Dict[str, Any]]:
+    """specs: (接口字段, 输出列名, "num100" | "num" | "str")。"""
+    merged: Dict[str, Dict[str, Any]] = {}
+    for api_key, col, kind in specs:
+        rows = _fetch_bkzj_rows(code, api_key)
+        pending: List[tuple] = []
+        for row in rows:
+            cid = str(row.get("f12") or "").strip()
+            name = str(row.get("f14") or "").strip()
+            if not cid or not name:
+                continue
+            item = merged.setdefault(cid, {})
+            item["板块代码"] = cid
+            item["板块名称"] = name
+            pending.append((item, row.get(api_key)))
+        if kind == "str":
+            for item, raw in pending:
+                item[col] = "" if raw is None else str(raw)
+            continue
+        nums = [_as_float(raw) for _item, raw in pending]
+        if kind == "num100":
+            nums = _maybe_div100(nums)
+        for (item, _raw), num in zip(pending, nums):
+            item[col] = num
+    return merged
+
+
+def fetch_board_rank_bkzj(kind: str) -> pd.DataFrame:
+    """dataapi 涨跌幅全榜，列与 push2 / akshare name_em 对齐。"""
+    code = _BKZJ_CODE.get(kind)
+    if not code:
+        raise ValueError(f"unknown kind: {kind}")
+    specs = (
+        ("f3", "涨跌幅", "num100"),
+        ("f2", "最新价", "num100"),
+        ("f4", "涨跌额", "num100"),
+        ("f8", "换手率", "num100"),
+        ("f20", "总市值", "num"),
+        ("f104", "上涨家数", "num"),
+        ("f105", "下跌家数", "num"),
+        ("f128", "领涨股票", "str"),
+        ("f136", "领涨股票-涨跌幅", "num100"),
+    )
+    merged = _merge_bkzj(code, specs)
+    if not merged:
+        raise RuntimeError(f"{kind} dataapi 榜为空")
+    df = pd.DataFrame(list(merged.values()))
+    df["涨跌幅"] = pd.to_numeric(df["涨跌幅"], errors="coerce")
+    df = df.dropna(subset=["板块名称", "涨跌幅"]).copy()
+    df = df.sort_values("涨跌幅", ascending=False, kind="mergesort").reset_index(drop=True)
+    df.insert(0, "排名", range(1, len(df) + 1))
+    for col in _BOARD_OUT_COLS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df[_BOARD_OUT_COLS]
+
+
+def fetch_fund_flow_bkzj(sector_type: str) -> pd.DataFrame:
+    """dataapi 板块资金流，列与 push2 fund-flow 对齐。"""
+    code = {"行业资金流": "m:90+t:2", "概念资金流": "m:90+t:3"}.get(sector_type)
+    if not code:
+        raise ValueError(f"unknown sector_type: {sector_type}")
+    specs = (
+        ("f3", "今日涨跌幅", "num100"),
+        ("f62", "今日主力净流入-净额", "num"),
+        ("f184", "今日主力净流入-净占比", "num100"),
+        ("f66", "今日超大单净流入-净额", "num"),
+        ("f69", "今日超大单净流入-净占比", "num100"),
+        ("f72", "今日大单净流入-净额", "num"),
+        ("f75", "今日大单净流入-净占比", "num100"),
+        ("f78", "今日中单净流入-净额", "num"),
+        ("f81", "今日中单净流入-净占比", "num100"),
+        ("f84", "今日小单净流入-净额", "num"),
+        ("f87", "今日小单净流入-净占比", "num100"),
+        ("f204", "今日主力净流入最大股", "str"),
+    )
+    merged = _merge_bkzj(code, specs)
+    if not merged:
+        raise RuntimeError(f"{sector_type} dataapi 为空")
+    df = pd.DataFrame(list(merged.values()))
+    df = df.rename(columns={"板块名称": "名称"})
+    df["今日主力净流入-净额"] = pd.to_numeric(df["今日主力净流入-净额"], errors="coerce")
+    df = df.dropna(subset=["名称"]).copy()
+    df = df.sort_values("今日主力净流入-净额", ascending=False, kind="mergesort").reset_index(drop=True)
+    df.insert(0, "序号", range(1, len(df) + 1))
+    return df
+
+
+def _direct_or_bkzj_rank(kind: str) -> pd.DataFrame:
+    try:
+        df = fetch_board_rank_direct(kind)
+        print(f"[info] {kind}_name_em: via direct push2, rows={len(df)}")
+        return df
+    except Exception as e:
+        print(f"[warn] {kind} push2 失败 ({type(e).__name__}: {e})，改用 dataapi")
+        df = fetch_board_rank_bkzj(kind)
+        print(f"[info] {kind}_name_em: via dataapi, rows={len(df)}")
+        return df
+
+
+def _direct_or_bkzj_flow(sector_type: str, label: str) -> pd.DataFrame:
+    try:
+        df = fetch_fund_flow_direct(sector_type)
+        print(f"[info] {label}: via direct push2, rows={len(df)}")
+        return df
+    except Exception as e:
+        print(f"[warn] {label} push2 失败 ({type(e).__name__}: {e})，改用 dataapi")
+        df = fetch_fund_flow_bkzj(sector_type)
+        print(f"[info] {label}: via dataapi, rows={len(df)}")
+        return df
+
+
 def _try_akshare(fn: Callable[[], pd.DataFrame], label: str) -> Optional[pd.DataFrame]:
     try:
         df = fn()
@@ -375,8 +546,7 @@ def fetch_and_save(
     if ak is not None:
         concept_df = _try_akshare(ak.stock_board_concept_name_em, "concept_name_em")
     if concept_df is None:
-        concept_df = fetch_board_rank_direct("concept")
-        print(f"[info] concept_name_em: via direct push2, rows={len(concept_df)}")
+        concept_df = _direct_or_bkzj_rank("concept")
     concept_path = os.path.join(OUT_DIR, f"concept_rank_{date_stamp}.csv")
     _save_csv(concept_df, concept_path)
     _print_summary("concept_rank", concept_df, concept_path)
@@ -387,8 +557,7 @@ def fetch_and_save(
     if ak is not None:
         industry_df = _try_akshare(ak.stock_board_industry_name_em, "industry_name_em")
     if industry_df is None:
-        industry_df = fetch_board_rank_direct("industry")
-        print(f"[info] industry_name_em: via direct push2, rows={len(industry_df)}")
+        industry_df = _direct_or_bkzj_rank("industry")
     industry_path = os.path.join(OUT_DIR, f"industry_rank_{date_stamp}.csv")
     _save_csv(industry_df, industry_path)
     _print_summary("industry_rank", industry_df, industry_path)
@@ -402,8 +571,7 @@ def fetch_and_save(
                 "concept_fund_flow",
             )
         if concept_ff is None:
-            concept_ff = fetch_fund_flow_direct("概念资金流")
-            print(f"[info] concept_fund_flow: via direct push2, rows={len(concept_ff)}")
+            concept_ff = _direct_or_bkzj_flow("概念资金流", "concept_fund_flow")
         concept_ff_path = os.path.join(OUT_DIR, f"concept_fund_flow_{date_stamp}.csv")
         _save_csv(concept_ff, concept_ff_path)
         _print_summary("concept_fund_flow", concept_ff, concept_ff_path)
@@ -416,8 +584,7 @@ def fetch_and_save(
                 "industry_fund_flow",
             )
         if industry_ff is None:
-            industry_ff = fetch_fund_flow_direct("行业资金流")
-            print(f"[info] industry_fund_flow: via direct push2, rows={len(industry_ff)}")
+            industry_ff = _direct_or_bkzj_flow("行业资金流", "industry_fund_flow")
         industry_ff_path = os.path.join(OUT_DIR, f"industry_fund_flow_{date_stamp}.csv")
         _save_csv(industry_ff, industry_ff_path)
         _print_summary("industry_fund_flow", industry_ff, industry_ff_path)

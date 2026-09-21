@@ -14,6 +14,7 @@ ACCOUNT_SNAPSHOT_VERSION = "20260811.04"
 _CACHED_ACCOUNT = None
 _CACHED_POSITIONS = {}
 _CACHED_ORDERS = {}  # order_sysid -> parsed
+_BOUND_ACCOUNT_ID = ""
 _DIAG_DONE = False
 _BJ_SECTOR_PROBE_DONE = False
 
@@ -366,12 +367,13 @@ def _norm_code(raw):
 
 
 def _resolve_account_id(ContextInfo, explicit=""):
+    """账号优先：显式参数 → config.ini → ContextInfo。
+
+    换账号后若只改 config.ini，仍跑着的策略 ContextInfo 可能还是旧号；
+    以配置为准，避免 results.json 继续写旧持仓。
+    """
     if explicit:
         return str(explicit).strip()
-    for attr in ("accountID", "account_id", "account", "accid"):
-        val = getattr(ContextInfo, attr, None)
-        if val is not None and str(val).strip():
-            return str(val).strip()
     try:
         import configparser
 
@@ -380,9 +382,16 @@ def _resolve_account_id(ContextInfo, explicit=""):
             cfg = configparser.ConfigParser()
             cfg.read(ini_path, encoding="utf-8")
             if cfg.has_option("Account", "account_id"):
-                return str(cfg.get("Account", "account_id") or "").strip()
+                aid = str(cfg.get("Account", "account_id") or "").strip()
+                if aid:
+                    return aid
     except Exception:
         pass
+    if ContextInfo is not None:
+        for attr in ("accountID", "account_id", "account", "accid"):
+            val = getattr(ContextInfo, attr, None)
+            if val is not None and str(val).strip():
+                return str(val).strip()
     return ""
 
 
@@ -2092,19 +2101,65 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
     return True, "ok"
 
 
+_CACHED_ACCOUNT = None
+_CACHED_POSITIONS = {}
+_BOUND_ACCOUNT_ID = ""
+
+
+def _clear_account_caches_if_switched(aid: str) -> bool:
+    """换账号后清掉旧号资金/持仓缓存，避免继续写回 results.json。"""
+    global _CACHED_ACCOUNT, _CACHED_POSITIONS, _BOUND_ACCOUNT_ID, _CACHED_ORDERS
+    new_aid = str(aid or "").strip()
+    old_aid = str(_BOUND_ACCOUNT_ID or "").strip()
+    if not new_aid:
+        return False
+    if old_aid and old_aid != new_aid:
+        _CACHED_ACCOUNT = None
+        _CACHED_POSITIONS = {}
+        try:
+            _CACHED_ORDERS = {}
+        except Exception:
+            pass
+        print("[账户] 已切换 %s → %s，已清空旧持仓缓存" % (old_aid, new_aid))
+        _BOUND_ACCOUNT_ID = new_aid
+        return True
+    _BOUND_ACCOUNT_ID = new_aid
+    return False
+
+
 def sync_account_snapshot_to_results(ContextInfo, results, account_id=""):
     """将资金/持仓/委托写入 results。"""
-    global _CACHED_ORDERS
+    global _CACHED_ACCOUNT, _CACHED_ORDERS
     if not isinstance(results, dict):
         return False, "results_not_dict"
     aid = _resolve_account_id(ContextInfo, account_id)
     if not aid:
         return False, "no_account_id"
+    switched = _clear_account_caches_if_switched(aid)
+    if switched:
+        try:
+            bind_trading_account(ContextInfo, aid)
+        except Exception:
+            pass
+        # 旧号快照立刻清掉，交易系统不会再显示上一户持仓
+        results["account"] = {
+            "account_id": aid,
+            "total_asset": 0.0,
+            "cash": 0.0,
+            "frozen_cash": 0.0,
+            "market_value": 0.0,
+            "updated_at": _now_iso(),
+        }
+        results["positions"] = {}
 
     wrote = False
     if _CACHED_ACCOUNT:
-        results["account"] = dict(_CACHED_ACCOUNT)
-        wrote = True
+        cached_aid = str((_CACHED_ACCOUNT or {}).get("account_id") or "").strip()
+        if cached_aid and cached_aid != aid:
+            _CACHED_ACCOUNT = None
+        else:
+            results["account"] = dict(_CACHED_ACCOUNT)
+            wrote = True
 
     acc_rows = _fetch_trade_detail(ContextInfo, aid, "account")
     pos_rows = _fetch_trade_detail(ContextInfo, aid, "position")

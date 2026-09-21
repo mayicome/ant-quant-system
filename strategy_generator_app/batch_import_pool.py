@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from PyQt5.QtWidgets import (
@@ -590,12 +590,21 @@ def filter_by_day_post_select_max_intraday_gain(
 
 
 def lookback_selection_days(as_of: date, n: int) -> List[date]:
-    """盘前口径：近 N 个已落地选股日（等价于起始=N、截止=1）。
+    """近 N 个已落地选股日（等价于起始=N、截止=1）。
 
-    与实盘上午「批量导入」一致：``get_trading_dates(N)`` 在 15:00 前以昨日为终点，
-    故此处用 ``as_of - 1 自然日`` 作为终点，避免把「当日盘后选股」提前进早盘池。
+    15:00 前窗口止于昨日，避免早盘把当天还没出的盘后选股算进去。
+    15:00 后与找文件用的 get_trading_dates() 一致，最近一日含今天。
     """
     return lookback_selection_days_range(as_of, n, 1)
+
+
+def _selection_window_end(as_of: date) -> date:
+    """选股窗口终点。当天 15:00 后含今天，其余用 as_of 的前一自然日。"""
+    as_of = _as_date(as_of) or date.today()
+    today = date.today()
+    if as_of == today and datetime.now().hour >= 15:
+        return as_of
+    return as_of - timedelta(days=1)
 
 
 def lookback_selection_days_range(
@@ -603,7 +612,7 @@ def lookback_selection_days_range(
     start_n: int,
     end_n: int = 1,
 ) -> List[date]:
-    """盘前口径：最近起始～最近截止交易日窗口（含两端）。
+    """最近起始～最近截止交易日窗口（含两端）。
 
     例如 start_n=10、end_n=5：取倒数第10个交易日到倒数第5个交易日。
     end_n=1 时退化为近 start_n 个交易日（含最近一日）。
@@ -620,7 +629,8 @@ def lookback_selection_days_range(
         }
     )
     as_of = _as_date(as_of) or date.today()
-    days = list(get_trading_dates(start_n, as_of_date=as_of - timedelta(days=1)) or [])
+    end = _selection_window_end(as_of)
+    days = list(get_trading_dates(start_n, as_of_date=end) or [])
     if not days:
         return []
     # days 升序：index0=最远，index-1=最近；取 [0 .. start_n-end_n] 含端

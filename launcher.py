@@ -4,7 +4,7 @@ import warnings
 import sys
 import subprocess
 import re
-from datetime import datetime
+from datetime import datetime, date, time as dt_time
 
 # 避免 PyQt/SIP 的弃用警告刷屏（不影响功能）
 warnings.filterwarnings(
@@ -24,9 +24,16 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QScrollArea,
     QMessageBox,
+    QLineEdit,
+    QFileDialog,
 )
-from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtCore import Qt, QSize, QTimer
 from PyQt5.QtGui import QFont, QIcon
+
+
+# 定时任务一般在 17:30 拉起盘后 bat；启动器晚一分钟看它有没有起来。
+_POST_MARKET_WATCH_AT = dt_time(17, 31)
+_DEFAULT_POST_MARKET_BAT = r"D:\run_all_if_trading_day.bat"
 
 
 class AntLauncherWindow(QMainWindow):
@@ -36,8 +43,10 @@ class AntLauncherWindow(QMainWindow):
         super().__init__(parent)
 
         self.setWindowTitle("蚂蚁量化系统启动器")
+        self._post_market_settings = self._load_post_market_settings()
         self._setup_icon()
         self._setup_ui()
+        self._arm_post_market_watch()
 
     def _get_apps_config_path(self) -> str:
         root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -241,7 +250,7 @@ class AntLauncherWindow(QMainWindow):
                     return
 
     def _setup_ui(self) -> None:
-        self.resize(1040, 560)
+        self.resize(1040, 640)
         self.setMinimumSize(780, 480)
 
         central = QWidget(self)
@@ -346,7 +355,10 @@ class AntLauncherWindow(QMainWindow):
         main_layout.addSpacing(10)
 
         # 底部小提示（提示主系统启动行为，不放在“小程序工具箱”内部）
-        hint_label = QLabel("提示：启动子系统后，本启动器可以最小化保留，也可以直接关闭。", self)
+        hint_label = QLabel(
+            "提示：启动子系统后可以把本窗口最小化。每天 17:31 会检查盘后 bat，窗口关掉就不会补启动。",
+            self,
+        )
         hint_font = QFont()
         hint_font.setPointSize(9)
         hint_label.setFont(hint_font)
@@ -435,6 +447,175 @@ class AntLauncherWindow(QMainWindow):
 
         scroll.setWidget(tools_container)
         main_layout.addWidget(scroll, 1)
+
+        self._setup_post_market_watch_row(main_layout)
+
+    def _project_root(self) -> str:
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(sys.executable or "")
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _post_market_settings_path(self) -> str:
+        return os.path.join(self._project_root(), "data", "launcher_settings.json")
+
+    def _load_post_market_settings(self) -> dict:
+        path = self._post_market_settings_path()
+        data = {"post_market_bat": _DEFAULT_POST_MARKET_BAT, "post_market_watch_date": ""}
+        if not os.path.isfile(path):
+            return data
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            return data
+        if isinstance(raw, dict):
+            bat = str(raw.get("post_market_bat") or "").strip()
+            if bat:
+                data["post_market_bat"] = bat
+            data["post_market_watch_date"] = str(raw.get("post_market_watch_date") or "").strip()
+        return data
+
+    def _save_post_market_settings(self) -> None:
+        path = self._post_market_settings_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self._post_market_settings, f, ensure_ascii=False, indent=2)
+
+    def _setup_post_market_watch_row(self, main_layout: QVBoxLayout) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        label = QLabel("盘后bat", self)
+        self.bat_path_edit = QLineEdit(self)
+        self.bat_path_edit.setText(self._post_market_settings.get("post_market_bat") or "")
+        self.bat_path_edit.setPlaceholderText(r"例如 D:\run_all_if_trading_day.bat")
+        self.bat_path_edit.setToolTip("每天 17:31 若这个 bat 还没在跑，就启动它。各台电脑路径可以不同。")
+        self.bat_path_edit.editingFinished.connect(self._on_bat_path_edited)
+        browse = QPushButton("浏览", self)
+        browse.setFixedWidth(64)
+        browse.clicked.connect(self._browse_post_market_bat)
+        row.addWidget(label)
+        row.addWidget(self.bat_path_edit, 1)
+        row.addWidget(browse)
+        main_layout.addLayout(row)
+
+        self.bat_watch_status = QLabel("", self)
+        self.bat_watch_status.setStyleSheet("color: #666666;")
+        self.bat_watch_status.setWordWrap(True)
+        self._set_bat_watch_status("每天 17:31 检查一次。已在运行则不重复启动。")
+        main_layout.addWidget(self.bat_watch_status)
+
+    def _set_bat_watch_status(self, text: str) -> None:
+        self.bat_watch_status.setText(text)
+
+    def _current_bat_path(self) -> str:
+        return str(self.bat_path_edit.text() or "").strip()
+
+    def _on_bat_path_edited(self) -> None:
+        path = self._current_bat_path()
+        if path == str(self._post_market_settings.get("post_market_bat") or ""):
+            return
+        self._post_market_settings["post_market_bat"] = path
+        self._save_post_market_settings()
+        self._set_bat_watch_status(f"已保存路径：{path}")
+
+    def _browse_post_market_bat(self) -> None:
+        current = self._current_bat_path()
+        start_dir = os.path.dirname(current) if current else "D:\\"
+        picked, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择盘后批跑 bat",
+            start_dir,
+            "批处理 (*.bat);;所有文件 (*.*)",
+        )
+        if not picked:
+            return
+        self.bat_path_edit.setText(picked)
+        self._on_bat_path_edited()
+
+    def _arm_post_market_watch(self) -> None:
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setInterval(30_000)
+        self._watch_timer.timeout.connect(self._maybe_start_post_market_bat)
+        self._watch_timer.start()
+        QTimer.singleShot(2000, self._maybe_start_post_market_bat)
+
+    def _watch_already_done_today(self) -> bool:
+        return self._post_market_settings.get("post_market_watch_date") == date.today().isoformat()
+
+    def _mark_watch_done_today(self) -> None:
+        self._post_market_settings["post_market_watch_date"] = date.today().isoformat()
+        self._post_market_settings["post_market_bat"] = self._current_bat_path()
+        self._save_post_market_settings()
+
+    def _append_launcher_log(self, text: str) -> None:
+        try:
+            logs_dir = os.path.join(self._project_root(), "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            path = os.path.join(logs_dir, "launcher_run.log")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+        except Exception:
+            pass
+
+    def _post_market_already_running(self, bat_path: str) -> bool:
+        import psutil
+
+        markers = [
+            "run_all_if_trading_day_gui.py",
+            "run_all_if_trading_day_launch.py",
+            "run_all_if_trading_day.py",
+        ]
+        base = os.path.basename(bat_path).lower()
+        if base:
+            markers.append(base)
+        for proc in psutil.process_iter(["cmdline"]):
+            try:
+                cmd = " ".join(proc.info.get("cmdline") or [])
+            except (psutil.Error, OSError):
+                continue
+            low = cmd.lower()
+            if any(m.lower() in low for m in markers):
+                return True
+        return False
+
+    def _maybe_start_post_market_bat(self) -> None:
+        now = datetime.now()
+        if now.time() < _POST_MARKET_WATCH_AT:
+            return
+        if self._watch_already_done_today():
+            return
+        if now.time() > dt_time(21, 0):
+            self._set_bat_watch_status("已过 21:00，今日不再自动补启动。需要的话用「盘后批跑」手动开。")
+            self._append_launcher_log("post-market watch skipped, after 21:00")
+            self._mark_watch_done_today()
+            return
+        bat_path = self._current_bat_path()
+        if not bat_path or not os.path.isfile(bat_path):
+            self._set_bat_watch_status(f"17:31 未补启动：找不到 bat\n{bat_path or '（路径为空）'}")
+            if not getattr(self, "_missing_bat_logged", False):
+                self._append_launcher_log(f"post-market watch skip, bat missing: {bat_path}")
+                self._missing_bat_logged = True
+            return
+        try:
+            running = self._post_market_already_running(bat_path)
+        except Exception as exc:
+            self._set_bat_watch_status(f"17:31 未能检查盘后进程：{exc}")
+            self._append_launcher_log(f"post-market watch check failed: {exc}")
+            return
+        if running:
+            self._set_bat_watch_status("17:31 盘后批跑已在运行，未重复启动。")
+            self._append_launcher_log(f"post-market watch: already running {bat_path}")
+            self._mark_watch_done_today()
+            return
+        try:
+            os.startfile(bat_path)
+        except Exception as exc:
+            self._set_bat_watch_status(f"17:31 启动失败：{exc}")
+            self._append_launcher_log(f"post-market watch start failed: {exc}")
+            return
+        self._set_bat_watch_status(f"17:31 定时任务未启动，已补启动：{bat_path}")
+        self._append_launcher_log(f"post-market watch started {bat_path}")
+        self._mark_watch_done_today()
 
     # --- 启动三个子系统 ---
 
@@ -535,12 +716,19 @@ class AntLauncherWindow(QMainWindow):
             python_exe = sys.executable or "python"
         script_path = os.path.join(root_dir, script_rel_path)
         if not os.path.exists(script_path):
+            QMessageBox.warning(self, "启动失败", f"脚本不存在：\n{script_path}")
             return
         try:
             popen_kwargs = {"cwd": root_dir}
             # Windows 下不显示控制台窗口
             if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
                 popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            env = os.environ.copy()
+            # 子进程 stdout 写到日志文件，默认 GBK 遇到 ✓ 等字符会直接退出，窗口起不来
+            env.setdefault("PYTHONUTF8", "1")
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            popen_kwargs["env"] = env
 
             logs_dir = os.path.join(root_dir, "logs")
             os.makedirs(logs_dir, exist_ok=True)
@@ -550,8 +738,8 @@ class AntLauncherWindow(QMainWindow):
                 popen_kwargs["stdout"] = f
                 popen_kwargs["stderr"] = f
                 subprocess.Popen([python_exe, script_path], **popen_kwargs)
-        except Exception:
-            pass
+        except Exception as exc:
+            QMessageBox.warning(self, "启动失败", f"{script_rel_path}\n\n{exc}")
 
     def launch_trade_system(self) -> None:
         # 主交易系统入口在 main.py
