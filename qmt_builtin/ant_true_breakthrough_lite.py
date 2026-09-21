@@ -1,5 +1,5 @@
 #coding:gbk
-"""О©╫О©╫?О©╫О©╫ tick О©╫?О©╫О©╫О©╫О©╫О©╫О©╫О©╫?О©╫О©╫ PyQt О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫"""
+"""уФм╩фф tick еп╤╗ё╗╬╚╪Р╟Фё╛нч PyQt рюю╣ё╘║ё"""
 # docstring removed for QMT gbk loader
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -469,7 +469,7 @@ def cond1_mode_description(
 
 
 def window_prior_ticks_from_seconds(window_sec: Any, tick_sec: float = 3.0) -> int:
-    """?О©╫? -> О©╫О©╫О©╫О©╫О©╫О©╫ lookback_priorО©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫?О©╫О©╫О©╫О©╫?О©╫О©╫? 3 О©╫О©╫/tickО©╫О©╫"""
+    """й╠╪Д╢╟ -> лУ╪Ч╒ы lookback_priorё╗╡╩╨╛╠╬ж║ё╘ё╩д╛хот╪ 3 цК/tick║ё"""
     try:
         sec = float(window_sec)
     except (TypeError, ValueError):
@@ -538,7 +538,7 @@ def is_breakthrough_sell_price_cross_tick(
     trigger_price: float,
     prev_last_price: Optional[float] = None,
 ) -> bool:
-    """?О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫??О©╫О©╫О©╫?О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫?О©╫"""
+    """м╩ффбТЁЖё╨у╧й╬╪шйв╢ноб╢╘╢╔╥╒╪ш║ё"""
     lp = float(last_price or 0)
     trig = float(trigger_price or 0)
     if lp <= 0 or trig <= 0:
@@ -561,7 +561,7 @@ def is_breakthrough_break_above_trigger_tick(
     trigger_price: float,
     prev_last_price: Optional[float] = None,
 ) -> bool:
-    """?О©╫О©╫О©╫О©╫О©╫О©╫?О©╫?О©╫О©╫О©╫О©╫О©╫О©╫?О©╫О©╫О©╫О©╫?О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫"""
+    """м╩ффбТЁЖг╟жцё╨пКохиофф╢╔╥╒╪шё╛тыоб╢╘╡етйпМбТ║ё"""
     lp = float(last_price or 0)
     trig = float(trigger_price or 0)
     if lp <= 0 or trig <= 0:

@@ -662,15 +662,25 @@ def _inject_code_sell_day_index_bt(
     first_buy_date_by_code: Dict[str, date],
     as_of: date,
     get_trading_dates_in_range_sorted_fn: Callable[[date, date], List[date]],
+    last_buy_date_by_code: Optional[Dict[str, date]] = None,
 ) -> None:
-    """回测：各股自首次买入日起的持有交易日序号（含 as_of），写入 code_sell_day_index。"""
+    """回测：各股自锚定买入日起的持有交易日序号（含 as_of），写入 code_sell_day_index。
+
+    锚定日优先末笔买入日，否则首次买入日（再次买入顺延无条件清仓）。
+    """
     if not params.get("scheduled_clear_on_sell_day") and not params.get(
         "sell_hold_trading_days"
     ) and not params.get("entry_window_trading_days"):
         return
+    last_map = last_buy_date_by_code if isinstance(last_buy_date_by_code, dict) else {}
+    first_map = first_buy_date_by_code or {}
+    codes = set(first_map.keys()) | set(last_map.keys())
     out: Dict[str, int] = {}
-    for code_6, bd in (first_buy_date_by_code or {}).items():
-        if not code_6 or bd is None:
+    for code_6 in codes:
+        if not code_6:
+            continue
+        bd = last_map.get(code_6) or first_map.get(code_6)
+        if bd is None:
             continue
         if as_of < bd:
             out[code_6] = 0
@@ -735,19 +745,30 @@ def _update_first_buy_dates_from_trades(
     day_trades: List[Dict[str, Any]],
     as_of: date,
     positions: Dict[str, Dict[str, Any]],
+    last_buy_date_by_code: Optional[Dict[str, date]] = None,
 ) -> None:
-    """按成交更新首次买入日；仓位清零后移除，便于再次买入重新起算。"""
+    """按成交更新首次/末笔买入日；仓位清零后移除，便于再次买入重新起算。"""
+    last_map = last_buy_date_by_code if isinstance(last_buy_date_by_code, dict) else None
     for t in day_trades or []:
         side = str(t.get("side") or "").lower()
         code_6 = _norm_code6(t.get("code") or t.get("stock_code"))
         if not code_6:
             continue
-        if side == "buy" and code_6 not in first_buy_date_by_code:
-            first_buy_date_by_code[code_6] = as_of
+        if side == "buy":
+            if code_6 not in first_buy_date_by_code:
+                first_buy_date_by_code[code_6] = as_of
+            if last_map is not None:
+                last_map[code_6] = as_of
     for code_6 in list(first_buy_date_by_code.keys()):
         vol = int((positions.get(code_6) or {}).get("volume") or 0)
         if vol <= 0:
             first_buy_date_by_code.pop(code_6, None)
+            if last_map is not None:
+                last_map.pop(code_6, None)
+    if last_map is not None:
+        for code_6 in list(last_map.keys()):
+            if code_6 not in first_buy_date_by_code:
+                last_map.pop(code_6, None)
 
 
 def _index_scheduled_buy_fills(
@@ -869,6 +890,7 @@ def _apply_scheduled_buy_injections(
     as_of: date,
     first_buy_date_by_code: Dict[str, date],
     first_buy_hints: Optional[Dict[str, date]] = None,
+    last_buy_date_by_code: Optional[Dict[str, date]] = None,
 ) -> List[Dict[str, Any]]:
     """
     将 as_of 及更早、尚未注入的买入成交写入持仓（T+1：只加 volume，不加 available）。
@@ -881,6 +903,7 @@ def _apply_scheduled_buy_injections(
 
     pending = sorted(d for d in list(fills_by_date.keys()) if d <= as_of)
     hints = first_buy_hints or {}
+    last_map = last_buy_date_by_code if isinstance(last_buy_date_by_code, dict) else None
     emitted: List[Dict[str, Any]] = []
     for d in pending:
         rows = fills_by_date.pop(d, None) or []
@@ -899,6 +922,8 @@ def _apply_scheduled_buy_injections(
             if code_6 not in first_buy_date_by_code:
                 hint = hints.get(code_6)
                 first_buy_date_by_code[code_6] = hint if hint is not None else d
+            if last_map is not None:
+                last_map[code_6] = d
             pos_after = int((positions.get(code_6) or {}).get("volume") or 0)
             amount = float(row.get("amount") or 0) or round(px * vol, 2)
             tr: Dict[str, Any] = {
@@ -1133,7 +1158,9 @@ def run_backtest_segmented(
     cash = initial_cash
     positions: Dict[str, Dict[str, Any]] = {}
     # 首次买入日：优先用初始持仓 entry_date（接续卖出）；否则视为区间首日建仓
+    # 末笔买入日：再次买入后无条件清仓从此顺延（与实盘/汇总一致）
     first_buy_date_by_code: Dict[str, date] = {}
+    last_buy_date_by_code: Dict[str, date] = {}
     try:
         from .simulator import (
             init_position_t1,
@@ -1168,6 +1195,13 @@ def run_backtest_segmented(
                     or _parse_entry_date_val((pos or {}).get("buy_date"))
                 )
                 first_buy_date_by_code[code_6] = ed if ed is not None else start_date
+                ld = (
+                    _parse_entry_date_val((pos or {}).get("last_buy_date"))
+                    or ed
+                )
+                last_buy_date_by_code[code_6] = (
+                    ld if ld is not None else first_buy_date_by_code[code_6]
+                )
                 # 建仓日落在回测首日及之后：首日尚不可卖（T+1）
                 if ed is not None and ed >= start_date:
                     positions[code_6] = init_position_t1(vol, cost, available=0)
@@ -1271,6 +1305,7 @@ def run_backtest_segmented(
                 current,
                 first_buy_date_by_code,
                 buy_date_hints,
+                last_buy_date_by_code,
             )
             if inj_trades:
                 note_buy_fills_on_baseline(positions_baseline, inj_trades)
@@ -1377,7 +1412,8 @@ def run_backtest_segmented(
                 params1["backtest_trade_day_index"] = int(bt_trade_day_index)
                 params1["backtest_trade_date"] = fill_day.strftime("%Y-%m-%d")
                 _inject_code_sell_day_index_bt(
-                    params1, first_buy_date_by_code, fill_day, get_trading_dates_in_range_sorted
+                    params1, first_buy_date_by_code, fill_day, get_trading_dates_in_range_sorted,
+                    last_buy_date_by_code
                 )
                 _inject_limit_up_defer_params(params1, lu_deferred_codes)
                 intents1: List[Dict[str, Any]] = []
@@ -1432,7 +1468,8 @@ def run_backtest_segmented(
                     note_buy_fills_on_baseline(positions_baseline, trades_a)
                     prune_baseline_if_flat(positions_baseline, positions)
                     _update_first_buy_dates_from_trades(
-                        first_buy_date_by_code, trades_a, fill_day, positions
+                        first_buy_date_by_code, trades_a, fill_day, positions,
+                        last_buy_date_by_code
                     )
                     # 到达 seg2_gen：刷新 prices 并生成 seg2 意图（使用此刻最新价 + 当前持仓/现金）
                     try:
@@ -1457,8 +1494,9 @@ def run_backtest_segmented(
                     params2["backtest_trade_day_index"] = int(bt_trade_day_index)
                     params2["backtest_trade_date"] = fill_day.strftime("%Y-%m-%d")
                     _inject_code_sell_day_index_bt(
-                        params2, first_buy_date_by_code, fill_day, get_trading_dates_in_range_sorted
-                    )
+                        params2, first_buy_date_by_code, fill_day, get_trading_dates_in_range_sorted,
+                    last_buy_date_by_code
+                )
                     _inject_limit_up_defer_params(params2, lu_deferred_codes)
                     intents2: List[Dict[str, Any]] = []
                     code2 = (seg2.get("strategy_code") or "").strip()
@@ -1511,8 +1549,9 @@ def run_backtest_segmented(
                         note_buy_fills_on_baseline(positions_baseline, trades_b)
                         prune_baseline_if_flat(positions_baseline, positions)
                         _update_first_buy_dates_from_trades(
-                            first_buy_date_by_code, trades_b, fill_day, positions
-                        )
+                            first_buy_date_by_code, trades_b, fill_day, positions,
+                        last_buy_date_by_code
+                    )
                     else:
                         rem_b = []
 
@@ -1542,8 +1581,9 @@ def run_backtest_segmented(
                         note_buy_fills_on_baseline(positions_baseline, trades_c)
                         prune_baseline_if_flat(positions_baseline, positions)
                         _update_first_buy_dates_from_trades(
-                            first_buy_date_by_code, trades_c, fill_day, positions
-                        )
+                            first_buy_date_by_code, trades_c, fill_day, positions,
+                        last_buy_date_by_code
+                    )
                         pending_intents = remaining2 if carry_over_pending_intents else []
                     else:
                         pending_intents = []
@@ -1627,8 +1667,9 @@ def run_backtest_segmented(
             if not strategy_uses_scheduled_clear(strategy_code, params_for_run, seg_name):
                 strip_scheduled_clear_params(params_for_run)
             _inject_code_sell_day_index_bt(
-                params_for_run, first_buy_date_by_code, fill_day, get_trading_dates_in_range_sorted
-            )
+                params_for_run, first_buy_date_by_code, fill_day, get_trading_dates_in_range_sorted,
+                    last_buy_date_by_code
+                )
             _inject_limit_up_defer_params(params_for_run, lu_deferred_codes)
             # clip 强度字段写入 prices（策略也可从 params.clip_strength_by_code 读取）
             _str_map = params_for_run.get("clip_strength_by_code") or {}
@@ -1734,7 +1775,8 @@ def run_backtest_segmented(
                     prune_baseline_if_flat(positions_baseline, positions)
                     _record_filled_legs_from_trades(seg, day_trades)
                     _update_first_buy_dates_from_trades(
-                        first_buy_date_by_code, day_trades, fill_day, positions
+                        first_buy_date_by_code, day_trades, fill_day, positions,
+                        last_buy_date_by_code
                     )
                     pending_intents = remaining_intents if carry_over_pending_intents else []
                     if len(day_trades) == 0 and codes_for_ohlc and not ohlc_map:
@@ -1764,7 +1806,8 @@ def run_backtest_segmented(
                     prune_baseline_if_flat(positions_baseline, positions)
                     _record_filled_legs_from_trades(seg, day_trades)
                     _update_first_buy_dates_from_trades(
-                        first_buy_date_by_code, day_trades, fill_day, positions
+                        first_buy_date_by_code, day_trades, fill_day, positions,
+                        last_buy_date_by_code
                     )
                     pending_intents = remaining_intents if carry_over_pending_intents else []
                     if len(day_trades) == 0:
@@ -1816,7 +1859,8 @@ def run_backtest_segmented(
                     prune_baseline_if_flat(positions_baseline, positions)
                     _record_filled_legs_from_trades(seg, day_trades)
                     _update_first_buy_dates_from_trades(
-                        first_buy_date_by_code, day_trades, fill_day, positions
+                        first_buy_date_by_code, day_trades, fill_day, positions,
+                        last_buy_date_by_code
                     )
                     pending_intents = []
             # 某段无意图时不逐段刷屏；见下方整日汇总

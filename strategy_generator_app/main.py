@@ -870,14 +870,20 @@ def _load_task_buy_dates_by_code(project_root: str, codes: List[str]) -> Dict[st
 
 
 def _load_prefer_entry_buy_dates(project_root: str, codes: List[str]) -> Dict[str, date]:
-    """卖出 N 日起算：优先实盘建仓日 position_entry_dates，其次任务 buy_date。"""
+    """卖出 N 日起算锚定日：优先末笔买入日，其次首次建仓日，再次任务 buy_date。
+
+    末笔买入日用于「再次买入后清仓日顺延」；无末笔记录时回退首次建仓日（与旧行为一致）。
+    """
     want = {_normalize_code(c) for c in (codes or []) if _normalize_code(c)}
     out: Dict[str, date] = {}
     try:
-        from utils.position_entry_dates import load_as_dates
+        from utils.position_entry_dates import load_last_buy_as_dates, load_as_dates
 
-        for c6, d in (load_as_dates(project_root) or {}).items():
+        for c6, d in (load_last_buy_as_dates(project_root) or {}).items():
             if c6 in want and d is not None:
+                out[c6] = d
+        for c6, d in (load_as_dates(project_root) or {}).items():
+            if c6 in want and c6 not in out and d is not None:
                 out[c6] = d
     except Exception:
         pass
@@ -892,7 +898,7 @@ def _load_prefer_entry_buy_dates(project_root: str, codes: List[str]) -> Dict[st
 
 def _inject_code_sell_day_index(params: Dict[str, Any], codes: List[str], project_root: str) -> None:
     """
-    写入 params['code_sell_day_index']：各股从建仓日/buy_date 起第几个卖出交易日（含今日）。
+    写入 params['code_sell_day_index']：各股从末笔买入日（无则建仓日）起第几个卖出交易日（含今日）。
     供「末交易日 14:56 定时清仓」等策略在实盘运行日判定是否生成清仓规则。
     """
     if not params.get("scheduled_clear_on_sell_day") and not params.get("sell_hold_trading_days"):
@@ -904,13 +910,15 @@ def _inject_code_sell_day_index(params: Dict[str, Any], codes: List[str], projec
         return
     buy_dates = _load_prefer_entry_buy_dates(project_root, codes)
     try:
-        from utils.position_entry_dates import load_all
+        from utils.position_entry_dates import load_all, load_last_buy_all
 
         params["position_entry_dates"] = load_all(project_root)
+        params["position_last_buy_dates"] = load_last_buy_all(project_root)
     except Exception:
         params["position_entry_dates"] = {
             c: d.isoformat() for c, d in buy_dates.items()
         }
+        params["position_last_buy_dates"] = {}
     today = date.today()
     out: Dict[str, int] = {}
     for code in codes or []:
@@ -933,7 +941,8 @@ def _inject_code_sell_day_index(params: Dict[str, Any], codes: List[str], projec
 def _ui_sell_hold_to_engine_n(hold_from_next_day: int) -> int:
     """界面持有天数 → 引擎清仓日序号。
 
-    界面/官方 CLI 口径：买入【次日】为持有第 1 日，第 N 日无条件清仓。
+    界面/官方 CLI 口径：锚定买入日【次日】为持有第 1 日，第 N 日无条件清仓。
+    锚定日=末笔买入日（无则首次建仓日）。
     引擎 code_sell_day_index 含买入日 → 注入 N+1（与 run_ma_zong1_single_daily_backtest 一致）。
     """
     try:
@@ -2079,8 +2088,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_paste_btn = QPushButton("粘贴")
         self.pool_paste_btn.setToolTip("将已复制股票池并入当前策略股票池")
         self.pool_paste_btn.clicked.connect(self._on_pool_paste_codes)
+        self.pool_export_btn = QPushButton("导出…")
+        self.pool_export_btn.setToolTip(
+            "将当前股票池表格全部行导出为 CSV（UTF-8 带 BOM，便于 Excel 打开）。\n"
+            "含代码、名称、选股日/建仓日、进度、窗口、已执行分支（不含勾选列）。"
+        )
+        self.pool_export_btn.clicked.connect(self._on_export_pool_csv)
         pool_btn_row.addWidget(self.pool_copy_btn)
         pool_btn_row.addWidget(self.pool_paste_btn)
+        pool_btn_row.addWidget(self.pool_export_btn)
         pool_btn_row.addWidget(self.pool_import_btn)
         pool_btn_row.addWidget(self.pool_batch_import_btn)
         pool_btn_row.addWidget(self.pool_import_positions_btn)
@@ -2150,8 +2166,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.param_entry_window_spin.setToolTip(
             "本策略运行交易日数（修改后自动保存到策略参数，换策略/重启不丢）。\n"
             "买入策略：入场窗口长度（选股日 T+1 起连续 N 天）；批量回测仿真长度同此值。\n"
-            "卖出策略（马总等）：实盘注入持有天数——买入【次日】为第 1 日，第 N 日无条件清仓"
-            "（与官方 CLI / 回测页接续同口径）。\n"
+            "卖出策略（马总等）：无条件清仓持有天数——锚定买入日【次日】为第 1 日，第 N 日 14:56 清仓。\n"
+            "锚定日优先取末笔买入日（再次买入会顺延清仓日）；无末笔记录时用首次建仓日。\n"
             "与回测页「下一轮接续→持有交易日数」独立，互不覆盖。"
         )
         params_form.addRow("运行交易日数：", self.param_entry_window_spin)
@@ -4288,6 +4304,77 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "复制",
             f"已复制 {len(codes)} 只股票（来源策略：{self._pool_clipboard_source_name}）。",
         )
+
+    def _on_export_pool_csv(self):
+        """导出股票池表格全部行（跳过勾选列）为 CSV。"""
+        t = self.pool_list
+        nrows = t.rowCount()
+        if nrows <= 0:
+            QMessageBox.information(self, "提示", "当前股票池为空，无可导出内容。")
+            return
+        sid = self._get_selected_strategy_id()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        name_safe = ""
+        if cfg and (cfg.name or "").strip():
+            name_safe = "".join(
+                ch if ch.isalnum() or ch in "-_" else "_" for ch in str(cfg.name).strip()
+            )[:40]
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        hd = os.path.join(root, "history_data")
+        os.makedirs(hd, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        prefix = f"股票池_{name_safe}_" if name_safe else "股票池_"
+        default_fn = os.path.join(hd, f"{prefix}{stamp}.csv")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出股票池 CSV",
+            default_fn,
+            "CSV (*.csv);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        # 跳过第 0 列「选」勾选框，导出数据列
+        col_indices = list(range(1, t.columnCount()))
+        headers = []
+        for c in col_indices:
+            hi = t.horizontalHeaderItem(c)
+            headers.append(hi.text() if hi else f"列{c + 1}")
+        # 入场/持有进度形如 5/10，Excel 会当成日期；写成 ="5/10" 强制按文本显示
+        progress_cols = {
+            i
+            for i, h in enumerate(headers)
+            if ("进度" in (h or "")) or h in ("入场进度", "持有进度")
+        }
+
+        def _csv_cell(val: str, force_text: bool) -> str:
+            s = (val or "").strip()
+            if not s:
+                return s
+            if force_text or (
+                "/" in s and s.replace("/", "").isdigit()
+            ):
+                # Excel 打开 CSV 时按公式求值，单元格显示为原文字（如 5/10）
+                return f'="{s}"'
+            return s
+
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(headers)
+                for r in range(nrows):
+                    row_vals = []
+                    for i, c in enumerate(col_indices):
+                        it = t.item(r, c)
+                        raw = (it.text() if it else "").strip()
+                        row_vals.append(_csv_cell(raw, i in progress_cols))
+                    w.writerow(row_vals)
+            QMessageBox.information(
+                self, "已导出", f"已导出 {nrows} 行：\n{path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
 
     def _on_pool_paste_codes(self):
         """把复制缓存中的股票并入当前策略股票池（去重、自动保存）。"""

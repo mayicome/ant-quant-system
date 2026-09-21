@@ -19,6 +19,8 @@ from utils.ant_rules_io_ext import (
 
 # 临时订阅超时：生成器异常退出后避免数百只长期挂在 subscribe_whole_quote 上拖垮行情
 STRATEGY_POOL_WATCH_TTL_SEC = 300
+# 列表未变时的续期间隔。必须小于 TTL，且不要每秒写盘（否则 QMT 会误判规则重载）
+STRATEGY_POOL_WATCH_HEARTBEAT_SEC = 120
 # 超过此数量写入时打警告（仍写入；靠 TTL + 运行结束 clear 回收）
 STRATEGY_POOL_WATCH_WARN_N = 120
 
@@ -70,6 +72,16 @@ def get_strategy_pool_watch(root: Optional[str] = None) -> List[str]:
     return normalize_watch_codes(data.get("strategy_pool_watch"))
 
 
+def _watch_age_sec(data: Dict[str, Any]) -> Optional[float]:
+    raw = str((data or {}).get("strategy_pool_watch_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        return (datetime.now() - datetime.fromisoformat(raw)).total_seconds()
+    except ValueError:
+        return None
+
+
 def set_strategy_pool_watch(codes_6: List[str], *, root: Optional[str] = None) -> bool:
     """运行开始：写入 strategy_pool_watch；运行结束由 clear_strategy_pool_watch 释放。"""
     rules_path, _ = default_paths(root or _project_root())
@@ -77,9 +89,13 @@ def set_strategy_pool_watch(codes_6: List[str], *, root: Optional[str] = None) -
     new_watch = codes_6_to_full(codes_6)
     old_watch = normalize_watch_codes(data.get("strategy_pool_watch"))
     if old_watch == new_watch:
-        # 刷新 TTL，避免长跑等待行情时被误清
+        # 列表未变不改 updated_at。仅在临近 TTL 时续期，避免竞价预热每秒重写触发 QMT 规则重载。
+        if not new_watch:
+            return False
+        age = _watch_age_sec(data)
+        if age is not None and age < float(STRATEGY_POOL_WATCH_HEARTBEAT_SEC):
+            return False
         data["strategy_pool_watch_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        data["updated_at"] = data["strategy_pool_watch_at"]
         save_json_atomic(rules_path, data)
         return False
     if len(new_watch) >= int(STRATEGY_POOL_WATCH_WARN_N):

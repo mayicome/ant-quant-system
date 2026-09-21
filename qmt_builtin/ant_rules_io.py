@@ -318,19 +318,31 @@ def prune_results_stocks(results: Dict[str, Any], keep_codes: Any) -> int:
 
 
 def rules_file_signature(path: str) -> str:
-#  rules_armed.json mtime + updated_at
+    """规则内容签名。不含 mtime / updated_at / strategy_pool_watch_at，TTL 续期写盘不触发重载。"""
     if not os.path.isfile(path):
         return ""
     try:
-        mtime = os.path.getmtime(path)
         data = load_json(path)
-        updated = str(data.get("updated_at") or "")
-        ver = str(data.get("version") or "")
-        n_tasks = len(data.get("tasks") or [])
-        n_watch = len(data.get("watch_codes") or [])
-        n_pool = len(data.get("strategy_pool_watch") or [])
-        return f"{mtime:.6f}|{updated}|{ver}|{n_tasks}|{n_watch}|{n_pool}"
     except OSError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    payload = {
+        "version": data.get("version"),
+        "trade_date": str(data.get("trade_date") or ""),
+        "tasks": data.get("tasks") or [],
+        "watch_codes": data.get("watch_codes") or [],
+        "strategy_pool_watch": data.get("strategy_pool_watch") or [],
+        "orders_enabled": bool(data.get("orders_enabled", True)),
+        "early_order_enabled": bool(data.get("early_order_enabled", False)),
+        "min_buy_amount": data.get("min_buy_amount") or 0,
+        "buy_block_window_enabled": bool(data.get("buy_block_window_enabled", False)),
+        "buy_block_start": str(data.get("buy_block_start") or ""),
+        "buy_block_end": str(data.get("buy_block_end") or ""),
+    }
+    try:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
         return ""
 
 

@@ -4,6 +4,7 @@
 总仓位（半仓基准）= 本轮持仓周期累计买入；只随买入增加，半仓/部分卖不减；持仓归零重置。
 开盘涨幅腿：每日相对昨收达标则按「总仓位」卖约 50%（OPEN50，每日可触发；触发价=昨收×(1+阈值)）。
 LU10：按「总仓位」卖约 50%；整段持仓期只触发一次。
+清仓：主板「涨停即清仓」；非主板达 CLEAR_GAIN_GROWTH（默认13%）弹性清剩余仓位。
 两腿独立；同轮都挂则半仓+取整零头并入一腿；只挂一腿则半仓后若剩余不够一手或不够最小单笔金额则并入。
 params.positions=可卖；positions_volume=当前持股；positions_baseline=总仓位基准（半仓用）。
 """
@@ -24,22 +25,35 @@ STRATEGY_NAME_ALIASES = (
 
 STRATEGY_CODE = r'''# 卖：马总选股逻辑1
 # 总仓位=本轮累计买入（positions_baseline）；半仓按总仓位取半；卖出不降总仓位；持股<100重置
-# OPEN50：每日按总仓位半仓；触发价=昨收×(1+阈值)（主板默认5%/成长默认10%）
+# OPEN50：每日按总仓位半仓；触发价=昨收×(1+阈值)（主板/非主板见下方 OPEN_GAIN_*）
 # 近10日涨停价：按总仓位半仓(LU10，整段一次)
 # 只挂一腿：半仓后剩余不够一手或不够最小单笔金额，则并入本次（对照当前持股 positions_volume）
 # params.positions=可卖；positions_volume=当前持股；positions_baseline=总仓位基准
 # 两腿回落%%：下方 DROP_PERCENT_OPEN / DROP_PERCENT_LU；params.open_drop_percent / lu_drop_percent 可覆盖
+# 开盘涨幅阈值：下方 OPEN_GAIN_MAIN / OPEN_GAIN_GROWTH；params.open_gain_main / open_gain_growth 可覆盖
+# 清仓：主板仍「涨停即清仓」；非主板达 CLEAR_GAIN_GROWTH（默认13%）弹性清仓剩余仓位
+#   params.clear_gain_growth 可覆盖；回落%% 同 DROP_PERCENT_OPEN / open_drop_percent
 # 近涨停分档（可选）：drop_percent_when_lu_gt_open / drop_percent_when_lu_lt_open
 #   仅改近涨停腿：LU触发价>开盘腿触发价用 gt，否则用 lt；开盘腿仍用 DROP_PERCENT_OPEN
 #   相等回退 drop_percent_when_lu_eq_open 或 DROP_PERCENT_LU / lu_drop_percent
 # N = params.scheduled_clear_on_sell_day / sell_hold_trading_days / entry_window_trading_days
+#   无条件清仓：锚定买入日次日起第 N 日 14:56；锚定日=末笔买入日（无则首次建仓日）
 
 NAME_OPEN50 = "马总1卖-开盘涨幅弹性半仓"
 NAME_LU10 = "马总1卖-近10日涨停价弹性半仓"
+NAME_CLEAR_LU = "涨停即清仓"
+NAME_CLEAR_GROWTH = "马总1卖-非主板涨幅弹性清仓"
 
 # 两腿回落比例%%（缺省）；改这里即可分腿调弹性；params 同名键可覆盖
 DROP_PERCENT_OPEN = 1.5  # 开盘涨幅弹性半仓
 DROP_PERCENT_LU = 1.5    # 近10日涨停价弹性半仓
+
+# 开盘涨幅阈值（相对昨收，小数）；改这里即可；params 同名键可覆盖
+OPEN_GAIN_MAIN = 0.05    # 主板
+OPEN_GAIN_GROWTH = 0.08  # 非主板（创业/科创/北交等）
+
+# 非主板弹性清仓：相对昨收涨幅（小数）；改这里即可；params.clear_gain_growth 可覆盖
+CLEAR_GAIN_GROWTH = 0.13
 
 def run(codes, prices, get_name, account, params):
     result = []
@@ -283,16 +297,37 @@ def run(codes, prices, get_name, account, params):
     params["_filled_legs"] = sorted(filled)
 
     try:
-        thr_main = float(params.get("open_gain_main", 0.05) or 0.05)
-    except (TypeError, ValueError):
-        thr_main = 0.05
+        _def_main = float(OPEN_GAIN_MAIN)
+    except (TypeError, ValueError, NameError):
+        _def_main = 0.05
     try:
-        thr_growth = float(params.get("open_gain_growth", 0.10) or 0.10)
+        _def_growth = float(OPEN_GAIN_GROWTH)
+    except (TypeError, ValueError, NameError):
+        _def_growth = 0.08
+    try:
+        thr_main = float(params.get("open_gain_main", _def_main) or _def_main)
     except (TypeError, ValueError):
-        thr_growth = 0.10
+        thr_main = _def_main
+    try:
+        thr_growth = float(params.get("open_gain_growth", _def_growth) or _def_growth)
+    except (TypeError, ValueError):
+        thr_growth = _def_growth
+    try:
+        _def_clear_g = float(CLEAR_GAIN_GROWTH)
+    except (TypeError, ValueError, NameError):
+        _def_clear_g = 0.13
+    try:
+        thr_clear_growth = float(params.get("clear_gain_growth", _def_clear_g) or _def_clear_g)
+    except (TypeError, ValueError):
+        thr_clear_growth = _def_clear_g
+    if thr_clear_growth < 0:
+        thr_clear_growth = _def_clear_g
+
+    def _is_growth_board(c6):
+        return c6.startswith(("300", "301", "688", "689", "8", "4", "920"))
 
     def _open_thr(c6):
-        if c6.startswith(("300", "301", "688", "689", "8", "4", "920")):
+        if _is_growth_board(c6):
             return thr_growth
         return thr_main
 
@@ -538,16 +573,35 @@ def run(codes, prices, get_name, account, params):
                 "half_pair": True,
             })
 
-        if limit_up > 0 and avail >= 100:
-            result.append({
-                "stock_code": c6,
-                "stock_name": name,
-                "rule_type": "best_sell",
-                "name": "涨停即清仓",
-                "trigger_price": float(round(limit_up, 2)),
-                "drop_percent": 0.0,
-                "volume": int(avail),
-            })
+        # 清仓：主板涨停即清；非主板达相对昨收涨幅阈值后弹性清剩余仓位
+        if avail >= 100:
+            if _is_growth_board(c6):
+                if prev_close > 0 and thr_clear_growth > 0:
+                    clear_trig = _clamp(
+                        round(prev_close * (1.0 + float(thr_clear_growth)), 2),
+                        limit_down,
+                        limit_up,
+                    )
+                    if clear_trig > 0:
+                        result.append({
+                            "stock_code": c6,
+                            "stock_name": name,
+                            "rule_type": "best_sell",
+                            "name": NAME_CLEAR_GROWTH,
+                            "trigger_price": float(clear_trig),
+                            "drop_percent": float(open_drop_pct),
+                            "volume": int(avail),
+                        })
+            elif limit_up > 0:
+                result.append({
+                    "stock_code": c6,
+                    "stock_name": name,
+                    "rule_type": "best_sell",
+                    "name": NAME_CLEAR_LU,
+                    "trigger_price": float(round(limit_up, 2)),
+                    "drop_percent": 0.0,
+                    "volume": int(avail),
+                })
 
         # 第 N 日无条件清仓（N 来自运行交易日数/持有天数）
         hold_n = None
@@ -610,8 +664,9 @@ def main() -> None:
     sp.update(
         {
             "drop_percent": 1.5,
-            "open_gain_main": float(sp.get("open_gain_main") or 0.05),
-            "open_gain_growth": float(sp.get("open_gain_growth") or 0.10),
+            "open_gain_main": 0.05,
+            "open_gain_growth": 0.08,
+            "clear_gain_growth": 0.13,
             "entry_window_trading_days": int(sp.get("entry_window_trading_days") or 4),
             "min_order_amount": float(sp.get("min_order_amount") or 5000),
             "_filled_legs": list(sp.get("_filled_legs") or []),

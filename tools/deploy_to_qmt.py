@@ -36,34 +36,61 @@ MODULE_FILES = (
 ENTRY_FILE = "蚂蚁量化规则.py"
 
 
-def _qmt_python_dir() -> Path:
+class DeployError(RuntimeError):
+    """部署失败（配置缺失、目录不存在或源文件缺失）。"""
+
+
+def _same_bytes(src: Path, dst: Path) -> bool:
+    if not dst.is_file():
+        return False
+    try:
+        return src.read_bytes() == dst.read_bytes()
+    except OSError:
+        return False
+
+
+def deploy() -> list:
+    """复制有变化的脚本到大 QMT python 目录。返回本次内容有变化的文件名。"""
     cp = configparser.ConfigParser()
     cp.read(CONFIG, encoding="utf-8")
-    raw = cp.get("qmt_builtin", "qmt_python_dir", fallback="").strip()
+    raw = ""
+    if cp.has_section("qmt_builtin"):
+        raw = cp.get("qmt_builtin", "qmt_python_dir", fallback="").strip()
     if not raw:
-        raise SystemExit("set [qmt_builtin] qmt_python_dir in data/config.ini")
-    return Path(raw.replace("/", "\\"))
+        raise DeployError("data/config.ini 未设置 [qmt_builtin] qmt_python_dir")
+    dst = Path(raw.replace("/", "\\"))
+    if not dst.is_dir():
+        raise DeployError("qmt_python_dir 不存在: " + str(dst))
+
+    names = list(MODULE_FILES) + [ENTRY_FILE]
+    changed = []
+    for name in names:
+        src = SRC / name
+        if not src.is_file():
+            hint = "（请先运行 tools/sync_qmt_gbk.py）" if name != ENTRY_FILE else ""
+            raise DeployError("缺少 " + str(src) + hint)
+        target = dst / name
+        if _same_bytes(src, target):
+            continue
+        shutil.copy2(src, target)
+        changed.append(name)
+        print("updated", target)
+
+    if changed:
+        print(
+            "done. %d file(s) changed. restart strategy in model trading"
+            % len(changed)
+        )
+    else:
+        print("unchanged. %d file(s) already match QMT" % len(names))
+    return changed
 
 
 def main() -> None:
-    dst = _qmt_python_dir()
-    if not dst.is_dir():
-        raise SystemExit("qmt_python_dir not found: " + str(dst))
-
-    for name in MODULE_FILES:
-        src = SRC / name
-        if not src.is_file():
-            raise SystemExit("missing " + str(src) + " (run sync_qmt_gbk.py first)")
-        shutil.copy2(src, dst / name)
-        print("copied", dst / name)
-
-    entry_src = SRC / ENTRY_FILE
-    if not entry_src.is_file():
-        raise SystemExit("missing " + str(entry_src))
-    shutil.copy2(entry_src, dst / ENTRY_FILE)
-    print("copied", dst / ENTRY_FILE)
-
-    print("done. restart strategy in model trading")
+    try:
+        deploy()
+    except DeployError as e:
+        raise SystemExit(str(e)) from e
 
 
 if __name__ == "__main__":

@@ -167,7 +167,8 @@ def resolve_scheduled_clear_effective_date(
     解析定时清仓生效交易日：
     1) 意图/规则已显式指定 scheduled_clear_effective_date；
     2) 每日条件清仓（scheduled_clear_every_day）：按生成时刻锚定（今日/下一交易日）；
-    3) 末日出清：buy_date + 第 N 个交易日（scheduled_clear_sell_day_index / on_sell_day）；
+    3) 末日出清：锚定买入日 + 第 N 个交易日（scheduled_clear_sell_day_index / on_sell_day）；
+       锚定日由调用方传入 buy_date（实盘优先末笔买入日）；
     4) 否则按生成时刻锚定。
     """
     explicit = (intent.get("scheduled_clear_effective_date") or "").strip()
@@ -348,6 +349,16 @@ def _merge_rules_replace_by_identity(
                 merged["id"] = old.get("id")
             elif old.get("id"):
                 merged["id"] = old.get("id")
+            # 末笔买入顺延清仓：若今日清仓任务已挂出且未执行，不要被新锚定日推后盖掉
+            if (str(old.get("type") or "").strip() == "scheduled_clear") and (
+                str(merged.get("type") or "").strip() == "scheduled_clear"
+            ):
+                if not _truthy_flag(old.get("scheduled_clear_executed")):
+                    old_eff = str(old.get("scheduled_clear_effective_date") or "").strip()[:10]
+                    new_eff = str(merged.get("scheduled_clear_effective_date") or "").strip()[:10]
+                    today_s = date.today().isoformat()
+                    if old_eff == today_s and new_eff and new_eff > today_s:
+                        merged["scheduled_clear_effective_date"] = old_eff
         out.append(merged)
     return out
 

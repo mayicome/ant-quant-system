@@ -215,6 +215,7 @@ class TradingApp(QMainWindow):
 
             # 初始化基本logger
             self.logger = Logger()
+            self._deploy_builtin_to_qmt()
             
             # 主动初始化股票信息管理器，确保在获取持仓信息前已加载完成
             try:
@@ -321,6 +322,44 @@ class TradingApp(QMainWindow):
             
             # 重新抛出异常，让全局异常处理器处理
             raise
+
+    def _deploy_builtin_to_qmt(self) -> None:
+        """启动时把 qmt_builtin 脚本复制到大 QMT python 目录，等同运行 tools/deploy_to_qmt.py。"""
+        try:
+            import importlib.util
+
+            script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "tools", "deploy_to_qmt.py"
+            )
+            spec = importlib.util.spec_from_file_location("deploy_to_qmt", script)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("无法加载 " + script)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            changed = list(mod.deploy() or [])
+            if not changed:
+                self.logger.info("QMT 内置策略与本地一致，无需重启「蚂蚁量化规则」。")
+                return
+            names = "、".join(changed[:8])
+            if len(changed) > 8:
+                names += " 等%d个" % len(changed)
+            self.logger.info(
+                "QMT 内置策略有更新（%d 个文件）：%s。请在模型交易中重启「蚂蚁量化规则」。"
+                % (len(changed), names)
+            )
+            from PyQt5.QtWidgets import QMessageBox
+
+            QMessageBox.information(
+                self,
+                "请重启蚂蚁量化规则",
+                "检测到 QMT 内置策略有更新，已写入大 QMT（%d 个文件）。\n"
+                "请在模型交易里重启「蚂蚁量化规则」后才会生效。\n\n%s"
+                % (len(changed), "\n".join(changed)),
+            )
+        except Exception as e:
+            self.logger.warning(
+                "自动 deploy_to_qmt 失败，交易系统继续启动: %s" % e
+            )
         
     def showEvent(self, event):
         """窗口显示时触发"""
