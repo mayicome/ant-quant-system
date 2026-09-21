@@ -59,6 +59,7 @@ ant-quant-data.zip
 
 # ===== 可执行文件 / 大二进制 =====
 *.exe
+!launcher.exe
 *.dll
 *.so
 *.dylib
