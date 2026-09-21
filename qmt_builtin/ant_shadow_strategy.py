@@ -2162,6 +2162,12 @@ def _periodic_sync_body(ContextInfo):
     if now - _LAST_PERIODIC_TS < float(RULES_RELOAD_INTERVAL_SEC) * 0.8:
         return
     _LAST_PERIODIC_TS = now
+    try:
+        probe = _load_py_module("ant_speed_probe", "ant_speed_probe.py")
+        if probe is not None and hasattr(probe, "on_periodic"):
+            probe.on_periodic(ContextInfo)
+    except Exception as e:
+        print("[交易核心] 测速探测错误: %s" % e)
     _process_pending_resubscribe(ContextInfo)
     reload_rules_if_changed(ContextInfo, allow_resubscribe=True)
     _maybe_seed_snapshots(force=False)
@@ -2681,6 +2687,24 @@ def _apply_runner_events(events, datas) -> bool:
 
 
 def _on_tick(datas):
+    _probe_t0 = time.perf_counter()
+    try:
+        _on_tick_body(datas)
+    finally:
+        try:
+            probe = _load_py_module("ant_speed_probe", "ant_speed_probe.py")
+            if probe is not None and hasattr(probe, "on_strategy_tick"):
+                probe.on_strategy_tick(
+                    _CONTEXT,
+                    datas,
+                    (time.perf_counter() - _probe_t0) * 1e6,
+                )
+        except Exception:
+            pass
+
+
+def _on_tick_body(datas):
+    global _RUNNER, _RESULTS, _TICK_COUNT
     global _RUNNER, _RESULTS, _TICK_COUNT
     if _RUNNER is None or _RESULTS is None:
         return

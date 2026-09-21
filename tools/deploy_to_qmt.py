@@ -29,6 +29,7 @@ MODULE_FILES = (
     "ant_account_snapshot.py",
     "ant_passorder.py",
     "ant_position_entry_dates.py",
+    "ant_speed_probe.py",
     "ant_filled_legs.py",
     "ant_cancel_request.py",
 )

@@ -802,6 +802,12 @@ def order_callback(ContextInfo, orderInfo):
             except Exception:
                 pass
             print("[交易核心] 委托回调 status=%s" % st)
+        try:
+            sp = _shadow._load_py_module("ant_speed_probe", "ant_speed_probe.py")
+            if sp is not None and hasattr(sp, "on_order"):
+                sp.on_order(ContextInfo, orderInfo)
+        except Exception:
+            pass
     except Exception as e:
         print("[入口] order_callback 错误: %s: %s" % (type(e).__name__, e))
 
@@ -830,6 +836,12 @@ def deal_callback(ContextInfo, dealInfo):
             except Exception:
                 pass
             print("[交易核心] 成交回调")
+        try:
+            sp = _shadow._load_py_module("ant_speed_probe", "ant_speed_probe.py")
+            if sp is not None and hasattr(sp, "on_deal"):
+                sp.on_deal(ContextInfo, dealInfo)
+        except Exception:
+            pass
     except Exception as e:
         print("[入口] deal_callback 错误: %s: %s" % (type(e).__name__, e))
 
