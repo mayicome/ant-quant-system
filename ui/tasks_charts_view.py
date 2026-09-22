@@ -762,9 +762,12 @@ class TasksChartsView(QWidget):
         
         toolbar_layout.addSpacing(10)
         
-        # 重新加载任务按钮（从文件刷新，用于策略生成系统写入新任务后同步）
-        reload_btn = QPushButton("🔄 重新加载任务")
-        reload_btn.setToolTip("从任务文件重新加载（策略生成系统写入新任务后请点击此按钮）")
+        # 加载任务按钮（从文件刷新；会先消化策略生成系统的待加载箱）
+        reload_btn = QPushButton("🔄 加载任务")
+        reload_btn.setToolTip(
+            "从当日任务文件加载；若存在 data/pending_tasks.json（策略生成待加载箱），"
+            "会先合并再加载。同股已有且正在运行的任务会暂停并提示。"
+        )
         reload_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 5px 15px;")
         reload_btn.clicked.connect(self._on_reload_tasks_from_file)
         toolbar_layout.addWidget(reload_btn)
@@ -824,10 +827,20 @@ class TasksChartsView(QWidget):
         return toolbar
         
     def _on_reload_tasks_from_file(self):
-        """从任务文件重新加载（策略生成系统写入新任务后调用，避免关闭主程序时覆盖）"""
+        """从任务文件加载（先消化 pending_tasks 待加载箱，再 force_reload）。"""
         if not hasattr(self, 'task_manager') or not self.task_manager:
             return
         try:
+            pending_n = 0
+            try:
+                pending_n = int(self.task_manager.peek_pending_inbox_count() or 0)
+            except Exception:
+                pending_n = 0
+            if pending_n > 0 and hasattr(self, "status_label") and self.status_label is not None:
+                try:
+                    self.status_label.setText(f"正在合并待加载箱 {pending_n} 条…")
+                except Exception:
+                    pass
             self.task_manager.load_tasks(force_reload=True)
             # 先拷贝提示列表；load_tasks 内会按 _reload_paused_norms 纠正 UI
             paused_list = list(
@@ -839,13 +852,29 @@ class TasksChartsView(QWidget):
                 self.task_manager._reload_paused_norms = set()
             except Exception:
                 pass
-            # 若有因重新加载被置为暂停的任务，弹窗提示（与程序启动时一致）
+            try:
+                self.task_manager._inbox_force_pause_norms = set()
+            except Exception:
+                pass
+            if hasattr(self, "status_label") and self.status_label is not None:
+                try:
+                    left = int(self.task_manager.peek_pending_inbox_count() or 0)
+                    if left > 0:
+                        self.status_label.setText(f"加载完成（待加载箱仍余 {left} 条）")
+                    elif pending_n > 0:
+                        self.status_label.setText(f"加载完成（已合并待加载箱 {pending_n} 条）")
+                    else:
+                        self.status_label.setText("加载完成")
+                except Exception:
+                    pass
+            # 若有因加载被置为暂停的任务，弹窗提示（与程序启动时一致）
             if paused_list:
                 from PyQt5.QtWidgets import QMessageBox
                 from PyQt5.QtCore import QTimer
                 def show_reload_paused_dialog():
                     msg = (
-                        "因重新加载任务后检测到任务内容（规则/参数等）与运行前不一致，"
+                        "因加载任务后检测到任务内容（规则/参数等）与运行前不一致"
+                        "（含策略生成待加载箱并入），"
                         "以下原正在运行的任务已置为暂停，请确认规则后手动启动：\n\n"
                     )
                     msg += "\n".join([f"  • {name}" for name in paused_list])
@@ -854,11 +883,11 @@ class TasksChartsView(QWidget):
                     try:
                         QMessageBox.warning(parent, "任务状态提示", msg, QMessageBox.Ok)
                     except Exception as e:
-                        self.logger.error(f"显示重新加载暂停提示失败: {e}", exc_info=True)
+                        self.logger.error(f"显示加载暂停提示失败: {e}", exc_info=True)
                     self.task_manager._reload_paused_task_names = []
                 QTimer.singleShot(500, show_reload_paused_dialog)
         except Exception as e:
-            self.logger.error(f"重新加载任务失败: {e}", exc_info=True)
+            self.logger.error(f"加载任务失败: {e}", exc_info=True)
         
     def load_tasks(self):
         """加载所有任务并创建图表"""
@@ -882,23 +911,23 @@ class TasksChartsView(QWidget):
             # 清空现有图表
             self.clear_charts()
             
-            # 只在第一次加载时从文件加载任务，后续切换页面不再重新加载
-            # （避免重新加载文件时丢失运行状态）
+            # 只在第一次加载时从文件加载任务，后续切换页面不再加载
+            # （避免再次加载文件时丢失运行状态）
             if not self._has_checked_startup_pause:
                 # 第一次加载时，确保任务管理器已加载任务
                 if hasattr(self.task_manager, 'load_tasks'):
                     self.task_manager.load_tasks()
             else:
-                # 如果已经初始化过，但当前任务列表为空，重新加载一次（可能刚添加了新任务）
+                # 如果已经初始化过，但当前任务列表为空，再加载一次（可能刚添加了新任务）
                 current_tasks = self.task_manager.tasks if hasattr(self.task_manager, 'tasks') else {}
                 if not current_tasks:
-                    # 重新加载任务管理器，确保获取最新保存的任务
+                    # 加载任务管理器，确保获取最新保存的任务
                     if hasattr(self.task_manager, 'load_tasks'):
                         self.task_manager.load_tasks()
             
             # 获取所有任务
             tasks = self.task_manager.tasks if hasattr(self.task_manager, 'tasks') else {}
-            # 本次重新加载时新增的股票代码集合（6 位），用于区分显示
+            # 本次加载时新增的股票代码集合（6 位），用于区分显示
             new_stock_codes = set(getattr(self.task_manager, '_newly_loaded_stock_codes', None) or [])
             
             def _norm_sc(sc):
@@ -1021,7 +1050,7 @@ class TasksChartsView(QWidget):
                 no_task_label.setStyleSheet("color: #999; font-size: 12pt; padding: 50px;")
                 self.grid_layout.addWidget(no_task_label, 0, 0)
                 self.status_label.setText("无任务")
-                # 重置加载标志，允许后续重新加载
+                # 重置加载标志，允许后续再加载
                 self._loading_tasks = False
                 try:
                     self._restore_chart_run_states(run_snap)
@@ -1306,7 +1335,7 @@ class TasksChartsView(QWidget):
                     header_layout.addSpacing(2)  # 恢复原来的间距
                     new_badge = QLabel("新")
                     new_badge.setStyleSheet("background-color: #FF9800; color: white; font-size: 10px; font-weight: bold; padding: 1px 4px; border-radius: 3px;")
-                    new_badge.setToolTip("本次重新加载时新增的任务")
+                    new_badge.setToolTip("本次加载时新增的任务")
                     new_badge.setVisible(is_new_task)
                     header_layout.addWidget(new_badge)
                     header_layout.addSpacing(4)
@@ -1780,7 +1809,7 @@ class TasksChartsView(QWidget):
             # 切换到目标页面
             self.current_page = target_page
             
-            # 重新加载任务（会按照新列数和页面显示）
+            # 加载任务（会按照新列数和页面显示）
             self.load_tasks()
             
             # 如果之前是全屏模式，确保保持全屏状态
@@ -2364,13 +2393,13 @@ class TasksChartsView(QWidget):
                 # 保存到文件（按新顺序）
                 self.task_manager.save_tasks([task for _, task in current_tasks_list])
                 
-                # 重新加载任务管理器中的任务（确保包含新任务）
+                # 加载任务管理器中的任务（确保包含新任务）
                 self.task_manager.load_tasks()
                 
                 self.logger.info(f"任务已创建: {stock_code}，插入到位置 {insert_pos}（当前页第1个位置）")
                 
-                # 重新加载（会按照保存的顺序加载）
-                # 强制重新加载任务管理器，确保新任务被读取
+                # 加载（会按照保存的顺序加载）
+                # 强制加载任务管理器，确保新任务被读取
                 if hasattr(self.task_manager, 'load_tasks'):
                     self.task_manager.load_tasks()
                 
@@ -2385,7 +2414,7 @@ class TasksChartsView(QWidget):
                     except Exception as e:
                         self.logger.warning(f"添加股票 {stock_code} 到订阅列表失败: {str(e)}")
                 
-                # 重置加载标志，确保能重新加载
+                # 重置加载标志，确保能再加载
                 self._loading_tasks = False
                 self.load_tasks()
                 
@@ -2771,7 +2800,7 @@ class TasksChartsView(QWidget):
         """解析任务运行/暂停显示状态。
 
         优先信任：TaskManager.running_tasks；
-        再：params 明确「已暂停」时覆盖图表残留的 live 态（重新加载意图暂停）；
+        再：params 明确「已暂停」时覆盖图表残留的 live 态（加载意图暂停）；
         再回退图表实况 / status / params。避免切列重排后用陈旧 params 把「运行中」刷成「已暂停」。
         """
         # 图表挂着旧 task_id 时，改用当前任务表判断，避免误显示「已暂停/未运行」
@@ -2864,7 +2893,7 @@ class TasksChartsView(QWidget):
 
         注意：快照为「未运行」时，不得覆盖 TaskManager 里已在跑的任务
         （预约重载：先 start_all 再 load_tasks 时，旧图快照全是未运行）。
-        重新加载因规则变化意图暂停的股票：禁止按快照拉回运行中。
+        加载因规则变化意图暂停的股票：禁止按快照拉回运行中。
         """
         try:
             if not snap:

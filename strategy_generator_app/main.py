@@ -114,7 +114,7 @@ from config.strategy_config import (
     strip_scheduled_clear_params,
 )
 from engine import run_strategy as engine_run_strategy
-from task_builder import build_task_dict, build_tasks_from_intents, write_tasks_to_excel
+from task_builder import build_task_dict, build_tasks_from_intents, enqueue_tasks_to_pending
 from price_provider import get_prices as fetch_prices, get_prices_with_key_points
 from account_provider import (
     get_account_info,
@@ -2271,6 +2271,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.preview_btn = QPushButton("运行")
         self.preview_btn.clicked.connect(lambda: self._on_preview_tasks(quiet=False))
         self.export_tasks_btn = QPushButton("生成任务")
+        self.export_tasks_btn.setToolTip(
+            "写入 data/pending_tasks.json 待加载箱（不直接改 current_tasks）；"
+            "请到交易系统点击「加载任务」合并。未加载前再次生成会累加到同一箱子。"
+        )
         self.export_tasks_btn.clicked.connect(lambda: self._on_export_tasks(quiet=False))
         preview_btn_row.addWidget(self.preview_btn)
         preview_btn_row.addWidget(self.export_tasks_btn)
@@ -6800,7 +6804,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 self.preview_table.setItem(i, 3, QTableWidgetItem(str(display_price)))
                 self.preview_table.setItem(i, 4, QTableWidgetItem(str(task.get("init_volume", 0))))
             if task_list:
-                msg_done = f"已生成 {len(task_list)} 条待执行任务，可点击「生成任务」写入任务文件。"
+                msg_done = f"已生成 {len(task_list)} 条待执行任务，可点击「生成任务」写入待加载箱（交易系统需再点「加载任务」）。"
                 if quiet:
                     self._append_run_log(f"[定时运行] {msg_done}")
                 else:
@@ -6866,16 +6870,21 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     getattr(cfg, "name", "") or "",
                 )
             )
-            path = write_tasks_to_excel(
+            path, total_n, n = enqueue_tasks_to_pending(
                 merged_tasks,
                 root,
-                append=True,
                 drop_scheduled_clear_on_merge=drop_clear_on_merge,
             )
+            tip = (
+                f"已写入待加载箱 {n} 条（箱内共 {total_n} 条）\n"
+                f"{path}\n\n"
+                f"请到交易系统点击「加载任务」完成合并；"
+                f"未加载前再次生成会累加到同一待加载箱。"
+            )
             if quiet:
-                self._append_run_log(f"[定时运行] 已写入 {len(merged_tasks)} 条任务到：{path}")
+                self._append_run_log(f"[定时运行] {tip.replace(chr(10), ' ')}")
             else:
-                QMessageBox.information(self, "完成", f"已写入 {len(merged_tasks)} 条任务（按股票合并）到：\n{path}")
+                QMessageBox.information(self, "完成", tip)
         except Exception as e:
             if quiet:
                 self._append_run_log(f"[定时运行] 写入任务失败: {type(e).__name__}: {e}")

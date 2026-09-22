@@ -6,7 +6,7 @@ import os
 import json
 import uuid
 from datetime import date, datetime, timedelta, time as dt_time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 try:
     from repo_path import ensure_repo_root_on_sys_path
@@ -785,17 +785,35 @@ def get_tasks_file_path(project_root: str) -> str:
     return os.path.join(project_root, "data", f"current_tasks_{today}.xlsx")
 
 
+def enqueue_tasks_to_pending(
+    new_tasks: List[Dict[str, Any]],
+    project_root: str,
+    drop_scheduled_clear_on_merge: bool = False,
+) -> Tuple[str, int, int]:
+    """将新任务写入待加载箱 data/pending_tasks.json（不直接改 current_tasks）。
+
+    若箱内仍有交易系统未加载的任务，会与本次新任务合并后再保存。
+    返回 (pending 路径, 箱内总条数, 本次条数)。
+    """
+    from utils.pending_tasks_inbox import enqueue_tasks
+
+    return enqueue_tasks(
+        project_root,
+        new_tasks,
+        drop_scheduled_clear_on_merge=drop_scheduled_clear_on_merge,
+    )
+
+
 def write_tasks_to_excel(
     new_tasks: List[Dict[str, Any]],
     project_root: str,
     append: bool = True,
     drop_scheduled_clear_on_merge: bool = False,
 ) -> str:
-    """
-    将新任务写入 data/current_tasks_YYYY-MM-DD.xlsx。
-    若 append=True 且文件存在，则先读取已有任务，合并后再写入；否则仅写入 new_tasks。
-    drop_scheduled_clear_on_merge：合并同股任务时剔除 scheduled_clear（用于买入策略覆盖写入时不保留旧清仓规则）。
-    返回任务文件路径。
+    """【已弃用】请改用 enqueue_tasks_to_pending。
+
+    仍保留：仅在明确需要直接改 current_tasks 的调试场景使用。
+    默认生产路径已改为待加载箱，避免与主程序 save_tasks 竞态。
     """
     import pandas as pd
 

@@ -100,12 +100,14 @@ class TaskManager(QObject):
         self._is_migrating_tasks = False
         # 记录任务文件最后修改时间，用于检测策略生成系统等外部修改，避免退出时覆盖
         self._last_file_mtime = None
-        # 重新加载后本次「新增」的股票代码集合（6 位），供界面区分显示；非重载时为 set()
+        # 加载后本次「新增」的股票代码集合（6 位），供界面区分显示；非 force 加载时为 set()
         self._newly_loaded_stock_codes = set()
-        # 重新加载时被置为暂停的任务显示名列表，供界面弹窗提示（与启动时一致）
+        # 加载时被置为暂停的任务显示名列表，供界面弹窗提示（与启动时一致）
         self._reload_paused_task_names = []
-        # 重新加载时被意图暂停的股票 6 位代码，供 UI 勿按图表快照恢复为运行中
+        # 加载时被意图暂停的股票 6 位代码，供 UI 勿按图表快照恢复为运行中
         self._reload_paused_norms = set()
+        # 待加载箱并入时需强制暂停的股票（同股已有任务且重载前在跑）
+        self._inbox_force_pause_norms = set()
         
         # 添加重连处理标志，避免重复处理
         self._reconnection_processed = False
@@ -165,7 +167,7 @@ class TaskManager(QObject):
             self.logger.error(f"保存每日任务备份失败：{str(e)}")
 
     def reset_load_flag(self):
-        """重置任务加载标志，允许重新加载任务"""
+        """重置任务加载标志，允许再次加载任务"""
         self._tasks_loaded = False
     
     def _check_and_migrate_previous_day_tasks(self):
@@ -613,7 +615,7 @@ class TaskManager(QObject):
             self.logger.info(f"已清理{len(invalid_tasks)}个无效任务")
     
     def _task_persist_fingerprint_for_reload_compare(self, task):
-        """重新加载前后对比用：忽略 task_id 与运行态字段，检测规则/持仓成本等持久化语义是否变化。"""
+        """加载前后对比用：忽略 task_id 与运行态字段，检测规则/持仓成本等持久化语义是否变化。"""
         if not isinstance(task, dict):
             return ""
         params = task.get("params") or {}
@@ -643,10 +645,20 @@ class TaskManager(QObject):
         """从文件加载任务
         Args:
             tasks_file: 可选的任务文件路径，如果不指定则使用self.tasks_file
-            force_reload: 若为 True 则忽略已加载标志，从文件重新加载（用于“重新加载任务”）
+            force_reload: 若为 True 则忽略已加载标志，从文件加载（用于「加载任务」）
         """
         if force_reload:
             self._tasks_loaded = False
+            try:
+                inbox_info = self.apply_pending_inbox_to_file()
+                if int(inbox_info.get("pending_n") or 0) > 0:
+                    self.logger.info(
+                        f"加载任务：已消化待加载箱 {inbox_info.get('pending_n')} 条 "
+                        f"(新增 {len(inbox_info.get('new_norms') or [])}，"
+                        f"更新 {len(inbox_info.get('touched_norms') or [])})"
+                    )
+            except Exception as e:
+                self.logger.warning(f"加载任务时处理待加载箱失败: {e}")
         # 程序彻夜不关时，__init__ 里的 self.tasks_file 仍是「启动当日」；
         # 未显式指定文件时每次加载前对齐到当前自然日的 data/current_tasks_YYYY-MM-DD.xlsx
         if not tasks_file and self.update_tasks_file_path():
@@ -654,7 +666,7 @@ class TaskManager(QObject):
         if self._tasks_loaded:
             return
         
-        # 重新加载时：记录重载前的股票集合，用于本次加载后标记「新增」任务
+        # 加载时：记录加载前的股票集合，用于本次加载后标记「新增」任务
         def _norm(sc):
             s = (sc or "").strip().replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
             s = "".join(c for c in s if c.isdigit())
@@ -675,7 +687,7 @@ class TaskManager(QObject):
                 if norm:
                     _running_fingerprints_before[norm] = self._task_persist_fingerprint_for_reload_compare(t)
 
-        # 重新加载时：为了不把“已执行过”的规则恢复成未执行，
+        # 加载时：为了不把“已执行过”的规则恢复成未执行，
         # 需要把旧内存中的规则 executed 信息合并到新从文件加载出来的同一规则上。
         _old_tasks_by_norm: dict = {}
         _old_any_executed_by_norm: dict = {}
@@ -1023,7 +1035,7 @@ class TaskManager(QObject):
                     if applied_rules:
                         try:
                             self.logger.info(
-                                f"重新加载任务：已合并保留执行状态 rules={applied_rules} 股票={len(applied_norms)}"
+                                f"加载任务：已合并保留执行状态 rules={applied_rules} 股票={len(applied_norms)}"
                             )
                         except Exception:
                             pass
@@ -1047,6 +1059,9 @@ class TaskManager(QObject):
                                 affected.add(norm)
                         # 兼容：文件里新出现的股票代码若恰好在运行集合中（极少见，如规范化/合并边界）
                         affected |= _running_stock_codes_before & self._newly_loaded_stock_codes
+                        # 待加载箱更新了同股已有任务：即使指纹偶发相同也强制暂停并提示
+                        inbox_force = getattr(self, "_inbox_force_pause_norms", set()) or set()
+                        affected |= _running_stock_codes_before & set(inbox_force)
                     if affected:
                         # 轻量停止：勿在 load 中途调用完整 stop_task（会 save_tasks clear 重建，
                         # 且 process.join 会把 UI 卡死成「不加载」）。只发 stop 并摘掉运行登记。
@@ -1086,7 +1101,7 @@ class TaskManager(QObject):
                                         pass
                             except Exception as stop_err:
                                 self.logger.warning(
-                                    f"重新加载暂停时处理运行任务失败 ({tid}): {stop_err}"
+                                    f"加载暂停时处理运行任务失败 ({tid}): {stop_err}"
                                 )
                         for task in self.tasks.values():
                             norm = _norm(task.get("stock_code"))
@@ -1105,14 +1120,14 @@ class TaskManager(QObject):
                                     f"{task.get('stock_name', '未知')} ({task.get('stock_code', '')})"
                                 )
                                 self.logger.info(
-                                    f"重新加载：检测到任务内容变化，已将正在运行的 {task.get('stock_code')} 置为暂停，请确认规则后手动启动"
+                                    f"加载任务：检测到任务内容变化，已将正在运行的 {task.get('stock_code')} 置为暂停，请确认规则后手动启动"
                                 )
                         self._reload_paused_norms = set(affected)
                         try:
                             self._block_tasks_updated_signal = True
                             self.save_tasks(list(self.tasks.values()))
                         except Exception as save_err:
-                            self.logger.warning(f"重新加载后保存暂停状态失败: {save_err}")
+                            self.logger.warning(f"加载任务后保存暂停状态失败: {save_err}")
                         finally:
                             self._block_tasks_updated_signal = False
                 else:
@@ -1428,6 +1443,117 @@ class TaskManager(QObject):
             else:
                 merged.append(ft)
         return merged
+
+    def _project_root(self) -> str:
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def apply_pending_inbox_to_file(self) -> dict:
+        """将 data/pending_tasks.json 合并进当日 current_tasks，并清空待加载箱。
+
+        返回统计：pending_n, merged_n, new_norms, touched_norms。
+        供「加载任务」在读表前调用；不直接改内存（随后 force_reload 读盘）。
+        """
+        info = {
+            "pending_n": 0,
+            "merged_n": 0,
+            "new_norms": [],
+            "touched_norms": [],
+            "path": "",
+        }
+        try:
+            from utils.pending_tasks_inbox import (
+                recover_orphan_taking,
+                take_pending,
+                merge_task_lists,
+                norms_in_tasks,
+                pending_path,
+                enqueue_tasks,
+                _normalize_stock_code,
+                _strip_inbox_meta,
+            )
+        except Exception as e:
+            self.logger.warning(f"待加载箱模块不可用: {e}")
+            return info
+
+        root = self._project_root()
+        info["path"] = pending_path(root)
+        try:
+            recover_orphan_taking(root)
+        except Exception as e:
+            self.logger.warning(f"恢复待加载箱 .taking 失败: {e}")
+
+        pending = take_pending(root)
+        if not pending:
+            self._inbox_force_pause_norms = set()
+            return info
+
+        info["pending_n"] = len(pending)
+        pending_norms = set(norms_in_tasks(pending))
+        try:
+            file_tasks = self._read_tasks_from_file()
+        except Exception as e:
+            self.logger.warning(f"读取当日任务表失败，待加载箱将写回: {e}")
+            try:
+                enqueue_tasks(root, pending)
+            except Exception:
+                pass
+            return info
+
+        existing_norms = set()
+        for t in file_tasks or []:
+            c = _normalize_stock_code((t or {}).get("stock_code"))
+            if c:
+                existing_norms.add(c)
+
+        touched = sorted(pending_norms & existing_norms)
+        new_norms = sorted(pending_norms - existing_norms)
+        info["touched_norms"] = touched
+        info["new_norms"] = new_norms
+        self._inbox_force_pause_norms = set(touched)
+
+        try:
+            merged = merge_task_lists(file_tasks, pending, drop_scheduled_clear_on_merge=None)
+            clean = []
+            for t in merged:
+                if not isinstance(t, dict):
+                    continue
+                clean.append(_strip_inbox_meta(t))
+            rows = []
+            for task in clean:
+                row = {k: task.get(k) for k in PERSIST_TASK_COLUMNS}
+                if isinstance(row.get("params"), dict):
+                    row["params"] = json.dumps(
+                        row["params"], ensure_ascii=False, default=self._json_default
+                    )
+                rows.append(row)
+            os.makedirs(os.path.dirname(self.tasks_file), exist_ok=True)
+            df = pd.DataFrame(rows, columns=PERSIST_TASK_COLUMNS)
+            df.to_excel(self.tasks_file, index=False)
+            try:
+                self._last_file_mtime = os.path.getmtime(self.tasks_file)
+            except OSError:
+                pass
+            info["merged_n"] = len(clean)
+            self.logger.info(
+                f"待加载箱已并入当日任务: pending={info['pending_n']} "
+                f"→ 表内 {info['merged_n']} 条；新增股 {len(new_norms)}，更新股 {len(touched)}"
+            )
+        except Exception as e:
+            self.logger.error(f"待加载箱并入失败，尝试写回箱子: {e}", exc_info=True)
+            try:
+                enqueue_tasks(root, pending)
+            except Exception as e2:
+                self.logger.error(f"写回待加载箱也失败: {e2}")
+            self._inbox_force_pause_norms = set()
+        return info
+
+    def peek_pending_inbox_count(self) -> int:
+        try:
+            from utils.pending_tasks_inbox import peek_pending_count
+
+            return int(peek_pending_count(self._project_root()) or 0)
+        except Exception:
+            return 0
     
     def save_tasks(self, tasks, merge_external: bool = True):
         """保存任务到文件。
@@ -1435,13 +1561,25 @@ class TaskManager(QObject):
         merge_external=True（默认）：若检测到任务文件已被外部（如策略生成系统）修改，
         则先与内存合并再保存。
         merge_external=False：以传入/内存任务为准直接写盘（图表删改规则时用，避免已删规则被磁盘合并回来）。
+
+        注意：策略生成已改为写入 pending_tasks.json；本方法不会清空待加载箱。
+        若待加载箱非空，仅打日志提醒用户点「加载任务」。
         """
         try:
             # 与 load_tasks 一致：跨天常驻时先把路径切到当日，避免整晚仍写入「启动日」任务表
             if self.update_tasks_file_path():
                 self._tasks_loaded = False
                 self.logger.info("保存任务：检测到自然日切换，已切换到当日任务文件路径")
-            # 检测任务文件是否被外部修改（如策略生成系统写入新任务）
+            try:
+                n_pending = self.peek_pending_inbox_count()
+                if n_pending > 0:
+                    self.logger.info(
+                        f"保存任务：待加载箱仍有 {n_pending} 条未合并，"
+                        f"不会被本次 save 覆盖；请点击「加载任务」"
+                    )
+            except Exception:
+                pass
+            # 检测任务文件是否被外部修改（手工改 Excel 等）
             if merge_external and os.path.exists(self.tasks_file):
                 try:
                     current_mtime = os.path.getmtime(self.tasks_file)
@@ -1451,12 +1589,12 @@ class TaskManager(QObject):
                         self.logger.info("任务文件存在但未由本进程加载过，将先与当前任务合并再保存")
                     elif current_mtime > self._last_file_mtime + 1:  # 1 秒容差
                         need_merge = True
-                        self.logger.info("任务文件已被外部修改，将先与当前修改合并再保存，避免丢失策略生成系统新任务或手动修改")
+                        self.logger.info("任务文件已被外部修改，将先与当前修改合并再保存，避免丢失手动修改")
                     if need_merge:
                         tasks = self._merge_external_file_with_memory()
                 except OSError:
                     pass
-            # 当日任务文件尚不存在时，走与加载相同的迁移逻辑（由策略生成器写入的新文件也会被后续合并逻辑处理）
+            # 当日任务文件尚不存在时，走与加载相同的迁移逻辑
             if (not os.path.exists(self.tasks_file)) and (not self._is_migrating_tasks):
                 self._check_and_migrate_previous_day_tasks()
             

@@ -401,7 +401,7 @@ class MainWindowExt(Ui_mainWindow):
         self.schedule_reload_dt_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.schedule_reload_dt_edit.setDateTime(_default_schedule_reload_qdatetime())
         self.schedule_reload_dt_edit.setToolTip(
-            "缺省为下一交易日 09:28:00（本地）；到点后自动执行：重新加载任务 + 自动启动；"
+            "缺省为下一交易日 09:28:00（本地）；到点后自动执行：加载任务 + 自动启动；"
             "若当日任务表仍为空则每 5 秒重试，直到有任务或手动清除预约"
         )
         self.schedule_reload_dt_edit.setFixedWidth(170)
@@ -4334,7 +4334,7 @@ class MainWindowExt(Ui_mainWindow):
             pass
 
     def _on_save_scheduled_reload(self):
-        """保存一次性预约：到点自动执行「重新加载任务 + 启动全部任务」"""
+        """保存一次性预约：到点自动执行「加载任务 + 启动全部任务」"""
         try:
             qdt = self.schedule_reload_dt_edit.dateTime()
             if not qdt.isValid():
@@ -4427,7 +4427,7 @@ class MainWindowExt(Ui_mainWindow):
         if not self.task_manager:
             self.logger.warning("[定时重载] task_manager 未初始化，取消本次执行")
             return False
-        self.logger.info("[定时重载] 开始执行：重新加载任务 + 启动全部任务")
+        self.logger.info("[定时重载] 开始执行：加载任务 + 启动全部任务")
         # 同一预约多次重试时：只首次 force_reload，避免反复把状态打成「未运行」
         already_reloaded = bool(getattr(self, "_scheduled_reload_did_force_load", False))
         if not already_reloaded:
@@ -4712,7 +4712,7 @@ class MainWindowExt(Ui_mainWindow):
                 all_tasks = list(self.task_manager.tasks.values())
                 self.task_manager.save_tasks(all_tasks)
                 
-                # 重新加载任务列表
+                # 加载任务列表
                 self.task_manager.load_tasks()
                 
                 # 刷新UI
@@ -4844,7 +4844,7 @@ class MainWindowExt(Ui_mainWindow):
                 all_tasks = list(self.task_manager.tasks.values())
                 self.task_manager.save_tasks(all_tasks)
                 
-                # 重新加载任务列表
+                # 加载任务列表
                 self.task_manager.load_tasks()
                 
                 # 刷新UI
@@ -4930,8 +4930,8 @@ class MainWindowExt(Ui_mainWindow):
                     all_tasks = list(self.task_manager.tasks.values())
                     self.task_manager.save_tasks(all_tasks)
                     
-                    # 不需要重新加载任务列表，因为任务已经直接添加到内存中
-                    # self.task_manager.load_tasks()  # 注释掉，避免_tasks_loaded标志阻止重新加载
+                    # 不需要加载任务列表，因为任务已经直接添加到内存中
+                    # self.task_manager.load_tasks()  # 注释掉，避免_tasks_loaded标志阻止加载
                     
                     # 刷新UI
                     self.refresh_task_table()
@@ -5060,7 +5060,7 @@ class MainWindowExt(Ui_mainWindow):
                 all_tasks = list(self.task_manager.tasks.values())
                 self.task_manager.save_tasks(all_tasks)
                 
-                # 重新加载任务列表
+                # 加载任务列表
                 self.task_manager.load_tasks()
                 
                 # 刷新UI

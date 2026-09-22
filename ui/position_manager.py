@@ -583,12 +583,12 @@ class PositionManager:
             # 保存到文件
             task_manager.save_tasks([task for _, task in current_tasks_list])
             
-            # 重新加载任务管理器中的任务
+            # 加载任务管理器中的任务
             task_manager.load_tasks()
             
             self.logger.info(f"从仓位管理创建任务: {stock_code}")
             
-            # 重新加载图表视图（会按照保存的顺序加载）
+            # 加载图表视图（会按照保存的顺序加载）
             tasks_charts_view.current_page = 0  # 切换到第一页
             tasks_charts_view.load_tasks()
             

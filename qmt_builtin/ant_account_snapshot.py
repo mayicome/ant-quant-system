@@ -1986,9 +1986,25 @@ def _probe_bj_sectors_once(ContextInfo):
         pass
 
 
+def _positions_match_account(positions, account_id: str) -> dict:
+    """只保留与当前账号一致的持仓；缺 account_id 的旧记录也丢掉。"""
+    aid = str(account_id or "").strip()
+    out = {}
+    for code, rec in (positions or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        rid = str(rec.get("account_id") or "").strip()
+        if aid and rid and rid != aid:
+            continue
+        if aid and not rid:
+            continue
+        out[code] = rec
+    return out
+
+
 def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id="", order_raw=None, deal_raw=None):
     """入口文件已调用 get_trade_detail_data，此处仅解析写入 results。"""
-    global _CACHED_ORDERS
+    global _CACHED_ACCOUNT, _CACHED_ORDERS, _CACHED_POSITIONS
     try:
         _probe_bj_sectors_once(ContextInfo)
     except Exception:
@@ -1999,10 +2015,37 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
     if not aid:
         return False, "no_account_id"
 
+    switched = _clear_account_caches_if_switched(aid)
+    if switched:
+        try:
+            bind_trading_account(ContextInfo, aid)
+        except Exception:
+            pass
+        results["account"] = {
+            "account_id": aid,
+            "total_asset": 0.0,
+            "cash": 0.0,
+            "frozen_cash": 0.0,
+            "market_value": 0.0,
+            "updated_at": _now_iso(),
+        }
+        results["positions"] = {}
+
     wrote = False
     kept_pos_cache = False
     if _CACHED_ACCOUNT:
-        results["account"] = dict(_CACHED_ACCOUNT)
+        cached_aid = str((_CACHED_ACCOUNT or {}).get("account_id") or "").strip()
+        if cached_aid and cached_aid != aid:
+            _CACHED_ACCOUNT = None
+        else:
+            results["account"] = dict(_CACHED_ACCOUNT)
+            wrote = True
+
+    # 任何路径写回前，先丢掉 results 里别的账号残留持仓
+    cur_pos = results.get("positions") if isinstance(results.get("positions"), dict) else {}
+    cleaned = _positions_match_account(cur_pos, aid)
+    if cleaned != cur_pos:
+        results["positions"] = cleaned
         wrote = True
 
     acc_rows = _rows(acc_raw)
@@ -2020,21 +2063,30 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
         acc = results.get("account") if isinstance(results.get("account"), dict) else {}
         market = _account_stock_market_value(acc)
         if (not positions) and market >= _POSITION_ALERT_MV_THRESHOLD and _CACHED_POSITIONS:
-            kept_pos_cache = True
-            results["positions"] = dict(_CACHED_POSITIONS)
-            wrote = True
-        elif (not positions) and market >= _POSITION_ALERT_MV_THRESHOLD:
-            _apply_parsed_positions(results, positions)
-            wrote = True
+            kept = _positions_match_account(_CACHED_POSITIONS, aid)
+            if kept:
+                kept_pos_cache = True
+                results["positions"] = dict(kept)
+                wrote = True
+            else:
+                _apply_parsed_positions(results, positions)
+                wrote = True
         else:
             _apply_parsed_positions(results, positions)
             wrote = True
     elif _CACHED_POSITIONS:
-        results["positions"] = dict(_CACHED_POSITIONS)
-        kept_pos_cache = True
-        wrote = True
-        # 未查到持仓时用展示仓位判断告警（避免无查询时误清）
-        alert_positions = dict(_CACHED_POSITIONS)
+        kept = _positions_match_account(_CACHED_POSITIONS, aid)
+        if kept:
+            results["positions"] = dict(kept)
+            kept_pos_cache = True
+            wrote = True
+            alert_positions = dict(kept)
+        else:
+            # 持仓查询未返回时，不要继续展示别的账号旧仓
+            if results.get("positions"):
+                results["positions"] = {}
+                wrote = True
+            alert_positions = {}
 
     order_rows = _rows(order_raw) if order_raw is not None else []
     _prune_cached_orders()
@@ -2185,8 +2237,12 @@ def sync_account_snapshot_to_results(ContextInfo, results, account_id=""):
     market = _account_stock_market_value(acc_probe)
     kept_cache = False
     if not positions and market >= _POSITION_ALERT_MV_THRESHOLD and _CACHED_POSITIONS:
-        kept_cache = True
-        results["positions"] = dict(_CACHED_POSITIONS)
+        kept = _positions_match_account(_CACHED_POSITIONS, aid)
+        if kept:
+            kept_cache = True
+            results["positions"] = dict(kept)
+        else:
+            _apply_parsed_positions(results, positions)
     else:
         _apply_parsed_positions(results, positions)
     wrote = True
