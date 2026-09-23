@@ -6755,6 +6755,41 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     self._append_run_log(output_text.rstrip())
                 elapsed = time.time() - run_start_time
                 self._append_run_log(f"运行结束，总耗时 {elapsed:.1f} 秒")
+                # 除权提示：买入整票停 [ex_div_skip]；卖出仅跳近涨停腿 [ex_div_skip_lu]
+                try:
+                    buy_skips = []
+                    lu_skips = []
+                    for ln in (output_text or "").splitlines():
+                        s = ln.strip()
+                        if s.startswith("[ex_div_skip_lu]"):
+                            lu_skips.append(s)
+                        elif s.startswith("[ex_div_skip]"):
+                            buy_skips.append(s)
+                    if buy_skips or lu_skips:
+                        parts = []
+                        if buy_skips:
+                            body = "\n".join(buy_skips[:40])
+                            if len(buy_skips) > 40:
+                                body += f"\n... 另有 {len(buy_skips) - 40} 条"
+                            parts.append(
+                                f"买入：{len(buy_skips)} 只疑似除权，今日未生成买入任务：\n{body}"
+                            )
+                        if lu_skips:
+                            body = "\n".join(lu_skips[:40])
+                            if len(lu_skips) > 40:
+                                body += f"\n... 另有 {len(lu_skips) - 40} 条"
+                            parts.append(
+                                f"卖出：{len(lu_skips)} 只除权日未挂近涨停腿"
+                                f"（开盘涨幅/清仓仍生成）：\n{body}"
+                            )
+                        tip = (
+                            "\n\n".join(parts)
+                            + "\n\n判定：日线昨收与行情昨收大幅偏离，或开盘缺口超过跌停幅度。"
+                        )
+                        self._append_run_log(tip)
+                        QMessageBox.warning(self, "除权日任务提示", tip)
+                except Exception:
+                    pass
 
             intents_done = getattr(self, "_preview_intents", None) or []
             if not intents_done:

@@ -254,7 +254,7 @@ def run(codes, prices, get_name, account, params):
 
         name = (get_name(c6) if get_name else "") or ""
 
-        # 疑似除权 → 本票停止一切买入（含未完成腿；已成交腿仍记在 _filled_legs）
+        # 疑似除权 → 本票停买（日线开盘缺口 / 日线昨收vs行情昨收偏离 / 今开vs日线昨收）
         try:
             ex_lookback = int(params.get("ex_div_lookback", 20) or 20)
         except (TypeError, ValueError):
@@ -262,32 +262,33 @@ def run(codes, prices, get_name, account, params):
         if ex_lookback < 1:
             ex_lookback = 20
         blocked = False
+        block_reason = ""
         try:
-            from utils.ex_div_gap import has_ex_div_gap
+            from utils.ex_div_gap import should_block_buy_ex_div
 
-            blocked = bool(
-                has_ex_div_gap(
+            blocked, block_reason = should_block_buy_ex_div(
+                c6,
+                stock_name=name,
+                through_date=trade_d,
+                lookback=ex_lookback,
+                prices_row=p,
+            )
+        except Exception:
+            try:
+                from ex_div_gap import should_block_buy_ex_div as _sb  # type: ignore
+
+                blocked, block_reason = _sb(
                     c6,
                     stock_name=name,
                     through_date=trade_d,
                     lookback=ex_lookback,
-                )
-            )
-        except Exception:
-            try:
-                from ex_div_gap import has_ex_div_gap as _has2  # type: ignore
-
-                blocked = bool(
-                    _has2(
-                        c6,
-                        stock_name=name,
-                        through_date=trade_d,
-                        lookback=ex_lookback,
-                    )
+                    prices_row=p,
                 )
             except Exception:
                 blocked = False
+                block_reason = ""
         if blocked:
+            print("[ex_div_skip] %s %s %s" % (c6, name or "", block_reason or "ex_div"))
             continue
 
         for leg_id, field, rule_name, ma_period in LEG_SPECS:

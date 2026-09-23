@@ -4,7 +4,10 @@
 总仓位（半仓基准）= 本轮持仓周期累计买入；只随买入增加，半仓/部分卖不减；持仓归零重置。
 开盘涨幅腿：每日相对昨收达标则按「总仓位」卖约 50%（OPEN50，每日可触发；触发价=昨收×(1+阈值)）。
 LU10：按「总仓位」卖约 50%；整段持仓期只触发一次。
-清仓：主板「涨停即清仓」；非主板达 CLEAR_GAIN_GROWTH（默认13%）弹性清剩余仓位。
+清仓：主板/非主板均可配「相对昨收涨幅 + 回落%%」。
+主板默认 CLEAR_GAIN_MAIN=0.10 且 DROP_PERCENT_CLEAR_MAIN=0 → 规则名「涨停即清仓」（触达即卖）。
+非主板默认 CLEAR_GAIN_GROWTH=0.13、DROP_PERCENT_CLEAR_GROWTH=1.5。
+除权日：近涨停腿跳过（历史涨停价未复权失真）；开盘涨幅/清仓仍挂。
 两腿独立；同轮都挂则半仓+取整零头并入一腿；只挂一腿则半仓后若剩余不够一手或不够最小单笔金额则并入。
 params.positions=可卖；positions_volume=当前持股；positions_baseline=总仓位基准（半仓用）。
 """
@@ -29,31 +32,38 @@ STRATEGY_CODE = r'''# 卖：马总选股逻辑1
 # 近10日涨停价：按总仓位半仓(LU10，整段一次)
 # 只挂一腿：半仓后剩余不够一手或不够最小单笔金额，则并入本次（对照当前持股 positions_volume）
 # params.positions=可卖；positions_volume=当前持股；positions_baseline=总仓位基准
-# 两腿回落%%：下方 DROP_PERCENT_OPEN / DROP_PERCENT_LU；params.open_drop_percent / lu_drop_percent 可覆盖
+# 回落%%：下方 DROP_PERCENT_OPEN / DROP_PERCENT_LU / DROP_PERCENT_CLEAR_*
+#   params.open_drop_percent / lu_drop_percent / clear_drop_percent_main / clear_drop_percent 可覆盖
 # 开盘涨幅阈值：下方 OPEN_GAIN_MAIN / OPEN_GAIN_GROWTH；params.open_gain_main / open_gain_growth 可覆盖
-# 清仓：主板仍「涨停即清仓」；非主板达 CLEAR_GAIN_GROWTH（默认13%）弹性清仓剩余仓位
-#   params.clear_gain_growth 可覆盖；回落%% 同 DROP_PERCENT_OPEN / open_drop_percent
+# 清仓涨幅：下方 CLEAR_GAIN_MAIN / CLEAR_GAIN_GROWTH；params.clear_gain_main / clear_gain_growth 可覆盖
+#   主板：CLEAR_GAIN_MAIN=0.10 且 DROP_PERCENT_CLEAR_MAIN=0 → 规则名「涨停即清仓」（触达即卖）
+#   其它主板组合 →「马总1卖-主板涨幅弹性清仓」（先触达再按回落%%卖）
 # 近涨停分档（可选）：drop_percent_when_lu_gt_open / drop_percent_when_lu_lt_open
 #   仅改近涨停腿：LU触发价>开盘腿触发价用 gt，否则用 lt；开盘腿仍用 DROP_PERCENT_OPEN
 #   相等回退 drop_percent_when_lu_eq_open 或 DROP_PERCENT_LU / lu_drop_percent
+# 除权日：日线昨收vs行情昨收大幅偏离时跳过近涨停腿（开盘涨幅/清仓仍挂）；print [ex_div_skip_lu]
 # N = params.scheduled_clear_on_sell_day / sell_hold_trading_days / entry_window_trading_days
 #   无条件清仓：锚定买入日次日起第 N 日 14:56；锚定日=末笔买入日（无则首次建仓日）
 
 NAME_OPEN50 = "马总1卖-开盘涨幅弹性半仓"
 NAME_LU10 = "马总1卖-近10日涨停价弹性半仓"
 NAME_CLEAR_LU = "涨停即清仓"
+NAME_CLEAR_MAIN = "马总1卖-主板涨幅弹性清仓"
 NAME_CLEAR_GROWTH = "马总1卖-非主板涨幅弹性清仓"
 
-# 两腿回落比例%%（缺省）；改这里即可分腿调弹性；params 同名键可覆盖
-DROP_PERCENT_OPEN = 1.5  # 开盘涨幅弹性半仓
-DROP_PERCENT_LU = 1.5    # 近10日涨停价弹性半仓
+# 回落比例%%（缺省）；改这里即可分腿调弹性；params 同名键可覆盖
+DROP_PERCENT_OPEN = 1.5          # 开盘涨幅弹性半仓
+DROP_PERCENT_LU = 1.5            # 近10日涨停价弹性半仓
+DROP_PERCENT_CLEAR_MAIN = 0.0    # 主板清仓回落；与 CLEAR_GAIN_MAIN=0.10 搭配表示涨停即清
+DROP_PERCENT_CLEAR_GROWTH = 1.5  # 非主板涨幅弹性清仓
 
 # 开盘涨幅阈值（相对昨收，小数）；改这里即可；params 同名键可覆盖
 OPEN_GAIN_MAIN = 0.05    # 主板
 OPEN_GAIN_GROWTH = 0.08  # 非主板（创业/科创/北交等）
 
-# 非主板弹性清仓：相对昨收涨幅（小数）；改这里即可；params.clear_gain_growth 可覆盖
-CLEAR_GAIN_GROWTH = 0.13
+# 清仓：相对昨收涨幅（小数）；改这里即可；params.clear_gain_main / clear_gain_growth 可覆盖
+CLEAR_GAIN_MAIN = 0.10     # 主板默认 10%（配合回落 0 → 涨停即清）
+CLEAR_GAIN_GROWTH = 0.13   # 非主板默认 13%
 
 def run(codes, prices, get_name, account, params):
     result = []
@@ -82,6 +92,8 @@ def run(codes, prices, get_name, account, params):
 
     open_drop_pct = _leg_drop("open_drop_percent", DROP_PERCENT_OPEN)
     lu_drop_pct = _leg_drop("lu_drop_percent", DROP_PERCENT_LU)
+    clear_drop_main_pct = _leg_drop("clear_drop_percent_main", DROP_PERCENT_CLEAR_MAIN)
+    clear_drop_growth_pct = _leg_drop("clear_drop_percent", DROP_PERCENT_CLEAR_GROWTH)
 
     def _opt_drop(key):
         v = params.get(key)
@@ -313,6 +325,16 @@ def run(codes, prices, get_name, account, params):
     except (TypeError, ValueError):
         thr_growth = _def_growth
     try:
+        _def_clear_m = float(CLEAR_GAIN_MAIN)
+    except (TypeError, ValueError, NameError):
+        _def_clear_m = 0.10
+    try:
+        thr_clear_main = float(params.get("clear_gain_main", _def_clear_m) or _def_clear_m)
+    except (TypeError, ValueError):
+        thr_clear_main = _def_clear_m
+    if thr_clear_main < 0:
+        thr_clear_main = _def_clear_m
+    try:
         _def_clear_g = float(CLEAR_GAIN_GROWTH)
     except (TypeError, ValueError, NameError):
         _def_clear_g = 0.13
@@ -499,6 +521,38 @@ def run(codes, prices, get_name, account, params):
         if lu_trig_raw is not None and lu_trig_raw > 0:
             lu_ref = _clamp(round(float(lu_trig_raw), 2), limit_down, limit_up)
 
+        # 除权日：历史涨停价未复权，夹到今日涨停后语义失真 → 跳过近涨停腿
+        skip_lu = False
+        skip_lu_reason = ""
+        try:
+            from utils.ex_div_gap import should_skip_lu_leg_ex_div
+
+            skip_lu, skip_lu_reason = should_skip_lu_leg_ex_div(
+                c6,
+                stock_name=name,
+                through_date=trade_d,
+                prices_row=p,
+            )
+        except Exception:
+            try:
+                from ex_div_gap import should_skip_lu_leg_ex_div as _slu  # type: ignore
+
+                skip_lu, skip_lu_reason = _slu(
+                    c6,
+                    stock_name=name,
+                    through_date=trade_d,
+                    prices_row=p,
+                )
+            except Exception:
+                skip_lu = False
+                skip_lu_reason = ""
+        if skip_lu and lu_ref > 0:
+            print(
+                "[ex_div_skip_lu] %s %s %s"
+                % (c6, name or "", skip_lu_reason or "ex_div")
+            )
+            lu_ref = 0.0
+
         day_open_drop = float(open_drop_pct)
         day_lu_drop = float(lu_drop_pct)
         # 仅近涨停腿按「LU触发价 vs 开盘腿触发价」分档；开盘腿 drop 固定
@@ -573,10 +627,11 @@ def run(codes, prices, get_name, account, params):
                 "half_pair": True,
             })
 
-        # 清仓：主板涨停即清；非主板达相对昨收涨幅阈值后弹性清剩余仓位
-        if avail >= 100:
+        # 清仓：主板/非主板均可配相对昨收涨幅 + 回落%%
+        # 主板 10%+回落0 →「涨停即清仓」（触达即卖）；其它 →「主板涨幅弹性清仓」
+        if avail >= 100 and prev_close > 0:
             if _is_growth_board(c6):
-                if prev_close > 0 and thr_clear_growth > 0:
+                if thr_clear_growth > 0:
                     clear_trig = _clamp(
                         round(prev_close * (1.0 + float(thr_clear_growth)), 2),
                         limit_down,
@@ -589,19 +644,30 @@ def run(codes, prices, get_name, account, params):
                             "rule_type": "best_sell",
                             "name": NAME_CLEAR_GROWTH,
                             "trigger_price": float(clear_trig),
-                            "drop_percent": float(open_drop_pct),
+                            "drop_percent": float(clear_drop_growth_pct),
                             "volume": int(avail),
                         })
-            elif limit_up > 0:
-                result.append({
-                    "stock_code": c6,
-                    "stock_name": name,
-                    "rule_type": "best_sell",
-                    "name": NAME_CLEAR_LU,
-                    "trigger_price": float(round(limit_up, 2)),
-                    "drop_percent": 0.0,
-                    "volume": int(avail),
-                })
+            elif thr_clear_main > 0:
+                clear_trig = _clamp(
+                    round(prev_close * (1.0 + float(thr_clear_main)), 2),
+                    limit_down,
+                    limit_up,
+                )
+                if clear_trig > 0:
+                    # 10% + 回落0：沿用「涨停即清仓」规则名（回测/第N日过滤认此名）
+                    _lu_imm = (
+                        abs(float(thr_clear_main) - 0.10) < 1e-9
+                        and float(clear_drop_main_pct) <= 1e-12
+                    )
+                    result.append({
+                        "stock_code": c6,
+                        "stock_name": name,
+                        "rule_type": "best_sell",
+                        "name": NAME_CLEAR_LU if _lu_imm else NAME_CLEAR_MAIN,
+                        "trigger_price": float(clear_trig),
+                        "drop_percent": 0.0 if _lu_imm else float(clear_drop_main_pct),
+                        "volume": int(avail),
+                    })
 
         # 第 N 日无条件清仓（N 来自运行交易日数/持有天数）
         hold_n = None
@@ -666,16 +732,19 @@ def main() -> None:
             "drop_percent": 1.5,
             "open_gain_main": 0.05,
             "open_gain_growth": 0.08,
+            "clear_gain_main": 0.10,
             "clear_gain_growth": 0.13,
             "entry_window_trading_days": int(sp.get("entry_window_trading_days") or 4),
             "min_order_amount": float(sp.get("min_order_amount") or 5000),
             "_filled_legs": list(sp.get("_filled_legs") or []),
         }
     )
-    # 分腿回落以代码前置 DROP_PERCENT_OPEN / DROP_PERCENT_LU 为准；
-    # 若历史 params 曾写入同名单键，清掉以免盖住代码缺省 1.5
+    # 分腿回落以代码前置 DROP_PERCENT_* 为准；
+    # 若历史 params 曾写入同名单键，清掉以免盖住代码缺省
     sp.pop("open_drop_percent", None)
     sp.pop("lu_drop_percent", None)
+    sp.pop("clear_drop_percent", None)
+    sp.pop("clear_drop_percent_main", None)
     out = {
         "id": sid,
         "name": STRATEGY_NAME,

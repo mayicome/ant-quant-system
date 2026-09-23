@@ -415,6 +415,38 @@ def run(codes, prices, get_name, account, params):
             lu_trig_raw = _recent_lu_trigger(c6, name, trade_d)
             if lu_trig_raw is not None and lu_trig_raw > 0:
                 lu_trig = _clamp(round(float(lu_trig_raw), 2), limit_down, limit_up)
+        # 除权日：历史涨停价未复权失真 → 跳过近涨停腿（开盘涨幅仍挂）
+        if lu_trig > 0:
+            skip_lu = False
+            skip_lu_reason = ""
+            try:
+                from utils.ex_div_gap import should_skip_lu_leg_ex_div
+
+                skip_lu, skip_lu_reason = should_skip_lu_leg_ex_div(
+                    c6,
+                    stock_name=name,
+                    through_date=trade_d,
+                    prices_row=p,
+                )
+            except Exception:
+                try:
+                    from ex_div_gap import should_skip_lu_leg_ex_div as _slu  # type: ignore
+
+                    skip_lu, skip_lu_reason = _slu(
+                        c6,
+                        stock_name=name,
+                        through_date=trade_d,
+                        prices_row=p,
+                    )
+                except Exception:
+                    skip_lu = False
+                    skip_lu_reason = ""
+            if skip_lu:
+                print(
+                    "[ex_div_skip_lu] %s %s %s"
+                    % (c6, name or "", skip_lu_reason or "ex_div")
+                )
+                lu_trig = 0.0
         want_open = open_trig > 0
         want_lu = lu_trig > 0
 
