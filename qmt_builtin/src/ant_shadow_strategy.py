@@ -1016,6 +1016,184 @@ def _finalize_order_below_min_skip(
     early_order: bool = False,
 ) -> None:
     """本笔买入金额低于最小下限：跳过并结束任务（不每 tick 重试）。"""
+    _finalize_buy_cash_end_skip(
+        po=po,
+        code=code,
+        tid=tid,
+        ev_type=ev_type,
+        gi_raw=gi_raw,
+        uid=uid,
+        px=px,
+        vol=vol,
+        strategy_name=strategy_name,
+        ev=ev,
+        cash_msg=cash_msg,
+        cash_block="order_below_min",
+        order_sysid="SKIPPED_MIN_BUY",
+        early_order=early_order,
+        log_tag="委托低于最低金额结束",
+    )
+
+
+def _finalize_no_cash_skip(
+    *,
+    po,
+    code: str,
+    tid: str,
+    ev_type: str,
+    gi_raw,
+    uid: str,
+    px: float,
+    vol: int,
+    strategy_name: str,
+    ev: dict,
+    cash_msg: str,
+    reason_code: str = "no_cash",
+    early_order: bool = False,
+) -> None:
+    """资金不足：跳过并结束任务（须图表人工「再次执行」，禁止自动连打）。"""
+    _finalize_buy_cash_end_skip(
+        po=po,
+        code=code,
+        tid=tid,
+        ev_type=ev_type,
+        gi_raw=gi_raw,
+        uid=uid,
+        px=px,
+        vol=vol,
+        strategy_name=strategy_name,
+        ev=ev,
+        cash_msg=cash_msg,
+        cash_block=str(reason_code or "no_cash"),
+        order_sysid="NO_CASH",
+        early_order=early_order,
+        log_tag="委托资金不足结束",
+    )
+
+
+_CASH_WAIT_LOG_AT = {}  # tid -> unix ts
+
+
+def _find_runner_task(tid: str):
+    if not tid or _RUNNER is None:
+        return None
+    try:
+        for t in list(getattr(_RUNNER, "tasks", None) or []):
+            if isinstance(t, dict) and str(t.get("task_id") or "") == str(tid):
+                return t
+    except Exception:
+        return None
+    return None
+
+
+def _task_cash_wait_active(tid: str) -> bool:
+    t = _find_runner_task(tid)
+    return bool(t and t.get("cash_wait_active"))
+
+
+def _defer_no_cash_while_waiting(
+    *,
+    code: str,
+    tid: str,
+    ev_type: str,
+    gi_raw,
+    px: float,
+    vol: int,
+    cash_msg: str,
+    ev: dict,
+) -> None:
+    """再次执行后的等资金模式：不结束、不写订单记录，仅解锁以便有钱后再试。"""
+    import time as _time
+
+    ev["order"] = {
+        "ok": False,
+        "price": float(px or 0),
+        "volume": int(vol or 0),
+        "status": "waiting_cash",
+        "msg": cash_msg,
+        "cash_wait": True,
+    }
+    now = _time.time()
+    last = float(_CASH_WAIT_LOG_AT.get(str(tid) or "") or 0)
+    if now - last >= 60.0:
+        _CASH_WAIT_LOG_AT[str(tid) or ""] = now
+        print(
+            "[交易核心] 等资金中（不结束）%s tid=%s px=%s vol=%s msg=%s"
+            % (code, tid, px, vol, cash_msg)
+        )
+    _unlock_order_task(code, tid, gi_raw, ev_type)
+
+
+def _update_cash_wait_remaining_on_armed(tid: str, remaining: int) -> None:
+    """部分成交后更新武装任务剩余量，保持 enabled。"""
+    rem = max(0, int(remaining or 0))
+    t = _find_runner_task(tid)
+    if isinstance(t, dict):
+        t["max_volume"] = rem
+        t["remaining_volume"] = rem
+        t["cash_wait_active"] = rem >= 100
+        if rem < 100:
+            t["enabled"] = False
+    if not _RULES_PATH or not tid:
+        return
+    try:
+        data = load_rules_armed(_RULES_PATH)
+        tasks = data.get("tasks") if isinstance(data, dict) else None
+        if not isinstance(tasks, list):
+            return
+        changed = False
+        for row in tasks:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("task_id") or "") != str(tid):
+                continue
+            row["max_volume"] = rem
+            row["remaining_volume"] = rem
+            if rem >= 100:
+                row["cash_wait_active"] = True
+                row["enabled"] = True
+            else:
+                row["cash_wait_active"] = False
+                row["enabled"] = False
+            changed = True
+            break
+        if changed:
+            try:
+                save_json_atomic(_RULES_PATH, data)
+            except Exception:
+                import json as _json
+
+                tmp = str(_RULES_PATH) + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    _json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                os.replace(tmp, _RULES_PATH)
+            print(
+                "[交易核心] 等资金剩余量已更新 %s rem=%d" % (tid, rem)
+            )
+    except Exception as e:
+        print("[交易核心] 更新等资金剩余量失败: %s" % e)
+
+
+def _finalize_buy_cash_end_skip(
+    *,
+    po,
+    code: str,
+    tid: str,
+    ev_type: str,
+    gi_raw,
+    uid: str,
+    px: float,
+    vol: int,
+    strategy_name: str,
+    ev: dict,
+    cash_msg: str,
+    cash_block: str,
+    order_sysid: str,
+    early_order: bool = False,
+    log_tag: str = "委托资金门控结束",
+) -> None:
+    """买入资金类门控：记 skipped 并结束任务（不 unlock 重试）。"""
     from datetime import datetime as _dt
 
     record = {
@@ -1030,8 +1208,8 @@ def _finalize_order_below_min_skip(
         "event_type": ev_type,
         "user_order_id": uid,
         "at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "cash_block": "order_below_min",
-        "order_sysid": "SKIPPED_MIN_BUY",
+        "cash_block": str(cash_block or "no_cash"),
+        "order_sysid": str(order_sysid or "NO_CASH"),
     }
     _attach_event_context_to_order(record, ev)
     if early_order:
@@ -1050,8 +1228,8 @@ def _finalize_order_below_min_skip(
         "msg": cash_msg,
     }
     print(
-        "[交易核心] 委托低于最低金额结束 %s tid=%s px=%s vol=%s msg=%s"
-        % (code, tid, px, vol, cash_msg)
+        "[交易核心] %s %s tid=%s px=%s vol=%s msg=%s"
+        % (log_tag, code, tid, px, vol, cash_msg)
     )
     if early_order:
         ekey = _early_key_from_ev(tid, gi_raw)
@@ -1322,33 +1500,33 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                         )
                         changed = True
                         continue
-                    from datetime import datetime as _dt
-
-                    record = {
-                        "stock_code": code,
-                        "side": "buy",
-                        "price": px,
-                        "volume": int(vol or 0),
-                        "status": "skipped",
-                        "msg": cash_msg,
-                        "strategy_name": "蚂蚁-夜市买入",
-                        "task_id": tid,
-                        "event_type": ev_type,
-                        "user_order_id": uid,
-                        "at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                        "cash_block": reason_code,
-                    }
-                    po.append_order_record(_RESULTS, record)
-                    ev["order"] = {
-                        "ok": False,
-                        "price": px,
-                        "volume": vol,
-                        "status": "skipped",
-                        "msg": cash_msg,
-                    }
-                    print(
-                        "[交易核心] 委托夜市买跳过 %s px=%s vol=%s msg=%s"
-                        % (code, px, vol, cash_msg)
+                    if _task_cash_wait_active(tid):
+                        _defer_no_cash_while_waiting(
+                            code=code,
+                            tid=tid,
+                            ev_type=ev_type,
+                            gi_raw=gi_raw,
+                            px=px,
+                            vol=vol,
+                            cash_msg=cash_msg,
+                            ev=ev,
+                        )
+                        changed = True
+                        continue
+                    _finalize_no_cash_skip(
+                        po=po,
+                        code=code,
+                        tid=tid,
+                        ev_type=ev_type,
+                        gi_raw=gi_raw,
+                        uid=uid,
+                        px=px,
+                        vol=vol,
+                        strategy_name="蚂蚁-夜市买入",
+                        ev=ev,
+                        cash_msg=cash_msg,
+                        reason_code=reason_code,
+                        early_order=False,
                     )
                     changed = True
                     continue
@@ -1433,45 +1611,33 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                         )
                         changed = True
                         continue
-                    from datetime import datetime as _dt
-
-                    record = {
-                        "stock_code": code,
-                        "side": "buy",
-                        "price": px,
-                        "volume": int(vol or 0),
-                        "status": "skipped",
-                        "msg": cash_msg,
-                        "strategy_name": "蚂蚁-提前买入",
-                        "task_id": tid,
-                        "event_type": ev_type,
-                        "early_order": True,
-                        "user_order_id": uid,
-                        "at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                        "cash_block": reason_code,
-                    }
-                    if gi_raw is not None:
-                        try:
-                            record["grid_index"] = int(gi_raw)
-                        except (TypeError, ValueError):
-                            pass
-                    po.append_order_record(_RESULTS, record)
-                    ev["order"] = {
-                        "ok": False,
-                        "price": px,
-                        "volume": vol,
-                        "status": "skipped",
-                        "msg": cash_msg,
-                    }
-                    ekey = _early_key_from_ev(tid, gi_raw)
-                    try:
-                        if _RUNNER is not None and hasattr(_RUNNER, "clear_early_state"):
-                            _RUNNER.clear_early_state(ekey)
-                    except Exception:
-                        pass
-                    print(
-                        "[交易核心] 委托提前买跳过 %s px=%s vol=%s msg=%s"
-                        % (code, px, vol, cash_msg)
+                    if _task_cash_wait_active(tid):
+                        _defer_no_cash_while_waiting(
+                            code=code,
+                            tid=tid,
+                            ev_type=ev_type,
+                            gi_raw=gi_raw,
+                            px=px,
+                            vol=vol,
+                            cash_msg=cash_msg,
+                            ev=ev,
+                        )
+                        changed = True
+                        continue
+                    _finalize_no_cash_skip(
+                        po=po,
+                        code=code,
+                        tid=tid,
+                        ev_type=ev_type,
+                        gi_raw=gi_raw,
+                        uid=uid,
+                        px=px,
+                        vol=vol,
+                        strategy_name="蚂蚁-提前买入",
+                        ev=ev,
+                        cash_msg=cash_msg,
+                        reason_code=reason_code,
+                        early_order=True,
                     )
                     changed = True
                     continue
@@ -1874,41 +2040,34 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                     )
                     changed = True
                     continue
-                from datetime import datetime as _dt
-
-                record = {
-                    "stock_code": code,
-                    "side": "buy",
-                    "price": float(buy_px or 0),
-                    "volume": int(vol or 0),
-                    "status": "skipped",
-                    "msg": cash_msg,
-                    "strategy_name": strategy_name,
-                    "task_id": tid,
-                    "event_type": ev_type,
-                    "user_order_id": uid,
-                    "at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                    "cash_block": reason_code,
-                }
-                _attach_event_context_to_order(record, ev)
-                if gi_raw is not None and ev_type == "grid_buy_hit":
-                    try:
-                        record["grid_index"] = int(gi_raw)
-                    except (TypeError, ValueError):
-                        pass
-                po.append_order_record(_RESULTS, record)
-                ev["order"] = {
-                    "ok": False,
-                    "price": record.get("price"),
-                    "volume": record.get("volume"),
-                    "status": "skipped",
-                    "msg": cash_msg,
-                }
-                print(
-                    "[交易核心] 委托 %s 跳过 %s px=%s vol=%s msg=%s"
-                    % (side_tag, code, buy_px, vol, cash_msg)
+                if _task_cash_wait_active(tid):
+                    _defer_no_cash_while_waiting(
+                        code=code,
+                        tid=tid,
+                        ev_type=ev_type,
+                        gi_raw=gi_raw,
+                        px=buy_px,
+                        vol=vol,
+                        cash_msg=cash_msg,
+                        ev=ev,
+                    )
+                    changed = True
+                    continue
+                _finalize_no_cash_skip(
+                    po=po,
+                    code=code,
+                    tid=tid,
+                    ev_type=ev_type,
+                    gi_raw=gi_raw,
+                    uid=uid,
+                    px=buy_px,
+                    vol=vol,
+                    strategy_name=strategy_name,
+                    ev=ev,
+                    cash_msg=cash_msg,
+                    reason_code=reason_code,
+                    early_order=False,
                 )
-                _unlock_order_task(code, tid, gi_raw, ev_type)
                 changed = True
                 continue
             vol = int(vol_adj)
@@ -1931,6 +2090,30 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 record["grid_index"] = int(gi_raw)
             except (TypeError, ValueError):
                 pass
+        # 等资金模式：先把剩余量写入订单，供主程序回写
+        if (
+            ok
+            and tid
+            and is_buy_order
+            and _task_cash_wait_active(tid)
+        ):
+            try:
+                before = int(
+                    (_find_runner_task(tid) or {}).get("max_volume")
+                    or record.get("volume")
+                    or vol
+                    or 0
+                )
+            except (TypeError, ValueError):
+                before = int(vol or 0)
+            try:
+                ordered = int(record.get("volume") or vol or 0)
+            except (TypeError, ValueError):
+                ordered = int(vol or 0)
+            rem = max(0, before - ordered)
+            record["cash_wait_active"] = True
+            record["remaining_volume"] = rem
+            record["planned_volume_before"] = before
         po.append_order_record(_RESULTS, record)
         ev["order"] = {
             "ok": bool(ok),
@@ -1982,6 +2165,23 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
                 except Exception:
                     all_done = False
                 _mark_grid_point_in_rules_armed(tid, gi, all_done=all_done)
+            elif bool(record.get("cash_wait_active")):
+                rem = 0
+                try:
+                    rem = int(record.get("remaining_volume") or 0)
+                except (TypeError, ValueError):
+                    rem = 0
+                if rem >= 100:
+                    _update_cash_wait_remaining_on_armed(tid, rem)
+                    _unlock_order_task(code, tid, gi_raw, ev_type)
+                    print(
+                        "[交易核心] 等资金部分成交，剩余%d股继续等待 %s"
+                        % (rem, code)
+                    )
+                else:
+                    record["remaining_volume"] = 0
+                    _update_cash_wait_remaining_on_armed(tid, 0)
+                    _disarm_task_in_rules_armed(tid)
             else:
                 _disarm_task_in_rules_armed(tid)
         changed = True

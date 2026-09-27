@@ -368,10 +368,27 @@ class RulesManagerDialog(QDialog):
         
         elif rule_type == 'scheduled_clear':
             scheduled_clear_time = rule.get('scheduled_clear_time', '14:56:00')
-            price = rule.get('price', 0)
+            try:
+                price = float(rule.get('price', 0) or 0)
+            except (TypeError, ValueError):
+                price = 0.0
             volume = rule.get('volume', 0)
             vol_text = f"{volume}股" if volume > 0 else "全部"
-            return f"时间{scheduled_clear_time}, 触发价{price:.2f}, {vol_text}"
+            eff = str(rule.get("scheduled_clear_effective_date") or "").strip()[:10]
+            force = bool(
+                rule.get("scheduled_clear_force")
+                or rule.get("scheduled_clear_on_hold_day")
+                or price <= 0
+            )
+            bits = [f"时间{scheduled_clear_time}"]
+            if force:
+                bits.append("无条件")
+            else:
+                bits.append(f"触发价{price:.2f}")
+            bits.append(vol_text)
+            if eff:
+                bits.append(f"生效{eff}")
+            return ", ".join(bits)
         
         return ""
     

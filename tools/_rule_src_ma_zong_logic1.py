@@ -10,7 +10,8 @@
 #   2) 所属行业东财涨幅原始排名前 BOARD_TOP_N_INDUSTRY，或概念前 BOARD_TOP_N_CONCEPT（任一即可）
 #      （行业/概念最高名次：按东财榜成分归属反查，每票都尽量写出；另附「所属行业/概念排名明细」全量列表）
 #   3) 当日主力资金净流入 >= 3000万
-#   4) 前10个交易日：主板无涨幅>=5%；创业/科创/北交所无涨幅>=10%
+#   4) 前10个交易日：主板无「最高价相对前收」涨幅>=5%；创业/科创/北交所无>=10%
+#      （涨幅=(当日最高-前收)/前收；缺最高价时回退收盘价）
 #   5) 当日收盘价 > MA5 且 > MA20
 # 依赖引擎 ctx["em_board_hot"]（填 besttest 热门字段；不作为入选门槛）
 # 近5/10/20日RS：用选股日线绝对涨幅 (close_D-close_{D-N})/close_{D-N}，对每只进表票都算；
@@ -291,6 +292,7 @@ def _today_limit_up(stock_code, stock_name, daily_data, as_of_date):
 def _prior_session_rets(daily_data, as_of_date, lookback):
     """不含当日的前 lookback 个交易日涨幅列表（小数）。
 
+    涨幅 = (当日最高价 - 前收) / 前收；缺最高价时回退收盘价。
     只取 as_of 之前最后 lookback+1 根K线再算涨幅，避免把当日涨停算进窗口。
     """
     as_d = _as_date(as_of_date)
@@ -307,13 +309,25 @@ def _prior_session_rets(daily_data, as_of_date, lookback):
     lb = max(1, int(lookback))
     window = prev.tail(lb + 1)
     closes = []
+    highs = []
+    has_high = "high" in getattr(window, "columns", [])
     for _, r in window.iterrows():
         try:
             c = float(r.get("close"))
         except (TypeError, ValueError):
             continue
-        if c == c and c > 0:
-            closes.append(c)
+        if not (c == c and c > 0):
+            continue
+        h = None
+        if has_high:
+            try:
+                hv = float(r.get("high"))
+                if hv == hv and hv > 0:
+                    h = hv
+            except (TypeError, ValueError):
+                h = None
+        closes.append(c)
+        highs.append(h if h is not None else c)
     if len(closes) < 2:
         return []
     rets = []
@@ -321,12 +335,15 @@ def _prior_session_rets(daily_data, as_of_date, lookback):
         pc = closes[i - 1]
         if pc <= 0:
             continue
-        rets.append((closes[i] - pc) / pc)
+        rets.append((highs[i] - pc) / pc)
     return rets
 
 
 def _prior_max_ret_with_date(daily_data, as_of_date, lookback):
-    """(最大涨幅小数, 日期)；窗口不含当日。"""
+    """(最大涨幅小数, 日期)；窗口不含当日。
+
+    涨幅 = (当日最高价 - 前收) / 前收；缺最高价时回退收盘价。
+    """
     as_d = _as_date(as_of_date)
     if as_d is None:
         return None, None
@@ -342,21 +359,33 @@ def _prior_max_ret_with_date(daily_data, as_of_date, lookback):
     best = None
     best_d = None
     closes = []
+    highs = []
     dates = []
+    has_high = "high" in getattr(window, "columns", [])
     for _, r in window.iterrows():
         try:
             c = float(r.get("close"))
         except (TypeError, ValueError):
             continue
         d = _as_date(r.get("_d") if "_d" in window.columns else r.get("date"))
-        if c == c and c > 0 and d is not None:
-            closes.append(c)
-            dates.append(d)
+        if not (c == c and c > 0) or d is None:
+            continue
+        h = None
+        if has_high:
+            try:
+                hv = float(r.get("high"))
+                if hv == hv and hv > 0:
+                    h = hv
+            except (TypeError, ValueError):
+                h = None
+        closes.append(c)
+        highs.append(h if h is not None else c)
+        dates.append(d)
     for i in range(1, len(closes)):
         pc = closes[i - 1]
         if pc <= 0:
             continue
-        ret = (closes[i] - pc) / pc
+        ret = (highs[i] - pc) / pc
         if best is None or ret > best:
             best = ret
             best_d = dates[i]
@@ -1049,13 +1078,13 @@ def _fail_reasons_logic1(
         thr_pct = float(thr) * 100.0
         if not prior_rets:
             reasons.append(
-                "前%d日无大涨不满足，要求涨幅均<%s%%，实际无前%d日涨幅数据"
+                "前%d日无大涨不满足，要求最高价相对前收涨幅均<%s%%，实际无前%d日涨幅数据"
                 % (int(PRIOR_LOOKBACK), _fmt_num(thr_pct, 2), int(PRIOR_LOOKBACK))
             )
         else:
             mp = max_prior if max_prior is not None else max(prior_rets)
             reasons.append(
-                "前%d日无大涨不满足，要求涨幅均<%s%%，实际最高%s%%"
+                "前%d日无大涨不满足，要求最高价相对前收涨幅均<%s%%，实际最高%s%%"
                 % (
                     int(PRIOR_LOOKBACK),
                     _fmt_num(thr_pct, 2),

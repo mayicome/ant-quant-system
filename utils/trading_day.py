@@ -225,7 +225,11 @@ def _build_trade_date_cache(cache_start: date, cache_end: date, today: date) -> 
 
 
 def _today_weekday_fallback(check_date: date) -> bool:
-    """日历源均不可用或未收录「今天」时，对当日 Mon–Fri 做兜底（不含法定节假日）。"""
+    """仅当日历源失败或未覆盖到今天时，对当日 Mon–Fri 做兜底。
+
+    注意：日历已覆盖到今天、但今天不在集合内，表示法定休市，不得走此兜底
+    （否则中秋等「周五假日」会被误判为交易日）。
+    """
     global _today_weekday_fallback_logged_on
     today = date.today()
     if check_date != today or check_date.weekday() >= 5:
@@ -233,10 +237,20 @@ def _today_weekday_fallback(check_date: date) -> bool:
     if _today_weekday_fallback_logged_on != today:
         _today_weekday_fallback_logged_on = today
         _safe_print(
-            f"警告: 交易日历未包含今日({today})，暂按工作日兜底判定为交易日；"
+            f"警告: 交易日历未覆盖今日({today})，暂按工作日兜底判定为交易日；"
             f"若今日为法定节假日，请稍后重连 QMT 或重启程序刷新日历"
         )
     return True
+
+
+def _cache_covers_today(today: date) -> bool:
+    """缓存是否已覆盖到今天（有今天或更晚的交易日），可据此认定「缺今天=休市」。"""
+    if not _trade_date_cache:
+        return False
+    try:
+        return max(_trade_date_cache) >= today
+    except ValueError:
+        return False
 
 
 def previous_tradeday(from_date: Optional[date] = None) -> date:
@@ -323,6 +337,11 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
     if _trade_date_cache and check_date in _trade_date_cache:
         return True
 
+    # 日历已覆盖到今天：不在集合内 = 休市（含周五法定假日），禁止再按工作日兜底
+    if check_date == today and _cache_covers_today(today):
+        return False
+
+    # 仅日历失败/过期未覆盖到今天时，才对今日做工作日兜底
     if check_date == today and _today_weekday_fallback(check_date):
         return True
 

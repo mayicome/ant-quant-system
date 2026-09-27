@@ -3,9 +3,13 @@
 
 对应网页：https://data.eastmoney.com/zjlx/detail.html
 优先于 Selenium：快、可拿全市场，适合盘后落盘。
+
+网络：先直连；若被对端掐断，再试本机代理（EM_FUND_FLOW_PROXY / EM_HIST_PROXY /
+环境变量 HTTPS_PROXY，以及常见本地端口 7078/7890）。
 """
 from __future__ import annotations
 
+import os
 import random
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -30,21 +34,47 @@ _HOSTS = (
     "https://push2delay.eastmoney.com/api/qt/clist/get",
     "https://82.push2.eastmoney.com/api/qt/clist/get",
     "https://push2.eastmoney.com/api/qt/clist/get",
+    "https://7.push2.eastmoney.com/api/qt/clist/get",
 )
 
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/122.0.0.0 Safari/537.36"
     ),
     "Referer": "https://data.eastmoney.com/zjlx/detail.html",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
+
+# 进程内记住本轮可用的代理（None=直连）
+_WORKING_PROXIES: Optional[Dict[str, str]] = None
+_WORKING_PROXIES_RESOLVED = False
+
+
+def _proxy_candidates() -> List[Optional[Dict[str, str]]]:
+    """直连优先，再试显式/环境/常见本地代理。"""
+    out: List[Optional[Dict[str, str]]] = [None]
+    seen = {""}
+
+    def _add(url: str) -> None:
+        u = (url or "").strip()
+        if not u or u in seen:
+            return
+        seen.add(u)
+        out.append({"http": u, "https": u})
+
+    for key in ("EM_FUND_FLOW_PROXY", "EM_HIST_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        _add(os.environ.get(key, ""))
+    for port in (7078, 7890, 7897, 10809, 10808, 1080):
+        _add(f"http://127.0.0.1:{port}")
+    return out
 
 
 def _session() -> requests.Session:
     s = requests.Session()
-    s.trust_env = False  # 避开系统坏代理
+    s.trust_env = False  # 避开系统坏代理；需要时代码显式传入 proxies
     return s
 
 
@@ -53,21 +83,44 @@ def _get_json(
     params: Dict[str, Any],
     *,
     hosts: Sequence[str] = _HOSTS,
-    retries: int = 5,
+    retries: int = 8,
 ) -> dict:
+    global _WORKING_PROXIES, _WORKING_PROXIES_RESOLVED
     last_err: Optional[Exception] = None
-    for attempt in range(max(1, retries)):
-        host = hosts[attempt % len(hosts)]
-        try:
-            r = session.get(host, params=params, headers=_HEADERS, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, dict) and data.get("data") is not None:
-                return data
-            last_err = RuntimeError(f"empty payload from {host}")
-        except Exception as e:
-            last_err = e
-            time.sleep(0.5 * (attempt + 1) + random.random() * 0.2)
+    proxy_list = _proxy_candidates()
+    if _WORKING_PROXIES_RESOLVED:
+        # 已知可用代理（或直连）放最前，减少重试成本
+        preferred = _WORKING_PROXIES
+        rest = [p for p in proxy_list if p != preferred]
+        proxy_list = [preferred] + rest
+
+    attempt = 0
+    for proxies in proxy_list:
+        for _ in range(2):  # 每个代理最多试 2 个 host
+            if attempt >= max(1, retries):
+                break
+            host = hosts[attempt % len(hosts)]
+            attempt += 1
+            try:
+                r = session.get(
+                    host,
+                    params=params,
+                    headers=_HEADERS,
+                    timeout=30,
+                    proxies=proxies or {},
+                )
+                r.raise_for_status()
+                data = r.json()
+                if isinstance(data, dict) and data.get("data") is not None:
+                    _WORKING_PROXIES = proxies
+                    _WORKING_PROXIES_RESOLVED = True
+                    return data
+                last_err = RuntimeError(f"empty payload from {host}")
+            except Exception as e:
+                last_err = e
+                time.sleep(0.4 * attempt + random.random() * 0.3)
+        if attempt >= max(1, retries):
+            break
     raise RuntimeError(f"东方财富资金流接口失败: {last_err}")
 
 
@@ -124,6 +177,10 @@ def fetch_individual_fund_flow_rows(
         "fetched": len(rows),
         "pages": total_pages,
         "page_size": pz,
+        "via_proxy": bool(_WORKING_PROXIES),
+        "proxy": (_WORKING_PROXIES or {}).get("https")
+        or (_WORKING_PROXIES or {}).get("http")
+        or "",
     }
     return rows, meta
 

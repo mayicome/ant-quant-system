@@ -856,14 +856,15 @@ def write_tasks_to_excel(
             old = final_tasks[idx]
             old_params = old.get("params") or {}
             old_rules = list(old_params.get("rules") or [])
-            new_rules = (new_task.get("params") or {}).get("rules") or []
+            new_rules = list((new_task.get("params") or {}).get("rules") or [])
             # 同名/同腿：用新规则覆盖旧触发价，避免新旧价格并存导致「加载无变化」
-            merged_rules = _merge_rules_replace_by_identity(old_rules, new_rules)
+            # 非定时清仓策略并入：只去掉本次新规则里的清仓，不删同股已有卖出清仓
             if drop_scheduled_clear_on_merge:
-                merged_rules = [
-                    r for r in merged_rules
+                new_rules = [
+                    r for r in new_rules
                     if (r.get("type") or "").strip() != "scheduled_clear"
                 ]
+            merged_rules = _merge_rules_replace_by_identity(old_rules, new_rules)
             old_params["rules"] = merged_rules
             old["params"] = old_params
         else:

@@ -17,13 +17,8 @@ import time
 from datetime import datetime
 from typing import List, Optional, Sequence, Tuple
 
-import akshare as ak
-import pandas as pd
-
 from utils.history_data_archive import archive_history_before
 
-
-_trade_calendar_cache = None
 
 # (脚本名, 额外参数, 步骤名)
 JobStep = Tuple[str, Sequence[str], str]
@@ -98,30 +93,19 @@ def _mode_body_line(live_only: bool) -> str:
     return "**模式**：全量盘后批跑"
 
 
-def _get_trade_calendar():
-    """获取交易日历（带缓存）。"""
-    global _trade_calendar_cache
-    if _trade_calendar_cache is None:
-        try:
-            trade_cal = ak.tool_trade_date_hist_sina()
-            trade_cal["trade_date"] = pd.to_datetime(trade_cal["trade_date"]).dt.date
-            _trade_calendar_cache = set(trade_cal["trade_date"].values)
-        except Exception as e:
-            print(f"[交易日检查] 获取交易日历失败，回退到工作日判断: {e}")
-            _trade_calendar_cache = set()
-    return _trade_calendar_cache
-
-
 def is_tradeday(day=None):
-    """判断某天是否为交易日；默认今天。"""
+    """判断某天是否为交易日；默认今天。统一走 utils.trading_day（含节假日）。"""
     if day is None:
         day = datetime.now().date()
     if isinstance(day, datetime):
         day = day.date()
-    trade_dates = _get_trade_calendar()
-    if not trade_dates:
+    try:
+        from utils.trading_day import is_tradeday as _is_tradeday
+
+        return bool(_is_tradeday(day))
+    except Exception as e:
+        print(f"[交易日检查] utils.trading_day 失败，回退到工作日判断: {e}")
         return day.weekday() < 5
-    return day in trade_dates
 
 
 def _job_label(script_name: str, extra_args: Sequence[str] = ()) -> str:

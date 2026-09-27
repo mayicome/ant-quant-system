@@ -74,6 +74,37 @@ def _rule_meta(task_id: str, rule: Dict[str, Any]) -> Dict[str, Any]:
     return meta
 
 
+def _buy_export_volume(rule: Dict[str, Any]) -> int:
+    """买入武装数量：等资金模式下用剩余量。"""
+    try:
+        base = int(rule.get("volume") or 0)
+    except (TypeError, ValueError):
+        base = 0
+    if not bool(rule.get("cash_wait_active")):
+        return base
+    try:
+        rem = rule.get("remaining_volume")
+        if rem is not None:
+            return max(0, int(rem))
+    except (TypeError, ValueError):
+        pass
+    return base
+
+
+def _armed_buy_extras(rule: Dict[str, Any]) -> Dict[str, Any]:
+    """再次执行后的等资金字段，随武装任务下发。"""
+    if not bool(rule.get("cash_wait_active")):
+        return {}
+    out: Dict[str, Any] = {"cash_wait_active": True}
+    try:
+        rem = rule.get("remaining_volume")
+        if rem is not None:
+            out["remaining_volume"] = max(0, int(rem))
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
 def _rule_early_order_enabled(rule: dict, global_default: bool) -> bool:
     """规则级提前下单快照；缺字段时用全局默认（兼容旧规则）。"""
     if isinstance(rule, dict) and "early_order_enabled" in rule:
@@ -206,23 +237,24 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                 trigger = _clamp_night_trigger_for_session(
                     task_manager, stock_code, rule_type, trigger
                 )
-                armed.append(
-                    normalize_armed_task(
-                        {
-                            "task_id": f"{task_id}:{rule_id}",
-                            "stock_code": stock_code,
-                            "rule_type": rule_type,
-                            "strategy_name": str(
-                                task.get("strategy")
-                                or ("夜市买入" if rule_type == "night_buy" else "夜市卖出")
-                            ),
-                            "trigger_price": trigger,
-                            "enabled": True,
-                            "max_volume": volume,
-                            "metadata": _rule_meta(task_id, rule),
-                        }
-                    )
-                )
+                night_row = {
+                    "task_id": f"{task_id}:{rule_id}",
+                    "stock_code": stock_code,
+                    "rule_type": rule_type,
+                    "strategy_name": str(
+                        task.get("strategy")
+                        or ("夜市买入" if rule_type == "night_buy" else "夜市卖出")
+                    ),
+                    "trigger_price": trigger,
+                    "enabled": True,
+                    "max_volume": (
+                        _buy_export_volume(rule) if rule_type == "night_buy" else volume
+                    ),
+                    "metadata": _rule_meta(task_id, rule),
+                }
+                if rule_type == "night_buy":
+                    night_row.update(_armed_buy_extras(rule))
+                armed.append(normalize_armed_task(night_row))
                 continue
             if rule_type == "scheduled_clear":
                 trigger = float(rule.get("price") or rule.get("trigger_price") or 0)
@@ -317,6 +349,8 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                 )
                 continue
             volume = int(rule.get("volume") or 0)
+            buy_volume = _buy_export_volume(rule)
+            buy_extras = _armed_buy_extras(rule)
             # 弹性卖出允许 volume=0 表示清仓
             if volume <= 0 and rule_type != "best_sell":
                 continue
@@ -327,30 +361,29 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                 price_high = float(rule.get("price_high") or 0)
                 if price_low <= 0 or price_high <= price_low:
                     continue
-                armed.append(
-                    normalize_armed_task(
-                        {
-                            "task_id": f"{task_id}:{rule_id}",
-                            "stock_code": stock_code,
-                            "rule_type": rule_type,
-                            "strategy_name": str(
-                                task.get("strategy")
-                                or ("笼子买入" if rule_type == "cage_buy" else "笼子卖出")
-                            ),
-                            "price_low": price_low,
-                            "price_high": price_high,
-                            "wall_thickness": float(rule.get("wall_thickness") or 0),
-                            "cage_entered": bool(rule.get("cage_entered")),
-                            "trigger_price": price_low,
-                            "enabled": not _rule_executed(rule),
-                            "max_volume": volume,
-                            "halt_on_open_gain": bool(rule.get("halt_on_open_gain"))
-                            if rule_type == "cage_buy"
-                            else False,
-                            "metadata": _rule_meta(task_id, rule),
-                        }
-                    )
-                )
+                cage_row = {
+                    "task_id": f"{task_id}:{rule_id}",
+                    "stock_code": stock_code,
+                    "rule_type": rule_type,
+                    "strategy_name": str(
+                        task.get("strategy")
+                        or ("笼子买入" if rule_type == "cage_buy" else "笼子卖出")
+                    ),
+                    "price_low": price_low,
+                    "price_high": price_high,
+                    "wall_thickness": float(rule.get("wall_thickness") or 0),
+                    "cage_entered": bool(rule.get("cage_entered")),
+                    "trigger_price": price_low,
+                    "enabled": not _rule_executed(rule),
+                    "max_volume": buy_volume if rule_type == "cage_buy" else volume,
+                    "halt_on_open_gain": bool(rule.get("halt_on_open_gain"))
+                    if rule_type == "cage_buy"
+                    else False,
+                    "metadata": _rule_meta(task_id, rule),
+                }
+                if rule_type == "cage_buy":
+                    cage_row.update(buy_extras)
+                armed.append(normalize_armed_task(cage_row))
                 continue
             trigger = float(rule.get("trigger_price") or rule.get("price") or 0)
             if trigger <= 0:
@@ -369,11 +402,12 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                     "require_break_below": False,
                     "break_below_trigger_done": False,
                     "enabled": not _rule_executed(rule),
-                    "max_volume": volume,
+                    "max_volume": buy_volume,
                     "early_order_enabled": eo,
                     "halt_on_open_gain": bool(rule.get("halt_on_open_gain")),
                     "metadata": _rule_meta(task_id, rule),
                 }
+                armed_row.update(buy_extras)
                 if rule.get("wait_unseal"):
                     armed_row["wait_unseal"] = True
                 if rule.get("fill_at_limit_up"):
@@ -436,29 +470,27 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                 )
                 continue
             if rule_type == "best_buy":
-                armed.append(
-                    normalize_armed_task(
-                        {
-                            "task_id": f"{task_id}:{rule_id}",
-                            "stock_code": stock_code,
-                            "rule_type": "best_buy",
-                            "strategy_name": str(task.get("strategy") or "弹性买入"),
-                            "trigger_price": trigger,
-                            "rise_percent": float(rule.get("rise_percent") or 0.3),
-                            "rise_scale": rule.get("rise_scale"),
-                            "max_rise_percent": rule.get("max_rise_percent"),
-                            "confirm_ticks": rule.get("confirm_ticks"),
-                            "cooldown_after_extreme_ticks": rule.get(
-                                "cooldown_after_extreme_ticks"
-                            ),
-                            "dynamic_thresholds": rule.get("dynamic_thresholds"),
-                            "halt_on_open_gain": bool(rule.get("halt_on_open_gain")),
-                            "enabled": not _rule_executed(rule),
-                            "max_volume": volume,
-                            "metadata": _rule_meta(task_id, rule),
-                        }
-                    )
-                )
+                best_buy_row = {
+                    "task_id": f"{task_id}:{rule_id}",
+                    "stock_code": stock_code,
+                    "rule_type": "best_buy",
+                    "strategy_name": str(task.get("strategy") or "弹性买入"),
+                    "trigger_price": trigger,
+                    "rise_percent": float(rule.get("rise_percent") or 0.3),
+                    "rise_scale": rule.get("rise_scale"),
+                    "max_rise_percent": rule.get("max_rise_percent"),
+                    "confirm_ticks": rule.get("confirm_ticks"),
+                    "cooldown_after_extreme_ticks": rule.get(
+                        "cooldown_after_extreme_ticks"
+                    ),
+                    "dynamic_thresholds": rule.get("dynamic_thresholds"),
+                    "halt_on_open_gain": bool(rule.get("halt_on_open_gain")),
+                    "enabled": not _rule_executed(rule),
+                    "max_volume": buy_volume,
+                    "metadata": _rule_meta(task_id, rule),
+                }
+                best_buy_row.update(buy_extras)
+                armed.append(normalize_armed_task(best_buy_row))
                 continue
             if rule_type == "breakthrough_sell":
                 # 与图表原逻辑一致：价格下穿/跌破触发价即卖，无需「先上破」
@@ -508,9 +540,10 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                         "band_accept_low": rule.get("band_accept_low")
                         if rule.get("band_accept_low") is not None
                         else rule.get("accept_band_low"),
-                        "max_volume": volume,
+                        "max_volume": buy_volume,
                         "halt_on_open_gain": bool(rule.get("halt_on_open_gain")),
                         "metadata": _rule_meta(task_id, rule),
+                        **buy_extras,
                     }
                 )
             )

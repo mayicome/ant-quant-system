@@ -1972,10 +1972,10 @@ if __name__ == "__main__":
             from utils.eastmoney_fund_flow import fetch_individual_fund_flow_df
 
             df, meta = fetch_individual_fund_flow_df(page_size=args.page_size)
+            via = "代理 " + str(meta.get("proxy") or "") if meta.get("via_proxy") else "直连"
             print(
                 f"接口完成: total={meta.get('total')} fetched={meta.get('fetched')} "
-                f"pages={meta.get('pages')} df={meta.get('dataframe_rows')} "
-                f"耗时字段见上"
+                f"pages={meta.get('pages')} df={meta.get('dataframe_rows')} via={via}"
             )
         except Exception as e:
             print(f"接口抓取失败: {e}")

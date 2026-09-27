@@ -66,17 +66,23 @@ def scheduled_clear_rule_active_today(rule: dict) -> bool:
 
 
 def scheduled_clear_is_force(rule: dict) -> bool:
-    """无条件定时清仓（不看现价是否低于触发价）。"""
+    """无条件定时清仓（不看现价是否低于触发价）。
+
+    规则带有效触发价（price>0）时一律按价判断：用于「涨停价-1tick」等
+    涨停板不清、其余价格清的语义；price<=0 才可能无条件。
+    """
+    try:
+        px = float(rule.get("price", 0) or 0)
+    except (TypeError, ValueError):
+        px = 0.0
+    if px > 0:
+        return False
     if _scheduled_clear_truthy(rule.get("scheduled_clear_force")):
         return True
     if _scheduled_clear_truthy(rule.get("scheduled_clear_on_hold_day")):
         return True
     # price<=0 且非每日条件单：视为无条件（兼容）
-    try:
-        px = float(rule.get("price", 0) or 0)
-    except (TypeError, ValueError):
-        px = 0.0
-    if px <= 0 and not _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
+    if not _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
         return True
     return False
 
@@ -210,7 +216,13 @@ class ScheduledClearManager(QObject):
                     current_time.hour * 3600 + current_time.minute * 60 + current_time.second
                     - (rule_time.hour * 3600 + rule_time.minute * 60 + rule_time.second)
                 )
-                if time_passed_seconds > 300:
+                # 无条件：超时 5 分钟记错过；有触发价（涨停外清仓）：等到 15:00 再结束
+                miss_deadline = (
+                    current_time >= dt_time(15, 0)
+                    if (not force and trigger_price > 0)
+                    else time_passed_seconds > 300
+                )
+                if miss_deadline:
                     if not rule.get("scheduled_clear_executed", False):
                         self.logger.info(
                             f"[{stock_code}] ⏰ [集中调度] 定时清仓规则「{rule_name}」时间已过 "
@@ -334,19 +346,32 @@ class ScheduledClearManager(QObject):
                     continue
                 rule["smart_sell_active"] = False
                 self._execute_rule(task, rule, tick_data, current_price)
-            elif current_price > 0 and not force:
-                self.logger.warning(
-                    f"[{stock_code}] ⚠️ [集中调度] 定时清仓「{rule_name}」价格不满足 "
-                    f"(现价: {current_price:.2f} >= 触发价: {trigger_price:.2f})，取消执行"
-                )
-                rule["pending_tick_execution"] = False
-                # 每日条件清仓：仅取消当日，不永久 executed
-                if _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
-                    rule["scheduled_clear_missed_date"] = datetime.now().date().isoformat()
-                    rule["scheduled_clear_executed"] = False
+            elif current_price > 0 and not force and trigger_price > 0:
+                # 涨停外清仓：现价仍>=触发价（常见于封死涨停）→ 继续等到收盘，不立刻记已执行
+                now_t = datetime.now().time()
+                if now_t >= dt_time(15, 0):
+                    self.logger.warning(
+                        f"[{stock_code}] ⚠️ [集中调度] 定时清仓「{rule_name}」收盘仍未满足 "
+                        f"(现价: {current_price:.2f} >= 触发价: {trigger_price:.2f})，标记结束"
+                    )
+                    rule["pending_tick_execution"] = False
+                    if _scheduled_clear_truthy(rule.get("scheduled_clear_every_day")):
+                        rule["scheduled_clear_missed_date"] = datetime.now().date().isoformat()
+                        rule["scheduled_clear_executed"] = False
+                    else:
+                        rule["scheduled_clear_executed"] = True
+                        rule["scheduled_clear_order_attempted"] = False
+                    self._persist_task_rules(task)
                 else:
-                    rule["scheduled_clear_executed"] = True
-                self._persist_task_rules(task)
+                    # 保持 pending，价格一旦低于触发价即可清
+                    rule_id = str(rule.get("id", "unknown"))
+                    last_log = self._last_check_log_time.get(rule_id + ":px")
+                    if last_log is None or (datetime.now() - last_log).total_seconds() >= 30:
+                        self.logger.info(
+                            f"[{stock_code}] [集中调度] 定时清仓「{rule_name}」待价格回落: "
+                            f"现价 {current_price:.2f} >= 触发价 {trigger_price:.2f}"
+                        )
+                        self._last_check_log_time[rule_id + ":px"] = datetime.now()
 
     def _get_position_volume(self, stock_code: str) -> int:
         qmt = getattr(self.task_manager, "qmt_adapter", None)

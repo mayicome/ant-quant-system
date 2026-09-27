@@ -238,9 +238,43 @@ def note_from_rule_fill(
     order_rec: Optional[Dict[str, Any]] = None,
     project_root: Optional[str] = None,
 ) -> Optional[str]:
-    """主程序图表确认成交时写入腿（与 QMT 侧互补）。"""
+    """主程序图表确认成交时写入腿（与 QMT 侧互补）。
+
+    未成交结束（skipped / 资金不足等）不得写入。
+    """
     rule = rule if isinstance(rule, dict) else {}
     order_rec = order_rec if isinstance(order_rec, dict) else {}
+    status = str(order_rec.get("status") or "").strip().lower()
+    cash_block = str(order_rec.get("cash_block") or "").strip().lower()
+    oid = str(
+        order_rec.get("order_sysid")
+        or rule.get("order_id")
+        or ""
+    ).strip()
+    reason = str(rule.get("executed_reason") or "").strip().lower()
+    # 与 QMT ant_filled_legs.note_from_order_record 对齐：仅真实成交
+    if status in ("skipped", "cancelled", "error", "cancel_sent"):
+        return None
+    if cash_block in ("no_cash", "min_buy_amount", "order_below_min"):
+        return None
+    if oid in (
+        "NO_CASH",
+        "MIN_BUY_AMOUNT",
+        "SKIPPED_NO_CASH",
+        "SKIPPED_MIN_BUY",
+        "SKIPPED_BUY_WINDOW",
+        "BAND_HARD_PASS",
+        "NOT_TRUE_BREAKTHROUGH",
+    ):
+        return None
+    if reason in (
+        "no_cash",
+        "order_below_min",
+        "buy_block_window",
+        "band_hard_pass",
+        "min_buy_amount",
+    ):
+        return None
     side = str(order_rec.get("side") or "").lower()
     if not side:
         rt = str(rule.get("type") or rule.get("rule_type") or "").lower()

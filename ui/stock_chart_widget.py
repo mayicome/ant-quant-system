@@ -1372,10 +1372,12 @@ class StockChartWidget(QWidget):
             ):
                 self._attach_scheduled_clear_effective_date(r, reset_runtime=False)
         
-        # 检查是否有定时清仓规则，如果有则启动定时器
+        # 检查是否有定时清仓规则，如果有则启动定时器，并同步工具栏显示
         scheduled_clear_rules = [
             r for r in self.rules 
-            if r.get('type') == 'scheduled_clear' and r.get('enabled', True)
+            if (r.get('type') or r.get('rule_type')) == 'scheduled_clear'
+            and r.get('enabled', True)
+            and not r.get('scheduled_clear_executed')
         ]
         if scheduled_clear_rules:
             # 启动定时器（如果还没有启动）
@@ -1385,6 +1387,9 @@ class StockChartWidget(QWidget):
                 self.scheduled_clear_timer.timeout.connect(self.check_scheduled_clear)
             if not self.scheduled_clear_timer.isActive():
                 self.scheduled_clear_timer.start(1000)  # 每秒检查一次
+            self._sync_scheduled_clear_toolbar_from_rules(scheduled_clear_rules)
+        else:
+            self._clear_scheduled_clear_toolbar_indicator()
         
         # 规则变化后，重绘图表
         if hasattr(self, 'price_position_ax'):
@@ -3102,28 +3107,45 @@ class StockChartWidget(QWidget):
 
     @staticmethod
     def _builtin_order_skip_reason(order_rec, order_id="") -> str:
-        """大 QMT skipped 订单 → executed_reason（禁买/低于最小买入等非正常结束）。"""
+        """大 QMT skipped 订单 → executed_reason（禁买/资金不足/低于最小买入等非正常结束）。
+
+        有 skip_reason 时仍可标 executed（结束本腿），但不得写入 filled_legs。
+        """
         rec = order_rec or {}
         oid = str(order_id or rec.get("order_sysid") or "").strip()
+        sysid = str(rec.get("order_sysid") or "").strip()
+        cash_block = str(rec.get("cash_block") or "").strip().lower()
+        status = str(rec.get("status") or "").strip().lower()
         if (
             bool(rec.get("buy_block_window"))
             or oid == "SKIPPED_BUY_WINDOW"
-            or str(rec.get("order_sysid") or "").strip() == "SKIPPED_BUY_WINDOW"
+            or sysid == "SKIPPED_BUY_WINDOW"
         ):
             return "buy_block_window"
         if (
             bool(rec.get("band_hard_pass"))
             or oid == "BAND_HARD_PASS"
-            or str(rec.get("order_sysid") or "").strip() == "BAND_HARD_PASS"
+            or sysid == "BAND_HARD_PASS"
             or str(rec.get("msg") or "").strip() == "band_hard_pass"
         ):
             return "band_hard_pass"
         if (
-            str(rec.get("cash_block") or "") == "order_below_min"
+            cash_block == "order_below_min"
             or oid == "SKIPPED_MIN_BUY"
-            or str(rec.get("order_sysid") or "").strip() == "SKIPPED_MIN_BUY"
+            or sysid == "SKIPPED_MIN_BUY"
         ):
             return "order_below_min"
+        # 资金不足：任务结束，但不算成交腿
+        if (
+            cash_block in ("no_cash", "min_buy_amount")
+            or oid in ("NO_CASH", "MIN_BUY_AMOUNT", "SKIPPED_NO_CASH")
+            or sysid in ("NO_CASH", "MIN_BUY_AMOUNT", "SKIPPED_NO_CASH")
+            or (
+                status == "skipped"
+                and ("资金不足" in str(rec.get("msg") or "") or "无可用资金" in str(rec.get("msg") or ""))
+            )
+        ):
+            return "no_cash"
         return ""
 
     @staticmethod
@@ -3521,18 +3543,102 @@ class StockChartWidget(QWidget):
             self._log_builtin_remaining_after_feedback(rule_id)
             return True
 
+        skip_reason_pre = self._builtin_order_skip_reason(order_rec, oid)
+        st_pre = str(order_rec.get("status") or "").strip().lower()
+        # 等资金模式：没钱不结束、不写「已执行」
+        if (
+            bool(rule.get("cash_wait_active"))
+            and (
+                skip_reason_pre == "no_cash"
+                or st_pre == "waiting_cash"
+                or bool(order_rec.get("cash_wait"))
+            )
+        ):
+            if self.logger:
+                self.logger.info(
+                    f"[{self.stock_code}] [builtin] 等资金中，保持挂起: "
+                    f"{rule.get('name')} rem={rule.get('remaining_volume')}"
+                )
+            return True
+        # 等资金模式：部分成交 → 更新剩余，整腿不结束
+        if bool(rule.get("cash_wait_active")) and skip_reason_pre == "":
+            try:
+                rem = order_rec.get("remaining_volume")
+                rem_i = int(rem) if rem is not None else None
+            except (TypeError, ValueError):
+                rem_i = None
+            if rem_i is None:
+                try:
+                    before = int(
+                        rule.get("remaining_volume")
+                        or rule.get("planned_volume")
+                        or rule.get("volume")
+                        or 0
+                    )
+                except (TypeError, ValueError):
+                    before = int(vol or 0)
+                rem_i = max(0, before - int(vol or 0))
+            try:
+                got = int(vol or 0)
+            except (TypeError, ValueError):
+                got = 0
+            accum = int(rule.get("filled_volume_accum") or 0) + max(0, got)
+            rule["filled_volume_accum"] = accum
+            rule["remaining_volume"] = max(0, rem_i)
+            rule["last_partial_order_id"] = oid
+            rule["last_partial_time"] = exec_time.strftime("%Y-%m-%d %H:%M:%S")
+            rule["last_partial_price"] = px
+            rule["last_partial_volume"] = got
+            if rem_i >= 100:
+                try:
+                    from utils.position_entry_dates import note_fill_from_order
+
+                    note_fill_from_order(
+                        stock_code=getattr(self, "stock_code", "") or "",
+                        rule=rule,
+                        order_rec=order_rec,
+                        skip_reason="",
+                    )
+                except Exception:
+                    pass
+                self._save_rules()
+                try:
+                    if self.task_manager and hasattr(
+                        self.task_manager, "_sync_rules_armed_if_builtin"
+                    ):
+                        self.task_manager._sync_rules_armed_if_builtin()
+                except Exception:
+                    pass
+                self.update_chart()
+                if self.logger:
+                    self.logger.info(
+                        f"[{self.stock_code}] [builtin] 等资金部分成交 "
+                        f"{got}股，剩余{rem_i}股继续等待: {rule.get('name')}"
+                    )
+                try:
+                    self._play_trade_sound()
+                except Exception:
+                    pass
+                return True
+            # 剩余不足一手：视为本腿完成
+            rule["cash_wait_active"] = False
+            vol = accum if accum > 0 else vol
+
         rule["executed"] = True
         rule["executed_time"] = exec_time.strftime("%Y-%m-%d %H:%M:%S")
         rule["executed_price"] = px
         rule["executed_volume"] = vol
         rule["order_id"] = oid
-        skip_reason = self._builtin_order_skip_reason(order_rec, oid)
+        skip_reason = skip_reason_pre
         if skip_reason:
             rule["executed_reason"] = skip_reason
             if skip_reason == "buy_block_window":
                 rule["order_id"] = "SKIPPED_BUY_WINDOW"
             elif skip_reason == "order_below_min":
                 rule["order_id"] = "SKIPPED_MIN_BUY"
+            elif skip_reason == "no_cash":
+                rule["order_id"] = "NO_CASH"
+                rule["executed_volume"] = 0
             elif skip_reason == "band_hard_pass":
                 rule["order_id"] = "BAND_HARD_PASS"
                 rule["executed_volume"] = 0
@@ -3546,6 +3652,8 @@ class StockChartWidget(QWidget):
                     rule["executed_detail"] = detail
         else:
             rule.pop("executed_reason", None)
+            if bool(rule.get("cash_wait_active")):
+                rule["cash_wait_active"] = False
         # 真突破明细：从 results 事件 / order_rec 写回，供右键显示
         self._apply_true_breakthrough_from_builtin_event(rule, tid, order_rec)
         if rtype in ("night_buy", "night_sell"):
@@ -4211,6 +4319,265 @@ class StockChartWidget(QWidget):
         )
         self.update_chart()
     
+    def _full_rule_task_id(self, rule) -> str:
+        """父任务 + 规则 id → 与 rules_armed / results 一致的 task_id。"""
+        parent = str(
+            self._resolve_live_task_id()
+            or getattr(self, "task_id", None)
+            or (self.task or {}).get("task_id")
+            or ""
+        ).strip()
+        rid = str((rule or {}).get("id") or "").strip()
+        if parent and rid:
+            return f"{parent}:{rid}"
+        return rid or parent
+
+    def _rule_leg_truly_filled(self, rule) -> bool:
+        """腿是否已有真实成交记录（filled_legs）。"""
+        try:
+            from utils.filled_legs import make_leg_key, load_leg_keys
+
+            key = make_leg_key(
+                getattr(self, "stock_code", "") or "",
+                name=(rule or {}).get("name"),
+                leg_key=(rule or {}).get("leg_key"),
+            )
+            if not key:
+                return False
+            return key in set(load_leg_keys() or [])
+        except Exception:
+            return False
+
+    def _results_order_cash_block_for_rule(self, rule) -> str:
+        """从当日 results.json 查该规则最近一笔订单的 cash_block。"""
+        tid = self._full_rule_task_id(rule)
+        lk = str((rule or {}).get("leg_key") or "").strip()
+        if not tid and not lk:
+            return ""
+        try:
+            import json
+            from pathlib import Path
+
+            path = Path(__file__).resolve().parents[1] / "data" / "results.json"
+            if not path.is_file():
+                return ""
+            data = json.loads(path.read_text(encoding="utf-8"))
+            orders = data.get("orders") or []
+            best = ""
+            for o in reversed(list(orders)):
+                if not isinstance(o, dict):
+                    continue
+                otid = str(o.get("task_id") or "").strip()
+                olk = str(o.get("leg_key") or "").strip()
+                if tid and otid == tid:
+                    pass
+                elif lk and olk == lk:
+                    pass
+                else:
+                    continue
+                cb = str(o.get("cash_block") or "").strip().lower()
+                st = str(o.get("status") or "").strip().lower()
+                if st == "filled" or int(o.get("traded_volume") or 0) > 0:
+                    return ""
+                if cb:
+                    return cb
+                msg = str(o.get("msg") or "")
+                if st == "skipped" and (
+                    "资金不足" in msg or "无可用资金" in msg or "低于最小买入" in msg
+                ):
+                    return "no_cash" if "最小买入" not in msg else "order_below_min"
+                if not best and st == "skipped":
+                    best = "skipped"
+            return best
+        except Exception:
+            return ""
+
+    def _rule_is_no_cash_ended(self, rule) -> bool:
+        """是否因资金不足结束（含历史回写未写 executed_reason 的遗留态）。"""
+        if not isinstance(rule, dict):
+            return False
+        rtype = str(rule.get("type") or "")
+        if rtype not in (
+            "best_buy",
+            "single_buy",
+            "breakthrough_buy",
+            "cage_buy",
+            "night_buy",
+        ):
+            return False
+        if rtype == "scheduled_clear":
+            return False
+        if not bool(rule.get("executed")):
+            return False
+        if self._rule_leg_truly_filled(rule):
+            return False
+        reason = str(rule.get("executed_reason") or "").strip().lower()
+        oid = str(rule.get("order_id") or "").strip()
+        if reason == "no_cash" or oid in (
+            "NO_CASH",
+            "MIN_BUY_AMOUNT",
+            "SKIPPED_NO_CASH",
+        ):
+            return True
+        cb = self._results_order_cash_block_for_rule(rule)
+        return cb in ("no_cash", "min_buy_amount")
+
+    def _clear_builtin_results_for_rule_retry(self, full_task_id: str) -> None:
+        """清 results 中该腿的 done / 弹性态，便于大 QMT 重新武装后追踪。"""
+        tid = str(full_task_id or "").strip()
+        if not tid:
+            return
+        try:
+            import json
+            from pathlib import Path
+
+            path = Path(__file__).resolve().parents[1] / "data" / "results.json"
+            if not path.is_file():
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return
+            changed = False
+            done = data.get("done_task_ids")
+            if isinstance(done, list):
+                new_done = [x for x in done if str(x) != tid]
+                if len(new_done) != len(done):
+                    data["done_task_ids"] = new_done
+                    changed = True
+            es = data.get("elastic_states")
+            if isinstance(es, dict) and tid in es:
+                es = dict(es)
+                es.pop(tid, None)
+                data["elastic_states"] = es
+                changed = True
+            if not changed:
+                return
+            tmp = str(path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp, path)
+        except Exception as e:
+            if getattr(self, "logger", None):
+                self.logger.debug(f"[{self.stock_code}] 清理 results 重试态失败: {e}")
+
+    def _retry_no_cash_rule(self, rule) -> bool:
+        """资金不足已结束的买入腿：保留历史，重新挂起等待触发（人工）。"""
+        if not self._rule_is_no_cash_ended(rule):
+            return False
+        from datetime import datetime
+
+        now = datetime.now()
+        attempt = int(rule.get("execution_attempt") or 1)
+        if attempt < 1:
+            attempt = 1
+        prior = list(rule.get("prior_attempts") or [])
+        prior.append(
+            {
+                "attempt": attempt,
+                "executed_time": rule.get("executed_time"),
+                "executed_price": rule.get("executed_price"),
+                "executed_volume": rule.get("executed_volume"),
+                "order_id": rule.get("order_id"),
+                "executed_reason": rule.get("executed_reason") or "no_cash",
+                "archived_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        rule["prior_attempts"] = prior
+        next_attempt = attempt + 1
+        rule["execution_attempt"] = next_attempt
+
+        # 清执行态，重新可触发（不改写已落盘的执行记录）
+        rule["executed"] = False
+        rule["enabled"] = True
+        for key in (
+            "executed_time",
+            "executed_price",
+            "executed_volume",
+            "order_id",
+            "executed_reason",
+            "executed_detail",
+            "executed_endpoint",
+        ):
+            rule.pop(key, None)
+        # 弹性买入追踪态重置
+        for key in (
+            "triggered",
+            "lowest_price",
+            "lowest_tick_idx",
+            "tick_idx",
+            "rebound_hit_count",
+            "true_breakthrough_detail",
+            "true_breakthrough_passed",
+            "pending_tick_execution",
+        ):
+            rule.pop(key, None)
+        rule["break_below_trigger_done"] = False
+        rule["break_above_trigger_done"] = False
+
+        # 进入「等资金」模式：没钱不结束；缩量后继续等剩余
+        try:
+            planned = int(rule.get("volume") or 0)
+        except (TypeError, ValueError):
+            planned = 0
+        rule["cash_wait_active"] = True
+        rule["planned_volume"] = planned
+        rule["remaining_volume"] = planned
+        rule["filled_volume_accum"] = int(rule.get("filled_volume_accum") or 0)
+
+        full_tid = self._full_rule_task_id(rule)
+        self._clear_builtin_results_for_rule_retry(full_tid)
+
+        try:
+            from core.execution_record_manager import ExecutionRecordManager
+
+            ExecutionRecordManager().add_execution_record(
+                {
+                    "execution_time": now,
+                    "stock_code": getattr(self, "stock_code", "") or "",
+                    "stock_name": getattr(self, "stock_name", "") or "",
+                    "rule_type": str(rule.get("type") or ""),
+                    "rule_name": str(rule.get("name") or ""),
+                    "rule_detail": (
+                        f"资金不足后人工重新挂起（第{next_attempt}次·等资金模式）"
+                        f" | 计划{planned}股 | leg={rule.get('leg_key') or ''}"
+                    ),
+                    "current_price": float(getattr(self, "current_price", 0) or 0),
+                    "trade_price": float(
+                        rule.get("trigger_price") or rule.get("price") or 0
+                    ),
+                    "trade_volume": 0,
+                    "order_id": f"RETRY_NO_CASH_{next_attempt}",
+                    "require_manual_approval": False,
+                    "approval_result": "retry_armed",
+                    "execution_outcome": "retry_armed",
+                    "skip_reason": "no_cash_retry",
+                },
+                dedupe_key=f"retry|{full_tid}|{next_attempt}|{now.strftime('%Y%m%d%H%M%S')}",
+            )
+        except Exception as e:
+            if getattr(self, "logger", None):
+                self.logger.debug(f"[{self.stock_code}] 写入重试执行记录失败: {e}")
+
+        self._save_rules()
+        try:
+            if self.task_manager and hasattr(self.task_manager, "_sync_rules_armed_if_builtin"):
+                self.task_manager._sync_rules_armed_if_builtin()
+        except Exception:
+            pass
+        self.update_chart()
+
+        name = str(rule.get("name") or "未命名规则")
+        msg = (
+            f"[{self.stock_code}] 已重新挂起「{name}」"
+            f"（第{next_attempt}次·等资金/可补剩余，禁用或删除才结束）"
+        )
+        if getattr(self, "logger", None):
+            self.logger.info(msg)
+        else:
+            print(msg)
+        return True
+
     def _show_rule_context_menu(self, rule, event):
         """显示规则的右键菜单"""
         from PyQt5.QtWidgets import QMenu, QMessageBox, QInputDialog
@@ -4294,6 +4661,14 @@ class StockChartWidget(QWidget):
                 info_action = menu.addAction(f"[已执行-试探建仓] {rule_name} ({type_name})")
             elif executed_reason == 'order_failed':
                 info_action = menu.addAction(f"[已执行-下单失败] {rule_name} ({type_name})")
+            elif (
+                executed_reason == 'no_cash'
+                or executed_order_id in ('NO_CASH', 'MIN_BUY_AMOUNT', 'SKIPPED_NO_CASH')
+                or self._rule_is_no_cash_ended(rule)
+            ):
+                attempt = int(rule.get('execution_attempt') or 1)
+                tag = f"[已执行-资金不足·第{attempt}次] {rule_name} ({type_name})"
+                info_action = menu.addAction(tag)
             else:
                 info_action = menu.addAction(f"[已执行] {rule_name} ({type_name})")
             info_action.setEnabled(False)
@@ -4372,6 +4747,20 @@ class StockChartWidget(QWidget):
             elif executed_reason == 'order_failed':
                 detail_action = menu.addAction("  执行结果: 下单失败，规则已结束")
                 detail_action.setEnabled(False)
+            elif (
+                executed_reason == 'no_cash'
+                or executed_order_id in ('NO_CASH', 'MIN_BUY_AMOUNT', 'SKIPPED_NO_CASH')
+                or self._rule_is_no_cash_ended(rule)
+            ):
+                attempt = int(rule.get('execution_attempt') or 1)
+                detail_action = menu.addAction(
+                    f"  执行结果: 资金不足未下单（第{attempt}次尝试）"
+                )
+                detail_action.setEnabled(False)
+                prior_n = len(rule.get('prior_attempts') or [])
+                if prior_n > 0:
+                    detail_action = menu.addAction(f"  历史重开: 已归档 {prior_n} 次")
+                    detail_action.setEnabled(False)
         elif grid_status_tag.startswith("已部分执行"):
             info_action = menu.addAction(f"[{grid_status_tag}] {rule_name} ({type_name})")
             info_action.setEnabled(False)
@@ -4390,6 +4779,18 @@ class StockChartWidget(QWidget):
                 if hd:
                     detail_action = menu.addAction(f"  详情: {hd}")
                     detail_action.setEnabled(False)
+            elif bool(rule.get("cash_wait_active")):
+                rem = rule.get("remaining_volume")
+                got = rule.get("filled_volume_accum") or 0
+                info_action = menu.addAction(
+                    f"[等资金中] {rule_name} ({type_name})"
+                )
+                info_action.setEnabled(False)
+                detail_action = menu.addAction(
+                    f"  已买{got}股 / 剩余{rem if rem is not None else '?'}股"
+                    f"（有钱且条件满足再买；禁用/删除才结束）"
+                )
+                detail_action.setEnabled(False)
             else:
                 info_action = menu.addAction(f"📋 {rule_name} ({type_name})")
                 info_action.setEnabled(False)  # 只显示，不可点击
@@ -4449,12 +4850,25 @@ class StockChartWidget(QWidget):
             edit_time_action = menu.addAction("⏰ 修改时间")
             
             menu.addSeparator()
+
+        # 资金不足已结束：人工重新挂起（不弹确认；自动流程仍一次结束）
+        retry_no_cash_action = None
+        if rule_executed and self._rule_is_no_cash_ended(rule):
+            next_n = int(rule.get("execution_attempt") or 1) + 1
+            retry_no_cash_action = menu.addAction(
+                f"🔄 再次执行（等资金模式 · 第{next_n}次）"
+            )
+            menu.addSeparator()
         
         # 删除选项（所有规则都可以删除）
         delete_action = menu.addAction("🗑️ 删除此规则")
         
         # 显示菜单并获取选择
         action = menu.exec_(QCursor.pos())
+
+        if retry_no_cash_action and action == retry_no_cash_action:
+            self._retry_no_cash_rule(rule)
+            return
         
         if action == delete_action:
             # 已执行的规则直接删除，不需要确认
@@ -9852,9 +10266,10 @@ class StockChartWidget(QWidget):
                     elif executed_reason == 'order_failed' or executed_order_id == 'ORDER_FAILED':
                         color = '#555555'
                         rule_name = f"[已执行-下单失败] {rule_name}"
-                    elif executed_order_id in ('MIN_BUY_AMOUNT', 'NO_CASH'):
+                    elif executed_order_id in ('MIN_BUY_AMOUNT', 'NO_CASH') or executed_reason == 'no_cash':
                         color = '#555555'
-                        rule_name = f"[已执行-资金不足] {rule_name}"
+                        attempt = int(rule.get('execution_attempt') or 1)
+                        rule_name = f"[已执行-资金不足·第{attempt}次] {rule_name}"
                     else:
                         color = '#999999'
                         rule_name = f"[已执行] {rule_name}"
@@ -9866,6 +10281,11 @@ class StockChartWidget(QWidget):
                         # 禁用的规则显示为黑色
                         color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）
                         rule_name = f"[已禁用] {rule_name}"
+                elif bool(rule.get("cash_wait_active")):
+                    color = '#FF9800'  # 等资金：橙色
+                    rem = rule.get("remaining_volume")
+                    got = rule.get("filled_volume_accum") or 0
+                    rule_name = f"[等资金 {got}/{rem if rem is not None else '?'}] {rule_name}"
                 else:
                     # 正常规则使用规则类型颜色
                     # 夜市规则使用特殊颜色
@@ -9913,6 +10333,19 @@ class StockChartWidget(QWidget):
                     volume = int(rule.get('volume', 0) or 0)
                 except (TypeError, ValueError):
                     price, volume = 0.0, 0
+                # 无条件定时清仓 price=0：用现价/昨收锚定节点，否则图表上看不到「已设置」
+                if rule_type == 'scheduled_clear' and (price <= 0 or math.isnan(price)):
+                    try:
+                        anchor = float(getattr(self, 'current_price', 0) or 0)
+                    except (TypeError, ValueError):
+                        anchor = 0.0
+                    if anchor <= 0:
+                        try:
+                            anchor = float(getattr(self, 'pre_close', 0) or 0)
+                        except (TypeError, ValueError):
+                            anchor = 0.0
+                    if anchor > 0:
+                        price = anchor
                 # 突破卖出：只要有有效突破价就显示节点（数量为 0 时仍显示，避免「节点消失」）
                 show_sell = (
                     price > 0
@@ -9921,6 +10354,7 @@ class StockChartWidget(QWidget):
                         volume > 0
                         or not rule_enabled
                         or rule_type == 'breakthrough_sell'
+                        or rule_type == 'scheduled_clear'
                     )
                 )
                 if show_sell:
@@ -10850,7 +11284,10 @@ class StockChartWidget(QWidget):
                         color = '#000000'
                     elif executed_reason == 'order_failed' or executed_order_id == 'ORDER_FAILED':
                         color = '#555555'  # 下单失败结束：深灰色
-                    elif executed_order_id in ('MIN_BUY_AMOUNT', 'NO_CASH'):
+                    elif (
+                        executed_order_id in ('MIN_BUY_AMOUNT', 'NO_CASH')
+                        or executed_reason == 'no_cash'
+                    ):
                         color = '#555555'  # 资金不足结束：深灰色
                     else:
                         color = '#999999'  # 已执行显示为灰色
@@ -13180,6 +13617,118 @@ class StockChartWidget(QWidget):
             self.night_market_timer.stop()
             self.night_market_timer = None
     
+    def _scheduled_clear_btn_base_style(self) -> str:
+        return """
+                QPushButton {
+                    background-color: #ff9800;
+                    color: white;
+                    padding: 5px 10px;
+                    border: 2px solid #ffb74d;
+                    border-radius: 4px;
+                    font-weight: normal;
+                }
+                QPushButton:checked {
+                    background-color: #f57c00;
+                    border: 4px solid #000000;
+                    padding: 8px 16px;
+                    margin: -2px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover:!checked {
+                    background-color: #ffb74d;
+                    border: 2px solid #ffcc80;
+                }
+            """
+
+    def _scheduled_clear_btn_armed_style(self) -> str:
+        return """
+                QPushButton {
+                    background-color: #9c27b0;
+                    color: white;
+                    padding: 5px 10px;
+                    border: 2px solid #ce93d8;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:checked {
+                    background-color: #7b1fa2;
+                    border: 4px solid #000000;
+                    padding: 8px 16px;
+                    margin: -2px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover:!checked {
+                    background-color: #ab47bc;
+                    border: 2px solid #e1bee7;
+                }
+            """
+
+    def _sync_scheduled_clear_toolbar_from_rules(self, rules=None):
+        """策略生成的无条件清仓也要在工具栏显示时间，避免误以为「未设置」。"""
+        from datetime import time as dt_time
+
+        if not hasattr(self, "scheduled_clear_tool_btn") or self.scheduled_clear_tool_btn is None:
+            return
+        rules = rules or [
+            r
+            for r in (self.rules or [])
+            if (r.get("type") or r.get("rule_type")) == "scheduled_clear"
+            and r.get("enabled", True)
+            and not r.get("scheduled_clear_executed")
+        ]
+        if not rules:
+            self._clear_scheduled_clear_toolbar_indicator()
+            return
+        rule = rules[0]
+        time_str = str(rule.get("scheduled_clear_time") or "14:56:00").strip() or "14:56:00"
+        try:
+            parts = [int(x) for x in time_str.split(":")]
+            while len(parts) < 3:
+                parts.append(0)
+            self.scheduled_clear_time = dt_time(parts[0], parts[1], parts[2])
+        except Exception:
+            pass
+        try:
+            self.scheduled_clear_volume = int(rule.get("volume") or 0)
+        except (TypeError, ValueError):
+            self.scheduled_clear_volume = 0
+        try:
+            self.scheduled_clear_price = float(rule.get("price") or 0)
+        except (TypeError, ValueError):
+            self.scheduled_clear_price = 0.0
+        self.scheduled_clear_enabled = True
+        name = str(rule.get("name") or "定时清仓")
+        force = bool(
+            rule.get("scheduled_clear_force")
+            or rule.get("scheduled_clear_on_hold_day")
+            or self.scheduled_clear_price <= 0
+        )
+        eff = str(rule.get("scheduled_clear_effective_date") or "").strip()[:10]
+        tip_bits = [f"已挂定时清仓：{name}", f"时间: {time_str}"]
+        if force:
+            tip_bits.append("无条件清仓（不看触发价）")
+        elif self.scheduled_clear_price > 0:
+            tip_bits.append(f"触发价: {self.scheduled_clear_price:.2f}元")
+        if self.scheduled_clear_volume > 0:
+            tip_bits.append(f"数量: {self.scheduled_clear_volume}股")
+        if eff:
+            tip_bits.append(f"生效日: {eff}")
+        self.scheduled_clear_tool_btn.setText(f"⏰定时清仓\n{time_str}")
+        self.scheduled_clear_tool_btn.setToolTip("\n".join(tip_bits))
+        self.scheduled_clear_tool_btn.setStyleSheet(self._scheduled_clear_btn_armed_style())
+
+    def _clear_scheduled_clear_toolbar_indicator(self):
+        if not hasattr(self, "scheduled_clear_tool_btn") or self.scheduled_clear_tool_btn is None:
+            return
+        self.scheduled_clear_enabled = False
+        self.scheduled_clear_tool_btn.setText("⏰定时清仓")
+        self.scheduled_clear_tool_btn.setToolTip(
+            "定时清仓：到达指定时间且价格低于指定价格时自动卖出"
+        )
+        self.scheduled_clear_tool_btn.setStyleSheet(self._scheduled_clear_btn_base_style())
+
     def toggle_scheduled_clear(self):
         """切换定时清仓启用状态（进入添加模式，在图表上点击添加节点）"""
         if self.add_mode == 'scheduled_clear':

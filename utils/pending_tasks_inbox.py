@@ -153,13 +153,14 @@ def merge_task_lists(
             old_params = old.get("params") if isinstance(old.get("params"), dict) else {}
             old_rules = list(old_params.get("rules") or [])
             new_rules = list((nt.get("params") or {}).get("rules") or [])
-            merged_rules = _merge_rules(old_rules, new_rules)
+            # 买入等非定时清仓策略：只丢掉本次 incoming 里的清仓，保留同股已有卖出策略的定时清仓
             if drop_clear:
-                merged_rules = [
+                new_rules = [
                     r
-                    for r in merged_rules
+                    for r in new_rules
                     if (r.get("type") or "").strip() != "scheduled_clear"
                 ]
+            merged_rules = _merge_rules(old_rules, new_rules)
             old_params["rules"] = merged_rules
             old["params"] = old_params
             # 用新任务补缺字段（名称/数量等），保留旧 task_id

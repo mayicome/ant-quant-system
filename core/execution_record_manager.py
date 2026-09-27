@@ -25,6 +25,7 @@ PSEUDO_ORDER_SYSIDS = frozenset(
         "NOT_TRUE_BREAKTHROUGH",
         "CANCELLED",
         "PROBE_REMAIN_SKIPPED",
+        "RETRY_NO_CASH",
     }
 )
 
@@ -33,6 +34,8 @@ def is_unique_broker_sysid(sysid) -> bool:
     """真实柜台合同号才可作全局唯一键；哨兵 / PO 占位则否。"""
     s = str(sysid or "").strip()
     if not s or s in PSEUDO_ORDER_SYSIDS:
+        return False
+    if s.startswith("RETRY_NO_CASH"):
         return False
     if s.startswith("PO") and len(s) <= 24:
         return False
@@ -144,6 +147,72 @@ class ExecutionRecordManager:
         except Exception as e:
             self.logger.error(f"添加执行记录失败: {str(e)}", exc_info=True)
             return False
+
+    @staticmethod
+    def _as_full_exec_time(raw) -> str:
+        """解析完整执行时间 YYYY-MM-DD HH:MM:SS；无法解析返回空串。"""
+        s = str(raw or "").strip()
+        if not s:
+            return ""
+        if "T" in s:
+            return s.replace("T", " ")[:19]
+        if len(s) >= 19 and s[4:5] == "-" and " " in s:
+            return s[:19]
+        return ""
+
+    @staticmethod
+    def _as_clock_only(raw) -> str:
+        """解析 HH:MM:SS；完整日期时间或无法解析返回空串。"""
+        s = str(raw or "").strip()
+        if not s or "T" in s or (" " in s and s[4:5] == "-"):
+            return ""
+        if ":" in s:
+            return s[:8] if len(s) >= 8 else s
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if len(digits) >= 6:
+            digits = digits[-6:]
+            return "%s:%s:%s" % (digits[0:2], digits[2:4], digits[4:6])
+        return ""
+
+    @classmethod
+    def _resolve_builtin_exec_time(cls, order_rec: Dict, order_id: str = "") -> str:
+        """执行时间：有真实柜台合同号时优先柜台时间，避免错贴后仍用本地旧 at。"""
+        rec = order_rec or {}
+        at = str(rec.get("at") or "").strip()
+        order_at = str(rec.get("order_at") or "").strip()
+        order_time = str(rec.get("order_time") or "").strip()
+        sysid = str(order_id or rec.get("order_sysid") or "").strip()
+
+        if is_unique_broker_sysid(sysid):
+            full = cls._as_full_exec_time(order_at) or cls._as_full_exec_time(order_time)
+            if full:
+                return full
+            clock = cls._as_clock_only(order_time)
+            if clock:
+                date_part = ""
+                for raw in (order_at, at):
+                    f = cls._as_full_exec_time(raw)
+                    if f:
+                        date_part = f[:10]
+                        break
+                    s = str(raw or "").strip()
+                    if len(s) >= 10 and s[4:5] == "-":
+                        date_part = s[:10]
+                        break
+                if not date_part:
+                    date_part = datetime.now().strftime("%Y-%m-%d")
+                return "%s %s" % (date_part, clock)
+
+        full = (
+            cls._as_full_exec_time(at)
+            or cls._as_full_exec_time(order_at)
+            or cls._as_full_exec_time(order_time)
+        )
+        if full:
+            return full
+        if at:
+            return at[:19]
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
     def builtin_order_dedupe_key(order_rec: Dict, order_id: str = "") -> str:
@@ -258,17 +327,11 @@ class ExecutionRecordManager:
         strategy = str(rec.get("strategy_name") or "").strip()
         rule_name = rn or strategy or rule_type_cn or "内置下单"
 
-        at = str(rec.get("at") or "").strip()
-        if "T" in at:
-            exec_time = at.replace("T", " ")[:19]
-        elif at:
-            exec_time = at[:19]
-        else:
-            exec_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         px = float(rec.get("price") or 0)
         vol = int(rec.get("volume") or 0)
         oid = str(order_id or rec.get("order_sysid") or "").strip()
+        # 有真实柜台合同号时优先 order_time/order_at，避免 no_cash 旧 at 被错贴后显示成上午时间
+        exec_time = self._resolve_builtin_exec_time(rec, oid)
         failed = status == "error" or bst == 57
         if failed and not oid:
             oid = "ORDER_FAILED"

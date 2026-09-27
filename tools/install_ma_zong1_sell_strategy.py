@@ -42,8 +42,9 @@ STRATEGY_CODE = r'''# 卖：马总选股逻辑1
 #   仅改近涨停腿：LU触发价>开盘腿触发价用 gt，否则用 lt；开盘腿仍用 DROP_PERCENT_OPEN
 #   相等回退 drop_percent_when_lu_eq_open 或 DROP_PERCENT_LU / lu_drop_percent
 # 除权日：日线昨收vs行情昨收大幅偏离时跳过近涨停腿（开盘涨幅/清仓仍挂）；print [ex_div_skip_lu]
-# N = params.scheduled_clear_on_sell_day / sell_hold_trading_days / entry_window_trading_days
-#   无条件清仓：锚定买入日次日起第 N 日 14:56；锚定日=末笔买入日（无则首次建仓日）
+# N_ui = entry_window / sell_hold_from_next_day（买入次日=第1日）
+# N_engine = scheduled_clear_on_sell_day / sell_hold_trading_days（含买入日，= N_ui+1）
+#   无条件清仓：锚定买入日次日起第 N_ui 日 14:56；锚定日=末笔买入日（无则首次建仓日）
 
 NAME_OPEN50 = "马总1卖-开盘涨幅弹性半仓"
 NAME_LU10 = "马总1卖-近10日涨停价弹性半仓"
@@ -669,9 +670,13 @@ def run(codes, prices, get_name, account, params):
                         "volume": int(avail),
                     })
 
-        # 第 N 日无条件清仓（N 来自运行交易日数/持有天数）
-        hold_n = None
-        for _hk in ("scheduled_clear_on_sell_day", "sell_hold_trading_days", "entry_window_trading_days"):
+        # 第 N 日无条件清仓：
+        # 界面「运行交易日数」= 买入【次日】起第 N 日；引擎序号含买入日 = N+1。
+        # 优先用已注入的 scheduled_clear_on_sell_day / sell_hold_trading_days（引擎序号）；
+        # 否则把 sell_hold_from_next_day / entry_window_trading_days 当界面 N 再 +1。
+        hold_n = None  # 引擎序号（含买入日）
+        ui_n = None  # 界面持有日（次日起算）
+        for _hk in ("scheduled_clear_on_sell_day", "sell_hold_trading_days"):
             _hv = params.get(_hk)
             if _hv is None or _hv == "":
                 continue
@@ -682,19 +687,74 @@ def run(codes, prices, get_name, account, params):
             if _hn >= 1:
                 hold_n = _hn
                 break
+        if hold_n is None:
+            for _hk in ("sell_hold_from_next_day", "entry_window_trading_days"):
+                _hv = params.get(_hk)
+                if _hv is None or _hv == "":
+                    continue
+                try:
+                    _hn = int(_hv)
+                except (TypeError, ValueError):
+                    continue
+                if _hn >= 1:
+                    ui_n = _hn
+                    hold_n = _hn + 1
+                    break
+        if hold_n is not None and ui_n is None:
+            try:
+                _u = int(params.get("sell_hold_from_next_day") or 0)
+            except (TypeError, ValueError):
+                _u = 0
+            ui_n = _u if _u >= 1 else max(1, int(hold_n) - 1)
         if hold_n is not None and avail >= 100:
-            result.append({
-                "stock_code": c6,
-                "stock_name": name,
-                "rule_type": "scheduled_clear",
-                "name": "马总1卖-第%d日无条件清仓" % int(hold_n),
-                "price": 0.0,
-                "volume": int(avail),
-                "scheduled_clear_time": "14:56:00",
-                "scheduled_clear_force": True,
-                "scheduled_clear_on_hold_day": True,
-                "scheduled_clear_sell_day_index": int(hold_n),
-            })
+            # 仅「今天就是第 N 日」才挂清仓；未到期不提前挂（避免持仓第1天就看到第2日清仓）
+            _day_map = params.get("code_sell_day_index") or {}
+            if not isinstance(_day_map, dict):
+                _day_map = {}
+            try:
+                _di = int(_day_map.get(c6) or _day_map.get(code) or 0)
+            except (TypeError, ValueError):
+                _di = 0
+            if _di == int(hold_n):
+                # 触发价=涨停板-1最小价位：涨停不清，其余价格到点清
+                clear_px = 0.0
+                if limit_up and limit_up > 0:
+                    try:
+                        from core.utils.security_type import SecurityTypeUtil
+                        _tick = float(SecurityTypeUtil.min_price_tick(c6))
+                        _prec = int(SecurityTypeUtil.get_price_precision(c6))
+                    except Exception:
+                        _tick, _prec = 0.01, 2
+                    if _tick <= 0:
+                        _tick = 0.01
+                    clear_px = round(float(limit_up) - _tick, _prec)
+                _nm_n = int(ui_n if ui_n is not None else max(1, int(hold_n) - 1))
+                if clear_px > 0:
+                    result.append({
+                        "stock_code": c6,
+                        "stock_name": name,
+                        "rule_type": "scheduled_clear",
+                        "name": "马总1卖-第%d日涨停外清仓" % _nm_n,
+                        "price": float(clear_px),
+                        "volume": int(avail),
+                        "scheduled_clear_time": "14:56:00",
+                        "scheduled_clear_force": False,
+                        "scheduled_clear_on_hold_day": True,
+                        "scheduled_clear_sell_day_index": int(hold_n),
+                    })
+                else:
+                    result.append({
+                        "stock_code": c6,
+                        "stock_name": name,
+                        "rule_type": "scheduled_clear",
+                        "name": "马总1卖-第%d日无条件清仓" % _nm_n,
+                        "price": 0.0,
+                        "volume": int(avail),
+                        "scheduled_clear_time": "14:56:00",
+                        "scheduled_clear_force": True,
+                        "scheduled_clear_on_hold_day": True,
+                        "scheduled_clear_sell_day_index": int(hold_n),
+                    })
 
     return result
 '''

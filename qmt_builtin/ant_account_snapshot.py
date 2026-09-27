@@ -1221,6 +1221,62 @@ def _parse_order_rows(rows, account_id=""):
     return out
 
 
+# 本地终结态哨兵：从未真实 passorder，禁止把后续柜台成交回填到这些行上
+_LOCAL_SKIP_SYSIDS = frozenset(
+    {
+        "SKIPPED_MIN_BUY",
+        "SKIPPED_BUY_WINDOW",
+        "BAND_HARD_PASS",
+        "ORDER_FAILED",
+        "PO_BUILTIN",
+        "NO_CASH",
+        "MIN_BUY_AMOUNT",
+        "NO_POSITION",
+        "NOT_TRUE_BREAKTHROUGH",
+        "CANCELLED",
+        "PROBE_REMAIN_SKIPPED",
+        "RETRY_NO_CASH",
+    }
+)
+
+
+def _is_unique_broker_sysid(sysid) -> bool:
+    s = str(sysid or "").strip()
+    if not s or s in _LOCAL_SKIP_SYSIDS:
+        return False
+    if s.startswith("RETRY_NO_CASH"):
+        return False
+    if s.startswith("PO") and len(s) <= 24:
+        return False
+    return True
+
+
+def _is_local_skip_order(local) -> bool:
+    """资金不足/最小买入等跳过单：不可与柜台成交按 task_id 错配合并。"""
+    if not isinstance(local, dict):
+        return True
+    if str(local.get("cash_block") or "").strip():
+        return True
+    if bool(local.get("buy_block_window")) or bool(local.get("cash_wait")):
+        return True
+    status = str(local.get("status") or "").strip().lower()
+    if status in ("skipped", "waiting_cash"):
+        return True
+    sysid = str(local.get("order_sysid") or "").strip()
+    if sysid and not _is_unique_broker_sysid(sysid):
+        return True
+    msg = str(local.get("msg") or "").strip().lower()
+    if msg in (
+        "no_cash",
+        "order_below_min",
+        "min_buy_amount",
+        "band_hard_pass",
+        "skipped",
+    ):
+        return True
+    return False
+
+
 def _remark_matches_local(remark, local):
     rem = str(remark or "").strip()
     if not rem:
@@ -1245,6 +1301,9 @@ def _remark_matches_local(remark, local):
 def _match_broker_order(local, broker_orders):
     """用 remark(userOrderId) 优先，其次 代码+方向+价量 对齐本地 passorder 记录。"""
     if not isinstance(local, dict) or not broker_orders:
+        return None
+    # 跳过单从未下到柜台，禁止按 remark/task_id 吞掉后来的真实成交
+    if _is_local_skip_order(local):
         return None
     for bo in broker_orders:
         if _remark_matches_local(bo.get("remark"), local):
@@ -1342,9 +1401,12 @@ def merge_broker_orders_into_results(results, broker_orders):
     for loc in local:
         if not isinstance(loc, dict):
             continue
-        # 已有合同号：用最新柜台快照刷新状态（夜市需等 已报）
+        # 本地跳过/资金不足哨兵：绝不回填柜台成交（否则上午 no_cash 会吞下午合同号）
+        if _is_local_skip_order(loc):
+            continue
+        # 已有真实合同号：用最新柜台快照刷新状态（夜市需等 已报）
         cur_sys = str(loc.get("order_sysid") or "").strip()
-        if cur_sys:
+        if cur_sys and _is_unique_broker_sysid(cur_sys):
             used.add(cur_sys)
             bo = by_sys.get(cur_sys)
             if bo:
@@ -1411,21 +1473,21 @@ def merge_broker_orders_into_results(results, broker_orders):
             if loc.get(k) != val:
                 loc[k] = val
                 changed = True
-        # 柜台缺时间时用本地 passorder 记录时间回填，并写回 broker 行供 UI 展示
-        loc_time = _normalize_order_time(loc.get("order_time") or loc.get("at") or "")
-        if loc_time:
-            if loc.get("order_time") != loc_time:
-                loc["order_time"] = loc_time
+        # 柜台缺时间时用本地 passorder 记录时间回填；有柜台 order_time 时不要用本地旧 at 覆盖
+        broker_ot = _normalize_order_time(bo.get("order_time") or "")
+        if broker_ot:
+            if loc.get("order_time") != broker_ot:
+                loc["order_time"] = broker_ot
                 changed = True
-            if not str(bo.get("order_time") or "").strip():
-                bo["order_time"] = loc_time
-                changed = True
-        elif not str(bo.get("order_time") or "").strip():
-            nt = _normalize_order_time(bo.get("order_time") or "")
-            if nt:
-                bo["order_time"] = nt
-                loc["order_time"] = nt
-                changed = True
+        else:
+            loc_time = _normalize_order_time(loc.get("order_time") or loc.get("at") or "")
+            if loc_time:
+                if loc.get("order_time") != loc_time:
+                    loc["order_time"] = loc_time
+                    changed = True
+                if not str(bo.get("order_time") or "").strip():
+                    bo["order_time"] = loc_time
+                    changed = True
         st = int(bo.get("broker_status") or 255)
         if st == 56:
             internal = "filled"
@@ -1443,6 +1505,7 @@ def merge_broker_orders_into_results(results, broker_orders):
             changed = True
         if internal == "filled" and prev_status != "filled":
             _note_filled_leg_from_local_order(loc)
+
     if changed:
         results["updated_at"] = _now_iso()
     return changed

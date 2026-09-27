@@ -517,6 +517,70 @@ class TasksChartsView(QWidget):
                     hit["executed_volume"] = vol
                     hit.pop("executed_reason", None)
             else:
+                # 等资金模式：没钱 / 等待中不标已执行
+                try:
+                    from ui.stock_chart_widget import StockChartWidget
+
+                    skip_reason_pre = StockChartWidget._builtin_order_skip_reason(
+                        order_rec, order_id
+                    )
+                except Exception:
+                    skip_reason_pre = ""
+                st_pre = str(order_rec.get("status") or "").strip().lower()
+                if bool(hit.get("cash_wait_active")) and (
+                    skip_reason_pre == "no_cash"
+                    or st_pre == "waiting_cash"
+                    or bool(order_rec.get("cash_wait"))
+                ):
+                    return True
+                if bool(hit.get("cash_wait_active")) and not skip_reason_pre:
+                    try:
+                        rem = order_rec.get("remaining_volume")
+                        rem_i = int(rem) if rem is not None else None
+                    except (TypeError, ValueError):
+                        rem_i = None
+                    if rem_i is None:
+                        try:
+                            before = int(
+                                hit.get("remaining_volume")
+                                or hit.get("planned_volume")
+                                or hit.get("volume")
+                                or 0
+                            )
+                        except (TypeError, ValueError):
+                            before = int(vol or 0)
+                        rem_i = max(0, before - int(vol or 0))
+                    got = int(vol or 0)
+                    accum = int(hit.get("filled_volume_accum") or 0) + max(0, got)
+                    hit["filled_volume_accum"] = accum
+                    hit["remaining_volume"] = max(0, rem_i)
+                    if rem_i >= 100:
+                        try:
+                            from utils.position_entry_dates import note_fill_from_order
+
+                            note_fill_from_order(
+                                stock_code=code6 or stock_code,
+                                rule=hit,
+                                order_rec=order_rec,
+                                skip_reason="",
+                            )
+                        except Exception:
+                            pass
+                        if isinstance(params, dict):
+                            task["params"] = params
+                        try:
+                            tm.save_tasks(list(tm.tasks.values()))
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(tm, "_sync_rules_armed_if_builtin"):
+                                tm._sync_rules_armed_if_builtin()
+                        except Exception:
+                            pass
+                        return True
+                    hit["cash_wait_active"] = False
+                    vol = accum if accum > 0 else vol
+
                 hit["executed"] = True
                 hit["executed_time"] = exec_time.strftime("%Y-%m-%d %H:%M:%S")
                 hit["executed_price"] = px
@@ -526,19 +590,24 @@ class TasksChartsView(QWidget):
                 try:
                     from ui.stock_chart_widget import StockChartWidget
 
-                    skip_reason = StockChartWidget._builtin_order_skip_reason(
+                    skip_reason = skip_reason_pre or StockChartWidget._builtin_order_skip_reason(
                         order_rec, hit.get("order_id")
                     )
                 except Exception:
-                    skip_reason = ""
+                    skip_reason = skip_reason_pre
                 if skip_reason:
                     hit["executed_reason"] = skip_reason
                     if skip_reason == "buy_block_window":
                         hit["order_id"] = "SKIPPED_BUY_WINDOW"
                     elif skip_reason == "order_below_min":
                         hit["order_id"] = "SKIPPED_MIN_BUY"
+                    elif skip_reason == "no_cash":
+                        hit["order_id"] = "NO_CASH"
+                        hit["executed_volume"] = 0
                 else:
                     hit.pop("executed_reason", None)
+                    if bool(hit.get("cash_wait_active")):
+                        hit["cash_wait_active"] = False
                 try:
                     from ui.stock_chart_widget import StockChartWidget
 

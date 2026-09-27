@@ -678,6 +678,9 @@ class BuiltinPricePoller(QObject):
             )
             if not ordered:
                 continue
+            # 等资金等待态：不写执行记录
+            if status == "waiting_cash" or bool(loc.get("cash_wait")):
+                continue
             # 提前挂单不写执行记录；确认/撤销另记
             # 例外：本笔金额低于下限已终结
             if str(loc.get("event_type") or "") == "early_place" and status != "filled":
@@ -717,6 +720,9 @@ class BuiltinPricePoller(QObject):
             )
             if not ordered:
                 continue
+            # 等资金等待态：不下单记录，不回写已执行
+            if status == "waiting_cash" or bool(loc.get("cash_wait")):
+                continue
             # 提前挂单不标已执行；确认或提前单成交才回写
             # 例外：本笔金额低于最小买入已终结（SKIPPED_MIN_BUY）
             ev = str(loc.get("event_type") or "")
@@ -737,10 +743,16 @@ class BuiltinPricePoller(QObject):
                 if bst not in (50, 51, 52, 55, 56) and status != "filled":
                     continue
             # 网格必须按点位去重，否则 g0 回写后会挡住 g1/g2…
-            mark_key = "chart|%s" % tid
+            # 同一 task 多次尝试（资金不足后再执行）须按订单身份区分，不能只用 tid
+            # （否则重开后的实盘单会被上午的 seen 键挡住，节点一直红）
+            mark_key = "chart|%s|%s" % (tid, self._order_identity(loc))
             if loc.get("grid_index") is not None:
                 try:
-                    mark_key = "chart|%s|g%d" % (tid, int(loc.get("grid_index")))
+                    mark_key = "chart|%s|g%d|%s" % (
+                        tid,
+                        int(loc.get("grid_index")),
+                        self._order_identity(loc),
+                    )
                 except (TypeError, ValueError):
                     pass
             if mark_key in self._seen_order_keys:

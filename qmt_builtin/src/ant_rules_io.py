@@ -170,6 +170,14 @@ def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
         out["fill_at_limit_up"] = bool(raw.get("fill_at_limit_up"))
     if "open_buy_ask" in raw:
         out["open_buy_ask"] = bool(raw.get("open_buy_ask"))
+    if raw.get("cash_wait_active"):
+        out["cash_wait_active"] = True
+        try:
+            rem = int(raw.get("remaining_volume"))
+            if rem > 0:
+                out["remaining_volume"] = rem
+        except (TypeError, ValueError):
+            pass
     # 已执行分支：腿键随武装任务下发
     meta = out.get("metadata") if isinstance(out.get("metadata"), dict) else {}
     lk = str(raw.get("leg_key") or meta.get("leg_key") or "").strip()
