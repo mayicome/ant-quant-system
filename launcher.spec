@@ -38,7 +38,7 @@ for c in resource_candidates:
 
 a = Analysis(
     ['launcher.py'],
-    pathex=[],
+    pathex=[_spec_dir],
     binaries=[],
     datas=datas,
     hiddenimports=[],

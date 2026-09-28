@@ -1725,7 +1725,11 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("蚂蚁量化策略生成系统")
+        try:
+            from utils.product_version import window_title as _product_window_title
+            self.setWindowTitle(_product_window_title("蚂蚁量化策略生成系统"))
+        except Exception:
+            self.setWindowTitle("蚂蚁量化策略生成系统")
 
         # 尽量与现有系统风格统一：图标共用 ant.ico（若存在）
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -3055,18 +3059,46 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_list.setHorizontalHeaderLabels(labels)
 
     def _pool_hold_progress(
-        self, code_6: str, entry_map: Dict[str, str], hold_n: int
+        self,
+        code_6: str,
+        entry_map: Dict[str, str],
+        hold_n: int,
+        *,
+        anchor_map: Optional[Dict[str, str]] = None,
     ) -> Tuple[str, str, str]:
-        """卖出持有进度：买入次日=第1日（与官方 --sell-hold 同口径）。返回 (建仓日, 进度, 窗口)。"""
-        raw = entry_map.get(code_6) or ""
-        ent_s = str(raw or "").strip()[:10]
+        """卖出持有进度。
+
+        - 分子：自「首次建仓日的次一交易日」起至今天的卖出交易日数
+          （例：9-23 建仓 → 9-24 起算，当天上午为 1/…）
+        - 分母：同上起点至「计划清仓日」的卖出交易日数；
+          清仓日按末笔买入日次日起第 N 日（末笔加仓会拉长分母）
+          （例：9-24 再买 → 清仓 9-29，全程 9-24/9-28/9-29 → 今天 2/3）
+
+        返回 (建仓日展示, 进度, 窗口)。
+        """
+        ent_s = str((entry_map or {}).get(code_6) or "").strip()[:10]
         if len(ent_s) < 10:
             return ("", "—", "无建仓日")
-        ent_d = self._parse_iso_date_val(ent_s) if hasattr(self, "_parse_iso_date_val") else None
-        if ent_d is None:
-            ent_d = _parse_cell_to_date(ent_s)
-        if ent_d is None:
+        entry_d = (
+            self._parse_iso_date_val(ent_s)
+            if hasattr(self, "_parse_iso_date_val")
+            else None
+        )
+        if entry_d is None:
+            entry_d = _parse_cell_to_date(ent_s)
+        if entry_d is None:
             return (ent_s, "—", "建仓日无效")
+
+        amap = anchor_map if anchor_map is not None else entry_map
+        raw_last = str((amap or {}).get(code_6) or ent_s or "").strip()[:10]
+        last_d = (
+            self._parse_iso_date_val(raw_last)
+            if hasattr(self, "_parse_iso_date_val")
+            else None
+        )
+        if last_d is None:
+            last_d = _parse_cell_to_date(raw_last) or entry_d
+
         try:
             from trading_calendar import (
                 first_trading_day_on_or_after,
@@ -3075,23 +3107,50 @@ class StrategyGeneratorMainWindow(QMainWindow):
             )
         except Exception:
             return (ent_s, "—", "无交易日历")
-        buy_td = first_trading_day_on_or_after(ent_d)
-        if buy_td is None:
+
+        entry_td = first_trading_day_on_or_after(entry_d)
+        if entry_td is None:
             return (ent_s, "—", "无开窗日")
-        sell_start = next_trading_day_after(buy_td)
+        sell_start = next_trading_day_after(entry_td)
         if sell_start is None:
             return (ent_s, "—", "无卖出起日")
-        today = date.today()
+
         hn = max(1, int(hold_n or 1))
+        last_td = first_trading_day_on_or_after(last_d) or entry_td
+        # 末笔买入次日起第 N 日清仓 ≡ 含买入日起第 N+1 个交易日
+        clear_d = None
+        try:
+            from task_builder import _nth_trading_day_from_buy
+
+            clear_d = _nth_trading_day_from_buy(last_td, hn + 1)
+        except Exception:
+            clear_d = None
+        if clear_d is None:
+            d0 = next_trading_day_after(last_td)
+            if d0 is not None:
+                span2 = get_trading_dates_in_range_sorted(
+                    d0, d0 + timedelta(days=400)
+                ) or []
+                if len(span2) >= hn:
+                    clear_d = span2[hn - 1]
+        if clear_d is None:
+            clear_d = sell_start
+
+        today = date.today()
+        denom_days = get_trading_dates_in_range_sorted(sell_start, clear_d) or []
+        denom = len(denom_days) if denom_days else hn
+        if denom < 1:
+            denom = hn
+
         if today < sell_start:
-            return (ent_s, f"0/{hn}", "买入日/未开卖")
-        days = get_trading_dates_in_range_sorted(sell_start, today) or []
-        idx = len(days)
+            return (ent_s, f"0/{denom}", "买入日/未开卖")
+        num_days = get_trading_dates_in_range_sorted(sell_start, today) or []
+        idx = len(num_days)
         if idx < 1:
-            return (ent_s, f"0/{hn}", "未开卖")
-        if idx > hn:
-            return (ent_s, f"{hn}/{hn}", "已结束")
-        return (ent_s, f"{idx}/{hn}", "进行中")
+            return (ent_s, f"0/{denom}", "未开卖")
+        if today > clear_d or idx > denom:
+            return (ent_s, f"{denom}/{denom}", "已结束")
+        return (ent_s, f"{idx}/{denom}", "进行中")
 
     def _prompt_missing_entry_dates(self, codes: List[str]) -> int:
         """弹窗为缺失建仓日的持仓补日期；返回新写入只数。"""
@@ -3304,6 +3363,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         name_fn=None,
         progress_cache: Optional[Dict[str, Tuple[str, str]]] = None,
         sell_mode: bool = False,
+        hold_anchor_map: Optional[Dict[str, str]] = None,
     ) -> None:
         code_6 = _normalize_code(code)
         if not code_6:
@@ -3315,9 +3375,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
             if sel_map is None:
                 if sell_mode:
                     try:
-                        from utils.position_entry_dates import load_all
+                        from utils.position_entry_dates import load_all, load_last_buy_all
 
                         sel_map = dict(load_all(self._project_root()) or {})
+                        if hold_anchor_map is None:
+                            hold_anchor_map = dict(
+                                load_last_buy_all(self._project_root()) or {}
+                            )
                     except Exception:
                         sel_map = {}
                 else:
@@ -3338,14 +3402,18 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
         raw_sel = (sel_map or {}).get(code_6) or ""
         sel_key = str(raw_sel or "").strip()[:10]
-        cache_key = ("S:" if sell_mode else "B:") + sel_key
+        anchor_key = str((hold_anchor_map or {}).get(code_6) or sel_key or "").strip()[:10]
+        cache_key = ("S:" if sell_mode else "B:") + sel_key + "|" + anchor_key
         if progress_cache is not None and sel_key and cache_key in progress_cache:
             prog, win = progress_cache[cache_key]
             sel_s = sel_key
         else:
             if sell_mode:
                 sel_s, prog, win = self._pool_hold_progress(
-                    code_6, sel_map or {}, int(entry_window or 1)
+                    code_6,
+                    sel_map or {},
+                    int(entry_window or 1),
+                    anchor_map=hold_anchor_map,
                 )
             else:
                 sel_s, prog, win = self._pool_entry_progress(
@@ -3411,13 +3479,16 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sp = (cfg.strategy_params if cfg else None) or {}
         sell_mode = self._current_strategy_is_sell_pool()
         sel_map: Dict[str, str] = {}
+        hold_anchor_map: Dict[str, str] = {}
         if sell_mode:
             try:
-                from utils.position_entry_dates import load_all
+                from utils.position_entry_dates import load_all, load_last_buy_all
 
                 sel_map = dict(load_all(self._project_root()) or {})
+                hold_anchor_map = dict(load_last_buy_all(self._project_root()) or {})
             except Exception:
                 sel_map = {}
+                hold_anchor_map = {}
         else:
             raw_map = sp.get("selection_date_by_code") or {}
             if isinstance(raw_map, dict):
@@ -3452,6 +3523,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     name_fn=name_fn,
                     progress_cache=progress_cache,
                     sell_mode=sell_mode,
+                    hold_anchor_map=hold_anchor_map if sell_mode else None,
                 )
         finally:
             t.setUpdatesEnabled(True)
@@ -9060,13 +9132,16 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sp = (cfg.strategy_params if cfg else None) or {}
         sell_mode = self._current_strategy_is_sell_pool()
         sel_map: Dict[str, str] = {}
+        hold_anchor_map: Dict[str, str] = {}
         if sell_mode:
             try:
-                from utils.position_entry_dates import load_all
+                from utils.position_entry_dates import load_all, load_last_buy_all
 
                 sel_map = dict(load_all(self._project_root()) or {})
+                hold_anchor_map = dict(load_last_buy_all(self._project_root()) or {})
             except Exception:
                 sel_map = {}
+                hold_anchor_map = {}
         else:
             raw_map = sp.get("selection_date_by_code") or {}
             if isinstance(raw_map, dict):
@@ -9083,7 +9158,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
         removed: List[str] = []
         for c6 in codes:
             if sell_mode:
-                _sel, _prog, win = self._pool_hold_progress(c6, sel_map, entry_window)
+                _sel, _prog, win = self._pool_hold_progress(
+                    c6, sel_map, entry_window, anchor_map=hold_anchor_map
+                )
             else:
                 _sel, _prog, win = self._pool_entry_progress(c6, sel_map, entry_window)
             if win == "已结束":

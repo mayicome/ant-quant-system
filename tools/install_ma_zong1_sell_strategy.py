@@ -5,7 +5,7 @@
 开盘涨幅腿：每日相对昨收达标则按「总仓位」卖约 50%（OPEN50，每日可触发；触发价=昨收×(1+阈值)）。
 LU10：按「总仓位」卖约 50%；整段持仓期只触发一次。
 清仓：主板/非主板均可配「相对昨收涨幅 + 回落%%」。
-主板默认 CLEAR_GAIN_MAIN=0.10 且 DROP_PERCENT_CLEAR_MAIN=0 → 规则名「涨停即清仓」（触达即卖）。
+主板默认 CLEAR_GAIN_MAIN=0.10 且 DROP_PERCENT_CLEAR_MAIN=0 → 规则名「涨停即清仓」，用单点卖出（现价≥涨停即卖）。
 非主板默认 CLEAR_GAIN_GROWTH=0.13、DROP_PERCENT_CLEAR_GROWTH=1.5。
 除权日：近涨停腿跳过（历史涨停价未复权失真）；开盘涨幅/清仓仍挂。
 两腿独立；同轮都挂则半仓+取整零头并入一腿；只挂一腿则半仓后若剩余不够一手或不够最小单笔金额则并入。
@@ -36,7 +36,7 @@ STRATEGY_CODE = r'''# 卖：马总选股逻辑1
 #   params.open_drop_percent / lu_drop_percent / clear_drop_percent_main / clear_drop_percent 可覆盖
 # 开盘涨幅阈值：下方 OPEN_GAIN_MAIN / OPEN_GAIN_GROWTH；params.open_gain_main / open_gain_growth 可覆盖
 # 清仓涨幅：下方 CLEAR_GAIN_MAIN / CLEAR_GAIN_GROWTH；params.clear_gain_main / clear_gain_growth 可覆盖
-#   主板：CLEAR_GAIN_MAIN=0.10 且 DROP_PERCENT_CLEAR_MAIN=0 → 规则名「涨停即清仓」（触达即卖）
+#   主板：CLEAR_GAIN_MAIN=0.10 且 DROP_PERCENT_CLEAR_MAIN=0 →「涨停即清仓」用 single_sell（现价≥涨停即卖）
 #   其它主板组合 →「马总1卖-主板涨幅弹性清仓」（先触达再按回落%%卖）
 # 近涨停分档（可选）：drop_percent_when_lu_gt_open / drop_percent_when_lu_lt_open
 #   仅改近涨停腿：LU触发价>开盘腿触发价用 gt，否则用 lt；开盘腿仍用 DROP_PERCENT_OPEN
@@ -55,7 +55,7 @@ NAME_CLEAR_GROWTH = "马总1卖-非主板涨幅弹性清仓"
 # 回落比例%%（缺省）；改这里即可分腿调弹性；params 同名键可覆盖
 DROP_PERCENT_OPEN = 1.5          # 开盘涨幅弹性半仓
 DROP_PERCENT_LU = 1.5            # 近10日涨停价弹性半仓
-DROP_PERCENT_CLEAR_MAIN = 0.0    # 主板清仓回落；与 CLEAR_GAIN_MAIN=0.10 搭配表示涨停即清
+DROP_PERCENT_CLEAR_MAIN = 0.0    # 主板清仓回落；与 CLEAR_GAIN_MAIN=0.10 搭配 → 涨停即清（单点卖）
 DROP_PERCENT_CLEAR_GROWTH = 1.5  # 非主板涨幅弹性清仓
 
 # 开盘涨幅阈值（相对昨收，小数）；改这里即可；params 同名键可覆盖
@@ -63,7 +63,7 @@ OPEN_GAIN_MAIN = 0.05    # 主板
 OPEN_GAIN_GROWTH = 0.08  # 非主板（创业/科创/北交等）
 
 # 清仓：相对昨收涨幅（小数）；改这里即可；params.clear_gain_main / clear_gain_growth 可覆盖
-CLEAR_GAIN_MAIN = 0.10     # 主板默认 10%（配合回落 0 → 涨停即清）
+CLEAR_GAIN_MAIN = 0.10     # 主板默认 10%（配合回落 0 → 涨停即清·单点卖）
 CLEAR_GAIN_GROWTH = 0.13   # 非主板默认 13%
 
 def run(codes, prices, get_name, account, params):
@@ -629,7 +629,7 @@ def run(codes, prices, get_name, account, params):
             })
 
         # 清仓：主板/非主板均可配相对昨收涨幅 + 回落%%
-        # 主板 10%+回落0 →「涨停即清仓」（触达即卖）；其它 →「主板涨幅弹性清仓」
+        # 主板 10%+回落0 →「涨停即清仓」用单点卖（现价≥涨停即卖）；其它 →「主板涨幅弹性清仓」
         if avail >= 100 and prev_close > 0:
             if _is_growth_board(c6):
                 if thr_clear_growth > 0:
@@ -655,20 +655,30 @@ def run(codes, prices, get_name, account, params):
                     limit_up,
                 )
                 if clear_trig > 0:
-                    # 10% + 回落0：沿用「涨停即清仓」规则名（回测/第N日过滤认此名）
+                    # 10% + 回落0：单点卖「涨停即清仓」（与回测触达即卖一致）
                     _lu_imm = (
                         abs(float(thr_clear_main) - 0.10) < 1e-9
                         and float(clear_drop_main_pct) <= 1e-12
                     )
-                    result.append({
-                        "stock_code": c6,
-                        "stock_name": name,
-                        "rule_type": "best_sell",
-                        "name": NAME_CLEAR_LU if _lu_imm else NAME_CLEAR_MAIN,
-                        "trigger_price": float(clear_trig),
-                        "drop_percent": 0.0 if _lu_imm else float(clear_drop_main_pct),
-                        "volume": int(avail),
-                    })
+                    if _lu_imm:
+                        result.append({
+                            "stock_code": c6,
+                            "stock_name": name,
+                            "rule_type": "single_sell",
+                            "name": NAME_CLEAR_LU,
+                            "price": float(clear_trig),
+                            "volume": int(avail),
+                        })
+                    else:
+                        result.append({
+                            "stock_code": c6,
+                            "stock_name": name,
+                            "rule_type": "best_sell",
+                            "name": NAME_CLEAR_MAIN,
+                            "trigger_price": float(clear_trig),
+                            "drop_percent": float(clear_drop_main_pct),
+                            "volume": int(avail),
+                        })
 
         # 第 N 日无条件清仓：
         # 界面「运行交易日数」= 买入【次日】起第 N 日；引擎序号含买入日 = N+1。

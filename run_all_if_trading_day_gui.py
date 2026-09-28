@@ -26,9 +26,11 @@ from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QCheckBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -63,6 +65,71 @@ STATUS_SKIP = "跳过"
 STATUS_RETRY = "重试中"
 
 COL_CHECK, COL_NAME, COL_READY, COL_FINISHED, COL_STATUS, COL_DETAIL = range(6)
+
+_DEFAULT_POST_MARKET_BAT = r"D:\run_all_if_trading_day.bat"
+
+
+def _launcher_settings_path() -> str:
+    return os.path.join(ROOT, "data", "launcher_settings.json")
+
+
+def _load_launcher_settings() -> dict:
+    path = _launcher_settings_path()
+    data = {
+        "post_market_bat": _DEFAULT_POST_MARKET_BAT,
+        "post_market_watch_date": "",
+        "auto_update_check_on_start": True,
+        "update_mirrors": [],
+    }
+    if not os.path.isfile(path):
+        return data
+    try:
+        import json
+
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return data
+    if isinstance(raw, dict):
+        bat = str(raw.get("post_market_bat") or "").strip()
+        if bat:
+            data["post_market_bat"] = bat
+        data["post_market_watch_date"] = str(raw.get("post_market_watch_date") or "").strip()
+        if "auto_update_check_on_start" in raw:
+            data["auto_update_check_on_start"] = bool(raw.get("auto_update_check_on_start"))
+        mirrors = raw.get("update_mirrors")
+        if isinstance(mirrors, list):
+            data["update_mirrors"] = [str(x).strip() for x in mirrors if str(x).strip()]
+        # 保留其它未知键，保存时合并回去
+        data["_raw"] = raw
+    return data
+
+
+def _save_post_market_bat(bat_path: str, prev: Optional[dict] = None) -> None:
+    import json
+
+    path = _launcher_settings_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {}
+    if isinstance(prev, dict):
+        raw = prev.get("_raw") if isinstance(prev.get("_raw"), dict) else prev
+        if isinstance(raw, dict):
+            payload.update(raw)
+    for k in ("post_market_bat", "post_market_watch_date", "auto_update_check_on_start", "update_mirrors"):
+        if k in (prev or {}) and k not in payload:
+            payload[k] = prev[k]
+    if not payload and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                old = json.load(f)
+            if isinstance(old, dict):
+                payload.update(old)
+        except Exception:
+            pass
+    payload["post_market_bat"] = str(bat_path or "").strip()
+    payload.pop("_raw", None)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 class Worker(QThread):
@@ -216,6 +283,40 @@ class PostMarketWindow(QMainWindow):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # 启动器 17:31 补启动用的 bat 路径（写到 data/launcher_settings.json）
+        bat_box = QVBoxLayout()
+        bat_title = QLabel("启动器盘后补启动（bat）")
+        bat_title.setStyleSheet("font-weight: bold; color: #333;")
+        bat_box.addWidget(bat_title)
+        bat_row = QHBoxLayout()
+        bat_row.setSpacing(8)
+        bat_lbl = QLabel("盘后bat")
+        self.bat_path_edit = QLineEdit()
+        self._launcher_settings = _load_launcher_settings()
+        self.bat_path_edit.setText(
+            str(self._launcher_settings.get("post_market_bat") or "")
+        )
+        self.bat_path_edit.setPlaceholderText(r"例如 D:\run_all_if_trading_day.bat")
+        self.bat_path_edit.setToolTip(
+            "启动器每天 17:31 若这个 bat 还没在跑，就启动它。\n"
+            "路径保存在 data/launcher_settings.json，各台电脑可以不同。"
+        )
+        self.bat_path_edit.editingFinished.connect(self._on_bat_path_edited)
+        bat_browse = QPushButton("浏览")
+        bat_browse.setFixedWidth(64)
+        bat_browse.clicked.connect(self._browse_post_market_bat)
+        bat_row.addWidget(bat_lbl)
+        bat_row.addWidget(self.bat_path_edit, 1)
+        bat_row.addWidget(bat_browse)
+        bat_box.addLayout(bat_row)
+        self.bat_hint = QLabel(
+            "说明：启动器开着时才会在 17:31 按此路径补启动；关掉启动器则不会。"
+        )
+        self.bat_hint.setStyleSheet("color: #666666;")
+        self.bat_hint.setWordWrap(True)
+        bat_box.addWidget(self.bat_hint)
+        layout.addLayout(bat_box)
+
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumHeight(180)
@@ -224,6 +325,33 @@ class PostMarketWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self._fill_table_rows()
         self._update_header()
+
+    def _on_bat_path_edited(self) -> None:
+        path = str(self.bat_path_edit.text() or "").strip()
+        cur = str(self._launcher_settings.get("post_market_bat") or "")
+        if path == cur:
+            return
+        try:
+            _save_post_market_bat(path, self._launcher_settings)
+            self._launcher_settings = _load_launcher_settings()
+            self.bat_hint.setText(f"已保存盘后 bat：{path or '（空）'}")
+            self._append_log(f"已保存启动器盘后 bat：{path or '（空）'}")
+        except Exception as e:
+            QMessageBox.warning(self, "盘后bat", f"保存失败：{e}")
+
+    def _browse_post_market_bat(self) -> None:
+        current = str(self.bat_path_edit.text() or "").strip()
+        start_dir = os.path.dirname(current) if current else "D:\\"
+        picked, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择盘后批跑 bat",
+            start_dir,
+            "批处理 (*.bat);;所有文件 (*.*)",
+        )
+        if not picked:
+            return
+        self.bat_path_edit.setText(picked)
+        self._on_bat_path_edited()
 
     def _update_header(self) -> None:
         mode = "定时自动" if self.scheduled else "手动补跑"

@@ -3122,8 +3122,12 @@ class SectorStockFilterDialog(QDialog):
         self._auto_run_finished = False
         self._auto_run_pending = bool(auto_run)
         self._auto_run_retry_count = 0
-        # 统一命名风格：蚂蚁量化选股系统
-        self.setWindowTitle("蚂蚁量化选股系统")
+        # 统一命名风格：蚂蚁量化选股系统（版本与启动器一致）
+        try:
+            from utils.product_version import window_title as _product_window_title
+            self.setWindowTitle(_product_window_title("蚂蚁量化选股系统"))
+        except Exception:
+            self.setWindowTitle("蚂蚁量化选股系统")
         # 使用与主程序和策略生成器相同的图标 ant.ico（若存在）
         root_dir = os.path.dirname(os.path.abspath(__file__))
         icon_path = os.path.join(root_dir, "ant.ico")

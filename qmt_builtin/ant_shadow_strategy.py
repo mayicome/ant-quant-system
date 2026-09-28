@@ -1,5 +1,4 @@
 #coding:gbk
-# -*- coding: utf-8 -*-
 """Shadow 联调：tick 驱动，读 rules_armed.json，写 results.json。"""
 import os
 import sys

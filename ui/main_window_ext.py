@@ -127,6 +127,12 @@ class MainWindowExt(Ui_mainWindow):
     def setup_ui(self, window):
         """初始化UI"""
         super().setupUi(window)
+
+        try:
+            from utils.product_version import window_title as _product_window_title
+            window.setWindowTitle(_product_window_title("蚂蚁量化交易系统"))
+        except Exception:
+            window.setWindowTitle("蚂蚁量化交易系统")
         
         # 设置窗口字体
         font = window.font()
@@ -323,24 +329,10 @@ class MainWindowExt(Ui_mainWindow):
             }
         """)
         
-        # 在状态栏永久显示版本信息（双击可查看详情）
-        from PyQt5.QtWidgets import QLabel
+        # 确保状态栏可见（版本号已在窗口标题显示，不再占右下角）
+        from PyQt5.QtWidgets import QLabel, QPushButton
+        from PyQt5.QtGui import QIcon
         from PyQt5.QtCore import Qt
-        class VersionLabel(QLabel):
-            def __init__(self, parent, main_window_ext):
-                super().__init__(parent)
-                self.main_window_ext = main_window_ext
-                self.setText("蚂蚁量化交易系统")
-                self.setStyleSheet("color: #2E86AB; font-weight: bold; padding: 0 10px;")
-                self.setToolTip("双击查看版本号")
-                self.setCursor(Qt.PointingHandCursor)
-            
-            def mouseDoubleClickEvent(self, event):
-                if self.main_window_ext:
-                    self.main_window_ext.show_version_dialog()
-                super().mouseDoubleClickEvent(event)
-        
-        # 确保状态栏可见
         self.statusBar.setVisible(True)
 
         # 布局基准（复盘 / 次日准备）
@@ -351,10 +343,7 @@ class MainWindowExt(Ui_mainWindow):
         )
         self._layout_basis_phase = None
         
-        # 添加音效开关按钮（先添加，这样会在版本标签左边）
-        from PyQt5.QtWidgets import QPushButton
-        from PyQt5.QtGui import QIcon
-        from PyQt5.QtCore import Qt
+        # 添加音效开关按钮
         
         # 加载音效设置
         self._load_sound_settings()
@@ -426,9 +415,6 @@ class MainWindowExt(Ui_mainWindow):
         self.statusBar.addPermanentWidget(self.schedule_reload_status)
         self.statusBar.addPermanentWidget(self.settings_btn)
         self.statusBar.addPermanentWidget(self.sound_btn)
-        
-        version_label = VersionLabel(window, self)
-        self.statusBar.addPermanentWidget(version_label)
         
         # 创建定时器用于更新状态栏
         self.status_timer = QTimer()
@@ -5231,11 +5217,6 @@ class MainWindowExt(Ui_mainWindow):
             except Exception as e2:
                 self.logger.warning(f"播放音效失败: {str(e2)}")
     
-    def show_version_dialog(self):
-        """显示版本号"""
-        QMessageBox.information(self.window, "版本信息", "版本号：V4.2")
-
-
     def on_column_resized(self, logicalIndex, oldSize, newSize):
         """处理列宽改变事件，确保状态列和操作列保持固定宽度"""
         try:

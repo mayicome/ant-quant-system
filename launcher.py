@@ -24,16 +24,119 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QScrollArea,
     QMessageBox,
-    QLineEdit,
-    QFileDialog,
+    QProgressDialog,
 )
-from PyQt5.QtCore import Qt, QSize, QTimer
+from PyQt5.QtCore import Qt, QSize, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon
+
+# 项目根：exe 旁 / 源码旁。更新模块始终从磁盘加载，便于 git pull 生效且不依赖打进包。
+_BOOT_ROOT = (
+    os.path.dirname(sys.executable)
+    if getattr(sys, "frozen", False)
+    else os.path.dirname(os.path.abspath(__file__))
+)
+if _BOOT_ROOT and _BOOT_ROOT not in sys.path:
+    sys.path.insert(0, _BOOT_ROOT)
+
+
+def _load_py_from_disk(rel_path: str, module_name: str):
+    """从项目根加载 .py（打包 exe 也读磁盘，便于 git pull 生效）。"""
+    import importlib.util
+    import sys as _sys
+
+    path = os.path.join(_BOOT_ROOT, *rel_path.replace("\\", "/").split("/"))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"找不到模块文件：{path}")
+    existing = _sys.modules.get(module_name)
+    if existing is not None and getattr(existing, "__file__", None) == path:
+        return existing
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载模块：{path}")
+    mod = importlib.util.module_from_spec(spec)
+    # dataclass 等依赖 sys.modules[模块名]，必须在 exec_module 前注册
+    _sys.modules[module_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_repo_updater():
+    """从项目根 utils/repo_updater.py 加载（打包 exe 也读磁盘文件）。"""
+    return _load_py_from_disk("utils/repo_updater.py", "ant_repo_updater")
+
+
+def _display_version() -> str:
+    try:
+        mod = _load_py_from_disk("utils/product_version.py", "ant_product_version")
+        return str(mod.display_version())
+    except Exception:
+        return ""
+
+
+def _version_hint() -> str:
+    ver = _display_version()
+    return f"当前版本：{ver}" if ver else ""
 
 
 # 定时任务一般在 17:30 拉起盘后 bat；启动器晚一分钟看它有没有起来。
 _POST_MARKET_WATCH_AT = dt_time(17, 31)
 _DEFAULT_POST_MARKET_BAT = r"D:\run_all_if_trading_day.bat"
+
+_DEFAULT_UPDATE_MIRRORS = [
+    "https://gitclone.com/{github_path}",
+    "https://ghproxy.net/https://{github_path}",
+    "https://mirror.ghproxy.com/https://{github_path}",
+    "https://ghfast.top/https://{github_path}",
+]
+
+
+class _UpdateWorker(QThread):
+    """后台检查 / 应用仓库更新，避免卡住启动器界面。"""
+
+    finished_ok = pyqtSignal(object)  # UpdateCheckResult
+
+    def __init__(self, root: str, mirrors: list, *, apply: bool = False, parent=None):
+        super().__init__(parent)
+        self.root = root
+        self.mirrors = list(mirrors or [])
+        self.apply = bool(apply)
+
+    def run(self) -> None:
+        try:
+            ru = _load_repo_updater()
+            if self.isInterruptionRequested():
+                self.finished_ok.emit(
+                    ru.UpdateCheckResult(False, "更新已取消。", repo_root=self.root)
+                )
+                return
+            if self.apply:
+                result = ru.apply_fast_forward_update(
+                    self.root, mirror_templates=self.mirrors
+                )
+            else:
+                result = ru.check_for_updates(self.root, mirror_templates=self.mirrors)
+        except Exception as e:
+            try:
+                ru = _load_repo_updater()
+                result = ru.UpdateCheckResult(
+                    False, f"更新检查异常：{e}", repo_root=self.root
+                )
+            except Exception:
+                result = type(
+                    "R",
+                    (),
+                    {
+                        "ok": False,
+                        "message": f"更新检查异常：{e}",
+                        "behind": 0,
+                        "dirty": False,
+                        "can_update": False,
+                        "updated": False,
+                        "fetch_url": "",
+                    },
+                )()
+        if not self.isInterruptionRequested():
+            self.finished_ok.emit(result)
 
 
 class AntLauncherWindow(QMainWindow):
@@ -42,11 +145,19 @@ class AntLauncherWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.setWindowTitle("蚂蚁量化系统启动器")
+        ver = _display_version()
+        self.setWindowTitle(
+            f"蚂蚁量化系统启动器 {ver}".strip()
+            if ver
+            else "蚂蚁量化系统启动器"
+        )
         self._post_market_settings = self._load_post_market_settings()
+        self._update_worker = None
         self._setup_icon()
         self._setup_ui()
         self._arm_post_market_watch()
+        if self._post_market_settings.get("auto_update_check_on_start", True):
+            QTimer.singleShot(1800, lambda: self._start_update_check(silent_if_latest=True))
 
     def _get_apps_config_path(self) -> str:
         root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -141,69 +252,49 @@ class AntLauncherWindow(QMainWindow):
                 "enabled": True,
             },
             {
-                "id": "ma10_regime_monitor",
-                "name": "MA10风格切换监控",
-                "script": "ma10_regime_monitor_gui.py",
-                "category": "tool",
-                "description": "马总 MA10 近三个月风格切换与回测监控",
-                "order": 60,
-                "enabled": True,
-            },
-            {
-                "id": "zt12_strict_bull_monitor",
-                "name": "严多头策略监控",
-                "script": "zt12_strict_bull_monitor_gui.py",
-                "category": "tool",
-                "description": "涨停后1–2天严多头：真突破/不看真突破叠画对比",
-                "order": 61,
-                "enabled": True,
-            },
-            {
-                "id": "em_hot_clip_monitor",
-                "name": "东财热门夹档监控",
-                "script": "em_hot_clip_monitor_gui.py",
-                "category": "tool",
-                "description": "东财热门夹档：空头排列/排列并集叠画对比（自动选股+回测）",
-                "order": 62,
-                "enabled": True,
-            },
-            {
-                "id": "bb_pctb_pullback_monitor",
-                "name": "布林%b回落监控",
-                "script": "bb_pctb_pullback_monitor_gui.py",
-                "category": "tool",
-                "description": "布林%b回落选股：买点A vs 买点B 叠画对比（自动选股+回测）",
-                "order": 64,
-                "enabled": True,
-            },
-            {
-                "id": "ma_zong_meet_monitor",
-                "name": "马总满足条件对比监控",
-                "script": "ma_zong_meet_monitor_gui.py",
-                "category": "tool",
-                "description": "马总选股逻辑：满足条件 vs 不满足条件的只数与收益对比",
-                "order": 63,
-                "enabled": True,
-            },
-            {
                 "id": "post_market_batch_manual",
                 "name": "盘后批跑",
                 "script": "run_all_if_trading_day_gui.py",
                 "category": "tool",
-                "description": "手动盘后批跑（有 data/qmt_live_only.flag 时自动仅实盘步骤；否则全量。"
-                "目标日按15:00规则，先看齐全再重跑）",
+                "description": "手动盘后批跑；可配置启动器 17:31 补启动用的 bat 路径。"
+                "有 data/qmt_live_only.flag 时自动仅实盘步骤；否则全量。"
+                "目标日按15:00规则，先看齐全再重跑",
                 "order": 70,
                 "enabled": True,
             },
         ]
+        # 启动器不再展示的旧监控入口（即便 json 里还留着也过滤掉）
+        hidden_ids = {
+            "ma10_regime_monitor",
+            "zt12_strict_bull_monitor",
+            "em_hot_clip_monitor",
+            "ma_zong_meet_monitor",
+            "bb_pctb_pullback_monitor",
+        }
         if not os.path.isfile(cfg_path):
-            return sorted([a for a in default_apps if a.get("enabled", True)], key=lambda x: x.get("order", 0))
+            return sorted(
+                [
+                    a
+                    for a in default_apps
+                    if a.get("enabled", True)
+                    and str(a.get("id") or "") not in hidden_ids
+                ],
+                key=lambda x: x.get("order", 0),
+            )
 
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             if not isinstance(raw, list):
-                return sorted([a for a in default_apps if a.get("enabled", True)], key=lambda x: x.get("order", 0))
+                return sorted(
+                    [
+                        a
+                        for a in default_apps
+                        if a.get("enabled", True)
+                        and str(a.get("id") or "") not in hidden_ids
+                    ],
+                    key=lambda x: x.get("order", 0),
+                )
             apps = []
             seen = set()
             for item in raw:
@@ -213,8 +304,10 @@ class AntLauncherWindow(QMainWindow):
                     continue
                 if item.get("category") != "tool":
                     continue
-                apps.append(item)
                 aid = str(item.get("id") or "")
+                if aid in hidden_ids:
+                    continue
+                apps.append(item)
                 if aid:
                     seen.add(aid)
             # 配置文件缺项时补上源码默认（避免加了新工具但旧 json 看不到）
@@ -224,12 +317,22 @@ class AntLauncherWindow(QMainWindow):
                 if item.get("category") != "tool":
                     continue
                 aid = str(item.get("id") or "")
+                if aid in hidden_ids:
+                    continue
                 if aid and aid not in seen:
                     apps.append(item)
             apps.sort(key=lambda x: x.get("order", 0))
             return apps
         except Exception:
-            return sorted([a for a in default_apps if a.get("enabled", True)], key=lambda x: x.get("order", 0))
+            return sorted(
+                [
+                    a
+                    for a in default_apps
+                    if a.get("enabled", True)
+                    and str(a.get("id") or "") not in hidden_ids
+                ],
+                key=lambda x: x.get("order", 0),
+            )
 
     def _setup_icon(self) -> None:
         """设置窗口图标，与主程序/其他系统保持一致。"""
@@ -356,7 +459,8 @@ class AntLauncherWindow(QMainWindow):
 
         # 底部小提示（提示主系统启动行为，不放在“小程序工具箱”内部）
         hint_label = QLabel(
-            "提示：启动子系统后可以把本窗口最小化。每天 17:31 会检查盘后 bat，窗口关掉就不会补启动。",
+            "提示：启动子系统后可以把本窗口最小化。"
+            "每天 17:31 会按「盘后批跑」里配置的 bat 补启动（关掉本窗口则不会）。",
             self,
         )
         hint_font = QFont()
@@ -420,7 +524,8 @@ class AntLauncherWindow(QMainWindow):
         else:
             root_dir = os.path.dirname(os.path.abspath(__file__))
         max_cols = 5  # 默认 5 个一行
-        n_tools = len(tool_apps)
+        # 末尾追加「检查更新」（非脚本入口）
+        n_tools = len(tool_apps) + 1
         # 只有一行时，把按钮居中显示，避免“后面空两个格”
         single_row = 0 < n_tools <= max_cols
         col_offset = (max_cols - n_tools) // 2 if single_row else 0
@@ -445,10 +550,33 @@ class AntLauncherWindow(QMainWindow):
                 col = idx % max_cols
             grid.addWidget(btn, row, col)
 
+        # 「检查更新」放进常用小工具
+        self.btn_check_update = QPushButton("检查更新", self)
+        self.btn_check_update.setStyleSheet(tool_btn_style)
+        self.btn_check_update.setToolTip(
+            "从 GitHub / 国内镜像检查并快进更新本机代码。\n"
+            "本地有未提交修改时不会覆盖。"
+        )
+        self.btn_check_update.clicked.connect(
+            lambda: self._start_update_check(silent_if_latest=False)
+        )
+        upd_idx = len(tool_apps)
+        if single_row:
+            grid.addWidget(self.btn_check_update, 0, upd_idx + col_offset)
+        else:
+            grid.addWidget(
+                self.btn_check_update, upd_idx // max_cols, upd_idx % max_cols
+            )
+
         scroll.setWidget(tools_container)
         main_layout.addWidget(scroll, 1)
 
-        self._setup_post_market_watch_row(main_layout)
+        self.update_status = QLabel("", self)
+        self.update_status.setStyleSheet("color: #666666;")
+        self.update_status.setWordWrap(True)
+        self.update_status.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+        self.update_status.hide()
+        main_layout.addWidget(self.update_status)
 
     def _project_root(self) -> str:
         if getattr(sys, "frozen", False):
@@ -460,7 +588,12 @@ class AntLauncherWindow(QMainWindow):
 
     def _load_post_market_settings(self) -> dict:
         path = self._post_market_settings_path()
-        data = {"post_market_bat": _DEFAULT_POST_MARKET_BAT, "post_market_watch_date": ""}
+        data = {
+            "post_market_bat": _DEFAULT_POST_MARKET_BAT,
+            "post_market_watch_date": "",
+            "auto_update_check_on_start": True,
+            "update_mirrors": list(_DEFAULT_UPDATE_MIRRORS),
+        }
         if not os.path.isfile(path):
             return data
         try:
@@ -473,64 +606,281 @@ class AntLauncherWindow(QMainWindow):
             if bat:
                 data["post_market_bat"] = bat
             data["post_market_watch_date"] = str(raw.get("post_market_watch_date") or "").strip()
+            if "auto_update_check_on_start" in raw:
+                data["auto_update_check_on_start"] = bool(raw.get("auto_update_check_on_start"))
+            mirrors = raw.get("update_mirrors")
+            if isinstance(mirrors, list) and mirrors:
+                data["update_mirrors"] = [str(x).strip() for x in mirrors if str(x).strip()]
         return data
 
     def _save_post_market_settings(self) -> None:
         path = self._post_market_settings_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = dict(self._post_market_settings)
+        payload.setdefault("auto_update_check_on_start", True)
+        payload.setdefault("update_mirrors", list(_DEFAULT_UPDATE_MIRRORS))
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(self._post_market_settings, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    def _setup_post_market_watch_row(self, main_layout: QVBoxLayout) -> None:
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        label = QLabel("盘后bat", self)
-        self.bat_path_edit = QLineEdit(self)
-        self.bat_path_edit.setText(self._post_market_settings.get("post_market_bat") or "")
-        self.bat_path_edit.setPlaceholderText(r"例如 D:\run_all_if_trading_day.bat")
-        self.bat_path_edit.setToolTip("每天 17:31 若这个 bat 还没在跑，就启动它。各台电脑路径可以不同。")
-        self.bat_path_edit.editingFinished.connect(self._on_bat_path_edited)
-        browse = QPushButton("浏览", self)
-        browse.setFixedWidth(64)
-        browse.clicked.connect(self._browse_post_market_bat)
-        row.addWidget(label)
-        row.addWidget(self.bat_path_edit, 1)
-        row.addWidget(browse)
-        main_layout.addLayout(row)
+    def _update_mirrors(self) -> list:
+        mirrors = self._post_market_settings.get("update_mirrors")
+        if isinstance(mirrors, list) and mirrors:
+            return [str(x).strip() for x in mirrors if str(x).strip()]
+        return list(_DEFAULT_UPDATE_MIRRORS)
 
-        self.bat_watch_status = QLabel("", self)
-        self.bat_watch_status.setStyleSheet("color: #666666;")
-        self.bat_watch_status.setWordWrap(True)
-        self._set_bat_watch_status("每天 17:31 检查一次。已在运行则不重复启动。")
-        main_layout.addWidget(self.bat_watch_status)
+    def _set_update_status(self, text: str, *, auto_clear_ms: int = 0) -> None:
+        """启动器底部短提示；auto_clear_ms>0 时到期自动清空。"""
+        lbl = getattr(self, "update_status", None)
+        if lbl is None:
+            return
+        timer = getattr(self, "_update_status_clear_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._update_status_clear_timer = None
+        msg = (text or "").strip()
+        lbl.setText(msg)
+        lbl.setVisible(bool(msg))
+        if msg and auto_clear_ms > 0:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._clear_update_status)
+            t.start(int(auto_clear_ms))
+            self._update_status_clear_timer = t
+
+    def _clear_update_status(self) -> None:
+        self._set_update_status("")
+
+    def _close_update_progress(self) -> None:
+        prog = getattr(self, "_update_progress", None)
+        if prog is not None:
+            try:
+                prog.close()
+            except Exception:
+                pass
+            self._update_progress = None
+
+    def _show_update_progress(self, text: str) -> None:
+        self._close_update_progress()
+        prog = QProgressDialog(text, None, 0, 0, self)
+        prog.setWindowTitle("检查更新")
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setCancelButton(None)
+        prog.show()
+        QApplication.processEvents()
+        self._update_progress = prog
+
+    def _start_update_check(self, *, silent_if_latest: bool = False) -> None:
+        if self._update_worker is not None and self._update_worker.isRunning():
+            if silent_if_latest:
+                self._set_update_status("正在检查更新…")
+            return
+        self.btn_check_update.setEnabled(False)
+        if silent_if_latest:
+            # 启动自动检查：底部短暂提示
+            self._set_update_status("正在检查更新…")
+        else:
+            # 手动检查：进度弹窗，结果也用弹窗，不在启动器上常驻文案
+            self._clear_update_status()
+            self._show_update_progress("正在通过 GitHub/国内镜像检查更新…")
+        worker = _UpdateWorker(
+            self._project_root(),
+            self._update_mirrors(),
+            apply=False,
+            parent=self,
+        )
+        self._update_worker = worker
+        worker.finished_ok.connect(
+            lambda r: self._on_update_check_done(r, silent_if_latest=silent_if_latest)
+        )
+        worker.start()
+
+    def _on_update_check_done(self, result, *, silent_if_latest: bool = False) -> None:
+        self.btn_check_update.setEnabled(True)
+        self._update_worker = None
+        self._close_update_progress()
+
+        ver_hint = _version_hint()
+        ver = _display_version()
+
+        if result is None:
+            if silent_if_latest:
+                self._set_update_status("更新检查无结果。", auto_clear_ms=2000)
+            else:
+                self._clear_update_status()
+                msg = "更新检查无结果。"
+                if ver_hint:
+                    msg = f"{msg}\n\n{ver_hint}"
+                QMessageBox.warning(self, "检查更新", msg)
+            return
+
+        self._append_launcher_log(
+            f"update check: ok={result.ok} behind={result.behind} "
+            f"dirty={result.dirty} via={result.fetch_url} msg={result.message}"
+        )
+
+        if not result.ok:
+            if silent_if_latest:
+                self._set_update_status(
+                    result.message.split("\n")[0], auto_clear_ms=2000
+                )
+            else:
+                self._clear_update_status()
+                msg = result.message
+                if ver_hint:
+                    msg = f"{msg}\n\n{ver_hint}"
+                QMessageBox.warning(self, "检查更新", msg)
+            return
+
+        if result.behind <= 0:
+            if silent_if_latest:
+                tip = f"代码已是最新（{ver}）。" if ver else "代码已是最新。"
+                self._set_update_status(tip, auto_clear_ms=2000)
+            else:
+                self._clear_update_status()
+                msg = result.message
+                if ver_hint:
+                    msg = f"{msg}\n\n{ver_hint}"
+                QMessageBox.information(self, "检查更新", msg)
+            return
+
+        # 有新版本：无论自动/手动，都用弹窗确认（手动不写底部状态）
+        summary = result.message
+        if result.fetch_url:
+            summary += f"\n通道：{result.fetch_url}"
+        if ver_hint:
+            summary += f"\n{ver_hint}"
+        if silent_if_latest:
+            self._set_update_status(
+                f"发现 {result.behind} 个新提交"
+                + ("（本地有改动）" if result.dirty else ""),
+                auto_clear_ms=2000,
+            )
+        else:
+            self._clear_update_status()
+
+        if result.dirty or not result.can_update:
+            QMessageBox.warning(
+                self,
+                "发现更新但未自动拉取",
+                summary
+                + "\n\n处理完本地改动后，再点「检查更新」即可。",
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "发现新版本",
+            summary + "\n\n是否立即快进更新到最新？\n（不会覆盖本地未提交修改）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            if silent_if_latest:
+                self._set_update_status(
+                    f"有 {result.behind} 个新提交，已跳过更新。",
+                    auto_clear_ms=2000,
+                )
+            return
+        self._start_apply_update(from_manual=not silent_if_latest)
+
+    def _start_apply_update(self, *, from_manual: bool = True) -> None:
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        self.btn_check_update.setEnabled(False)
+        if from_manual:
+            self._clear_update_status()
+            self._show_update_progress("正在拉取更新…")
+        else:
+            self._set_update_status("正在拉取更新…")
+        worker = _UpdateWorker(
+            self._project_root(),
+            self._update_mirrors(),
+            apply=True,
+            parent=self,
+        )
+        self._update_worker = worker
+        worker.finished_ok.connect(
+            lambda r: self._on_apply_update_done(r, from_manual=from_manual)
+        )
+        worker.start()
+
+    def _on_apply_update_done(self, result, *, from_manual: bool = True) -> None:
+        self.btn_check_update.setEnabled(True)
+        self._update_worker = None
+        self._close_update_progress()
+        if result is None:
+            if from_manual:
+                self._clear_update_status()
+                QMessageBox.warning(self, "更新未完成", "更新失败：无结果。")
+            else:
+                self._set_update_status("更新失败：无结果。", auto_clear_ms=2000)
+            return
+        self._append_launcher_log(f"update apply: {result.message}")
+        if getattr(result, "updated", False):
+            if from_manual:
+                self._clear_update_status()
+            else:
+                self._set_update_status(
+                    "更新完成，请重启已打开的子系统。", auto_clear_ms=2000
+                )
+            QMessageBox.information(self, "更新完成", result.message)
+            return
+        if result.ok and result.behind <= 0:
+            if from_manual:
+                self._clear_update_status()
+            else:
+                self._set_update_status("代码已是最新。", auto_clear_ms=2000)
+            QMessageBox.information(self, "检查更新", result.message)
+            return
+        if from_manual:
+            self._clear_update_status()
+        else:
+            self._set_update_status(
+                result.message.split("\n")[0], auto_clear_ms=2000
+            )
+        QMessageBox.warning(self, "更新未完成", result.message)
 
     def _set_bat_watch_status(self, text: str) -> None:
-        self.bat_watch_status.setText(text)
+        # 盘后 bat 配置已挪到「盘后批跑」；启动器仅写日志，避免占界面
+        msg = (text or "").strip()
+        if msg:
+            self._append_launcher_log(f"post-market watch: {msg}")
+
+    def closeEvent(self, event) -> None:
+        """退出前停掉定时器与更新线程，避免 PyInstaller 单文件包删不掉 _MEI 临时目录。"""
+        try:
+            if getattr(self, "_watch_timer", None) is not None:
+                self._watch_timer.stop()
+        except Exception:
+            pass
+        worker = getattr(self, "_update_worker", None)
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.requestInterruption()
+                    # git fetch 可能较久：最多等几秒，再强制结束线程
+                    if not worker.wait(5000):
+                        worker.terminate()
+                        worker.wait(2000)
+            except Exception:
+                pass
+            self._update_worker = None
+        try:
+            super().closeEvent(event)
+        except Exception:
+            event.accept()
 
     def _current_bat_path(self) -> str:
-        return str(self.bat_path_edit.text() or "").strip()
-
-    def _on_bat_path_edited(self) -> None:
-        path = self._current_bat_path()
-        if path == str(self._post_market_settings.get("post_market_bat") or ""):
-            return
-        self._post_market_settings["post_market_bat"] = path
-        self._save_post_market_settings()
-        self._set_bat_watch_status(f"已保存路径：{path}")
-
-    def _browse_post_market_bat(self) -> None:
-        current = self._current_bat_path()
-        start_dir = os.path.dirname(current) if current else "D:\\"
-        picked, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择盘后批跑 bat",
-            start_dir,
-            "批处理 (*.bat);;所有文件 (*.*)",
-        )
-        if not picked:
-            return
-        self.bat_path_edit.setText(picked)
-        self._on_bat_path_edited()
+        # 每次从磁盘重读，便于在「盘后批跑」改路径后启动器立刻用上
+        try:
+            self._post_market_settings = self._load_post_market_settings()
+        except Exception:
+            pass
+        return str(self._post_market_settings.get("post_market_bat") or "").strip()
 
     def _arm_post_market_watch(self) -> None:
         self._watch_timer = QTimer(self)
@@ -543,8 +893,10 @@ class AntLauncherWindow(QMainWindow):
         return self._post_market_settings.get("post_market_watch_date") == date.today().isoformat()
 
     def _mark_watch_done_today(self) -> None:
+        bat = self._current_bat_path()
         self._post_market_settings["post_market_watch_date"] = date.today().isoformat()
-        self._post_market_settings["post_market_bat"] = self._current_bat_path()
+        if bat:
+            self._post_market_settings["post_market_bat"] = bat
         self._save_post_market_settings()
 
     def _append_launcher_log(self, text: str) -> None:
@@ -582,39 +934,38 @@ class AntLauncherWindow(QMainWindow):
         now = datetime.now()
         if now.time() < _POST_MARKET_WATCH_AT:
             return
+        # 重读设置（含今日是否已补启动、bat 路径）
+        try:
+            self._post_market_settings = self._load_post_market_settings()
+        except Exception:
+            pass
         if self._watch_already_done_today():
             return
         if now.time() > dt_time(21, 0):
             self._set_bat_watch_status("已过 21:00，今日不再自动补启动。需要的话用「盘后批跑」手动开。")
-            self._append_launcher_log("post-market watch skipped, after 21:00")
             self._mark_watch_done_today()
             return
         bat_path = self._current_bat_path()
         if not bat_path or not os.path.isfile(bat_path):
-            self._set_bat_watch_status(f"17:31 未补启动：找不到 bat\n{bat_path or '（路径为空）'}")
+            self._set_bat_watch_status(f"17:31 未补启动：找不到 bat {bat_path or '（路径为空）'}")
             if not getattr(self, "_missing_bat_logged", False):
-                self._append_launcher_log(f"post-market watch skip, bat missing: {bat_path}")
                 self._missing_bat_logged = True
             return
         try:
             running = self._post_market_already_running(bat_path)
         except Exception as exc:
             self._set_bat_watch_status(f"17:31 未能检查盘后进程：{exc}")
-            self._append_launcher_log(f"post-market watch check failed: {exc}")
             return
         if running:
             self._set_bat_watch_status("17:31 盘后批跑已在运行，未重复启动。")
-            self._append_launcher_log(f"post-market watch: already running {bat_path}")
             self._mark_watch_done_today()
             return
         try:
             os.startfile(bat_path)
         except Exception as exc:
             self._set_bat_watch_status(f"17:31 启动失败：{exc}")
-            self._append_launcher_log(f"post-market watch start failed: {exc}")
             return
         self._set_bat_watch_status(f"17:31 定时任务未启动，已补启动：{bat_path}")
-        self._append_launcher_log(f"post-market watch started {bat_path}")
         self._mark_watch_done_today()
 
     # --- 启动三个子系统 ---

@@ -1473,7 +1473,8 @@ def merge_broker_orders_into_results(results, broker_orders):
             if loc.get(k) != val:
                 loc[k] = val
                 changed = True
-        # 柜台缺时间时用本地 passorder 记录时间回填；有柜台 order_time 时不要用本地旧 at 覆盖
+        # 柜台缺时间时用本地 passorder 记录时间回填，并写回 broker 行供 UI 展示
+        # 注意：有柜台 order_time 时不要用本地旧 at 覆盖
         broker_ot = _normalize_order_time(bo.get("order_time") or "")
         if broker_ot:
             if loc.get("order_time") != broker_ot:
@@ -1505,7 +1506,6 @@ def merge_broker_orders_into_results(results, broker_orders):
             changed = True
         if internal == "filled" and prev_status != "filled":
             _note_filled_leg_from_local_order(loc)
-
     if changed:
         results["updated_at"] = _now_iso()
     return changed

@@ -1666,14 +1666,19 @@ class VersionDialog(QDialog):
         font.setPointSize(12)  # 设置字体大小为12pt
         
         # 标题
-        title_label = QLabel("蚂蚁量化交易策略系统")
+        title_label = QLabel("蚂蚁量化系统")
         title_label.setFont(font)
         title_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #2E86AB; margin: 20px;")
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
         
-        # 版本号
-        version_label = QLabel("版本号: V4.2")
+        # 版本号（与启动器 / 选股 / 策略生成统一，见 utils/product_version.py）
+        try:
+            from utils.product_version import version_label as _product_version_label
+            _ver_text = _product_version_label()
+        except Exception:
+            _ver_text = "版本号：V?"
+        version_label = QLabel(_ver_text)
         version_label.setFont(font)
         version_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #A23B72; margin: 10px;")
         version_label.setAlignment(Qt.AlignCenter)

@@ -1,0 +1,23 @@
+#!/bin/sh
+# 每次提交自动更新产品版本后缀（utils/product_version.py）
+# 启用方式（任选）：
+#   git config core.hooksPath .githooks
+# 或把本文件复制到 .git/hooks/pre-commit
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+if command -v python >/dev/null 2>&1; then
+  PY=python
+elif command -v py >/dev/null 2>&1; then
+  PY=py
+elif command -v python3 >/dev/null 2>&1; then
+  PY=python3
+else
+  echo "[pre-commit] 未找到 python，跳过版本后缀更新" >&2
+  exit 0
+fi
+
+"$PY" "scripts/bump_product_version_suffix.py" || exit 1
+git add "utils/product_version.py"
+exit 0

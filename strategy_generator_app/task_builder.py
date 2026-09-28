@@ -299,13 +299,26 @@ def _dedupe_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _is_hold_day_scheduled_clear(rule: Dict[str, Any]) -> bool:
+    """第 N 日无条件/涨停外清仓（非每日条件清仓）。"""
+    if str(rule.get("type") or "").strip() != "scheduled_clear":
+        return False
+    if _truthy_flag(rule.get("scheduled_clear_every_day")):
+        return False
+    return _truthy_flag(rule.get("scheduled_clear_on_hold_day")) or _truthy_flag(
+        rule.get("scheduled_clear_force")
+    )
+
+
 def _merge_rules_replace_by_identity(
     old_rules: List[Dict[str, Any]],
     new_rules: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """合并规则：同 leg_key / 同 type+name 用新规则覆盖旧规则，并保留旧执行态。
 
-    未出现在新列表中的旧规则保留（如手工加的其它腿）。
+    未出现在新列表中的旧规则默认保留（如手工加的其它腿）。
+    例外：第 N 日清仓若本次生成未再挂出，则撤掉旧的未执行清仓
+    （末笔买入顺延后，不应残留按旧锚定日挂出的「今日清仓」）。
     """
     old_list = [r for r in (old_rules or []) if isinstance(r, dict)]
     new_list = [r for r in (new_rules or []) if isinstance(r, dict)]
@@ -319,6 +332,7 @@ def _merge_rules_replace_by_identity(
         old_by_id[_rule_identity_key(r)] = r  # 同身份多条时后者覆盖索引
 
     new_ids = {_rule_identity_key(r) for r in new_list}
+    new_has_hold_clear = any(_is_hold_day_scheduled_clear(r) for r in new_list)
     out: List[Dict[str, Any]] = []
     # 先保留新任务未覆盖的旧规则
     seen_keep = set()
@@ -327,6 +341,13 @@ def _merge_rules_replace_by_identity(
         if kid in new_ids:
             continue
         if kid in seen_keep:
+            continue
+        # 本次未挂第 N 日清仓 → 撤掉旧的未执行第 N 日清仓（允许末笔买入顺延）
+        if (
+            not new_has_hold_clear
+            and _is_hold_day_scheduled_clear(r)
+            and not _truthy_flag(r.get("scheduled_clear_executed"))
+        ):
             continue
         seen_keep.add(kid)
         out.append(r)
@@ -349,15 +370,16 @@ def _merge_rules_replace_by_identity(
                 merged["id"] = old.get("id")
             elif old.get("id"):
                 merged["id"] = old.get("id")
-            # 末笔买入顺延清仓：若今日清仓任务已挂出且未执行，不要被新锚定日推后盖掉
+            # 末笔买入顺延：新生效日更晚时采用新日期（勿把今日旧清仓钉死）
             if (str(old.get("type") or "").strip() == "scheduled_clear") and (
                 str(merged.get("type") or "").strip() == "scheduled_clear"
             ):
                 if not _truthy_flag(old.get("scheduled_clear_executed")):
                     old_eff = str(old.get("scheduled_clear_effective_date") or "").strip()[:10]
                     new_eff = str(merged.get("scheduled_clear_effective_date") or "").strip()[:10]
-                    today_s = date.today().isoformat()
-                    if old_eff == today_s and new_eff and new_eff > today_s:
+                    if old_eff and new_eff and new_eff > old_eff:
+                        merged["scheduled_clear_effective_date"] = new_eff
+                    elif old_eff and not new_eff:
                         merged["scheduled_clear_effective_date"] = old_eff
         out.append(merged)
     return out
@@ -462,12 +484,15 @@ def _make_rule_dict(
                 pass
         return _finish(out)
     if rule_type == "single_sell":
+        px = f("price")
+        if px <= 0:
+            px = f("trigger_price")
         out = {
             "id": rule_id,
             "type": "single_sell",
             "enabled": bool(intent.get("enabled", True)),
             "name": intent.get("name") or "单点卖出",
-            "price": f("price"),
+            "price": px,
             "volume": i("volume"),
         }
         if isinstance(intent.get("activation"), dict):
