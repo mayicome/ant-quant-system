@@ -851,10 +851,12 @@ class AntLauncherWindow(QMainWindow):
             self._append_launcher_log(f"post-market watch: {msg}")
 
     def closeEvent(self, event) -> None:
-        """退出前停掉定时器与更新线程，避免 PyInstaller 单文件包删不掉 _MEI 临时目录。"""
+        """退出前停掉定时器与更新线程，便于干净退出。"""
         try:
             if getattr(self, "_watch_timer", None) is not None:
                 self._watch_timer.stop()
+                self._watch_timer.deleteLater()
+                self._watch_timer = None
         except Exception:
             pass
         worker = getattr(self, "_update_worker", None)
@@ -862,13 +864,22 @@ class AntLauncherWindow(QMainWindow):
             try:
                 if worker.isRunning():
                     worker.requestInterruption()
-                    # git fetch 可能较久：最多等几秒，再强制结束线程
-                    if not worker.wait(5000):
+                    if not worker.wait(3000):
                         worker.terminate()
-                        worker.wait(2000)
+                        worker.wait(1500)
+            except Exception:
+                pass
+            try:
+                worker.deleteLater()
             except Exception:
                 pass
             self._update_worker = None
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+        except Exception:
+            pass
         try:
             super().closeEvent(event)
         except Exception:
@@ -1109,7 +1120,13 @@ def main() -> None:
     app = QApplication(sys.argv)
     window = AntLauncherWindow()
     window.show()
-    sys.exit(app.exec_())
+    code = app.exec_()
+    try:
+        window.deleteLater()
+        app.processEvents()
+    except Exception:
+        pass
+    sys.exit(code)
 
 
 if __name__ == "__main__":
