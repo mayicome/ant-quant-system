@@ -164,22 +164,56 @@ def _sha(repo_root: str, ref: str) -> str:
 
 def _dirty_tracked(repo_root: str) -> Tuple[bool, str]:
     """已跟踪文件有改动/暂存/冲突则视为脏；仅未跟踪文件不算。"""
+    dirty, detail, _paths = _dirty_tracked_paths(repo_root)
+    return dirty, detail
+
+
+def _dirty_tracked_paths(repo_root: str) -> Tuple[bool, str, List[str]]:
+    """返回 (是否脏, 预览文案, 已跟踪脏路径列表)。"""
     code, out, err = _run_git(repo_root, ["status", "--porcelain"], timeout=30)
     if code != 0:
-        return True, err or "无法读取 git status"
-    lines = []
+        return True, err or "无法读取 git status", []
+    lines: List[str] = []
+    paths: List[str] = []
     for line in (out or "").splitlines():
         if not line:
             continue
         if line.startswith("??"):
             continue
         lines.append(line)
+        # porcelain: XY<space>path 或 rename 的 "old -> new"
+        path = line[3:] if len(line) >= 4 else line
+        if " -> " in path:
+            path = path.split(" -> ", 1)[-1]
+        path = path.strip().strip('"').replace("\\", "/")
+        if path:
+            paths.append(path)
     if not lines:
-        return False, ""
+        return False, "", []
     preview = "\n".join(lines[:8])
     if len(lines) > 8:
         preview += f"\n…共 {len(lines)} 处"
-    return True, preview
+    return True, preview, paths
+
+
+def _changed_paths_between(repo_root: str, a_ref: str, b_ref: str) -> List[str]:
+    """a..b 之间变更的文件路径（相对仓库根，正斜杠）。"""
+    code, out, _ = _run_git(
+        repo_root,
+        ["diff", "--name-only", f"{a_ref}..{b_ref}"],
+        timeout=60,
+    )
+    if code != 0 or not out:
+        return []
+    return [ln.strip().replace("\\", "/") for ln in out.splitlines() if ln.strip()]
+
+
+def _dirty_overlap_with_incoming(
+    dirty_paths: Sequence[str], incoming_paths: Sequence[str]
+) -> List[str]:
+    dirty_set = {p.replace("\\", "/") for p in dirty_paths if p}
+    inc_set = {p.replace("\\", "/") for p in incoming_paths if p}
+    return sorted(dirty_set & inc_set)
 
 
 def _ahead_behind(repo_root: str, local_ref: str, remote_ref: str) -> Tuple[int, int]:
@@ -219,7 +253,7 @@ def check_for_updates(
             False, "未配置 origin 远程地址。", repo_root=repo, branch=branch
         )
 
-    dirty, dirty_detail = _dirty_tracked(repo)
+    dirty, dirty_detail, dirty_paths = _dirty_tracked_paths(repo)
     local_sha = _sha(repo, "HEAD")
     candidates = build_fetch_candidates(origin, mirror_templates)
     tried: List[str] = []
@@ -272,6 +306,14 @@ def check_for_updates(
         )
 
     ahead, behind = _ahead_behind(repo, "HEAD", remote_ref)
+    incoming_paths = (
+        _changed_paths_between(repo, "HEAD", remote_ref) if behind > 0 else []
+    )
+    overlap = (
+        _dirty_overlap_with_incoming(dirty_paths, incoming_paths)
+        if (dirty and behind > 0)
+        else []
+    )
 
     if behind <= 0 and ahead <= 0:
         msg = "已是最新。"
@@ -287,12 +329,22 @@ def check_for_updates(
         can = False
     else:
         msg = f"发现远程有 {behind} 个新提交。"
-        can = not dirty
+        # 仅当本地脏文件与即将拉下来的文件重叠时才禁止（避免股票池等本地数据挡住更新）
+        can = not bool(overlap)
 
     if dirty and behind > 0:
-        msg += "\n本地有未提交修改，已禁止自动更新（避免覆盖）。"
-        if dirty_detail:
-            msg += f"\n{dirty_detail}"
+        if overlap:
+            msg += (
+                "\n本地未提交修改与本次远程更新有重叠，已禁止自动更新（避免覆盖）。"
+                "\n冲突文件：\n" + "\n".join(overlap[:8])
+            )
+            if len(overlap) > 8:
+                msg += f"\n…共 {len(overlap)} 个"
+        else:
+            msg += (
+                "\n本地有未提交修改，但与本次更新文件无冲突，可继续快进。"
+                f"\n{dirty_detail}"
+            )
 
     return UpdateCheckResult(
         True,
@@ -324,14 +376,8 @@ def apply_fast_forward_update(
         chk.can_update = False
         chk.message = "已是最新，无需更新。"
         return chk
-    if chk.dirty:
-        chk.can_update = False
-        chk.message = (
-            "本地有未提交修改，已取消更新。\n"
-            "请先提交/备份/还原本地改动后再点「检查更新」。"
-        )
-        if chk.dirty_detail:
-            chk.message += f"\n{chk.dirty_detail}"
+    if not chk.can_update:
+        # check_for_updates 已写明原因（分叉 / 脏文件与远程重叠等）
         return chk
     if chk.ahead > 0:
         chk.can_update = False

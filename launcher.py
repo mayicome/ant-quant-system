@@ -555,7 +555,7 @@ class AntLauncherWindow(QMainWindow):
         self.btn_check_update.setStyleSheet(tool_btn_style)
         self.btn_check_update.setToolTip(
             "从 GitHub / 国内镜像检查并快进更新本机代码。\n"
-            "本地有未提交修改时不会覆盖。"
+            "仅当本地改动与远程更新文件重叠时才会禁止自动更新。"
         )
         self.btn_check_update.clicked.connect(
             lambda: self._start_update_check(silent_if_latest=False)
@@ -762,19 +762,21 @@ class AntLauncherWindow(QMainWindow):
         else:
             self._clear_update_status()
 
-        if result.dirty or not result.can_update:
+        # 仅当 can_update=False（分叉 / 脏文件与远程重叠等）才禁止；
+        # 本地有改动但与本次更新无重叠时仍可快进。
+        if not result.can_update:
             QMessageBox.warning(
                 self,
                 "发现更新但未自动拉取",
                 summary
-                + "\n\n处理完本地改动后，再点「检查更新」即可。",
+                + "\n\n处理完冲突的本地改动后，再点「检查更新」即可。",
             )
             return
 
         reply = QMessageBox.question(
             self,
             "发现新版本",
-            summary + "\n\n是否立即快进更新到最新？\n（不会覆盖本地未提交修改）",
+            summary + "\n\n是否立即快进更新到最新？\n（不会覆盖与本次更新冲突的本地修改）",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
