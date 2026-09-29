@@ -37,6 +37,12 @@ NEW_CHECK = """        _ma_ok = (float(ma5) < float(ma10) < float(ma20)) or (
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     raw = json.loads(BASE.read_text(encoding="utf-8"))
     code = str(raw["code"])
     if code.count(OLD_CHECK) != 2:

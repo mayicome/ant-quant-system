@@ -100,6 +100,12 @@ EXTRA_CLOSE_MARKERS = [
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     raw = json.loads(BASE.read_text(encoding="utf-8"))
     code = str(raw["code"])
     if "分时_午后收益" in code or "_apply_tick_tail_filters" in code:

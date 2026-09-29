@@ -110,6 +110,12 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     compile(CODE, f"<{RULE_NAME}>", "exec")
     existing = [r for r in load_sector_rules() if r.get("name") == RULE_NAME]
     if existing:

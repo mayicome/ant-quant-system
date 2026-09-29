@@ -370,6 +370,12 @@ def _install_one(
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_strategy_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_strategy_install
+    refuse_strategy_install(__file__)
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for name, pref_id, leg_id, field, rule_name in SPECS:
         path = _install_one(name, pref_id, leg_id, field, rule_name)

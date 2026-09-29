@@ -537,6 +537,12 @@ def run(codes, prices, get_name, account, params):
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_strategy_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_strategy_install
+    refuse_strategy_install(__file__)
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     existing_id = None
     prev = {}

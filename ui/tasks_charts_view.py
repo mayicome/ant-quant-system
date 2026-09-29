@@ -8,12 +8,46 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QScrollArea, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QMessageBox,
                              QDialog, QFormLayout, QComboBox, QDoubleSpinBox,
                              QRadioButton, QButtonGroup, QSizePolicy, QGridLayout, QMenu,
-                             QApplication)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+                             QApplication, QAbstractButton)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject, QEvent
 from PyQt5.QtGui import QFont, QKeyEvent
 from ui.stock_chart_widget import StockChartWidget
 from utils.logger import Logger
 import time
+
+
+class _TaskBoxDoubleClickFilter(QObject):
+    """任务框及其子控件上的双击（按钮除外）转发到回调。"""
+
+    def __init__(self, stock_code, on_dblclick, owner_widget, parent=None):
+        super().__init__(parent)
+        self.stock_code = stock_code
+        self.on_dblclick = on_dblclick
+        self.owner_widget = owner_widget
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.MouseButtonDblClick:
+            return False
+        try:
+            if event.button() != Qt.LeftButton:
+                return False
+        except Exception:
+            return False
+
+        # 启动/暂停、删除、移动等按钮上的双击不切换布局
+        w = obj if isinstance(obj, QWidget) else None
+        while w is not None:
+            if isinstance(w, QAbstractButton):
+                return False
+            if w is self.owner_widget:
+                break
+            w = w.parentWidget()
+
+        try:
+            self.on_dblclick(self.stock_code)
+        except Exception:
+            pass
+        return True
 
 
 class TasksChartsView(QWidget):
@@ -28,6 +62,8 @@ class TasksChartsView(QWidget):
         # 存储图表组件 {stock_code: chart_widget}
         self.chart_widgets = {}
         
+        # 防抖：Qt 与 matplotlib 可能各报一次双击
+        self._last_task_dblclick_ts = 0.0
         # 图表组件缓存：存储所有已创建的图表组件（包括不在当前页的）
         # {stock_code: {'chart': StockChartWidget, 'container': QWidget, 'task': dict}}
         self._chart_cache = {}
@@ -1175,6 +1211,7 @@ class TasksChartsView(QWidget):
             col = 0
             max_row = 0  # 记录实际使用的最大行号
             chart_containers_to_show = []  # 收集需要显示的容器，最后一次性显示
+            charts_need_redraw = []  # 1 列强制重绘延后，避免切列时 UI 卡住
             # 本页已放置的 stock_code：同一页若重复出现同一股票，不能复用同一容器（否则会移走导致空单元格）
             placed_stock_codes_this_page = set()
             for task_id, task in current_page_tasks:
@@ -1231,7 +1268,13 @@ class TasksChartsView(QWidget):
                         chart.canvas.setMinimumHeight(400)
                     
                     # 更新任务数据和规则（可能已变化）；补齐曾为「未知」的名称
-                    self._bind_chart_to_task(chart, task_id, task, update_rules=True)
+                    # 完整 load 仍刷新规则，但不同步重绘；统一延后到 updates 恢复后
+                    self._bind_chart_to_task(
+                        chart, task_id, task,
+                        update_rules=True,
+                        redraw_rules=False,
+                    )
+                    charts_need_redraw.append(chart)
                     if stock_name and stock_name not in ("未知", "未知名称"):
                         chart.stock_name = stock_name
                         try:
@@ -1246,14 +1289,6 @@ class TasksChartsView(QWidget):
                     # 更新任务运行状态：优先图表实况 / running_tasks，避免切列后被陈旧 params 刷成已暂停
                     task_running, task_paused = self._resolve_task_run_state(task_id, task, chart)
                     chart.set_task_status(task_running, task_paused)
-                    
-                    # 重绘：只在 1 列强制，避免 2 列切换时卡顿
-                    need_force_redraw = (self.columns == 1)
-                    try:
-                        if need_force_redraw:
-                            chart.update_chart()
-                    except Exception:
-                        pass
                     
                     # 更新缓存中的任务数据
                     cached_data['task'] = task
@@ -1341,18 +1376,17 @@ class TasksChartsView(QWidget):
                     
                     # 设置task和task_manager，用于拖动结束后保存
                     chart.task_manager = self.task_manager
-                    self._bind_chart_to_task(chart, task_id, task, update_rules=True)
+                    self._bind_chart_to_task(
+                        chart, task_id, task, update_rules=True, redraw_rules=False
+                    )
                     
                     # 传递任务运行状态给图表：优先实况，避免 UI 显示滞后/被陈旧 params 覆盖
                     task_running, task_paused = self._resolve_task_run_state(task_id, task, chart)
                     chart.set_task_status(task_running, task_paused)
                     
-                    # 先显示空图表框架：仅 1 列时强制重绘以避免切 2 列卡顿
+                    # 先显示空图表框架：1 列延后重绘，避免创建阶段同步卡顿
                     if self.columns == 1:
-                        try:
-                            chart.update_chart()
-                        except:
-                            pass  # 如果失败，后续加载数据时会自动显示
+                        charts_need_redraw.append(chart)
                     
                     # 延迟加载市场数据（异步分批加载，避免一次性加载导致卡顿）
                     # 先显示空图表框架，数据在后台逐步加载
@@ -1550,6 +1584,7 @@ class TasksChartsView(QWidget):
                     chart_containers_to_show.append((chart_container, chart))
                 
                 # 添加到网格布局（根据列数设置）- 此时图表是隐藏的
+                self._install_task_box_dblclick(chart_container, stock_code)
                 self.grid_layout.addWidget(chart_container, row, col)
                 placed_stock_codes_this_page.add(stock_code)
                 
@@ -1629,15 +1664,18 @@ class TasksChartsView(QWidget):
                 pass
             # 性能优化：所有布局修改完成后，重新启用 UI 更新
             self.setUpdatesEnabled(True)
+
+            if charts_need_redraw:
+                # 逐个异步重绘，避免一页多图挤在同一事件里再次卡顿
+                self._schedule_charts_redraw(charts_need_redraw)
             
             # 启动异步加载队列（如果有待加载的图表）
             if self._pending_charts:
                 # 延迟50ms后开始加载第一个图表，给界面渲染留出时间
                 self._load_timer.start(50)
             
-            # 3/4 列：视口尺寸就绪后再按窗口高度均分每格高度（避免一页出现纵向滚动条）
-            if self.columns in (3, 4):
-                QTimer.singleShot(0, self._apply_chart_heights_from_viewport)
+            # 视口就绪后校正列宽（多列等宽 / 单列恢复策略）；3/4 列再均分行高
+            QTimer.singleShot(0, self._apply_chart_layout_from_viewport)
             
             elapsed = _time.time() - _t0
             if elapsed > 0.2:
@@ -1662,6 +1700,25 @@ class TasksChartsView(QWidget):
             # 性能优化：确保异常时也重新启用 UI 更新
             self.setUpdatesEnabled(True)
     
+    def _schedule_charts_redraw(self, charts):
+        """逐个异步重绘图表，让布局/切列先完成，避免一页多图同步卡死。"""
+        queue = [c for c in charts if c is not None]
+        if not queue:
+            return
+
+        def _redraw_next():
+            if not queue:
+                return
+            chart = queue.pop(0)
+            try:
+                chart.update_chart()
+            except Exception:
+                pass
+            if queue:
+                QTimer.singleShot(0, _redraw_next)
+
+        QTimer.singleShot(0, _redraw_next)
+
     def _load_next_chart(self):
         """分批加载图表数据，避免一次性加载导致卡顿"""
         if not self._pending_charts:
@@ -1713,6 +1770,75 @@ class TasksChartsView(QWidget):
         # 清空当前显示的图表引用（但保留在缓存中）
         self.chart_widgets.clear()
     
+    def _apply_equal_column_widths(self):
+        """
+        多列时强制各列等宽。
+        matplotlib FigureCanvas 的 sizeHint 会随 figsize/上次实际像素变化（单列时可达上千像素），
+        仅靠 setColumnStretch(1) 有时仍会把先放大过的列撑得更宽；这里按视口均分列最小宽，
+        并把横向尺寸策略设为 Ignored，让网格拉伸独占列宽分配。
+        """
+        cols = getattr(self, 'columns', 1) or 1
+        try:
+            if cols <= 1:
+                for col_idx in range(10):
+                    self.grid_layout.setColumnStretch(col_idx, 1 if col_idx == 0 else 0)
+                    self.grid_layout.setColumnMinimumWidth(col_idx, 0)
+                for cached in getattr(self, '_chart_cache', {}).values():
+                    if not isinstance(cached, dict):
+                        continue
+                    container = cached.get('container')
+                    chart = cached.get('chart')
+                    if container is not None:
+                        container.setMaximumWidth(16777215)
+                        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                    if chart is not None:
+                        chart.setMaximumWidth(16777215)
+                        chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                        if hasattr(chart, 'canvas') and chart.canvas is not None:
+                            chart.canvas.setMaximumWidth(16777215)
+                            chart.canvas.setMinimumWidth(200)
+                            chart.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                return
+
+            vp = self.scroll_area.viewport()
+            w = int(vp.width()) if vp is not None else 0
+            if w < 100:
+                w = max(400, int(self.width()) - 20)
+            spacing = self.grid_layout.horizontalSpacing()
+            if spacing < 0:
+                spacing = 10
+            margins = self.grid_layout.contentsMargins()
+            inner = max(0, w - margins.left() - margins.right() - (cols - 1) * spacing)
+            col_w = max(80, inner // cols)
+
+            for col_idx in range(10):
+                if col_idx < cols:
+                    self.grid_layout.setColumnStretch(col_idx, 1)
+                    self.grid_layout.setColumnMinimumWidth(col_idx, col_w)
+                else:
+                    self.grid_layout.setColumnStretch(col_idx, 0)
+                    self.grid_layout.setColumnMinimumWidth(col_idx, 0)
+
+            # 只约束当前页可见容器，避免缓存里不可见控件带着大 sizeHint 干扰
+            for chart_data in getattr(self, 'chart_widgets', {}).values():
+                if not isinstance(chart_data, dict):
+                    continue
+                container = chart_data.get('container')
+                chart = chart_data.get('chart')
+                if container is not None:
+                    container.setMaximumWidth(16777215)
+                    container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+                if chart is not None:
+                    chart.setMaximumWidth(16777215)
+                    chart.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+                    if hasattr(chart, 'canvas') and chart.canvas is not None:
+                        # 多列时不要被单列遗留的大 sizeHint / minWidth 撑开某一列
+                        chart.canvas.setMinimumWidth(0)
+                        chart.canvas.setMaximumWidth(16777215)
+                        chart.canvas.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        except Exception:
+            pass
+
     def _apply_chart_heights_from_viewport(self):
         """
         3/4 列时按当前滚动视口高度均分每行高度，使一页内尽量不出现纵向滚动条。
@@ -1745,7 +1871,7 @@ class TasksChartsView(QWidget):
             chart_h = max(40, int(cell_h * 0.30))
             canvas_h = max(50, cell_h - chart_h - 6)
             canvas_h = min(canvas_h, cell_h - chart_h - 4)
-            for cached in self._chart_cache.values():
+            for cached in self.chart_widgets.values():
                 if not isinstance(cached, dict):
                     continue
                 chart = cached.get('chart')
@@ -1756,11 +1882,37 @@ class TasksChartsView(QWidget):
                     chart.canvas.setMinimumHeight(canvas_h)
         except Exception:
             pass
-    
+
+    def _apply_chart_layout_from_viewport(self):
+        """校正列宽；并按列数调整单元格高度。"""
+        self._apply_equal_column_widths()
+        cols = getattr(self, 'columns', 1)
+        if cols in (3, 4):
+            self._apply_chart_heights_from_viewport()
+            return
+        # 2 列 / 1 列：用固定最小高，避免从 3/4 列切过来仍保留过大的 minHeight
+        try:
+            if cols == 2:
+                chart_h, canvas_h = 140, 180
+            elif cols == 1:
+                chart_h, canvas_h = 300, 400
+            else:
+                return
+            for chart_data in getattr(self, 'chart_widgets', {}).values():
+                if not isinstance(chart_data, dict):
+                    continue
+                chart = chart_data.get('chart')
+                if not chart:
+                    continue
+                chart.setMinimumHeight(chart_h)
+                if hasattr(chart, 'canvas') and chart.canvas is not None:
+                    chart.canvas.setMinimumHeight(canvas_h)
+        except Exception:
+            pass    
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if getattr(self, 'columns', 1) in (3, 4):
-            QTimer.singleShot(0, self._apply_chart_heights_from_viewport)
+        # 多列需等宽；单列也走一次以恢复 Expanding 策略
+        QTimer.singleShot(0, self._apply_chart_layout_from_viewport)
     
     def stop_all_chart_timers(self):
         """停止所有图表的定时器（用于程序退出时清理）"""
@@ -1829,6 +1981,56 @@ class TasksChartsView(QWidget):
         # 优先走快速重排，只有在缓存不足时才回退到 load_tasks
         QTimer.singleShot(0, self._load_page_fast)
     
+    def _install_task_box_dblclick(self, container, stock_code):
+        """在任务框及子控件上安装双击过滤（任意位置切单列/全屏，按钮除外）。"""
+        if container is None or not stock_code:
+            return
+        stock_code = str(stock_code)
+        filt = getattr(container, '_task_dblclick_filter', None)
+        if filt is not None:
+            filt.stock_code = stock_code
+            filt.on_dblclick = self.handle_task_double_click
+            return
+
+        filt = _TaskBoxDoubleClickFilter(
+            stock_code, self.handle_task_double_click, container, parent=container
+        )
+        container._task_dblclick_filter = filt
+        container.installEventFilter(filt)
+        for child in container.findChildren(QWidget):
+            child.installEventFilter(filt)
+
+    def handle_task_double_click(self, stock_code):
+        """任务框双击：多列→该股单列；单列非全屏→全屏；单列全屏→退出全屏。"""
+        try:
+            now = time.time()
+            if now - getattr(self, '_last_task_dblclick_ts', 0) < 0.4:
+                return
+            self._last_task_dblclick_ts = now
+
+            stock_code = str(stock_code or '').strip()
+            if not stock_code:
+                return
+
+            is_fullscreen = bool(getattr(self, 'is_fullscreen', False))
+            current_columns = getattr(self, 'columns', 1)
+
+            if is_fullscreen:
+                if current_columns == 1:
+                    if hasattr(self, 'exit_fullscreen'):
+                        self.exit_fullscreen()
+                else:
+                    # 多列全屏：直接切到该股单列并保持全屏（内部会恢复全屏）
+                    self.switch_to_single_column_and_show_stock(stock_code)
+            else:
+                if current_columns == 1:
+                    if hasattr(self, 'enter_fullscreen'):
+                        self.enter_fullscreen()
+                else:
+                    self.switch_to_single_column_and_show_stock(stock_code)
+        except Exception as e:
+            self.logger.error(f"处理任务框双击失败: {str(e)}", exc_info=True)
+
     def switch_to_single_column_and_show_stock(self, stock_code):
         """切换到1列布局并显示指定股票
         
@@ -1836,6 +2038,7 @@ class TasksChartsView(QWidget):
             stock_code: 要显示的股票代码
         """
         try:
+            stock_code = str(stock_code or '').strip()
             # 如果已经在1列布局，且该股票在当前页面，则不需要切换
             if self.columns == 1 and stock_code in self.chart_widgets:
                 # 滚动到该图表
@@ -1857,55 +2060,59 @@ class TasksChartsView(QWidget):
             # 在所有任务中查找该股票的索引位置（先查找，避免切换列数后找不到）
             target_page = 0
             if hasattr(self, 'all_tasks') and self.all_tasks:
+                sc_short = stock_code.split('.')[0] if '.' in stock_code else stock_code
                 for idx, (task_id, task) in enumerate(self.all_tasks):
-                    if task.get('stock_code') == stock_code:
+                    task_sc = str(task.get('stock_code', '') or '').strip()
+                    task_short = task_sc.split('.')[0] if '.' in task_sc else task_sc
+                    if task_sc == stock_code or task_short == sc_short:
                         # 1列时每页1个任务
                         target_page = idx
                         break
             
-            # 切换到1列布局
+            # 切换到1列布局（先更新单选框，再异步重排，避免双击后卡住数秒才开始切）
             if self.columns != 1:
+                self._prev_columns = self.columns
                 self.columns = 1
-                # 更新单选框状态（先暂时断开信号，避免触发重复调用）
                 if hasattr(self, 'column_button_group'):
                     button = self.column_button_group.button(1)
                     if button:
-                        # 暂时断开信号，避免触发on_column_toggled
                         button.blockSignals(True)
                         button.setChecked(True)
                         button.blockSignals(False)
+                if hasattr(self, 'column_radios'):
+                    for cols, radio in self.column_radios.items():
+                        if cols != 1:
+                            radio.setChecked(False)
             
-            # 切换到目标页面
             self.current_page = target_page
-            
-            # 加载任务（会按照新列数和页面显示）
-            self.load_tasks()
-            
-            # 如果之前是全屏模式，确保保持全屏状态
-            if was_fullscreen:
-                # 延迟恢复全屏状态，确保 load_tasks() 完成
-                from PyQt5.QtCore import QTimer
-                def restore_fullscreen():
-                    if hasattr(self, 'is_fullscreen') and not self.is_fullscreen:
-                        # 如果全屏状态丢失，重新进入全屏
-                        if hasattr(self, 'enter_fullscreen'):
-                            self.enter_fullscreen()
-                QTimer.singleShot(100, restore_fullscreen)
-            
-            # 滚动到该图表（延迟执行，确保加载完成）
-            from PyQt5.QtCore import QTimer
-            def scroll_to_chart():
-                if stock_code in self.chart_widgets:
-                    chart_data = self.chart_widgets[stock_code]
-                    # 确保图表可见
-                    if 'container' in chart_data and chart_data['container']:
-                        chart_data['container'].show()
-                        chart_data['container'].raise_()
-                        # 滚动到该容器
-                        self.scroll_area.ensureWidgetVisible(chart_data['container'])
-                    if 'chart' in chart_data and chart_data['chart']:
-                        chart_data['chart'].show()
-            QTimer.singleShot(200, scroll_to_chart)  # 增加延迟，确保load_tasks完成
+
+            def _finish_switch():
+                # 优先快速重排（缓存命中），只有缺图时才完整 load_tasks
+                self._load_page_fast()
+                if was_fullscreen and not getattr(self, 'is_fullscreen', False):
+                    if hasattr(self, 'enter_fullscreen'):
+                        self.enter_fullscreen()
+                # 滚动到目标图
+                chart_data = self.chart_widgets.get(stock_code)
+                if not chart_data:
+                    sc_short = stock_code.split('.')[0] if '.' in stock_code else stock_code
+                    for k, v in self.chart_widgets.items():
+                        ks = str(k).split('.')[0] if '.' in str(k) else str(k)
+                        if ks == sc_short:
+                            chart_data = v
+                            break
+                if chart_data:
+                    container = chart_data.get('container')
+                    chart = chart_data.get('chart')
+                    if container:
+                        container.show()
+                        container.raise_()
+                        self.scroll_area.ensureWidgetVisible(container)
+                    if chart:
+                        chart.show()
+
+            # 先让出事件循环，单选框/当前页状态立刻可见，再做重排
+            QTimer.singleShot(0, _finish_switch)
             
         except Exception as e:
             self.logger.error(f"切换到单列显示股票失败: {str(e)}", exc_info=True)
@@ -2117,6 +2324,7 @@ class TasksChartsView(QWidget):
     def _rearrange_charts_fast(self):
         """轻量级重排图表位置（不重新创建图表，只调整布局位置）"""
         run_snap = {}
+        charts_need_redraw = []
         try:
             import time as _time
             _t0 = _time.time()
@@ -2189,13 +2397,21 @@ class TasksChartsView(QWidget):
                     chart_container = cached_data.get('container')
                     chart = cached_data.get('chart')
                     if chart_container:
+                        self._install_task_box_dblclick(chart_container, stock_code)
                         self.grid_layout.addWidget(chart_container, row, col)
                         max_row = max(max_row, row)
                         # 确保容器和图表可见
                         chart_container.show()
                         if chart:
                             # 快速翻页也必须刷新 task_id：否则预约换新任务后仍点旧 ID 启动失败
-                            self._bind_chart_to_task(chart, task_id, task, update_rules=True)
+                            # task_id 未变时不要 set_rules（其内部会同步 update_chart，多列一切就卡）
+                            old_tid = getattr(chart, 'task_id', None)
+                            rules_changed = old_tid != task_id
+                            self._bind_chart_to_task(
+                                chart, task_id, task,
+                                update_rules=rules_changed,
+                                redraw_rules=False,
+                            )
                             cached_data['task'] = task
                             try:
                                 running, paused = self._resolve_task_run_state(task_id, task, chart)
@@ -2207,13 +2423,9 @@ class TasksChartsView(QWidget):
                             chart.current_columns = self.columns
                             if hasattr(chart, 'set_controls_visible'):
                                 chart.set_controls_visible(self.columns == 1)
-                            # 只在 1 列时强制重绘；2 列尽量避免 Matplotlib 重绘以降低切列卡顿
-                            need_force_redraw = layout_changed and (self.columns == 1)
-                            try:
-                                if need_force_redraw:
-                                    chart.update_chart()
-                            except Exception:
-                                pass
+                            # 切到 1 列，或 task/规则变更：布局完成后再异步重绘
+                            if rules_changed or (layout_changed and self.columns == 1):
+                                charts_need_redraw.append(chart)
                             # 检查图表是否已有数据，没有则加入待加载队列
                             has_data = hasattr(chart, 'price_data') and chart.price_data and len(chart.price_data) > 0
                             if not has_data:
@@ -2301,8 +2513,10 @@ class TasksChartsView(QWidget):
                 pass
             # 性能优化：重新启用 UI 更新
             self.setUpdatesEnabled(True)
-            if getattr(self, 'columns', 1) in (3, 4):
-                QTimer.singleShot(0, self._apply_chart_heights_from_viewport)
+            QTimer.singleShot(0, self._apply_chart_layout_from_viewport)
+            # 布局先显示，再逐个异步重绘（matplotlib 同步重绘会卡 1–3 秒）
+            if charts_need_redraw:
+                self._schedule_charts_redraw(charts_need_redraw)
             try:
                 elapsed = _time.time() - _t0
                 if elapsed > 0.2:
@@ -2813,8 +3027,13 @@ class TasksChartsView(QWidget):
                     return tid, task
         return None, None
 
-    def _bind_chart_to_task(self, chart, task_id, task, *, update_rules=True):
-        """把图表控件绑到当前任务（刷新 task_id / task / 规则），避免缓存残留旧 ID。"""
+    def _bind_chart_to_task(self, chart, task_id, task, *, update_rules=True, redraw_rules=True):
+        """把图表控件绑到当前任务（刷新 task_id / task / 规则），避免缓存残留旧 ID。
+        
+        Args:
+            update_rules: 是否调用 set_rules（切列/翻页且 task_id 未变时应 False，避免触发重绘）
+            redraw_rules: 传给 set_rules；批量操作时 False，由外层异步 update_chart
+        """
         if not chart or not isinstance(task, dict):
             return False
         chart.task = task
@@ -2825,7 +3044,16 @@ class TasksChartsView(QWidget):
             params = task.get("params") if isinstance(task.get("params"), dict) else {}
             rules = params.get("rules", [])
             try:
-                chart.set_rules(rules if isinstance(rules, list) else [])
+                chart.set_rules(
+                    rules if isinstance(rules, list) else [],
+                    redraw=redraw_rules,
+                )
+            except TypeError:
+                # 兼容旧签名 set_rules(rules)
+                try:
+                    chart.set_rules(rules if isinstance(rules, list) else [])
+                except Exception:
+                    pass
             except Exception:
                 pass
         return True
@@ -3116,24 +3344,66 @@ class TasksChartsView(QWidget):
     def pause_all_page_tasks(self):
         """暂停当前页所有正在运行的任务"""
         try:
-            paused = []
+            charts_to_pause = []
             for stock_code, chart_data in list(self.chart_widgets.items()):
                 chart = chart_data.get('chart') if isinstance(chart_data, dict) else chart_data
                 if not chart:
                     continue
                 if getattr(chart, 'task_running', False) and not getattr(chart, 'task_paused', False):
+                    charts_to_pause.append((stock_code, chart))
+
+            if not charts_to_pause:
+                self.status_label.setText("本页没有正在运行的任务")
+                return
+
+            # 1) 先全部刷新按钮，立刻给反馈
+            paused = []
+            for stock_code, chart in charts_to_pause:
+                try:
+                    chart.task_running = False
+                    chart.task_paused = True
+                    if hasattr(chart, '_refresh_toggle_btn_ui'):
+                        chart._refresh_toggle_btn_ui()
+                    if hasattr(chart, '_sync_task_status_to_memory'):
+                        chart._sync_task_status_to_memory()
+                    name = getattr(chart, 'stock_name', '') or stock_code
+                    paused.append(f"{name} ({stock_code})")
+                except Exception as e:
+                    self.logger.error(f"刷新暂停UI失败 {stock_code}: {e}", exc_info=True)
+            self.status_label.setText(f"正在暂停本页 {len(paused)} 个任务…")
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+
+            # 2) 停进程：批量不写盘
+            tm = None
+            for stock_code, chart in charts_to_pause:
+                try:
+                    if tm is None:
+                        tm = getattr(chart, 'task_manager', None)
+                    if hasattr(chart, 'pause_task'):
+                        chart.pause_task(persist=False, stop_via_tm=True)
+                    else:
+                        # 兼容旧图表：无 persist 参数
+                        chart.pause_task()
+                except TypeError:
                     try:
                         chart.pause_task()
-                        name = getattr(chart, 'stock_name', '') or stock_code
-                        paused.append(f"{name} ({stock_code})")
                     except Exception as e:
                         self.logger.error(f"暂停任务失败 {stock_code}: {e}", exc_info=True)
+                except Exception as e:
+                    self.logger.error(f"暂停任务失败 {stock_code}: {e}", exc_info=True)
 
-            if paused:
-                self.logger.info(f"全部暂停：已暂停本页 {len(paused)} 个任务：{paused}")
-                self.status_label.setText(f"已暂停本页 {len(paused)} 个任务")
-            else:
-                self.status_label.setText("本页没有正在运行的任务")
+            # 3) 统一写盘一次
+            if tm is not None:
+                try:
+                    tm.save_tasks(list(tm.tasks.values()))
+                except Exception as e:
+                    self.logger.warning(f"全部暂停后统一保存失败: {e}")
+
+            self.logger.info(f"全部暂停：已暂停本页 {len(paused)} 个任务：{paused}")
+            self.status_label.setText(f"已暂停本页 {len(paused)} 个任务")
         except Exception as e:
             self.logger.error(f"全部暂停失败: {e}", exc_info=True)
             QMessageBox.critical(self, "错误", f"全部暂停失败：{str(e)}")
@@ -3191,18 +3461,21 @@ class TasksChartsView(QWidget):
             'tableWidget': None,  # 持仓列表
         }
         
-        # 保存组件的可见状态
+        # 保存组件的可见状态，以及进入全屏前的分隔条尺寸（退出时恢复最近比例）
         if hasattr(main_window_ext, 'splitter_3'):
             self.fullscreen_original_widgets['splitter_3'] = main_window_ext.splitter_3
             self.fullscreen_original_widgets['splitter_3_visible'] = main_window_ext.splitter_3.isVisible()
+            self.fullscreen_original_widgets['splitter_3_sizes'] = main_window_ext.splitter_3.sizes()
         
         if hasattr(main_window_ext, 'splitter_2'):
             self.fullscreen_original_widgets['splitter_2'] = main_window_ext.splitter_2
             self.fullscreen_original_widgets['splitter_2_visible'] = main_window_ext.splitter_2.isVisible()
+            self.fullscreen_original_widgets['splitter_2_sizes'] = main_window_ext.splitter_2.sizes()
         
         if hasattr(main_window_ext, 'splitter'):
             self.fullscreen_original_widgets['splitter'] = main_window_ext.splitter
             self.fullscreen_original_widgets['splitter_visible'] = main_window_ext.splitter.isVisible()
+            self.fullscreen_original_widgets['splitter_sizes'] = main_window_ext.splitter.sizes()
         
         if hasattr(main_window_ext, 'textEdit'):
             self.fullscreen_original_widgets['textEdit'] = main_window_ext.textEdit
@@ -3243,6 +3516,11 @@ class TasksChartsView(QWidget):
         # 设置焦点以接收键盘事件
         self.setFocus()
         
+        # 全屏后宽度变化，延迟再均分列宽/行高，避免某一列被旧 sizeHint 撑开
+        if getattr(self, 'columns', 1) >= 2:
+            QTimer.singleShot(0, self._apply_chart_layout_from_viewport)
+            QTimer.singleShot(50, self._apply_chart_layout_from_viewport)
+        
         # 更新全屏按钮文本
         if hasattr(self, 'fullscreen_btn'):
             self.fullscreen_btn.setText("退出全屏")
@@ -3262,6 +3540,9 @@ class TasksChartsView(QWidget):
         if self.fullscreen_original_widgets.get('splitter_2'):
             splitter_2 = self.fullscreen_original_widgets['splitter_2']
             splitter_2.setVisible(self.fullscreen_original_widgets.get('splitter_2_visible', True))
+            saved = self.fullscreen_original_widgets.get('splitter_2_sizes')
+            if saved:
+                splitter_2.setSizes(saved)
         
         if self.fullscreen_original_widgets.get('textEdit'):
             textEdit = self.fullscreen_original_widgets['textEdit']
@@ -3271,19 +3552,25 @@ class TasksChartsView(QWidget):
             tableWidget = self.fullscreen_original_widgets['tableWidget']
             tableWidget.setVisible(self.fullscreen_original_widgets.get('tableWidget_visible', True))
         
-        # 恢复 splitter_3 的大小比例
+        # 恢复进入全屏前的分隔条比例（用户最近调整后的尺寸）
         if self.fullscreen_original_widgets.get('splitter_3'):
             splitter_3 = self.fullscreen_original_widgets['splitter_3']
-            splitter_3.setSizes([600, 400])  # 恢复原始比例
+            saved = self.fullscreen_original_widgets.get('splitter_3_sizes')
+            splitter_3.setSizes(saved if saved else [700, 300])
         
-        # 恢复 splitter 的大小比例
         if self.fullscreen_original_widgets.get('splitter'):
             splitter = self.fullscreen_original_widgets['splitter']
-            splitter.setSizes([600, 400])  # 恢复原始比例
+            saved = self.fullscreen_original_widgets.get('splitter_sizes')
+            splitter.setSizes(saved if saved else [800, 200])
         
         self.is_fullscreen = False
         self.fullscreen_chart_widget = None
         self.fullscreen_exit_btn = None
+        
+        # 退出全屏后宽度回缩，再均分一次，避免列宽残留
+        if getattr(self, 'columns', 1) >= 2:
+            QTimer.singleShot(0, self._apply_chart_layout_from_viewport)
+            QTimer.singleShot(50, self._apply_chart_layout_from_viewport)
         
         # 更新全屏按钮文本
         if hasattr(self, 'fullscreen_btn'):

@@ -17,6 +17,12 @@ RULES_DIR = ROOT / "data" / "sector_rules"
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     src = next(
         p
         for p in RULES_DIR.glob("*.json")

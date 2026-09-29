@@ -24,6 +24,12 @@ NAME = "马总选股逻辑-次日MA10"
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     code = SRC.read_text(encoding="utf-8")
     if "def select(" not in code:
         raise SystemExit("rule source missing select()")

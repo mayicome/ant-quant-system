@@ -333,6 +333,12 @@ def run(codes, prices, get_name, account, params):
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_strategy_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_strategy_install
+    refuse_strategy_install(__file__)
+
     rid = "strategy_" + uuid.uuid4().hex[:8]
     existing_id = None
     prev: dict = {}

@@ -8,8 +8,9 @@ import os
 import configparser
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QSpacerItem, 
-                             QSizePolicy, QDialog, QDialogButtonBox, QTimeEdit)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QDateTime, QTime
+                             QSizePolicy, QDialog, QDialogButtonBox, QTimeEdit,
+                             QApplication, QMessageBox)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QDateTime, QTime, QObject, QEvent
 from PyQt5.QtGui import QFont
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -31,6 +32,31 @@ from core.elastic_sell import (
 # 配置中文字体
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'sans-serif']
 matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
+
+class _ChartCanvasDoubleClickFilter(QObject):
+    """捕获图表/画布上的 Qt 双击，转发到 StockChartWidget._handle_double_click。"""
+
+    def __init__(self, chart_widget, parent=None):
+        super().__init__(parent)
+        self._chart = chart_widget
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.MouseButtonDblClick:
+            return False
+        try:
+            if event.button() != Qt.LeftButton:
+                return False
+        except Exception:
+            return False
+        chart = self._chart
+        if chart is None or getattr(chart, 'add_mode', None):
+            return False
+        try:
+            chart._handle_double_click()
+        except Exception:
+            pass
+        return True
 
 
 class StockChartWidget(QWidget):
@@ -78,9 +104,9 @@ class StockChartWidget(QWidget):
         self.price_hint_annotation = None
         self.last_mouse_position = None  # 保存最后已知的鼠标位置 (x, y)
         
-        # 双击检测相关
+        # 双击检测相关（matplotlib 备用；主路径走 Qt MouseButtonDblClick）
         self._last_click_time = 0
-        self._double_click_interval = 0.3  # 双击间隔（秒）
+        self._double_click_interval = 0.5  # 与常见系统双击间隔接近，避免偶发点不动
         
         # 交易规则列表
         self.rules = []  # 存储所有交易规则
@@ -728,6 +754,11 @@ class StockChartWidget(QWidget):
         # 设置图表最小大小（将在设置列数后根据列数调整）
         self.canvas.setMinimumHeight(200)
         self.canvas.setMinimumWidth(200)
+
+        # Qt 双击（比 matplotlib 手写间隔更可靠；与任务框过滤器共用防抖）
+        self._canvas_dblclick_filter = _ChartCanvasDoubleClickFilter(self, parent=self)
+        self.canvas.installEventFilter(self._canvas_dblclick_filter)
+        self.installEventFilter(self._canvas_dblclick_filter)
         
         # 创建图表：只显示价格位置图
         self.price_position_ax = self.figure.add_subplot(1, 1, 1)
@@ -1229,6 +1260,13 @@ class StockChartWidget(QWidget):
     
     def set_controls_visible(self, visible):
         """动态设置控件布局的显示/隐藏状态"""
+        # 多列互切时反复 False→False 无需遍历按钮
+        if (
+            getattr(self, '_controls_visible_state', None) is visible
+            and (not visible or self.chart_control_layout is not None)
+        ):
+            return
+
         # 如果需要显示但布局不存在，先创建它
         if visible and self.chart_control_layout is None:
             self._create_control_layout()
@@ -1239,6 +1277,8 @@ class StockChartWidget(QWidget):
                 item = self.chart_control_layout.itemAt(i)
                 if item and item.widget():
                     item.widget().setVisible(visible)
+        
+        self._controls_visible_state = bool(visible)
         
         # 注意：不再在这里设置最小高度，应该由调用者根据列数来设置
         # 连接鼠标事件（如果还没有连接的话）
@@ -1361,8 +1401,13 @@ class StockChartWidget(QWidget):
 
         return inner_low, inner_high
 
-    def set_rules(self, rules):
-        """设置交易规则列表"""
+    def set_rules(self, rules, redraw=True):
+        """设置交易规则列表
+        
+        Args:
+            rules: 规则列表
+            redraw: 是否立即重绘；切列/翻页批量绑定时应传 False，由外层异步重绘
+        """
         self.rules = rules if rules else []
         for r in self.rules:
             if (
@@ -1391,31 +1436,88 @@ class StockChartWidget(QWidget):
         else:
             self._clear_scheduled_clear_toolbar_indicator()
         
-        # 规则变化后，重绘图表
-        if hasattr(self, 'price_position_ax'):
+        # 规则变化后重绘（批量切列时可关闭，避免一页多图同步卡死）
+        if redraw and hasattr(self, 'price_position_ax'):
             self.update_chart()
     
     def set_task_status(self, task_running=False, task_paused=False):
         """设置任务运行状态（从保存的数据中恢复）"""
         self.task_running = task_running
         self.task_paused = task_paused
-        
-        # 更新UI显示：按钮显示状态并包含操作提示
+        self._refresh_toggle_btn_ui()
+
+    def _refresh_toggle_btn_ui(self):
+        """仅刷新启停按钮文案/样式（不落盘、不重绘图表）。"""
+        if not hasattr(self, 'toggle_btn') or self.toggle_btn is None:
+            return
         if self.task_running and not self.task_paused:
-            # 运行中（绿色边框+浅绿背景）
             self.toggle_btn.setText("🟢 运行中 | 暂停")
-            self.toggle_btn.setStyleSheet("font-weight: bold; padding: 2px 12px; background-color: #f1f8f4; border: 2px solid #4caf50; border-radius: 8px; color: #2e7d32; font-size: 11px;")
+            self.toggle_btn.setStyleSheet(
+                "font-weight: bold; padding: 2px 12px; background-color: #f1f8f4; "
+                "border: 2px solid #4caf50; border-radius: 8px; color: #2e7d32; font-size: 11px;"
+            )
             self.toggle_btn.setEnabled(True)
         elif self.task_paused:
-            # 已暂停（橙色边框+浅橙背景）
             self.toggle_btn.setText("🟡 已暂停 | 继续")
-            self.toggle_btn.setStyleSheet("font-weight: bold; padding: 2px 12px; background-color: #fff8f0; border: 2px solid #ff9800; border-radius: 8px; color: #e65100; font-size: 11px;")
+            self.toggle_btn.setStyleSheet(
+                "font-weight: bold; padding: 2px 12px; background-color: #fff8f0; "
+                "border: 2px solid #ff9800; border-radius: 8px; color: #e65100; font-size: 11px;"
+            )
             self.toggle_btn.setEnabled(True)
         else:
-            # 未运行（灰色边框+浅灰背景）
             self.toggle_btn.setText("🔴 未运行 | 启动")
-            self.toggle_btn.setStyleSheet("font-weight: bold; padding: 2px 12px; background-color: #fafafa; border: 2px solid #999; border-radius: 8px; color: #666; font-size: 11px;")
+            self.toggle_btn.setStyleSheet(
+                "font-weight: bold; padding: 2px 12px; background-color: #fafafa; "
+                "border: 2px solid #999; border-radius: 8px; color: #666; font-size: 11px;"
+            )
             self.toggle_btn.setEnabled(True)
+
+    def _sync_task_status_to_memory(self):
+        """只更新内存中的任务状态，不写盘。"""
+        if not (hasattr(self, 'task') and self.task):
+            return
+        if 'params' not in self.task or not isinstance(self.task.get('params'), dict):
+            self.task['params'] = {}
+        self.task['params']['task_running'] = bool(self.task_running)
+        self.task['params']['task_paused'] = bool(self.task_paused)
+        try:
+            tid = str(self.task.get('task_id') or getattr(self, 'task_id', '') or '')
+            if tid and self.task_manager and tid in getattr(self.task_manager, 'tasks', {}):
+                tm_task = self.task_manager.tasks[tid]
+                if not isinstance(tm_task.get('params'), dict):
+                    tm_task['params'] = {}
+                tm_task['params']['task_running'] = bool(self.task_running)
+                tm_task['params']['task_paused'] = bool(self.task_paused)
+                self.task_manager.task_params[tid] = tm_task['params']
+                if self.task_running and not self.task_paused:
+                    tm_task['status'] = '运行中'
+                elif self.task_paused:
+                    # 保持与 stop 对齐的常见展示
+                    if tm_task.get('status') == '运行中':
+                        tm_task['status'] = '未运行'
+        except Exception:
+            pass
+
+    def _schedule_save_task_status(self):
+        """合并延后写盘，避免启停时同步 save_tasks 卡住按钮反馈。"""
+        self._save_status_pending = True
+        if getattr(self, '_save_status_timer', None) is None:
+            self._save_status_timer = QTimer(self)
+            self._save_status_timer.setSingleShot(True)
+            self._save_status_timer.timeout.connect(self._flush_save_task_status)
+        self._save_status_timer.start(0)
+
+    def _flush_save_task_status(self):
+        if not getattr(self, '_save_status_pending', False):
+            return
+        self._save_status_pending = False
+        try:
+            self._save_task_status()
+        except Exception as e:
+            try:
+                self.logger.error(f"[{self.stock_code}] 延后保存任务状态失败: {e}", exc_info=True)
+            except Exception:
+                pass
     
     def set_add_mode(self, mode):
         """设置添加模式"""
@@ -1983,6 +2085,17 @@ class StockChartWidget(QWidget):
         
         # 优先通过任务管理器启动真实任务进程，避免仅UI置状态导致“看起来暂停但实际仍在运行”
         task_id = self._resolve_live_task_id()
+        # 先乐观刷新按钮，再启动进程；失败则回滚，避免“点了没反应”
+        prev_running, prev_paused = self.task_running, self.task_paused
+        self.task_running = True
+        self.task_paused = False
+        self._refresh_toggle_btn_ui()
+        self._sync_task_status_to_memory()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+
         if self.task_manager and task_id:
             if not self.task_manager.start_task(task_id):
                 # 仍在 running_tasks：对齐为运行中，避免「显示未运行却提示已在运行」
@@ -1992,93 +2105,122 @@ class StockChartWidget(QWidget):
                     )
                 else:
                     self.logger.warning(f"[{self.stock_code}] 启动任务失败，保持当前状态")
+                    self.task_running, self.task_paused = prev_running, prev_paused
+                    self._refresh_toggle_btn_ui()
+                    self._sync_task_status_to_memory()
                     return
-        self.task_running = True
-        self.task_paused = False
-        
-        # 更新UI：按钮显示状态并包含操作提示
-        self.toggle_btn.setText("🟢 运行中 | 暂停")
-        self.toggle_btn.setStyleSheet("font-weight: bold; padding: 2px 12px; background-color: #f1f8f4; border: 2px solid #4caf50; border-radius: 8px; color: #2e7d32; font-size: 11px;")
-        self.toggle_btn.setEnabled(True)
-        
-        # 保存状态
-        self._save_task_status()
-        
-        # 检查是否有夜市规则，如果有则启动夜市定时器
-        # builtin：下单由大 QMT 内置策略按时间窗执行，避免图表定时器空转刷日志
-        night_market_rules = [r for r in self.rules if r.get('type') in ['night_buy', 'night_sell'] and r.get('enabled', True) and not r.get('executed', False)]
-        if night_market_rules:
-            skip_chart_night = False
-            try:
-                from utils.qmt_execution_config import use_builtin_order_execution
 
-                skip_chart_night = bool(use_builtin_order_execution())
-            except Exception:
-                skip_chart_night = False
-            if skip_chart_night:
-                self.logger.info(
-                    f"[{self.stock_code}] [builtin] 夜市规则交由大 QMT 执行，"
-                    f"跳过图表定时器（{len(night_market_rules)} 条）"
-                )
-            else:
-                self._start_night_market_timer(night_market_rules)
-        
-        # 提前下单按规则快照；启动时有价则检查（含已挂提前单）
-        if self.current_price > 0:
-            from datetime import datetime
-            tick_data_for_check = {
-                'stock_code': self.stock_code,
-                'lastPrice': self.current_price,
-                'time': datetime.now()
-            }
-            self._update_early_orders_status(tick_data_for_check)
-            self._check_early_orders(tick_data_for_check)
-        else:
-            self.logger.debug(f"[{self.stock_code}] 当前价为0，跳过启动时提前下单检查")
-        
+        # 延后写盘与附属逻辑，让按钮先完成反馈
+        self._schedule_save_task_status()
+        QTimer.singleShot(0, self._after_start_task_side_effects)
         print(f"任务已启动: {self.stock_code} {self.stock_name}")
-    
-    def pause_task(self):
-        """暂停任务"""
-        # 优先通过任务管理器停止真实任务进程，避免退出时仍被判定有运行任务
-        task_id = self._resolve_live_task_id()
-        if self.task_manager and task_id:
-            ok = False
-            try:
-                ok = bool(self.task_manager.stop_task(task_id))
-            except Exception as e:
-                self.logger.warning(f"[{self.stock_code}] stop_task 异常: {e}")
-                ok = False
-            if not ok:
-                # 旧版/残缺登记：尽量强制清掉，避免永远停不掉
+
+    def _after_start_task_side_effects(self):
+        """启动成功后的附属逻辑（夜市定时器 / 提前下单检查），不阻塞按钮反馈。"""
+        try:
+            night_market_rules = [
+                r for r in self.rules
+                if r.get('type') in ['night_buy', 'night_sell']
+                and r.get('enabled', True)
+                and not r.get('executed', False)
+            ]
+            if night_market_rules:
+                skip_chart_night = False
                 try:
-                    if task_id in getattr(self.task_manager, "running_tasks", {}):
-                        self.task_manager._force_remove_running_task(
-                            task_id, send_stop=False
-                        )
-                    mark = getattr(self.task_manager, "_mark_task_stopped_params", None)
-                    if callable(mark):
-                        mark(task_id, paused=True, status="未运行")
-                    self.logger.warning(
-                        f"[{self.stock_code}] 暂停走强制清理，已尽量移除运行登记"
+                    from utils.qmt_execution_config import use_builtin_order_execution
+                    skip_chart_night = bool(use_builtin_order_execution())
+                except Exception:
+                    skip_chart_night = False
+                if skip_chart_night:
+                    self.logger.info(
+                        f"[{self.stock_code}] [builtin] 夜市规则交由大 QMT 执行，"
+                        f"跳过图表定时器（{len(night_market_rules)} 条）"
                     )
-                except Exception as e:
-                    self.logger.error(
-                        f"[{self.stock_code}] 强制清理失败: {e}", exc_info=True
-                    )
+                else:
+                    self._start_night_market_timer(night_market_rules)
+
+            if self.current_price > 0:
+                from datetime import datetime
+                tick_data_for_check = {
+                    'stock_code': self.stock_code,
+                    'lastPrice': self.current_price,
+                    'time': datetime.now()
+                }
+                self._update_early_orders_status(tick_data_for_check)
+                self._check_early_orders(tick_data_for_check)
+            else:
+                self.logger.debug(f"[{self.stock_code}] 当前价为0，跳过启动时提前下单检查")
+        except Exception as e:
+            try:
+                self.logger.error(f"[{self.stock_code}] 启动附属逻辑失败: {e}", exc_info=True)
+            except Exception:
+                pass
+    
+    def pause_task(self, *, persist=True, stop_via_tm=True):
+        """暂停任务。
+        
+        Args:
+            persist: 是否写盘；全部暂停批量调用时传 False，最后统一 save 一次
+            stop_via_tm: 是否通过 TaskManager.stop_task 停进程
+        """
+        # 先立刻刷新按钮，再做停进程/写盘，避免点了半天没反馈
         self.task_running = False
         self.task_paused = True
-        
-        # 先立即更新UI（不等待撤单完成，避免卡顿）
-        self.toggle_btn.setText("🟡 已暂停 | 继续")
-        self.toggle_btn.setStyleSheet("font-weight: bold; padding: 2px 12px; background-color: #fff8f0; border: 2px solid #ff9800; border-radius: 8px; color: #e65100; font-size: 11px;")
-        self.toggle_btn.setEnabled(True)
+        self._refresh_toggle_btn_ui()
+        self._sync_task_status_to_memory()
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+        tm_saved = False
+        if stop_via_tm:
+            task_id = self._resolve_live_task_id()
+            if self.task_manager and task_id:
+                ok = False
+                try:
+                    ok = bool(self.task_manager.stop_task(task_id, persist=persist))
+                    tm_saved = bool(persist and ok)
+                except TypeError:
+                    # 兼容旧签名 stop_task(task_id)
+                    try:
+                        ok = bool(self.task_manager.stop_task(task_id))
+                        tm_saved = bool(ok)
+                    except Exception as e:
+                        self.logger.warning(f"[{self.stock_code}] stop_task 异常: {e}")
+                        ok = False
+                except Exception as e:
+                    self.logger.warning(f"[{self.stock_code}] stop_task 异常: {e}")
+                    ok = False
+                if not ok:
+                    # 旧版/残缺登记：尽量强制清掉，避免永远停不掉
+                    try:
+                        if task_id in getattr(self.task_manager, "running_tasks", {}):
+                            self.task_manager._force_remove_running_task(
+                                task_id, send_stop=False
+                            )
+                        mark = getattr(self.task_manager, "_mark_task_stopped_params", None)
+                        if callable(mark):
+                            mark(task_id, paused=True, status="未运行")
+                        self.logger.warning(
+                            f"[{self.stock_code}] 暂停走强制清理，已尽量移除运行登记"
+                        )
+                    except Exception as e:
+                        self.logger.error(
+                            f"[{self.stock_code}] 强制清理失败: {e}", exc_info=True
+                        )
         
         # 停止夜市定时器
         self._stop_night_market_timer()
+
+        # stop_task 幂等路径可能把 params.task_paused 写成 False，再对齐回「已暂停」
+        self.task_running = False
+        self.task_paused = True
+        self._sync_task_status_to_memory()
         
-        # 保存状态
-        self._save_task_status()
+        # TM 已写盘则不必再同步 save；批量暂停由外层统一 save
+        if persist and not tm_saved:
+            self._schedule_save_task_status()
         
         # 在后台线程中撤消所有提前下单的订单（避免阻塞UI）
         import threading
@@ -4461,8 +4603,12 @@ class StockChartWidget(QWidget):
             if getattr(self, "logger", None):
                 self.logger.debug(f"[{self.stock_code}] 清理 results 重试态失败: {e}")
 
-    def _retry_no_cash_rule(self, rule) -> bool:
-        """资金不足已结束的买入腿：保留历史，重新挂起等待触发（人工）。"""
+    def _retry_no_cash_rule(self, rule, *, convert_to_single: bool = False) -> bool:
+        """资金不足已结束的买入腿：保留历史，重新挂起等待触发（人工）。
+
+        convert_to_single=True 时，将弹性/突破/笼子/夜市等改为对应单点买卖
+       （价格取 trigger_price 或 price / 笼子端点）。
+        """
         if not self._rule_is_no_cash_ended(rule):
             return False
         from datetime import datetime
@@ -4471,6 +4617,7 @@ class StockChartWidget(QWidget):
         attempt = int(rule.get("execution_attempt") or 1)
         if attempt < 1:
             attempt = 1
+        old_type = str(rule.get("type") or "")
         prior = list(rule.get("prior_attempts") or [])
         prior.append(
             {
@@ -4480,6 +4627,7 @@ class StockChartWidget(QWidget):
                 "executed_volume": rule.get("executed_volume"),
                 "order_id": rule.get("order_id"),
                 "executed_reason": rule.get("executed_reason") or "no_cash",
+                "rule_type": old_type,
                 "archived_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             }
         )
@@ -4512,8 +4660,16 @@ class StockChartWidget(QWidget):
             "pending_tick_execution",
         ):
             rule.pop(key, None)
+        # 提前挂单态也清掉，避免盖住「等资金」样式
+        self._clear_early_order_state(rule)
         rule["break_below_trigger_done"] = False
         rule["break_above_trigger_done"] = False
+
+        converted_note = ""
+        if convert_to_single:
+            new_type = self._convert_rule_to_single_point(rule)
+            if new_type and new_type != old_type:
+                converted_note = f"·{old_type}→{new_type}"
 
         # 进入「等资金」模式：没钱不结束；缩量后继续等剩余
         try:
@@ -4531,6 +4687,9 @@ class StockChartWidget(QWidget):
         try:
             from core.execution_record_manager import ExecutionRecordManager
 
+            mode_txt = "等资金模式"
+            if convert_to_single:
+                mode_txt = f"等资金·改为单点{converted_note}"
             ExecutionRecordManager().add_execution_record(
                 {
                     "execution_time": now,
@@ -4539,7 +4698,7 @@ class StockChartWidget(QWidget):
                     "rule_type": str(rule.get("type") or ""),
                     "rule_name": str(rule.get("name") or ""),
                     "rule_detail": (
-                        f"资金不足后人工重新挂起（第{next_attempt}次·等资金模式）"
+                        f"资金不足后人工重新挂起（第{next_attempt}次·{mode_txt}）"
                         f" | 计划{planned}股 | leg={rule.get('leg_key') or ''}"
                     ),
                     "current_price": float(getattr(self, "current_price", 0) or 0),
@@ -4568,8 +4727,9 @@ class StockChartWidget(QWidget):
         self.update_chart()
 
         name = str(rule.get("name") or "未命名规则")
+        extra = "·已改为单点" if convert_to_single and converted_note else ""
         msg = (
-            f"[{self.stock_code}] 已重新挂起「{name}」"
+            f"[{self.stock_code}] 已重新挂起「{name}」{extra}"
             f"（第{next_attempt}次·等资金/可补剩余，禁用或删除才结束）"
         )
         if getattr(self, "logger", None):
@@ -4577,6 +4737,89 @@ class StockChartWidget(QWidget):
         else:
             print(msg)
         return True
+
+    def _convert_rule_to_single_point(self, rule) -> str:
+        """将规则原地改为单点买卖；返回转换后的 type（无法转换则原样返回）。"""
+        if not isinstance(rule, dict):
+            return ""
+        old = str(rule.get("type") or "").strip()
+        mapping = {
+            "best_buy": "single_buy",
+            "best_sell": "single_sell",
+            "breakthrough_buy": "single_buy",
+            "breakthrough_sell": "single_sell",
+            "cage_buy": "single_buy",
+            "cage_sell": "single_sell",
+            "night_buy": "single_buy",
+            "night_sell": "single_sell",
+        }
+        new_type = mapping.get(old)
+        if not new_type:
+            return old
+
+        try:
+            px = float(rule.get("trigger_price") or rule.get("price") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px <= 0 and old in ("cage_buy", "cage_sell"):
+            try:
+                lo = float(rule.get("price_low") or 0)
+            except (TypeError, ValueError):
+                lo = 0.0
+            try:
+                hi = float(rule.get("price_high") or 0)
+            except (TypeError, ValueError):
+                hi = 0.0
+            if "buy" in old:
+                px = lo if lo > 0 else hi
+            else:
+                px = hi if hi > 0 else lo
+            if px <= 0 and lo > 0 and hi > 0:
+                px = (lo + hi) / 2.0
+
+        rule["type"] = new_type
+        if px > 0:
+            try:
+                precision = self._get_price_precision()
+            except Exception:
+                precision = 2
+            rule["price"] = round(float(px), precision)
+
+        # 清掉非单点字段，避免引擎仍按弹性/笼子逻辑读
+        for key in (
+            "trigger_price",
+            "rise_percent",
+            "drop_percent",
+            "rise_scale",
+            "max_rise_percent",
+            "dynamic_thresholds",
+            "room_blend_start",
+            "price_low",
+            "price_high",
+            "wall_thickness",
+            "require_break_below",
+            "require_break_above",
+            "break_below_trigger_done",
+            "break_above_trigger_done",
+            "band_low",
+            "band_high",
+            "band_accept_low",
+            "accept_band_low",
+            "pullback_price",
+            "confirm_ticks",
+            "cooldown_after_extreme_ticks",
+            "triggered",
+            "lowest_price",
+            "highest_price",
+        ):
+            rule.pop(key, None)
+        rule["retry_from_type"] = old
+        try:
+            self._stamp_early_order_flag(rule, force=False)
+            self._stamp_breakthrough_flags(rule, force=False)
+        except Exception:
+            pass
+        return new_type
 
     def _show_rule_context_menu(self, rule, event):
         """显示规则的右键菜单"""
@@ -4851,13 +5094,19 @@ class StockChartWidget(QWidget):
             
             menu.addSeparator()
 
-        # 资金不足已结束：人工重新挂起（不弹确认；自动流程仍一次结束）
-        retry_no_cash_action = None
+        # 资金不足已结束：人工重新挂起（两项：保持原类型 / 改为单点）
+        retry_keep_action = None
+        retry_single_action = None
         if rule_executed and self._rule_is_no_cash_ended(rule):
             next_n = int(rule.get("execution_attempt") or 1) + 1
-            retry_no_cash_action = menu.addAction(
-                f"🔄 再次执行（等资金模式 · 第{next_n}次）"
+            retry_keep_action = menu.addAction(
+                f"🔄 再次执行（保持原类型 · 等资金 · 第{next_n}次）"
             )
+            rt_now = str(rule.get("type") or "").strip()
+            if rt_now not in ("single_buy", "single_sell"):
+                retry_single_action = menu.addAction(
+                    f"🔄 再次执行为单点（等资金 · 第{next_n}次）"
+                )
             menu.addSeparator()
         
         # 删除选项（所有规则都可以删除）
@@ -4866,8 +5115,11 @@ class StockChartWidget(QWidget):
         # 显示菜单并获取选择
         action = menu.exec_(QCursor.pos())
 
-        if retry_no_cash_action and action == retry_no_cash_action:
-            self._retry_no_cash_rule(rule)
+        if retry_keep_action and action == retry_keep_action:
+            self._retry_no_cash_rule(rule, convert_to_single=False)
+            return
+        if retry_single_action and action == retry_single_action:
+            self._retry_no_cash_rule(rule, convert_to_single=True)
             return
         
         if action == delete_action:
@@ -10157,10 +10409,69 @@ class StockChartWidget(QWidget):
             return False
         return ld <= p <= lu
 
-    def _append_rule_chart_point(self, price_points, price, label, color, draggable, volume):
+    def _append_rule_chart_point(self, price_points, price, label, color, draggable, volume, style=None):
         if not self._rule_price_is_tradeable(price):
             return
-        price_points.append((float(price), label, color, draggable, volume))
+        # (price, label, fill, draggable, volume[, style_dict])
+        # style: edge/lw/alpha/marker — 类型色作填充，状态走描边与透明度
+        if style is None:
+            price_points.append((float(price), label, color, draggable, volume))
+        else:
+            price_points.append((float(price), label, color, draggable, volume, style))
+
+    @staticmethod
+    def _unpack_chart_point(point):
+        """兼容 5 元组关键点与 6 元组规则点（含 style）。"""
+        price = point[0]
+        name = point[1]
+        color = point[2]
+        draggable = point[3]
+        volume = point[4]
+        style = point[5] if len(point) >= 6 else None
+        return price, name, color, draggable, volume, style
+
+    def _rule_fill_color(self, rule_type):
+        from core.trading_rules import get_rule_type_color
+        return get_rule_type_color(rule_type, "#888888")
+
+    def _rule_point_style(self, rule, rule_type, base_state=None, *, force_state=None, point_executed=None):
+        """类型色 + 状态样式。force_state / point_executed 用于笼端点、网格格点。"""
+        from core.trading_rules import (
+            classify_rule_chart_state,
+            get_rule_node_state_style,
+        )
+        state = force_state
+        if state is None:
+            if point_executed is True:
+                state = "done"
+            elif point_executed is False and base_state in ("done", "abnormal", "disabled"):
+                # 规则整体已结束/禁用但该端点/格点未触发：鬼影
+                state = "ghost"
+            else:
+                state = base_state or classify_rule_chart_state(rule, rule_type)
+            # 运行中叠加：提前挂单 / 弹性已触发（不覆盖结束态；也不盖掉「等资金」）
+            if state == "pending":
+                done_flag = bool(rule.get("executed", False))
+                if rule_type == "scheduled_clear":
+                    done_flag = bool(rule.get("scheduled_clear_executed", False))
+                early_ok = (
+                    rule.get("early_order", False)
+                    and rule.get("early_order_id")
+                    and not done_flag
+                    and self.task_running
+                    and not self.task_paused
+                )
+                if early_ok:
+                    state = "early_order"
+                elif (
+                    rule_type in ("best_buy", "best_sell")
+                    and rule.get("triggered", False)
+                    and not done_flag
+                    and self.task_running
+                    and not self.task_paused
+                ):
+                    state = "triggered"
+        return get_rule_node_state_style(state)
 
     def _cage_pair_tradeable(self, price_low, price_high) -> bool:
         """笼子上下沿均须在 [跌停, 涨停] 内；否则不可撮合，不绘制。"""
@@ -10175,9 +10486,9 @@ class StockChartWidget(QWidget):
         """从规则列表生成价格点
         返回网格规则的点列表，用于绘制连接线
         """
-        from core.trading_rules import RuleType, RULE_TYPE_COLORS
+        from core.trading_rules import classify_rule_chart_state
         from core.rule_activation import rule_activation_chart_suffix
-        grid_lines = []  # 存储网格规则的连接线信息 [(rule_name, [(price, volume), ...]), ...]
+        grid_lines = []  # 存储网格规则的点列表，用于绘制连接线
         
         if not self.rules:
             return grid_lines
@@ -10190,119 +10501,84 @@ class StockChartWidget(QWidget):
             rule_name = rule.get('name', '未命名规则')
             rule_enabled = rule.get('enabled', True)
             rule_executed = rule.get('executed', False)
+            # 填充始终用类型色；状态只影响描边/透明度/标记
+            color = self._rule_fill_color(rule_type)
+            base_state = classify_rule_chart_state(rule, rule_type)
+            if (
+                rule_executed
+                and base_state == "done"
+                and self._is_band_hard_pass_rule(rule)
+            ):
+                base_state = "abnormal"
             
-            # 对于定时清仓规则，检查 scheduled_clear_executed 字段
+            # 标签文案仍区分细因（颜色不再按细因分色）
             if rule_type == 'scheduled_clear':
                 scheduled_clear_executed = rule.get('scheduled_clear_executed', False)
-                scheduled_clear_order_attempted = rule.get('scheduled_clear_order_attempted', False)
-                # 获取定时清仓时间
                 scheduled_clear_time = rule.get('scheduled_clear_time', '14:56:00')
-                # 在标签中显示时间
                 rule_name_with_time = f"{rule_name} ({scheduled_clear_time})"
-                
-                # 定时清仓规则：已执行时根据是否调用了下单指令区分显示
                 if scheduled_clear_executed:
-                    # 如果调用了下单指令（已下单），显示为灰色
-                    if scheduled_clear_order_attempted:
-                        color = '#999999'  # 灰色节点（已下单）
-                        rule_name = f"[已执行] {rule_name_with_time}"
-                    else:
-                        # 如果没有调用下单指令，可能是价格不满足条件或时间已过
-                        color = '#ffffff'  # 白色节点（已执行但未下单）
-                        rule_name = f"[已执行] {rule_name_with_time}"
+                    rule_name = f"[已执行] {rule_name_with_time}"
                 elif not rule_enabled:
                     if str(rule.get("halt_reason") or "").strip() == "open_gain":
-                        color = '#FFC107'  # 昨收涨幅熔断：黄色节点
                         rule_name = f"[已停止-昨收涨幅超限] {rule_name_with_time}"
                     else:
-                        color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）
                         rule_name = f"[已禁用] {rule_name_with_time}"
                 else:
-                    # 定时清仓规则使用紫色，便于区分
-                    color = '#9c27b0'  # 紫色
-                    # 未执行且启用的规则，显示时间
                     rule_name = rule_name_with_time
             else:
-                # 其他规则类型的颜色逻辑
                 if rule_executed:
-                    # 已执行的规则显示为深灰色；若是禁买窗口跳过，单独显示文案和颜色
                     executed_reason = str(rule.get('executed_reason', '') or '')
                     executed_order_id = str(rule.get('order_id', '') or '')
                     if (
                         executed_reason == 'buy_block_window'
                         or executed_order_id == 'SKIPPED_BUY_WINDOW'
                     ):
-                        color = '#000000'  # 禁买窗口跳过：黑色节点，便于与常规已执行灰色区分
                         rule_name = f"[已执行-禁买跳过] {rule_name}"
                     elif (
                         executed_reason == 'order_below_min'
                         or executed_order_id == 'SKIPPED_MIN_BUY'
                     ):
-                        color = '#000000'  # 本笔低于最小买入：异常结束，黑色
                         rule_name = f"[已执行-本笔低于最小买入] {rule_name}"
                     elif (
                         executed_reason == 'early_cancelled'
                         or executed_order_id == 'EARLY_CANCELLED'
                     ):
-                        color = '#000000'  # 提前挂单人工撤单：黑色
                         rule_name = f"[已执行-提前撤单] {rule_name}"
                     elif executed_reason == 'not_true_breakthrough':
-                        color = '#000000'
                         rule_name = f"[已结束-非真突破] {rule_name}"
                     elif (
                         executed_reason == 'band_hard_pass'
                         or executed_order_id == 'BAND_HARD_PASS'
                         or self._is_band_hard_pass_rule(rule)
                     ):
-                        color = '#000000'
                         kind = self._band_hard_pass_kind_label(rule)
                         rule_name = f"[已结束-价格带硬pass·{kind}] {rule_name}"
                     elif (
                         rule_type == 'breakthrough_buy'
                         and self._rule_true_breakthrough_passed(rule)
                     ):
-                        color = '#999999'
                         rule_name = f"[已执行-真突破] {rule_name}"
                     elif executed_reason == 'order_failed' or executed_order_id == 'ORDER_FAILED':
-                        color = '#555555'
                         rule_name = f"[已执行-下单失败] {rule_name}"
                     elif executed_order_id in ('MIN_BUY_AMOUNT', 'NO_CASH') or executed_reason == 'no_cash':
-                        color = '#555555'
                         attempt = int(rule.get('execution_attempt') or 1)
                         rule_name = f"[已执行-资金不足·第{attempt}次] {rule_name}"
                     else:
-                        color = '#999999'
                         rule_name = f"[已执行] {rule_name}"
                 elif not rule_enabled:
                     if str(rule.get("halt_reason") or "").strip() == "open_gain":
-                        color = '#FFC107'  # 昨收涨幅熔断：黄色节点，区别于普通禁用黑点
                         rule_name = f"[已停止-昨收涨幅超限] {rule_name}"
                     else:
-                        # 禁用的规则显示为黑色
-                        color = '#000000'  # 禁用：黑色（与“已执行/已结束”的灰色区分）
                         rule_name = f"[已禁用] {rule_name}"
                 elif bool(rule.get("cash_wait_active")):
-                    color = '#FF9800'  # 等资金：橙色
                     rem = rule.get("remaining_volume")
                     got = rule.get("filled_volume_accum") or 0
                     rule_name = f"[等资金 {got}/{rem if rem is not None else '?'}] {rule_name}"
-                else:
-                    # 正常规则使用规则类型颜色
-                    # 夜市规则使用特殊颜色
-                    if rule_type == 'night_buy':
-                        color = '#5c6bc0'  # 深蓝色（与按钮颜色一致）
-                    elif rule_type == 'night_sell':
-                        color = '#ab47bc'  # 紫色（与按钮颜色一致）
-                    else:
-                        try:
-                            color = RULE_TYPE_COLORS.get(RuleType(rule_type), '#888888') if rule_type else '#888888'
-                        except (ValueError, AttributeError):
-                            color = '#888888'
 
             act_suffix = rule_activation_chart_suffix(rule)
             if act_suffix:
                 rule_name = f"{rule_name}{act_suffix}"
-            
+
             # 根据规则类型添加价格点（禁用的规则即使volume为0也显示）
             if rule_type in ['single_buy', 'breakthrough_buy', 'night_buy']:
                 # 单点买入/突破买入：在指定价格显示买入点
@@ -10314,17 +10590,8 @@ class StockChartWidget(QWidget):
                 if math.isnan(price) or price <= 0:
                     pass
                 elif volume > 0 or not rule_enabled or rule_type == 'breakthrough_buy':
-                    # 如果是提前下单且未执行，使用黄色显示（必须有订单ID，说明已真正下单）
-                    if (rule.get('early_order', False) and 
-                        rule.get('early_order_id') and  # 必须有订单ID，说明已真正下单
-                        not rule_executed and 
-                        self.task_running and 
-                        not self.task_paused):
-                        # 使用黄色表示提前下单状态（不再闪烁以提升性能）
-                        early_order_color = '#ffeb3b'  # 黄色
-                        self._append_rule_chart_point(price_points, price, rule_name, early_order_color, True, volume)
-                    else:
-                        self._append_rule_chart_point(price_points, price, rule_name, color, True, volume)
+                    st = self._rule_point_style(rule, rule_type, base_state)
+                    self._append_rule_chart_point(price_points, price, rule_name, color, True, volume, st)
             
             elif rule_type in ['single_sell', 'breakthrough_sell', 'night_sell', 'scheduled_clear']:
                 # 单点卖出/突破卖出/夜市卖出/定时清仓：在指定价格显示卖出点
@@ -10358,183 +10625,119 @@ class StockChartWidget(QWidget):
                     )
                 )
                 if show_sell:
-                    # 对于定时清仓规则，检查 scheduled_clear_executed 而不是 executed
-                    if rule_type == 'scheduled_clear':
-                        scheduled_clear_executed = rule.get('scheduled_clear_executed', False)
-                        # 如果是提前下单且未执行，使用黄色显示（必须有订单ID，说明已真正下单）
-                        if (rule.get('early_order', False) and 
-                            rule.get('early_order_id') and  # 必须有订单ID，说明已真正下单
-                            not scheduled_clear_executed and 
-                            self.task_running and 
-                            not self.task_paused):
-                            # 使用黄色表示提前下单状态（不再闪烁以提升性能）
-                            early_order_color = '#ffeb3b'  # 黄色
-                            self._append_rule_chart_point(price_points, price, rule_name, early_order_color, True, -volume)
-                        else:
-                            # 已执行时使用白色节点（color 已经在上面设置为白色）
-                            self._append_rule_chart_point(price_points, price, rule_name, color, True, -volume)
-                    else:
-                        # 其他卖出规则（single_sell, night_sell）使用原有逻辑
-                        # 如果是提前下单且未执行，使用黄色显示（必须有订单ID，说明已真正下单）
-                        if (rule.get('early_order', False) and 
-                            rule.get('early_order_id') and  # 必须有订单ID，说明已真正下单
-                            not rule_executed and 
-                            self.task_running and 
-                            not self.task_paused):
-                            # 使用黄色表示提前下单状态（不再闪烁以提升性能）
-                            early_order_color = '#ffeb3b'  # 黄色
-                            self._append_rule_chart_point(price_points, price, rule_name, early_order_color, True, -volume)
-                        else:
-                            self._append_rule_chart_point(price_points, price, rule_name, color, True, -volume)
+                    st = self._rule_point_style(rule, rule_type, base_state)
+                    self._append_rule_chart_point(
+                        price_points, price, rule_name, color, True, -volume, st
+                    )
             
             elif rule_type == 'cage_buy':
-                # 笼子买入：显示两个价格点（两端均须在涨跌停内，否则整段不画）
+                # 笼子买入：两端均须在涨跌停内；触发端 done，未触发端 ghost
                 price_low = rule.get('price_low', 0)
                 price_high = rule.get('price_high', 0)
                 volume = rule.get('volume', 0)
                 if price_low > 0 and price_high > 0 and (volume > 0 or not rule_enabled):
                     if not self._cage_pair_tradeable(price_low, price_high):
                         continue
-                    # 如果是提前下单且未执行，使用黄色显示
-                    if (rule.get('early_order', False) and 
-                        rule.get('early_order_id') and  # 必须有订单ID，说明已真正下单
-                        not rule_executed and 
-                        self.task_running and 
-                        not self.task_paused):
-                        # 使用黄色表示提前下单状态（不再闪烁以提升性能）
-                        early_order_color = '#ffeb3b'  # 黄色
-                        price_points.append((price_low, f'{rule_name}(下)', early_order_color, True, volume))
-                        price_points.append((price_high, f'{rule_name}(上)', early_order_color, True, volume))
-                    elif rule_executed:
-                        # 已执行：根据保存的executed_endpoint判断是哪个端点执行的，未执行的端点显示为白色
-                        executed_endpoint = rule.get('executed_endpoint')  # 'low' 或 'high'
+                    low_done = high_done = None
+                    if rule_executed:
+                        executed_endpoint = rule.get('executed_endpoint')
                         if executed_endpoint == 'low':
-                            # 下限执行（灰色），上限未执行（白色）
-                            price_points.append((price_low, f'{rule_name}(下)', color, True, volume))  # 灰色
-                            price_points.append((price_high, f'{rule_name}(上)', '#ffffff', True, volume))  # 白色
+                            low_done, high_done = True, False
                         elif executed_endpoint == 'high':
-                            # 上限执行（灰色），下限未执行（白色）
-                            price_points.append((price_low, f'{rule_name}(下)', '#ffffff', True, volume))  # 白色
-                            price_points.append((price_high, f'{rule_name}(上)', color, True, volume))  # 灰色
+                            low_done, high_done = False, True
                         else:
-                            # 没有端点记录（兼容旧数据），通过价格距离判断
-                            executed_price = rule.get('executed_price', 0)
+                            executed_price = rule.get('executed_price', 0) or 0
                             if executed_price > 0:
-                                dist_to_low = abs(executed_price - price_low)
-                                dist_to_high = abs(executed_price - price_high)
-                                if dist_to_low < dist_to_high:
-                                    price_points.append((price_low, f'{rule_name}(下)', color, True, volume))
-                                    price_points.append((price_high, f'{rule_name}(上)', '#ffffff', True, volume))
+                                if abs(executed_price - price_low) <= abs(executed_price - price_high):
+                                    low_done, high_done = True, False
                                 else:
-                                    price_points.append((price_low, f'{rule_name}(下)', '#ffffff', True, volume))
-                                    price_points.append((price_high, f'{rule_name}(上)', color, True, volume))
+                                    low_done, high_done = False, True
                             else:
-                                # 两个都显示为灰色（兼容旧数据）
-                                price_points.append((price_low, f'{rule_name}(下)', color, True, volume))
-                                price_points.append((price_high, f'{rule_name}(上)', color, True, volume))
-                    else:
-                        price_points.append((price_low, f'{rule_name}(下)', color, True, volume))
-                        price_points.append((price_high, f'{rule_name}(上)', color, True, volume))
+                                low_done, high_done = True, True
+                    st_low = self._rule_point_style(
+                        rule, rule_type, base_state, point_executed=low_done
+                    )
+                    st_high = self._rule_point_style(
+                        rule, rule_type, base_state, point_executed=high_done
+                    )
+                    self._append_rule_chart_point(
+                        price_points, price_low, f'{rule_name}(下)', color, True, volume, st_low
+                    )
+                    self._append_rule_chart_point(
+                        price_points, price_high, f'{rule_name}(上)', color, True, volume, st_high
+                    )
             
             elif rule_type == 'cage_sell':
-                # 笼子卖出：显示两个价格点
                 price_low = rule.get('price_low', 0)
                 price_high = rule.get('price_high', 0)
                 volume = rule.get('volume', 0)
                 if price_low > 0 and price_high > 0 and (volume > 0 or not rule_enabled):
-                    # 如果是提前下单且未执行，使用黄色显示
-                    if (rule.get('early_order', False) and 
-                        rule.get('early_order_id') and  # 必须有订单ID，说明已真正下单
-                        not rule_executed and 
-                        self.task_running and 
-                        not self.task_paused):
-                        # 使用黄色表示提前下单状态（不再闪烁以提升性能）
-                        early_order_color = '#ffeb3b'  # 黄色
-                        price_points.append((price_low, f'{rule_name}(下)', early_order_color, True, -volume))
-                        price_points.append((price_high, f'{rule_name}(上)', early_order_color, True, -volume))
-                    elif rule_executed:
-                        # 已执行：根据保存的executed_endpoint判断是哪个端点执行的，未执行的端点显示为白色
-                        executed_endpoint = rule.get('executed_endpoint')  # 'low' 或 'high'
+                    low_done = high_done = None
+                    if rule_executed:
+                        executed_endpoint = rule.get('executed_endpoint')
                         if executed_endpoint == 'low':
-                            # 下限执行（灰色），上限未执行（白色）
-                            price_points.append((price_low, f'{rule_name}(下)', color, True, -volume))  # 灰色
-                            price_points.append((price_high, f'{rule_name}(上)', '#ffffff', True, -volume))  # 白色
+                            low_done, high_done = True, False
                         elif executed_endpoint == 'high':
-                            # 上限执行（灰色），下限未执行（白色）
-                            price_points.append((price_low, f'{rule_name}(下)', '#ffffff', True, -volume))  # 白色
-                            price_points.append((price_high, f'{rule_name}(上)', color, True, -volume))  # 灰色
+                            low_done, high_done = False, True
                         else:
-                            # 没有端点记录（兼容旧数据），通过价格距离判断
-                            executed_price = rule.get('executed_price', 0)
+                            executed_price = rule.get('executed_price', 0) or 0
                             if executed_price > 0:
-                                dist_to_low = abs(executed_price - price_low)
-                                dist_to_high = abs(executed_price - price_high)
-                                if dist_to_low < dist_to_high:
-                                    price_points.append((price_low, f'{rule_name}(下)', color, True, -volume))
-                                    price_points.append((price_high, f'{rule_name}(上)', '#ffffff', True, -volume))
+                                if abs(executed_price - price_low) <= abs(executed_price - price_high):
+                                    low_done, high_done = True, False
                                 else:
-                                    price_points.append((price_low, f'{rule_name}(下)', '#ffffff', True, -volume))
-                                    price_points.append((price_high, f'{rule_name}(上)', color, True, -volume))
+                                    low_done, high_done = False, True
                             else:
-                                # 两个都显示为灰色（兼容旧数据）
-                                price_points.append((price_low, f'{rule_name}(下)', color, True, -volume))
-                                price_points.append((price_high, f'{rule_name}(上)', color, True, -volume))
-                    else:
-                        price_points.append((price_low, f'{rule_name}(下)', color, True, -volume))
-                        price_points.append((price_high, f'{rule_name}(上)', color, True, -volume))
+                                low_done, high_done = True, True
+                    st_low = self._rule_point_style(
+                        rule, rule_type, base_state, point_executed=low_done
+                    )
+                    st_high = self._rule_point_style(
+                        rule, rule_type, base_state, point_executed=high_done
+                    )
+                    self._append_rule_chart_point(
+                        price_points, price_low, f'{rule_name}(下)', color, True, -volume, st_low
+                    )
+                    self._append_rule_chart_point(
+                        price_points, price_high, f'{rule_name}(上)', color, True, -volume, st_high
+                    )
             
             elif rule_type == 'best_sell':
-                # 弹性卖出：显示触发价格
                 trigger_price = rule.get('trigger_price', 0)
                 volume = rule.get('volume', 0)
                 drop_percent = rule.get('drop_percent', 0.3)
-                triggered = rule.get('triggered', False)
                 if trigger_price > 0 and (volume > 0 or not rule_enabled):
                     label = f'{rule_name}\n(回落{drop_percent:.2f}%)'
-                    # 如果已触发且未执行且任务运行中，使用红色显示（不再闪烁以提升性能）
-                    if triggered and not rule_executed and self.task_running and not self.task_paused:
-                        # 使用红色表示已触发但未执行的状态
-                        triggered_color = '#ff0000'  # 红色
-                        price_points.append((trigger_price, label, triggered_color, True, -volume if volume > 0 else 0))
-                    else:
-                        # 已执行或未触发或任务未运行：使用正常颜色（已执行时为灰色）
-                        price_points.append((trigger_price, label, color, True, -volume if volume > 0 else 0))
+                    st = self._rule_point_style(rule, rule_type, base_state)
+                    self._append_rule_chart_point(
+                        price_points, trigger_price, label, color, True,
+                        -volume if volume > 0 else 0, st,
+                    )
             
             elif rule_type == 'best_buy':
-                # 弹性买入：显示触发价格
                 trigger_price = rule.get('trigger_price', 0)
                 volume = rule.get('volume', 0)
                 rise_percent = rule.get('rise_percent', 0.3)
-                triggered = rule.get('triggered', False)
                 if trigger_price > 0 and (volume > 0 or not rule_enabled):
                     label = f'{rule_name}\n(反弹{rise_percent:.2f}%)'
-                    # 如果已触发且未执行且任务运行中，使用红色显示（不再闪烁以提升性能）
-                    if triggered and not rule_executed and self.task_running and not self.task_paused:
-                        # 使用红色表示已触发但未执行的状态
-                        triggered_color = '#ff0000'  # 红色
-                        price_points.append((trigger_price, label, triggered_color, True, volume))
-                    else:
-                        # 已执行或未触发或任务未运行：使用正常颜色（已执行时为灰色）
-                        price_points.append((trigger_price, label, color, True, volume))
+                    st = self._rule_point_style(rule, rule_type, base_state)
+                    self._append_rule_chart_point(
+                        price_points, trigger_price, label, color, True, volume, st,
+                    )
             
             elif rule_type == 'grid_buy':
-                # 网格买入：显示所有网格线
                 start_price = rule.get('start_price', 0)
                 end_price = rule.get('end_price', 0)
                 volume_per_grid = rule.get('volume_per_grid', 0)
                 grid_step = rule.get('grid_step', 0.5)
                 num_grids = rule.get('num_grids', 2)
-                executed_grids = rule.get('executed_grids', [])
                 
-                # 兼容旧数据：如果没有 end_price，根据 start_price 和 grid_step 计算
                 if end_price == 0 and start_price > 0:
                     end_price = start_price - num_grids * grid_step
-                    rule['end_price'] = round(end_price, 2)  # 更新到规则中
+                    rule['end_price'] = round(end_price, 2)
                 
                 if start_price > 0 and end_price > 0:
-                    # 获取已执行节点的固定价格和固定股数
-                    executed_grid_prices = rule.get('executed_grid_prices', {})  # {grid_index: fixed_price}
-                    executed_grid_volumes = rule.get('executed_grid_volumes', {})  # {grid_index: fixed_volume}
+                    executed_grid_prices = rule.get('executed_grid_prices', {})
+                    executed_grid_volumes = rule.get('executed_grid_volumes', {})
                     executed_grids = set()
                     for x in rule.get('executed_grids', []) or []:
                         try:
@@ -10542,89 +10745,72 @@ class StockChartWidget(QWidget):
                         except (TypeError, ValueError):
                             pass
                     _done_n, _done_total, grid_status_tag = self._grid_exec_progress(rule)
+                    grid_coords = []
                     
-                    # 收集网格点的坐标，用于绘制连接线
-                    grid_coords = []  # [(price, volume), ...]
-                    
-                    # 添加所有网格点
-                    # 思路：先按照正常逻辑计算所有节点的位置和股数（基于start_price和end_price，允许拖动调整）
-                    # 然后对于已执行的节点，用固定价格和固定股数替换计算出的值
                     for i in range(num_grids + 1):
-                        # 先按正常逻辑计算节点位置（基于start_price和end_price）
                         if i == 0:
-                            calculated_price = start_price  # 高价端
+                            calculated_price = start_price
                         elif i == num_grids:
-                            calculated_price = end_price    # 低价端
+                            calculated_price = end_price
                         else:
-                            # 中间点：使用比例插值法
                             calculated_price = start_price - (start_price - end_price) * i / num_grids
                             precision = self._get_price_precision()
                             calculated_price = round(calculated_price, precision)
                         
-                        # 如果该节点已执行，用固定价格和固定股数替换计算出的值
                         if i in executed_grid_prices or str(i) in executed_grid_prices:
                             grid_price = executed_grid_prices.get(i, executed_grid_prices.get(str(i)))
                             grid_volume = executed_grid_volumes.get(
                                 i, executed_grid_volumes.get(str(i), volume_per_grid)
                             )
                         else:
-                            grid_price = calculated_price  # 使用计算出的价格（可拖动调整）
-                            grid_volume = volume_per_grid  # 使用计算出的股数（可拖动调整）
+                            grid_price = calculated_price
+                            grid_volume = volume_per_grid
                         
-                        # 保存网格点坐标（用于绘制连接线）
                         grid_coords.append((grid_price, grid_volume))
                         
-                        # 根据网格点是否已执行选择颜色和标签
                         if i in executed_grids:
-                            grid_color = '#999999'  # 已执行：深灰色
-                            # 部分完成用「已部分执行」，全部完成才用「已执行」
                             if grid_status_tag and grid_status_tag not in rule_name:
                                 prefix = f'[{grid_status_tag}] '
                             else:
                                 prefix = ''
-                        elif (rule.get('early_order', False) and 
-                              rule.get('early_order_id') and  # 必须有订单ID，说明已真正下单
-                              not rule_executed and 
-                              self.task_running and 
-                              not self.task_paused):
-                            # 如果是提前下单且未执行，使用黄色显示（不再闪烁以提升性能）
-                            grid_color = '#ffeb3b'  # 黄色
+                            st = self._rule_point_style(
+                                rule, rule_type, base_state, force_state="done"
+                            )
+                        elif rule_executed:
                             prefix = ''
+                            st = self._rule_point_style(
+                                rule, rule_type, base_state, force_state="ghost"
+                            )
                         else:
-                            grid_color = color  # 未执行：使用规则颜色
                             prefix = ''
+                            st = self._rule_point_style(rule, rule_type, base_state)
                         
                         if i == 0:
-                            # 第一个点显示完整标签
                             label = f'{prefix}{rule_name}点1\n(间距{grid_step}元)'
                         else:
-                            # 其他点显示简短标签（点2、点3...）
                             label = f'{prefix}{rule_name}点{i+1}'
-                        price_points.append((grid_price, label, grid_color, True, grid_volume))
+                        self._append_rule_chart_point(
+                            price_points, grid_price, label, color, True, grid_volume, st
+                        )
                     
-                    # 保存网格连接线信息
                     if len(grid_coords) > 1:
                         grid_lines.append((rule_name, grid_coords, color))
             
             elif rule_type == 'grid_sell':
-                # 网格卖出：显示所有网格线
                 start_price = rule.get('start_price', 0)
                 end_price = rule.get('end_price', 0)
                 volume_per_grid = rule.get('volume_per_grid', 0)
                 grid_step = rule.get('grid_step', 0.5)
                 num_grids = rule.get('num_grids', 2)
-                executed_grids = rule.get('executed_grids', [])
                 
-                # 兼容旧数据：如果没有 end_price，根据 start_price 和 grid_step 计算
                 if end_price == 0 and start_price > 0:
                     end_price = start_price + num_grids * grid_step
                     precision = self._get_price_precision()
-                    rule['end_price'] = round(end_price, precision)  # 更新到规则中
+                    rule['end_price'] = round(end_price, precision)
                 
                 if start_price > 0 and end_price > 0:
-                    # 获取已执行节点的固定价格和固定股数
-                    executed_grid_prices = rule.get('executed_grid_prices', {})  # {grid_index: fixed_price}
-                    executed_grid_volumes = rule.get('executed_grid_volumes', {})  # {grid_index: fixed_volume}
+                    executed_grid_prices = rule.get('executed_grid_prices', {})
+                    executed_grid_volumes = rule.get('executed_grid_volumes', {})
                     executed_grids = set()
                     for x in rule.get('executed_grids', []) or []:
                         try:
@@ -10632,66 +10818,53 @@ class StockChartWidget(QWidget):
                         except (TypeError, ValueError):
                             pass
                     _done_n, _done_total, grid_status_tag = self._grid_exec_progress(rule)
-                    
-                    # 收集网格点的坐标，用于绘制连接线
-                    grid_coords = []  # [(price, volume), ...]
-                    
-                    # 添加所有网格点（显示在Y轴负方向）
-                    # 思路：先按照正常逻辑计算所有节点的位置和股数（基于start_price和end_price，允许拖动调整）
-                    # 然后对于已执行的节点，用固定价格和固定股数替换计算出的值
+                    grid_coords = []
                     precision = self._get_price_precision()
                     for i in range(num_grids + 1):
-                        # 先按正常逻辑计算节点位置（基于start_price和end_price）
                         if i == 0:
-                            calculated_price = start_price  # 低价端
+                            calculated_price = start_price
                         elif i == num_grids:
-                            calculated_price = end_price    # 高价端
+                            calculated_price = end_price
                         else:
-                            # 中间点：使用比例插值法
                             calculated_price = start_price + (end_price - start_price) * i / num_grids
                             calculated_price = round(calculated_price, precision)
                         
-                        # 如果该节点已执行，用固定价格和固定股数替换计算出的值
                         if i in executed_grid_prices or str(i) in executed_grid_prices:
                             grid_price = executed_grid_prices.get(i, executed_grid_prices.get(str(i)))
                             grid_volume = executed_grid_volumes.get(
                                 i, executed_grid_volumes.get(str(i), volume_per_grid)
                             )
                         else:
-                            grid_price = calculated_price  # 使用计算出的价格（可拖动调整）
-                            grid_volume = volume_per_grid  # 使用计算出的股数（可拖动调整）
+                            grid_price = calculated_price
+                            grid_volume = volume_per_grid
                         
-                        # 保存网格点坐标（用于绘制连接线，注意Y坐标为负值）
                         grid_coords.append((grid_price, -grid_volume))
                         
-                        # 根据网格点是否已执行选择颜色和标签
                         if i in executed_grids:
-                            grid_color = '#999999'  # 已执行：深灰色
                             if grid_status_tag and grid_status_tag not in rule_name:
                                 prefix = f'[{grid_status_tag}] '
                             else:
                                 prefix = ''
-                        elif (rule.get('early_order', False) and 
-                              rule.get('early_order_id') and  # 必须有订单ID，说明已真正下单
-                              not rule_executed and 
-                              self.task_running and 
-                              not self.task_paused):
-                            # 如果是提前下单且未执行，使用黄色显示（不再闪烁以提升性能）
-                            grid_color = '#ffeb3b'  # 黄色
+                            st = self._rule_point_style(
+                                rule, rule_type, base_state, force_state="done"
+                            )
+                        elif rule_executed:
                             prefix = ''
+                            st = self._rule_point_style(
+                                rule, rule_type, base_state, force_state="ghost"
+                            )
                         else:
-                            grid_color = color  # 未执行：使用规则颜色
                             prefix = ''
+                            st = self._rule_point_style(rule, rule_type, base_state)
                         
                         if i == 0:
-                            # 第一个点显示完整标签
                             label = f'{prefix}{rule_name}点1\n(间距{grid_step}元)'
                         else:
-                            # 其他点显示简短标签（点2、点3...）
                             label = f'{prefix}{rule_name}点{i+1}'
-                        price_points.append((grid_price, label, grid_color, True, -grid_volume))
+                        self._append_rule_chart_point(
+                            price_points, grid_price, label, color, True, -grid_volume, st
+                        )
                     
-                    # 保存网格连接线信息
                     if len(grid_coords) > 1:
                         grid_lines.append((rule_name, grid_coords, color))
         
@@ -11462,7 +11635,8 @@ class StockChartWidget(QWidget):
         def _sort_points_at_same_price(pts):
             """同价位多点时：可拖动优先；今日最高/最低/今开盘其次；其余在后。"""
             def _key(p):
-                _, name, _, draggable, _ = p
+                name = p[1]
+                draggable = p[3]
                 if draggable:
                     return (0, 0, name)
                 if name == "今日最高":
@@ -11572,7 +11746,7 @@ class StockChartWidget(QWidget):
         node_key_counts = {}
         for _gp in all_prices_sorted:
             for _pt in price_groups[_gp]:
-                _rp, _nm, _c, _d, _vol = _pt
+                _rp, _nm, _c, _d, _vol, _st = self._unpack_chart_point(_pt)
                 _nk = (_gp, _node_vol_key(_vol))
                 node_key_counts[_nk] = node_key_counts.get(_nk, 0) + 1
         global_idx = 0
@@ -11586,7 +11760,7 @@ class StockChartWidget(QWidget):
             
             # 对于每个价格，绘制所有标签
             for point_idx, point in enumerate(points_at_price):
-                raw_price, name, color, draggable, volume = point
+                raw_price, name, color, draggable, volume, node_style = self._unpack_chart_point(point)
 
                 if not draggable and not self._rule_price_is_tradeable(raw_price):
                     continue
@@ -11622,10 +11796,22 @@ class StockChartWidget(QWidget):
                 
                 if should_draw_circle:
                     if draggable:
-                        # 可拖动的买卖点，绘制大圆点
+                        # 可拖动的买卖点，绘制大圆点；状态样式覆盖描边/透明度/标记
                         marker_size = 100
                         alpha = 1.0
                         marker = 'o'
+                        edgecolors = 'black'
+                        linewidth = 1
+                        overlay_x = False
+                        fill_color = color
+                        if isinstance(node_style, dict):
+                            alpha = float(node_style.get("alpha", alpha))
+                            marker = node_style.get("marker", marker) or marker
+                            edgecolors = node_style.get("edge", edgecolors)
+                            linewidth = float(node_style.get("lw", linewidth))
+                            overlay_x = bool(node_style.get("overlay_x"))
+                            if node_style.get("fill"):
+                                fill_color = node_style["fill"]
                         # 可拖动的点zorder较高（90）
                         if name == '当前价':
                             circle_zorder = 100
@@ -11636,12 +11822,25 @@ class StockChartWidget(QWidget):
                         marker_size = 50
                         alpha = 0.7
                         marker = 'o'
+                        edgecolors = 'black'
+                        linewidth = 1
+                        overlay_x = False
+                        fill_color = color
                         # 不可拖动的点默认 zorder 较低（80）；今日最高/最低带色、需压过「最近涨停」等灰色点
                         circle_zorder = 88 if name in ("今日最高", "今日最低") else 80
                     
-                    line = self.price_position_ax.scatter(raw_price, volume, c=color, s=marker_size, 
-                                                        alpha=alpha, marker=marker, edgecolors='black', linewidth=1,
-                                                        zorder=circle_zorder)
+                    line = self.price_position_ax.scatter(
+                        raw_price, volume, c=fill_color, s=marker_size,
+                        alpha=alpha, marker=marker, edgecolors=edgecolors, linewidths=linewidth,
+                        zorder=circle_zorder,
+                    )
+                    # 禁用：圆形上叠黑叉（形状与其它节点一致）
+                    if overlay_x:
+                        self.price_position_ax.scatter(
+                            raw_price, volume, c='#000000', s=marker_size * 0.55,
+                            alpha=min(1.0, alpha + 0.15), marker='x', linewidths=1.8,
+                            zorder=circle_zorder + 1,
+                        )
                     
                     # 如果是可拖动的买点或卖点，保存引用
                     if draggable:
@@ -11752,11 +11951,14 @@ class StockChartWidget(QWidget):
                     label_text = f'{name}\n{raw_price:.{precision}f}'
                 
                 # 可拖动买卖节点多时易与 X 轴刻度重叠：白底更透；其它关键价位略透
+                _edge = color
+                if draggable and isinstance(node_style, dict) and node_style.get("edge"):
+                    _edge = node_style.get("edge")
                 if draggable:
                     _bbox = dict(
                         boxstyle="round,pad=0.25",
                         facecolor="white",
-                        edgecolor=color,
+                        edgecolor=_edge,
                         alpha=0.38,
                         linewidth=0.9,
                     )
@@ -11975,27 +12177,26 @@ class StockChartWidget(QWidget):
         
     def on_mouse_press(self, event):
         """鼠标按下事件"""
+        if event.button == 1:  # 左键
+            # 双击检测放在 inaxes 判断之前：点到坐标轴边距时也能切列
+            # （主路径已用 Qt MouseButtonDblClick；此处作 matplotlib 备用，间隔 0.5s）
+            import time
+            current_time = time.time()
+            time_since_last_click = current_time - self._last_click_time
+
+            if (not self.add_mode and
+                self._last_click_time > 0 and
+                time_since_last_click < self._double_click_interval):
+                self._handle_double_click()
+                self._last_click_time = 0
+                return
+            else:
+                self._last_click_time = current_time
+
         if event.inaxes != self.price_position_ax:
             return
         
         if event.button == 1:  # 左键
-            # 检测双击：如果距离上次点击时间很短，且不在添加模式下，则触发双击事件
-            import time
-            current_time = time.time()
-            time_since_last_click = current_time - self._last_click_time
-            
-            if (not self.add_mode and 
-                self._last_click_time > 0 and  # 确保有上次点击记录
-                time_since_last_click < self._double_click_interval):
-                # 这是双击事件（仅在非添加模式下触发）
-                # 在所有布局模式下都响应双击事件
-                self._handle_double_click()
-                self._last_click_time = 0  # 重置，避免连续三次点击被误判为两次双击
-                return
-            else:
-                # 记录点击时间
-                self._last_click_time = current_time
-            
             # 如果处于添加模式
             if self.add_mode:
                 current_price = event.xdata
@@ -13119,92 +13320,38 @@ class StockChartWidget(QWidget):
         self.temp_rule_start = None
     
     def _handle_double_click(self):
-        """处理双击事件：
-        - 在1列全屏模式下：双击退出全屏
-        - 在2-4列全屏模式下：双击切换到该股的1列全屏
-        - 在单列非全屏模式下：双击打开全屏
-        - 在2-4列非全屏模式下：双击切换到1列布局并显示该股票
-        """
+        """处理双击：转交 TasksChartsView（多列切单列 / 单列切全屏等）。"""
         try:
-            # 查找父组件 TasksChartsView
             parent = self.parent()
             tasks_charts_view = None
             while parent:
-                # 检查是否是 TasksChartsView 类型
                 if parent.__class__.__name__ == 'TasksChartsView':
                     tasks_charts_view = parent
                     break
                 parent = parent.parent()
-            
+
             if not tasks_charts_view:
                 return
-            
-            # 检查是否在全屏模式和当前列数（直接检查columns，更可靠）
+
+            if hasattr(tasks_charts_view, 'handle_task_double_click'):
+                tasks_charts_view.handle_task_double_click(self.stock_code)
+                return
+
+            # 兼容旧路径
             is_fullscreen = hasattr(tasks_charts_view, 'is_fullscreen') and tasks_charts_view.is_fullscreen
             current_columns = getattr(tasks_charts_view, 'columns', 1)
-            
             if is_fullscreen:
-                # 全屏模式下
                 if current_columns == 1:
-                    # 1列全屏：双击退出全屏，保持在1列布局
                     if hasattr(tasks_charts_view, 'exit_fullscreen'):
                         tasks_charts_view.exit_fullscreen()
-                        # 确保退出全屏后保持在1列布局（延迟检查，带重试机制）
-                        from PyQt5.QtCore import QTimer
-                        retry_count = [0]  # 使用列表以便在闭包中修改
-                        max_retries = 5
-                        def ensure_single_column():
-                            retry_count[0] += 1
-                            if (hasattr(tasks_charts_view, 'columns') and 
-                                tasks_charts_view.columns != 1):
-                                # 如果列数不是1列，切换到1列
-                                tasks_charts_view.columns = 1
-                                if hasattr(tasks_charts_view, 'column_button_group'):
-                                    button = tasks_charts_view.column_button_group.button(1)
-                                    if button:
-                                        button.blockSignals(True)
-                                        button.setChecked(True)
-                                        button.blockSignals(False)
-                                tasks_charts_view.load_tasks()
-                                # 如果还有重试次数，继续检查
-                                if retry_count[0] < max_retries:
-                                    QTimer.singleShot(200, ensure_single_column)
-                        QTimer.singleShot(100, ensure_single_column)
-                else:
-                    # 2-4列全屏：双击切换到该股的1列全屏
-                    if hasattr(tasks_charts_view, 'switch_to_single_column_and_show_stock'):
-                        tasks_charts_view.switch_to_single_column_and_show_stock(self.stock_code)
-                    # 延迟强制更新布局，确保 load_tasks() 完成后布局正确显示（带重试机制）
-                    from PyQt5.QtCore import QTimer
-                    retry_count = [0]
-                    max_retries = 10
-                    def update_layout():
-                        retry_count[0] += 1
-                        # 确保列数已切换到1列
-                        if hasattr(tasks_charts_view, 'columns') and tasks_charts_view.columns == 1:
-                            # 强制更新布局
-                            if hasattr(tasks_charts_view, 'grid_layout'):
-                                tasks_charts_view.grid_layout.update()
-                            # 确保全屏状态保持
-                            if (hasattr(tasks_charts_view, 'is_fullscreen') and 
-                                    not tasks_charts_view.is_fullscreen):
-                                if hasattr(tasks_charts_view, 'enter_fullscreen'):
-                                    tasks_charts_view.enter_fullscreen()
-                        elif retry_count[0] < max_retries:
-                            # 如果列数还没切换，继续重试
-                            QTimer.singleShot(200, update_layout)
-                    # 延迟500ms，确保 load_tasks() 和图表创建完成
-                    QTimer.singleShot(500, update_layout)
+                elif hasattr(tasks_charts_view, 'switch_to_single_column_and_show_stock'):
+                    tasks_charts_view.switch_to_single_column_and_show_stock(self.stock_code)
             else:
-                # 非全屏模式下
                 if current_columns == 1:
-                    # 单列非全屏模式：双击打开全屏
                     if hasattr(tasks_charts_view, 'enter_fullscreen'):
                         tasks_charts_view.enter_fullscreen()
-                else:
-                    # 2-4列非全屏：切换到1列显示该股票（不进入全屏）
-                    if hasattr(tasks_charts_view, 'switch_to_single_column_and_show_stock'):
-                        tasks_charts_view.switch_to_single_column_and_show_stock(self.stock_code)
+                elif hasattr(tasks_charts_view, 'switch_to_single_column_and_show_stock'):
+                    tasks_charts_view.switch_to_single_column_and_show_stock(self.stock_code)
         except Exception as e:
             self.logger.error(f"处理双击事件失败: {str(e)}", exc_info=True)
     

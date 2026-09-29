@@ -383,8 +383,8 @@ class MainWindowExt(Ui_mainWindow):
             }
         """)
         
-        # 定时重载并自动启动控件（精确到秒）
-        self.schedule_reload_label = QLabel("定时重载:")
+        # 定时加载并自动启动控件（精确到秒）
+        self.schedule_reload_label = QLabel("定时加载:")
         self.schedule_reload_dt_edit = QDateTimeEdit()
         self.schedule_reload_dt_edit.setCalendarPopup(True)
         self.schedule_reload_dt_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
@@ -474,8 +474,8 @@ class MainWindowExt(Ui_mainWindow):
         # 因为此时这些对象还未设置
         
         # 强制设置分隔条的初始大小以确保比例正确
-        self.splitter_3.setSizes([600, 400])  # 强制设置左右比例为6:4
-        self.splitter.setSizes([600, 400])    # 强制设置左边内部上下比例为6:4
+        self.splitter_3.setSizes([700, 300])  # 强制设置左右比例为7:3
+        self.splitter.setSizes([800, 200])    # 强制设置左边内部上下比例为8:2
         self.splitter_2.setSizes([500, 500])  # 强制设置右边内部上下比例为5:5
         
         # 设置分隔条的样式
@@ -4343,11 +4343,11 @@ class MainWindowExt(Ui_mainWindow):
             self.schedule_reload_status.setStyleSheet(
                 self._schedule_reload_status_base_style + "color: #d32f2f; font-weight: bold;"
             )
-            self.logger.info(f"[定时重载] 已预约自动重载并启动: {run_at.strftime('%Y-%m-%d %H:%M:%S')}")
-            QMessageBox.information(self.window, "完成", "已保存定时预约，到点将自动重载并启动任务。")
+            self.logger.info(f"[定时加载] 已预约自动加载并启动: {run_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            QMessageBox.information(self.window, "完成", "已保存定时预约，到点将自动加载并启动任务。")
         except Exception as e:
-            self.logger.error(f"保存定时重载失败: {str(e)}")
-            QMessageBox.warning(self.window, "错误", f"保存定时重载失败: {e}")
+            self.logger.error(f"保存定时加载失败: {str(e)}")
+            QMessageBox.warning(self.window, "错误", f"保存定时加载失败: {e}")
 
     def _on_clear_scheduled_reload(self):
         """清除一次性预约"""

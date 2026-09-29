@@ -126,6 +126,12 @@ def build_source() -> str:
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     code = build_source()
     if "def select(" not in code:
         raise SystemExit("generated rule missing select()")

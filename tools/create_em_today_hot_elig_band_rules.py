@@ -67,6 +67,12 @@ def _upsert(name: str, elig_lo: int, elig_hi: int) -> None:
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     for name, lo, hi in RULES:
         _upsert(name, lo, hi)
     names = {str(r.get("name")) for r in load_sector_rules()}

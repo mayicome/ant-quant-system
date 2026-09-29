@@ -16,6 +16,12 @@ RULE_NAME = "近10日涨停-十大热门板块或概念"
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     code = rule_code_recent_limit_up_in_hot_theme(lookback_days=10, top_n=10)
     compile(code, f"<{RULE_NAME}>", "exec")
     existing = {str(r.get("name") or ""): r for r in load_sector_rules()}

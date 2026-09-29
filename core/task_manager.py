@@ -2221,11 +2221,12 @@ class TaskManager(QObject):
         except Exception:
             pass
 
-    def stop_task(self, task_id):
+    def stop_task(self, task_id, *, persist=True):
         """停止指定任务。
 
         进程缺失/已死时也必须清掉 running_tasks，避免「停不掉 / 退不出」。
         不在 running_tasks 但 params/status 仍显示运行中时，做幂等对齐。
+        persist=False 时只更新内存/停进程，不立刻 save_tasks（供批量暂停后统一写盘）。
         """
         try:
             if task_id in self.running_tasks:
@@ -2256,15 +2257,17 @@ class TaskManager(QObject):
                         self._mark_task_stopped_params(
                             task_id, paused=True, status=new_status
                         )
-                        try:
-                            self.save_tasks(list(self.tasks.values()))
-                        except Exception as e:
-                            self.logger.warning(f"停止任务后保存失败: {e}")
+                        if persist:
+                            try:
+                                self.save_tasks(list(self.tasks.values()))
+                            except Exception as e:
+                                self.logger.warning(f"停止任务后保存失败: {e}")
                     else:
-                        try:
-                            self.save_tasks(list(self.tasks.values()))
-                        except Exception as e:
-                            self.logger.warning(f"停止任务后保存失败: {e}")
+                        if persist:
+                            try:
+                                self.save_tasks(list(self.tasks.values()))
+                            except Exception as e:
+                                self.logger.warning(f"停止任务后保存失败: {e}")
 
                 # 无论 process/pipe 是否完整，都强制清掉运行登记
                 try:
@@ -2325,11 +2328,12 @@ class TaskManager(QObject):
                     self._mark_task_stopped_params(
                         task_id, paused=False, status="未运行"
                     )
-                    self._block_tasks_updated_signal = True
-                    try:
-                        self.save_tasks(list(self.tasks.values()))
-                    finally:
-                        self._block_tasks_updated_signal = False
+                    if persist:
+                        self._block_tasks_updated_signal = True
+                        try:
+                            self.save_tasks(list(self.tasks.values()))
+                        finally:
+                            self._block_tasks_updated_signal = False
                     self.logger.info(
                         f"[{stock_code}] 任务未在 running_tasks，已对齐为未运行（幂等停止）"
                     )

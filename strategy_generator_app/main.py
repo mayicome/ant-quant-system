@@ -2196,11 +2196,11 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.logic_code_edit = PythonCodeEdit()
         self.logic_code_edit.setPlaceholderText("定义 run(codes, prices, get_name, account) 返回意图列表…")
         self.logic_code_edit.setMinimumHeight(280)
-        params_layout.addWidget(self.logic_code_edit)
+        self.logic_code_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        params_layout.addWidget(self.logic_code_edit, 1)
         logic_btn = QPushButton("保存逻辑")
         logic_btn.clicked.connect(self._on_save_logic_params)
         params_layout.addWidget(logic_btn)
-        params_layout.addStretch()
         self.detail_tabs.addTab(self.params_logic_tab_widget, "参数与逻辑")
 
         # 可编辑区块变更时标记未保存（用于 Tab 星号与提示条）

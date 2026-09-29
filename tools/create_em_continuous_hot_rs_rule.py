@@ -16,6 +16,12 @@ RULE_NAME = "东财热门-连续2日Top50-组内RS前20"
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     code = rule_code_em_continuous_hot_rs_top20(
         top_n=50, rs_top_k=20, rs_lookback=10, min_members=30
     )

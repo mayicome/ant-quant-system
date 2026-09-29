@@ -357,6 +357,12 @@ def _remove_same_name_files(name: str, keep_id: str | None = None) -> None:
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     existing = {str(r.get("name") or ""): r for r in load_sector_rules()}
     for name, pack_mode, brief in PACKS:
         code = build_code(pack_mode, brief)

@@ -52,6 +52,12 @@ def _upsert(name: str, hot_mode: str) -> None:
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     for name, mode in RULES:
         _upsert(name, mode)
     names = {str(r.get("name")) for r in load_sector_rules()}

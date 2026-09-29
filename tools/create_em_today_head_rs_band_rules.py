@@ -66,6 +66,12 @@ def _upsert(name: str, rs_lo: int, rs_hi: Optional[int]) -> None:
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     # 顺带刷新旧「头档 RS20」规则，使其显式过滤合格榜标签内 RS∈[1,20]
     legacy = "东财热门-今日Top50-头档Elig1to15-RS20-夹档-无涨停-MA5ltMA10lt20-流通ge120"
     code_legacy = rule_code_em_today_hot_elig_band(

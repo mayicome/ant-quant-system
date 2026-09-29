@@ -128,6 +128,12 @@ def _build_code_from_union() -> str:
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     code = _build_code_from_union()
     existing = {str(r.get("name") or ""): dict(r) for r in load_sector_rules()}
     if NAME in existing:

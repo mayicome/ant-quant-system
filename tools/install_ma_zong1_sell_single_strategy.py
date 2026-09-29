@@ -687,6 +687,12 @@ def _install_one(spec: tuple) -> None:
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_strategy_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_strategy_install
+    refuse_strategy_install(__file__)
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for spec in SPECS:
         _install_one(spec)

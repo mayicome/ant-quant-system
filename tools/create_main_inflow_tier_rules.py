@@ -22,6 +22,12 @@ RULES = [
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_rule_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_rule_install
+    refuse_rule_install(__file__)
+
     existing = {str(r.get("name") or ""): r for r in load_sector_rules()}
     for name, factory in RULES:
         code = factory()

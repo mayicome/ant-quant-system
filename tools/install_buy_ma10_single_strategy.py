@@ -11,6 +11,12 @@ CFG = ROOT / "strategy_generator_app" / "config" / "strategies" / "strategy_ma10
 
 
 def main() -> None:
+    try:
+        from strategy_install_disabled import refuse_strategy_install
+    except ImportError:
+        from tools.strategy_install_disabled import refuse_strategy_install
+    refuse_strategy_install(__file__)
+
     code = SRC.read_text(encoding="utf-8")
     if "def run(" not in code:
         raise SystemExit("strategy source missing run()")

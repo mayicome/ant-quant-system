@@ -7,7 +7,7 @@
 
 import uuid
 from enum import Enum
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 class RuleType(Enum):
     """规则类型枚举"""
@@ -42,22 +42,124 @@ RULE_TYPE_NAMES = {
     RuleType.SCHEDULED_CLEAR: '定时清仓',
 }
 
-# 规则类型的颜色配置
+# 规则类型的颜色配置（与图表「规则工具」按钮底色一致）
 RULE_TYPE_COLORS = {
     RuleType.SINGLE_BUY: '#4caf50',      # 绿色
     RuleType.SINGLE_SELL: '#f44336',     # 红色
     RuleType.CAGE_BUY: '#66bb6a',        # 浅绿色
     RuleType.CAGE_SELL: '#ef5350',       # 浅红色
-    RuleType.BEST_SELL: '#ff9800',       # 橙色
-    RuleType.BEST_BUY: '#2196f3',        # 蓝色
-    RuleType.GRID_BUY: '#8bc34a',        # 黄绿色
-    RuleType.GRID_SELL: '#ff5722',       # 深橙色
+    RuleType.BEST_SELL: '#ec407a',       # 粉色（弹性卖出）
+    RuleType.BEST_BUY: '#26a69a',        # 青绿（弹性买入）
+    RuleType.GRID_BUY: '#00897b',        # 深青绿（网格买入）
+    RuleType.GRID_SELL: '#d32f2f',       # 深红（网格卖出）
     RuleType.BREAKTHROUGH_BUY: '#00bcd4',  # 青色
     RuleType.BREAKTHROUGH_SELL: '#7b1fa2', # 深紫色（与单点卖出的红色和夜市卖出的紫色有明显区别）
     RuleType.NIGHT_BUY: '#5c6bc0',       # 深蓝色（与按钮颜色一致）
     RuleType.NIGHT_SELL: '#ab47bc',      # 紫色（与按钮颜色一致）
     RuleType.SCHEDULED_CLEAR: '#9c27b0',  # 紫色（与图表显示颜色一致）
 }
+
+# 节点：填充=类型色；描边/透明度/标记=运行状态（避免类型与状态抢同一色相）
+RULE_NODE_STATE_STYLES = {
+    "pending": {"edge": "#212121", "lw": 1.0, "alpha": 1.0, "marker": "o"},
+    "early_order": {"edge": "#FDD835", "lw": 2.8, "alpha": 1.0, "marker": "o"},   # 黄边=提前挂单
+    "triggered": {"edge": "#00E5FF", "lw": 2.8, "alpha": 1.0, "marker": "o"},     # 亮边=已触发盯盘
+    "cash_wait": {"edge": "#E65100", "lw": 2.8, "alpha": 1.0, "marker": "o"},  # 深橙边=等资金/再挂
+    "done": {"edge": "#616161", "lw": 1.0, "alpha": 0.35, "marker": "o"},        # 淡=正常结束
+    # 禁用：仍为圆点，绘制时再叠一层黑叉（overlay_x）
+    "disabled": {
+        "edge": "#000000", "lw": 2.0, "alpha": 0.7, "marker": "o", "overlay_x": True,
+    },
+    "abnormal": {"edge": "#B71C1C", "lw": 2.4, "alpha": 0.40, "marker": "o"},   # 暗红边+淡填充=异常结束
+    "halt": {"edge": "#FFC107", "lw": 2.8, "alpha": 0.75, "marker": "o"},       # 琥珀边=熔断停止
+    "ghost": {"edge": "#9E9E9E", "lw": 1.0, "alpha": 0.22, "marker": "o"},       # 笼未触发端
+}
+
+
+def get_rule_type_color(rule_type: Any, default: str = "#888888") -> str:
+    """规则类型填充色（与工具栏一致）。"""
+    if rule_type is None:
+        return default
+    try:
+        if isinstance(rule_type, RuleType):
+            return RULE_TYPE_COLORS.get(rule_type, default)
+        return RULE_TYPE_COLORS.get(RuleType(str(rule_type).strip()), default)
+    except (ValueError, AttributeError, TypeError):
+        return default
+
+
+def get_rule_node_state_style(state: str) -> Dict[str, Any]:
+    """返回节点绘制样式副本。"""
+    base = RULE_NODE_STATE_STYLES.get(state) or RULE_NODE_STATE_STYLES["pending"]
+    out = {
+        "edge": base["edge"],
+        "lw": float(base["lw"]),
+        "alpha": float(base["alpha"]),
+        "marker": base["marker"],
+    }
+    if base.get("overlay_x"):
+        out["overlay_x"] = True
+    if base.get("fill"):
+        out["fill"] = base["fill"]
+    return out
+
+
+def _rule_executed_is_abnormal(rule: Dict[str, Any]) -> bool:
+    """已执行是否属于异常结束（叉），其余为正常淡化结束。"""
+    executed_reason = str(rule.get("executed_reason", "") or "")
+    executed_order_id = str(rule.get("order_id", "") or "")
+    if executed_reason in (
+        "buy_block_window",
+        "order_below_min",
+        "early_cancelled",
+        "not_true_breakthrough",
+        "band_hard_pass",
+        "order_failed",
+        "no_cash",
+        "no_position",
+        "pending_sell_lock",
+    ):
+        return True
+    if executed_order_id in (
+        "SKIPPED_BUY_WINDOW",
+        "SKIPPED_MIN_BUY",
+        "EARLY_CANCELLED",
+        "BAND_HARD_PASS",
+        "ORDER_FAILED",
+        "MIN_BUY_AMOUNT",
+        "NO_CASH",
+    ):
+        return True
+    return False
+
+
+def classify_rule_chart_state(rule: Dict[str, Any], rule_type: Any = None) -> str:
+    """根据规则字段得到基础状态（不含提前挂单/弹性已触发等运行时叠加）。"""
+    rt = rule_type or rule.get("type") or rule.get("rule_type")
+    rt = str(rt).strip() if rt is not None else ""
+    enabled = bool(rule.get("enabled", True))
+
+    if rt == "scheduled_clear":
+        if rule.get("scheduled_clear_executed"):
+            return "done"
+        if not enabled:
+            if str(rule.get("halt_reason") or "").strip() == "open_gain":
+                return "halt"
+            return "disabled"
+        return "pending"
+
+    if rule.get("executed", False):
+        return "abnormal" if _rule_executed_is_abnormal(rule) else "done"
+
+    if not enabled:
+        if str(rule.get("halt_reason") or "").strip() == "open_gain":
+            return "halt"
+        return "disabled"
+
+    if bool(rule.get("cash_wait_active")):
+        return "cash_wait"
+
+    return "pending"
 
 class TradingRule:
     """交易规则基类"""
