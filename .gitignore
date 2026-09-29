@@ -6,9 +6,9 @@ strategy_generator_app/config/batch_import_pool_settings.json
 # ===== 行情 / 缓存 / 历史数据（体积大，不备份）=====
 # data/ 整目录忽略时无法再放行其中的文件，所以改成忽略内容、单独放行选股依赖。
 data/*
-# 股票池各机不同，不进仓库（避免另一台 pull/检查更新被挡住）
+# 股票池 / QMT 板块索引各机本地生成，不进仓库（避免另一台 pull/检查更新被挡住）
 # !data/a_share_universe.json
-!data/qmt_sector_index.json
+# !data/qmt_sector_index.json
 history_data/
 cache/
 *.pkl
