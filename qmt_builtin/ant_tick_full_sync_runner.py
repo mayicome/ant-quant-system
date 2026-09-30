@@ -223,7 +223,12 @@ def _is_tradeday(xtdata, day):
         arr = xtdata.get_trading_dates("SH", ds, ds) or []
         return bool(arr)
     except Exception:
-        return day.weekday() < 5
+        try:
+            from utils.trading_day import is_tradeday as _td
+
+            return bool(_td(day))
+        except Exception:
+            return day.weekday() < 5
 
 
 def _load_universe_from_file():

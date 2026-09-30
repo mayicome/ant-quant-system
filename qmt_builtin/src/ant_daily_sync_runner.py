@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, time as dt_time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 DAILY_SYNC_VERSION = "20260908.04"
 INTRADAY_PRIORITY_DAILY_LIMIT = 1
@@ -1090,15 +1090,63 @@ def _log_fetch_fail(code: str, start_s: str, end_s: str, reason: str) -> None:
     )
 
 
+def _disk_trade_dates() -> Set[date]:
+    """读取 data/trade_calendar.json；空则返回空集。"""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = ""
+        cur = here
+        for _ in range(5):
+            cand = os.path.join(cur, "data", "trade_calendar.json")
+            if os.path.isfile(cand):
+                path = cand
+                break
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        if not path:
+            return set()
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f) or {}
+        raw = payload.get("dates") if isinstance(payload, dict) else None
+        out: Set[date] = set()
+        for item in raw or []:
+            s = str(item or "").strip()[:10]
+            if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                out.add(date.fromisoformat(s))
+        return out
+    except Exception:
+        return set()
+
+
+def _fallback_is_tradeday(day: date) -> bool:
+    """xtdata 不可用时：优先 utils.trading_day / 磁盘日历，禁止把法定休市工作日当交易日。"""
+    try:
+        from utils.trading_day import is_tradeday as _td
+
+        return bool(_td(day))
+    except Exception:
+        pass
+    disk = _disk_trade_dates()
+    if disk:
+        lo, hi = min(disk), max(disk)
+        if lo <= day <= hi:
+            return day in disk
+    return day.weekday() < 5
+
+
 def _trading_dates_between(xtdata, start_d: date, end_d: date) -> List[date]:
     if end_d < start_d:
         return []
+    xtdata_ok = False
     try:
         arr = xtdata.get_trading_dates(
             "SH",
             start_d.strftime("%Y%m%d"),
             end_d.strftime("%Y%m%d"),
         ) or []
+        xtdata_ok = True
     except Exception:
         arr = []
     out = []
@@ -1108,10 +1156,13 @@ def _trading_dates_between(xtdata, start_d: date, end_d: date) -> List[date]:
             out.append(d)
     if out:
         return sorted(set(out))
-    # ?????????????
+    # API 正常但区间为空：整段休市，勿用「周一到周五」填假日
+    if xtdata_ok:
+        return []
+    # API 失败：本地日历 / 工作日兜底
     cur = start_d
     while cur <= end_d:
-        if cur.weekday() < 5:
+        if _fallback_is_tradeday(cur):
             out.append(cur)
         cur += timedelta(days=1)
     return out
@@ -1122,9 +1173,8 @@ def _is_tradeday(xtdata, day: date) -> bool:
     try:
         arr = xtdata.get_trading_dates("SH", ds, ds) or []
     except Exception:
-        arr = []
-    if not arr:
-        return day.weekday() < 5
+        return _fallback_is_tradeday(day)
+    # 空列表=休市（如中秋周五）；切勿再按 weekday 兜底，否则会写假日线
     for ts in arr:
         d = _parse_trade_date_from_ts(ts)
         if d == day:
@@ -1139,7 +1189,7 @@ def _last_tradeday_on_or_before(xtdata, day: date, lookback_days: int = 90) -> d
         return dates[-1]
     cur = day
     for _ in range(lookback_days):
-        if cur.weekday() < 5:
+        if _fallback_is_tradeday(cur):
             return cur
         cur -= timedelta(days=1)
     return day
@@ -1153,7 +1203,7 @@ def _last_tradeday_before(xtdata, day: date, lookback_days: int = 90) -> date:
         return dates[-1]
     cur = day - timedelta(days=1)
     for _ in range(lookback_days):
-        if cur.weekday() < 5:
+        if _fallback_is_tradeday(cur):
             return cur
         cur -= timedelta(days=1)
     return day - timedelta(days=1)

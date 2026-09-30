@@ -349,7 +349,20 @@ def _expected_cache_last_date(through_date: date) -> date:
             while d.weekday() >= 5:
                 d -= timedelta(days=1)
             return d
-    return through_date
+    # 休市日（中秋/国庆等）即使过了 15:35 也不期望「今日」K
+    try:
+        from utils.trading_day import is_tradeday, previous_tradeday
+
+        if is_tradeday(through_date):
+            return through_date
+        return previous_tradeday(through_date)
+    except Exception:
+        if through_date.weekday() >= 5:
+            d = through_date - timedelta(days=1)
+            while d.weekday() >= 5:
+                d -= timedelta(days=1)
+            return d
+        return through_date
 
 
 def _peek_daily_cache_last_date(code: str) -> Optional[date]:
