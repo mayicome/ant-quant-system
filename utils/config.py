@@ -4,6 +4,7 @@ import sys
 
 from PyQt5.QtWidgets import QMessageBox
 
+from utils.app_config import config_ini_path, ensure_app_config_ini
 from utils.qmt_execution_config import get_qmt_mode, requires_path_qmt
 
 class Config:
@@ -13,24 +14,8 @@ class Config:
         
     def load_config(self):
         """加载配置文件"""
-        #config_path为当前目录的上一级目录的data子目录的config.ini文件
-        #如果data子目录不存在，则创建data子目录
-        data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
-        config_path = os.path.join(data_dir, 'config.ini')
-        #重新获取config_path的绝对路径
-        config_path = os.path.abspath(config_path)
-        if not os.path.exists(config_path):
-            # 如果配置文件不存在，创建默认配置
-            self._config['Account'] = {
-                'path_qmt': '',
-                'account_id': ''
-            }
-            # 保存默认配置到文件
-            self.save_config()
-        else:
-            self._config.read(config_path, encoding='utf-8')
+        config_path, _, _ = ensure_app_config_ini()
+        self._config.read(config_path, encoding="utf-8")
             
         # 检查配置是否有效
         account_config = self._config['Account']
@@ -52,13 +37,15 @@ class Config:
                 hint += (
                     "\n\nbuiltin 模式下 path_qmt 可留空，"
                     "资金/持仓/现价由大 QMT 内置策略写入 data/results.json。"
+                    "\n也可关掉本窗口后重新打开启动器，按提示选择目录和账号。"
                 )
             QMessageBox.warning(None, "警告", hint)
             sys.exit(1)
 
     def save_config(self):
         """保存配置到文件"""
-        config_path = os.path.join(os.path.dirname(__file__), '..', 'config.ini')
+        config_path = config_ini_path()
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
         with open(config_path, 'w', encoding='utf-8') as f:
             self._config.write(f)
     

@@ -59,16 +59,22 @@ def _read_account_ini() -> Tuple[Optional[configparser.ConfigParser], str, str, 
     import configparser
 
     root = repo_root()
-    config_path = os.path.join(root, "data", "config.ini")
+    try:
+        from utils.app_config import config_ini_path, ensure_app_config_ini
+
+        ensure_app_config_ini(root)
+        config_path = config_ini_path(root)
+    except Exception:
+        config_path = os.path.join(root, "data", "config.ini")
     if not os.path.isfile(config_path):
-        return None, "", "", "mini"
+        return None, "", "", "builtin"
     cfg = configparser.ConfigParser()
     cfg.read(config_path, encoding="utf-8")
     if "Account" not in cfg:
-        return cfg, "", "", "mini"
+        return cfg, "", "", "builtin"
     path_qmt = (cfg["Account"].get("path_qmt") or "").strip()
     account_id = (cfg["Account"].get("account_id") or "").strip()
-    qmt_mode = (cfg["Account"].get("qmt_mode") or "mini").strip().lower()
+    qmt_mode = (cfg["Account"].get("qmt_mode") or "builtin").strip().lower()
     return cfg, path_qmt, account_id, qmt_mode
 
 

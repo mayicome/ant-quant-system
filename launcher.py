@@ -25,6 +25,10 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QMessageBox,
     QProgressDialog,
+    QDialog,
+    QComboBox,
+    QFileDialog,
+    QDialogButtonBox,
 )
 from PyQt5.QtCore import Qt, QSize, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon
@@ -165,6 +169,144 @@ class _RuntimeIndexWorker(QThread):
             self.finished_ok.emit({"fetched": [], "errors": {"_": str(e)}, "aborted": False})
 
 
+class _QmtSetupDialog(QDialog):
+    """新机补齐大 QMT python 目录与资金账号。"""
+
+    def __init__(self, parent, *, detect, installs, missing):
+        super().__init__(parent)
+        self._detect = detect
+        self._installs = list(installs or [])
+        self.setWindowTitle("配置大 QMT")
+        self.setMinimumWidth(560)
+        self.setModal(True)
+
+        n_inst = len(self._installs)
+        if "qmt_python_dir" in (missing or ()) and n_inst == 0:
+            py_hint = "未找到大 QMT。请先安装「国金证券 QMT 交易端」，或手动选择其 python 目录。"
+        elif n_inst == 1:
+            py_hint = "已检测到 1 个大 QMT 安装，请确认 python 目录。"
+        else:
+            py_hint = "检测到多个 QMT 安装，请选择正在使用的大 QMT（投研/交易端）python 目录。"
+
+        n_acc0 = 0
+        if self._installs:
+            n_acc0 = len(detect.discover_accounts(self._installs[0].get("root") or ""))
+        if "account_id" in (missing or ()) and n_inst == 0:
+            acc_hint = "找到安装后再自动列出资金账号；也可直接填写。"
+        elif n_acc0 == 1:
+            acc_hint = "已检测到 1 个资金账号，请确认。"
+        elif n_acc0 > 1:
+            acc_hint = "该安装下有多个资金账号，请选择（按最近使用排序）。"
+        else:
+            acc_hint = "该目录下未找到资金账号。请先在大 QMT 登录一次，或手动填写。"
+
+        layout = QVBoxLayout(self)
+        tip = QLabel(
+            "首次使用需要指定大 QMT 的 python 目录和资金账号，无需改 config.ini。\n"
+            + py_hint
+            + "\n"
+            + acc_hint
+        )
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        layout.addWidget(QLabel("大 QMT python 目录"))
+        py_row = QHBoxLayout()
+        self.py_combo = QComboBox()
+        self.py_combo.setEditable(True)
+        self.py_combo.setMinimumWidth(360)
+        for it in self._installs:
+            py = str(it.get("python_dir") or "")
+            self.py_combo.addItem("%s  —  %s" % (it.get("label") or py, py), py)
+        if n_inst == 1:
+            self.py_combo.setCurrentIndex(0)
+        py_row.addWidget(self.py_combo, 1)
+        browse = QPushButton("浏览…")
+        browse.clicked.connect(self._browse_python_dir)
+        py_row.addWidget(browse)
+        layout.addLayout(py_row)
+
+        layout.addWidget(QLabel("资金账号"))
+        self.acc_combo = QComboBox()
+        self.acc_combo.setEditable(True)
+        layout.addWidget(self.acc_combo)
+        self.py_combo.currentTextChanged.connect(self._reload_accounts)
+        self._reload_accounts()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.Cancel).setText("稍后再说")
+        buttons.accepted.connect(self._on_ok)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _python_dir_text(self) -> str:
+        raw = str(self.py_combo.currentText() or "").strip()
+        if "  —  " in raw:
+            raw = raw.split("  —  ", 1)[-1].strip()
+        if raw and os.path.isdir(raw):
+            return raw
+        data = self.py_combo.currentData()
+        if data:
+            return str(data).strip()
+        return raw
+
+    def _browse_python_dir(self) -> None:
+        start = self._python_dir_text() or "D:/"
+        chosen = QFileDialog.getExistingDirectory(self, "选择大 QMT 的 python 目录", start)
+        if chosen:
+            self.py_combo.setCurrentText(chosen)
+            self._reload_accounts()
+
+    def _reload_accounts(self, *_args) -> None:
+        py = self._python_dir_text()
+        root = ""
+        try:
+            root = self._detect.install_root_from_python_dir(py)
+        except Exception:
+            root = ""
+        prev = str(self.acc_combo.currentText() or "").strip()
+        self.acc_combo.blockSignals(True)
+        self.acc_combo.clear()
+        accounts = []
+        if root:
+            try:
+                accounts = list(self._detect.discover_accounts(root) or [])
+            except Exception:
+                accounts = []
+        for acc in accounts:
+            aid = str(acc.get("account_id") or "")
+            self.acc_combo.addItem(aid, aid)
+        if accounts:
+            self.acc_combo.setCurrentIndex(0)
+        elif prev:
+            self.acc_combo.setEditText(prev)
+        self.acc_combo.blockSignals(False)
+
+    def _on_ok(self) -> None:
+        py = self._python_dir_text()
+        acc = str(self.acc_combo.currentText() or "").strip()
+        if not py or not os.path.isdir(py):
+            QMessageBox.warning(
+                self,
+                "目录无效",
+                "请选择大 QMT 安装目录下的 python 文件夹。\n找不到时请先安装并打开一次国金证券 QMT 交易端。",
+            )
+            return
+        if not acc:
+            QMessageBox.warning(
+                self,
+                "缺少资金账号",
+                "请选择或填写资金账号。\n可在大 QMT 登录一次后再打开启动器自动识别。",
+            )
+            return
+        self._result = {"python_dir": py, "account_id": acc}
+        self.accept()
+
+    def result_values(self) -> dict:
+        return dict(getattr(self, "_result", {}) or {})
+
+
 class AntLauncherWindow(QMainWindow):
     """蚂蚁量化系统启动器：统一入口，启动三个子系统。"""
 
@@ -183,7 +325,9 @@ class AntLauncherWindow(QMainWindow):
         self._setup_icon()
         self._setup_ui()
         self._arm_post_market_watch()
+        self._ensure_app_config_ini()
         QTimer.singleShot(400, self._start_runtime_index_bootstrap)
+        QTimer.singleShot(600, self._maybe_prompt_qmt_setup)
 
     def _get_apps_config_path(self) -> str:
         root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -653,6 +797,64 @@ class AntLauncherWindow(QMainWindow):
         if isinstance(mirrors, list) and mirrors:
             return [str(x).strip() for x in mirrors if str(x).strip()]
         return list(_DEFAULT_UPDATE_MIRRORS)
+
+    def _ensure_app_config_ini(self) -> None:
+        try:
+            mod = _load_py_from_disk("utils/app_config.py", "ant_app_config")
+            path, created, added = mod.ensure_app_config_ini(self._project_root())
+            if created:
+                self._append_launcher_log("config.ini: created %s" % path)
+            elif added:
+                self._append_launcher_log("config.ini: filled %s" % ",".join(added))
+        except Exception as e:
+            self._append_launcher_log("config.ini: ensure failed %s" % e)
+
+    def _maybe_prompt_qmt_setup(self) -> None:
+        try:
+            cfg = _load_py_from_disk("utils/app_config.py", "ant_app_config")
+            missing = cfg.missing_qmt_setup(self._project_root())
+        except Exception as e:
+            self._append_launcher_log("qmt setup: check failed %s" % e)
+            return
+        if not missing:
+            return
+        try:
+            detect = _load_py_from_disk("utils/qmt_detect.py", "ant_qmt_detect")
+            installs = detect.discover_qmt_installs()
+        except Exception as e:
+            self._append_launcher_log("qmt setup: detect failed %s" % e)
+
+            class _EmptyDetect:
+                def discover_accounts(self, root):
+                    return []
+
+                def install_root_from_python_dir(self, py):
+                    return ""
+
+            detect = _EmptyDetect()
+            installs = []
+        dlg = _QmtSetupDialog(
+            self, detect=detect, installs=installs, missing=missing
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            self._append_launcher_log("qmt setup: skipped")
+            return
+        vals = dlg.result_values()
+        py = str(vals.get("python_dir") or "").strip()
+        acc = str(vals.get("account_id") or "").strip()
+        try:
+            cfg.update_config_values(
+                {
+                    ("Account", "account_id"): acc,
+                    ("Account", "qmt_mode"): "builtin",
+                    ("qmt_builtin", "qmt_python_dir"): py.replace("\\", "/"),
+                },
+                self._project_root(),
+            )
+            self._append_launcher_log("qmt setup: saved account=%s python=%s" % (acc, py))
+            self._set_update_status("已保存大 QMT 目录与资金账号。", auto_clear_ms=4000)
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", "写入配置失败：%s" % e)
 
     def _start_runtime_index_bootstrap(self) -> None:
         if self._bootstrap_worker is not None and self._bootstrap_worker.isRunning():

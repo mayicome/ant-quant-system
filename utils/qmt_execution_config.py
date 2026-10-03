@@ -12,13 +12,18 @@ _VALID_MODES = frozenset({"mini", "builtin", "standalone"})
 
 
 def _config_path() -> str:
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "data", "config.ini")
+    from utils.app_config import config_ini_path, ensure_app_config_ini
+
+    try:
+        ensure_app_config_ini()
+    except Exception:
+        pass
+    return config_ini_path()
 
 
-def get_qmt_mode(default: QmtMode = "mini") -> QmtMode:
+def get_qmt_mode(default: QmtMode = "builtin") -> QmtMode:
     """读取 qmt_mode：mini=外部 xtdata；builtin/standalone=读 results.json 现价心跳。"""
-    fallback = default if default in _VALID_MODES else "mini"
+    fallback = default if default in _VALID_MODES else "builtin"
     try:
         path = _config_path()
         if not os.path.isfile(path):

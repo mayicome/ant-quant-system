@@ -10,8 +10,13 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 def trading_config_path() -> str:
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "data", "config.ini")
+    from utils.app_config import config_ini_path, ensure_app_config_ini
+
+    try:
+        ensure_app_config_ini()
+    except Exception:
+        pass
+    return config_ini_path()
 
 
 def read_trading_bool(key: str, default: bool = False) -> bool:
