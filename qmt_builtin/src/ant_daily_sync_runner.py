@@ -9,7 +9,7 @@ import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-DAILY_SYNC_VERSION = "20260908.04"
+DAILY_SYNC_VERSION = "20261002.07"
 INTRADAY_PRIORITY_DAILY_LIMIT = 1
 INTRADAY_PRIORITY_DAILY_LIMIT_MAX = 8
 # ??????????????????? 1 ??????????????? download_history_data(1d) ??????????????????????
@@ -132,9 +132,9 @@ _FORCE_ORDERED_CODES: Optional[List[str]] = None
 _FORCE_ORDERED_END: str = ""
 
 try:
-    from ant_qmt_paths import PROJECT_ROOT
+    from ant_qmt_paths import PROJECT_ROOT, DATA_DIR
 except ImportError:
-    from qmt_builtin.ant_qmt_paths import PROJECT_ROOT
+    from qmt_builtin.ant_qmt_paths import PROJECT_ROOT, DATA_DIR
 
 try:
     from ant_rules_io import save_json_atomic
@@ -144,6 +144,22 @@ except ImportError:
 _BUILTIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _BUILTIN_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_DIR)
+# 大 QMT 内也要能 import 仓库 utils.trading_day / 读 data/trade_calendar.json
+_PROJECT_ROOT = str(PROJECT_ROOT).rstrip("\\/")
+if _PROJECT_ROOT and _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+# QMT 热加载常只换本文件，sys.modules 里 utils.trading_day 仍是旧缓存；强制重载。
+try:
+    import importlib
+
+    import utils.trading_day as _td_mod
+
+    importlib.reload(_td_mod)
+    if hasattr(_td_mod, "invalidate_trading_day_cache"):
+        _td_mod.invalidate_trading_day_cache()
+except Exception:
+    pass
 
 _SYNC_DONE_END_DATE = ""
 _FAILED_RECOVERY_DUE_AT = 0.0
@@ -1090,23 +1106,53 @@ def _log_fetch_fail(code: str, start_s: str, end_s: str, reason: str) -> None:
     )
 
 
+_DISK_TRADE_DATES_CACHE: Optional[Set[date]] = None
+_DISK_TRADE_DATES_LOGGED = False
+
+
 def _disk_trade_dates() -> Set[date]:
-    """读取 data/trade_calendar.json；空则返回空集。"""
+    """读取 data/trade_calendar.json；空则返回空集。结果进程内缓存。"""
+    global _DISK_TRADE_DATES_CACHE, _DISK_TRADE_DATES_LOGGED
+    if _DISK_TRADE_DATES_CACHE is not None:
+        return _DISK_TRADE_DATES_CACHE
     try:
+        candidates = []
+        try:
+            candidates.append(os.path.join(str(DATA_DIR), "trade_calendar.json"))
+        except Exception:
+            pass
+        if _PROJECT_ROOT:
+            candidates.append(os.path.join(_PROJECT_ROOT, "data", "trade_calendar.json"))
+        # 与 ant_qmt_paths 同构的 DATA_ROOT，避免中文路径在个别环境下 isfile 失败
+        candidates.append(
+            "D:\\"
+            + "\u8682\u8681\u91cf\u5316\u7cfb\u7edf"
+            + "\\data\\trade_calendar.json"
+        )
         here = os.path.dirname(os.path.abspath(__file__))
-        path = ""
         cur = here
         for _ in range(5):
-            cand = os.path.join(cur, "data", "trade_calendar.json")
-            if os.path.isfile(cand):
-                path = cand
-                break
+            candidates.append(os.path.join(cur, "data", "trade_calendar.json"))
             parent = os.path.dirname(cur)
             if parent == cur:
                 break
             cur = parent
+        path = ""
+        for cand in candidates:
+            if not cand:
+                continue
+            try:
+                if os.path.isfile(cand):
+                    path = cand
+                    break
+            except Exception:
+                continue
         if not path:
-            return set()
+            if not _DISK_TRADE_DATES_LOGGED:
+                _DISK_TRADE_DATES_LOGGED = True
+                print("[日线同步] 磁盘交易日历未找到 candidates=%d" % len(candidates))
+            _DISK_TRADE_DATES_CACHE = set()
+            return _DISK_TRADE_DATES_CACHE
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f) or {}
         raw = payload.get("dates") if isinstance(payload, dict) else None
@@ -1114,71 +1160,61 @@ def _disk_trade_dates() -> Set[date]:
         for item in raw or []:
             s = str(item or "").strip()[:10]
             if len(s) == 10 and s[4] == "-" and s[7] == "-":
-                out.add(date.fromisoformat(s))
+                try:
+                    out.add(datetime.strptime(s, "%Y-%m-%d").date())
+                except ValueError:
+                    continue
+        if not _DISK_TRADE_DATES_LOGGED:
+            _DISK_TRADE_DATES_LOGGED = True
+            if out:
+                print(
+                    "[日线同步] 磁盘交易日历已加载 n=%d path=%s"
+                    % (len(out), path)
+                )
+            else:
+                print("[日线同步] 磁盘交易日历为空 path=%s" % path)
+        _DISK_TRADE_DATES_CACHE = out
         return out
-    except Exception:
-        return set()
+    except Exception as e:
+        if not _DISK_TRADE_DATES_LOGGED:
+            _DISK_TRADE_DATES_LOGGED = True
+            print("[日线同步] 磁盘交易日历读取失败: %s" % e)
+        _DISK_TRADE_DATES_CACHE = set()
+        return _DISK_TRADE_DATES_CACHE
 
 
 def _fallback_is_tradeday(day: date) -> bool:
-    """xtdata 不可用时：优先 utils.trading_day / 磁盘日历，禁止把法定休市工作日当交易日。"""
-    try:
-        from utils.trading_day import is_tradeday as _td
-
-        return bool(_td(day))
-    except Exception:
-        pass
+    """磁盘日历优先；不可用时失败闭合（当休市），勿 weekday 兜底。"""
     disk = _disk_trade_dates()
     if disk:
         lo, hi = min(disk), max(disk)
         if lo <= day <= hi:
             return day in disk
-    return day.weekday() < 5
+    return False
 
 
 def _trading_dates_between(xtdata, start_d: date, end_d: date) -> List[date]:
+    """区间交易日：只走磁盘日历（xtdata 日历已不可靠，参数保留兼容）。"""
+    del xtdata
     if end_d < start_d:
         return []
-    xtdata_ok = False
-    try:
-        arr = xtdata.get_trading_dates(
-            "SH",
-            start_d.strftime("%Y%m%d"),
-            end_d.strftime("%Y%m%d"),
-        ) or []
-        xtdata_ok = True
-    except Exception:
-        arr = []
-    out = []
-    for ts in arr:
-        d = _parse_trade_date_from_ts(ts)
-        if d is not None and start_d <= d <= end_d:
-            out.append(d)
-    if out:
-        return sorted(set(out))
-    # API 正常但区间为空：整段休市，勿用「周一到周五」填假日
-    if xtdata_ok:
-        return []
-    # API 失败：本地日历 / 工作日兜底
-    cur = start_d
-    while cur <= end_d:
-        if _fallback_is_tradeday(cur):
-            out.append(cur)
-        cur += timedelta(days=1)
-    return out
+    disk = _disk_trade_dates()
+    if disk:
+        lo, hi = min(disk), max(disk)
+        # 与查询区间有交集才用磁盘；否则空（失败闭合，勿 weekday 填）
+        if hi >= start_d and lo <= end_d:
+            return sorted(d for d in disk if start_d <= d <= end_d)
+    return []
 
 
 def _is_tradeday(xtdata, day: date) -> bool:
-    ds = day.strftime("%Y%m%d")
-    try:
-        arr = xtdata.get_trading_dates("SH", ds, ds) or []
-    except Exception:
-        return _fallback_is_tradeday(day)
-    # 空列表=休市（如中秋周五）；切勿再按 weekday 兜底，否则会写假日线
-    for ts in arr:
-        d = _parse_trade_date_from_ts(ts)
-        if d == day:
-            return True
+    """是否交易日。只信磁盘交易日历；不可用则当休市（勿 xtdata/weekday 兜底）。"""
+    del xtdata  # 接口保留；QMT 侧 get_trading_dates 已不可靠
+    disk = _disk_trade_dates()
+    if disk:
+        lo, hi = min(disk), max(disk)
+        if lo <= day <= hi:
+            return day in disk
     return False
 
 
@@ -1220,13 +1256,8 @@ def _resolve_sync_end_date(xtdata, now: datetime) -> date:
 
 
 def _last_weekday_before(day: date) -> date:
-    """?????????????????????????????????????????"""
-    cur = day - timedelta(days=1)
-    for _ in range(14):
-        if cur.weekday() < 5:
-            return cur
-        cur -= timedelta(days=1)
-    return day - timedelta(days=1)
+    """上一「会话日」：只走磁盘交易日历，勿用 weekday（国庆会落到假日）。"""
+    return _last_tradeday_before(None, day)
 
 
 def _pool_daily_write_end_date(
@@ -4495,18 +4526,26 @@ def _manifest_partial_running(manifest: Optional[Dict[str, Any]] = None) -> bool
 
 def _should_schedule_failed_manifest_recovery() -> bool:
     """init: schedule FORCE/catch-up; market hours OK (time-sliced)."""
+    now = datetime.now()
+    try:
+        xtdata = _load_xtdata()
+    except Exception:
+        xtdata = None
+    # 法定休市：不安排补跑（否则会把 running 中的假日进度继续跑完）
+    if not _is_tradeday(xtdata, now.date()):
+        print(
+            "[日线同步] 非交易日跳过补跑安排: %s" % now.date().isoformat()
+        )
+        return False
     _, cache_dir, _, manifest_path = _data_paths()
     if _force_backfill_requested(cache_dir):
         return True
     if _manifest_partial_running(_load_manifest(manifest_path)):
         return True
-    now = datetime.now()
     if not _past_daily_sync_cutoff(now):
         return False
     manifest = _load_manifest(manifest_path)
-    try:
-        xtdata = _load_xtdata()
-    except Exception:
+    if xtdata is None:
         return str(manifest.get("status") or "") == "failed"
     end_d = _resolve_sync_end_date(xtdata, now)
     if _maybe_reopen_completed_for_stale_bars(end_d):
@@ -4671,6 +4710,14 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
         xtdata = _load_xtdata()
     except Exception as e:
         print("[日线同步] 加载 xtdata 失败: %s" % e)
+        return False
+
+    # 法定休市（国庆等）：任何入口都不得把周中假日写成 end_d / 假 K
+    if not _is_tradeday(xtdata, now.date()):
+        print(
+            "[日线同步] 非交易日跳过追赶: %s source=%s"
+            % (now.date().isoformat(), source)
+        )
         return False
 
     end_d = _resolve_sync_end_date(xtdata, now)
@@ -5711,6 +5758,18 @@ def startup_catch_up(ContextInfo=None) -> bool:
 
 def daily_bar_sync(ContextInfo):
     """15:35 定时日线同步；成功后可串行触发 tick 全量 / 盘后量能。"""
+    now = datetime.now()
+    try:
+        xtdata = _load_xtdata()
+    except Exception:
+        xtdata = None
+    # 法定休市（国庆等）直接跳过：勿写假日 K、勿串联分笔
+    if not _is_tradeday(xtdata, now.date()):
+        print(
+            "[日线同步] 非交易日跳过定时同步: %s"
+            % now.date().isoformat()
+        )
+        return False
     ok = run_catch_up_sync(ContextInfo, source="timer")
     # ???????????????/???????????????????????????
     if ok or _daily_gate_open_for_tick():
@@ -5881,8 +5940,8 @@ def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
         if not _is_tradeday(xtdata, now.date()):
             return False
     except Exception:
-        if now.weekday() >= 5:
-            return False
+        # 勿仅按周末跳过：国庆等周中休市也必须拦住；异常则失败闭合
+        return False
 
     # Completed gate can hide codes unblocked after false-delisted miss clear.
     # Reopen once/day for today-incremental (never arms FORCE).

@@ -14,7 +14,7 @@ import time
 from datetime import date, datetime, time as dt_time
 from typing import Any, Dict, List, Optional, Tuple
 
-AFTER_HOURS_RANK_VERSION = "20260801.03"
+AFTER_HOURS_RANK_VERSION = "20261002.01"
 # 与日线同点：仅作 catch-up 判断；正式启动由 tick 落盘串行触发
 RANK_HOUR = 15
 RANK_MINUTE = 35
@@ -179,24 +179,43 @@ def _get_xtdata():
 
 
 def _is_tradeday(day: date, ContextInfo=None, xtdata=None) -> bool:
-    """交易日判断：ContextInfo / 可选 xtdata / 工作日回退。不强制连行情 RPC。"""
-    ds = day.strftime("%Y%m%d")
-    for owner in (ContextInfo, xtdata):
-        if owner is None:
-            continue
-        fn = getattr(owner, "get_trading_dates", None)
-        if not callable(fn):
-            continue
-        try:
-            arr = fn("SH", ds, ds) or []
-            return bool(arr)
-        except Exception:
-            continue
-    # 仅「落盘完成」可证明是交易日；空目录不能当交易日
-    # （分笔 catch-up 探测曾误建空 ticks/{今日}/，导致周末一直「等待分笔」）
-    if _tick_full_sync_ready(ds):
-        return True
-    return day.weekday() < 5
+    """交易日判断：磁盘日历优先；不可用则当休市（勿 xtdata/weekday）。"""
+    del ContextInfo, xtdata
+    # 1) 磁盘
+    try:
+        path = os.path.join(_data_dir(), "trade_calendar.json")
+        with open(path, "r", encoding="utf-8") as f:
+            import json
+
+            payload = json.load(f) or {}
+        raw = payload.get("dates") if isinstance(payload, dict) else None
+        if raw:
+            keys = set()
+            parsed = []
+            for x in raw:
+                s = str(x or "").strip()[:10]
+                if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                    keys.add(s)
+                    try:
+                        parsed.append(datetime.strptime(s, "%Y-%m-%d").date())
+                    except ValueError:
+                        pass
+            if parsed:
+                lo, hi = min(parsed), max(parsed)
+                if lo <= day <= hi:
+                    return day.isoformat() in keys
+    except Exception:
+        pass
+    # 2) utils（已失败闭合，无 weekday）
+    try:
+        root = os.path.dirname(_data_dir().rstrip("\\/"))
+        if root and root not in sys.path:
+            sys.path.insert(0, root)
+        from utils.trading_day import is_tradeday as _td
+
+        return bool(_td(day))
+    except Exception:
+        return False
 
 
 def _load_universe_from_file() -> List[str]:

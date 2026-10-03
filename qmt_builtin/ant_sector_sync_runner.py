@@ -12,7 +12,7 @@ import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-SECTOR_SYNC_VERSION = "20260803.01"
+SECTOR_SYNC_VERSION = "20261002.01"
 SYNC_HOUR = 15
 SYNC_MINUTE = 35
 STARTUP_DELAY_SEC = 10
@@ -199,6 +199,30 @@ def _cache_age_days(index_path: str) -> Optional[int]:
 
 
 def _is_trading_day_today() -> bool:
+    """磁盘日历优先；不可用则当休市。"""
+    try:
+        path = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data", "trade_calendar.json")
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f) or {}
+        raw = payload.get("dates") if isinstance(payload, dict) else None
+        if raw:
+            today = date.today()
+            keys = set()
+            parsed = []
+            for x in raw:
+                s = str(x or "").strip()[:10]
+                if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                    keys.add(s)
+                    try:
+                        parsed.append(datetime.strptime(s, "%Y-%m-%d").date())
+                    except ValueError:
+                        pass
+            if parsed:
+                lo, hi = min(parsed), max(parsed)
+                if lo <= today <= hi:
+                    return today.isoformat() in keys
+    except Exception:
+        pass
     try:
         root = PROJECT_ROOT.rstrip("\\/")
         if root not in sys.path:
@@ -207,7 +231,7 @@ def _is_trading_day_today() -> bool:
 
         return bool(is_tradeday())
     except Exception:
-        return datetime.now().weekday() < 5
+        return False
 
 
 def _start_sector_sync_bg(ContextInfo, source: str, *, force: bool = False) -> None:
@@ -342,6 +366,13 @@ def run_sector_sync(ContextInfo=None, source: str = "manual", force: bool = Fals
     global _SYNC_RUNNING, _SOFT_FAIL_LOGGED
     if _SYNC_RUNNING:
         print("[板块同步] 跳过: 已在运行")
+        return False
+
+    if not force and not _is_trading_day_today():
+        print(
+            "[板块同步] 非交易日跳过: %s source=%s"
+            % (date.today().isoformat(), source)
+        )
         return False
 
     _, index_path, manifest_path = _paths()

@@ -1,5 +1,5 @@
 #coding:gbk
-"""15:35 ? A ??????? + on-demand??manifest ??????? 15:35 / init??"""
+"""15:35 全 A 日线同步 + on-demand；manifest 失败恢复见 15:35 / init。"""
 import csv
 import json
 import os
@@ -9,13 +9,13 @@ import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-DAILY_SYNC_VERSION = "20260908.04"
+DAILY_SYNC_VERSION = "20261002.07"
 INTRADAY_PRIORITY_DAILY_LIMIT = 1
 INTRADAY_PRIORITY_DAILY_LIMIT_MAX = 8
 # ??????????????????? 1 ??????????????? download_history_data(1d) ??????????????????????
-# ???????????????Σ?9:00-9:30???????15:00-15:30????? 1 ?? 1 ?
+# 非连续竞价交易时段（9:00-9:30、午休、15:00-15:30）：约 1 秒 1 只
 INTRADAY_ON_DEMAND_DAILY_INTERVAL_SEC = 1.0
-# ?????????9:30-11:30??13:00-15:00????? 10 ?? 1 ????????????????
+# 连续竞价（9:30-11:30、13:00-15:00）：约 10 秒 1 只，避免抢行情线程
 CONTINUOUS_QUOTE_ON_DEMAND_DAILY_INTERVAL_SEC = 10.0
 INTRADAY_ON_DEMAND_DAILY_BATCH = 1
 POOL_SLICE_SLEEP_SEC = 0.5
@@ -57,7 +57,7 @@ BACKFILL_FIRST_DATE_SLACK_DAYS = 14
 # v8: (reverted) tick last-bar reconcile was too expensive for full-universe after hours.
 # v9: after-hours incremental re-pulls from CSV last trade day only.
 # v10: drop full_tick close/vol reconcile; keep last-trade-day 1d refresh only.
-# v11: tick ??????????????????? daily_cache ???? K???? patch_daily_cache_today_from_tick_row????
+# v11: tick 全量落盘时用末笔对账覆盖 daily_cache 当日 K（见 patch_daily_cache_today_from_tick_row）。
 QUALITY_VERSION = 11
 # Touch under data/daily_cache/ to force one-shot backfill.
 # Empty file => start at BACKFILL_START_DATE; optional JSON {"start":"YYYYMMDD"}
@@ -132,9 +132,9 @@ _FORCE_ORDERED_CODES: Optional[List[str]] = None
 _FORCE_ORDERED_END: str = ""
 
 try:
-    from ant_qmt_paths import PROJECT_ROOT
+    from ant_qmt_paths import PROJECT_ROOT, DATA_DIR
 except ImportError:
-    from qmt_builtin.ant_qmt_paths import PROJECT_ROOT
+    from qmt_builtin.ant_qmt_paths import PROJECT_ROOT, DATA_DIR
 
 try:
     from ant_rules_io import save_json_atomic
@@ -144,6 +144,22 @@ except ImportError:
 _BUILTIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _BUILTIN_DIR not in sys.path:
     sys.path.insert(0, _BUILTIN_DIR)
+# 大 QMT 内也要能 import 仓库 utils.trading_day / 读 data/trade_calendar.json
+_PROJECT_ROOT = str(PROJECT_ROOT).rstrip("\\/")
+if _PROJECT_ROOT and _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+# QMT 热加载常只换本文件，sys.modules 里 utils.trading_day 仍是旧缓存；强制重载。
+try:
+    import importlib
+
+    import utils.trading_day as _td_mod
+
+    importlib.reload(_td_mod)
+    if hasattr(_td_mod, "invalidate_trading_day_cache"):
+        _td_mod.invalidate_trading_day_cache()
+except Exception:
+    pass
 
 _SYNC_DONE_END_DATE = ""
 _FAILED_RECOVERY_DUE_AT = 0.0
@@ -163,11 +179,11 @@ def _env_truthy(name: str) -> bool:
 
 
 def is_qmt_live_only() -> bool:
-    """?????????? tick ??? / ????????????????????? + ???????????
+    """实盘机：跳过 tick 全量 / 盘后量能串联（仍保留日线 + 按需日线）。
 
-    ?????Ч??
-    - ???????? ANT_QMT_LIVE_ONLY=1
-    - ??? data/qmt_live_only.flag??PROJECT_ROOT ???
+    任一生效：
+    - 环境变量 ANT_QMT_LIVE_ONLY=1
+    - 文件 data/qmt_live_only.flag（PROJECT_ROOT 下）
     """
     if _env_truthy("ANT_QMT_LIVE_ONLY"):
         return True
@@ -179,14 +195,14 @@ def is_qmt_live_only() -> bool:
 
 
 def _live_only_skip(what: str) -> bool:
-    """??????????????????????? True?????÷????? return????"""
+    """若实盘模式则打印一次说明并返回 True（调用方应直接 return）。"""
     global _LIVE_ONLY_LOGGED
     if not is_qmt_live_only():
         return False
     if not _LIVE_ONLY_LOGGED:
         _LIVE_ONLY_LOGGED = True
         print(
-            "[???????] ??????????? tick/????????%s???汾=%s"
+            "[日线同步] 实盘模式：跳过 tick/盘后量能（%s）版本=%s"
             % (what, DAILY_SYNC_VERSION)
         )
     return True
@@ -356,13 +372,13 @@ def _consume_reset_force_progress(
         if manifest_path:
             _save_manifest(manifest_path, cleared)
     except Exception as e:
-        print("[???????] ???? FORCE ????д manifest ???: %s" % e)
+        print("[日线同步] 重置 FORCE 进度写 manifest 失败: %s" % e)
     try:
         os.remove(path)
     except Exception as e:
-        print("[???????] ??? FORCE ??????????: %s" % e)
+        print("[日线同步] 删除 FORCE 进度文件失败: %s" % e)
     print(
-        "[???????] ?????? FORCE ????: prev_progress=%d -> 0"
+        "[日线同步] 已重置 FORCE 进度: prev_progress=%d -> 0"
         % prev
     )
     return cleared
@@ -373,9 +389,9 @@ def _clear_force_backfill_flag(cache_dir: Optional[str] = None) -> None:
     try:
         if os.path.isfile(path):
             os.remove(path)
-            print("[???????] ????? FORCE ?????? %s" % path)
+            print("[日线同步] 已清除 FORCE 回填标记 %s" % path)
     except Exception as e:
-        print("[???????] ??? FORCE ?????????: %s" % e)
+        print("[日线同步] 清除 FORCE 回填标记失败: %s" % e)
     _clear_force_ordered_cache(cache_dir)
 
 
@@ -431,7 +447,7 @@ def _load_force_ordered_codes(
         _FORCE_ORDERED_END = end_s
         return list(out)
     except Exception as e:
-        print("[???????] ???????? FORCE ???????: %s" % e)
+        print("[日线同步] 加载有序 FORCE 缓存失败: %s" % e)
         return None
 
 
@@ -460,7 +476,7 @@ def _save_force_ordered_codes(
     try:
         save_json_atomic(_force_ordered_cache_path(cache_dir), payload)
     except Exception as e:
-        print("[???????] ???????? FORCE ???????: %s" % e)
+        print("[日线同步] 保存有序 FORCE 缓存失败: %s" % e)
 
 
 def _apply_force_ordered_cache(
@@ -502,7 +518,7 @@ def _clear_halt_miss_for_force(cache_dir: Optional[str] = None) -> int:
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cache_dir, force=True)
         print(
-            "[???????] ????? %d ?????????/??? miss??????????"
+            "[日线同步] 已清除 %d 条今日停牌/暂停 miss（强制补数）"
             % len(drop)
         )
     return len(drop)
@@ -527,7 +543,7 @@ def _clear_soft_short_miss_for_main_chain(cache_dir: Optional[str] = None) -> in
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cache_dir, force=True)
         print(
-            "[???????] ????? %d ?? short_history miss????????"
+            "[日线同步] 已清除 %d 条 short_history miss（主链）"
             % len(drop)
         )
     return len(drop)
@@ -571,7 +587,7 @@ def _clear_false_delisted_miss_with_recent_csv(
         _MISS_CACHE_DIRTY = True
         _miss_cache_save(cdir, force=True)
         print(
-            "[???????] ????? %d ?????????? miss??CSV ????? %dd ???"
+            "[日线同步] 已清除 %d 条误判退市 miss（CSV 末日在 %dd 内）"
             % (len(drop), int(max_age_days))
         )
     return len(drop)
@@ -635,11 +651,11 @@ def _maybe_reopen_completed_for_stale_bars(end_d: date) -> bool:
     try:
         _save_manifest(manifest_path, reopened)
     except Exception as e:
-        print("[???????] ???????? miss ??????: %s" % e)
+        print("[日线同步] 清理过期 miss 记录失败: %s" % e)
         return False
     _SYNC_DONE_END_DATE = ""
     print(
-        "[???????] ???????????? stale_csv=%d cleared_miss=%d miss_skip_was=%d end=%s????????????"
+        "[日线同步] 重开已完成增量 stale_csv=%d cleared_miss=%d miss_skip_was=%d end=%s（无强制补数）"
         % (stale_n, cleared, miss_skip, end_s)
     )
     return True
@@ -682,11 +698,11 @@ def _abandon_stale_force_partial(
         if manifest_path:
             _save_manifest(manifest_path, cleared)
     except Exception as e:
-        print("[???????] д miss ???????: %s" % e)
+        print("[日线同步] 写 miss 缓存失败: %s" % e)
     _clear_force_ordered_cache(cache_dir)
     _clear_soft_short_miss_for_main_chain(cache_dir)
     print(
-        "[???????] ?????????????????????? status=%s trigger=%s ??????????????????"
+        "[日线同步] 已放弃过期强制补数部分进度 status=%s trigger=%s （强制补数标志不存在）"
         % (status, trigger or "-")
     )
     return cleared
@@ -732,7 +748,7 @@ def _miss_cache_save(cache_dir: Optional[str] = None, force: bool = False) -> No
         save_json_atomic(path, payload)
         _MISS_CACHE_DIRTY = False
     except Exception as e:
-        print("[???????] miss ???汣?????: %s" % e)
+        print("[日线同步] miss 缓存保存失败: %s" % e)
 
 
 def _miss_until_date(reason: str, fail_day: date) -> date:
@@ -810,7 +826,7 @@ def _miss_cache_put(
     if _daily_sync_verbose() and _MISS_LOG_COUNT < 8:
         _MISS_LOG_COUNT += 1
         print(
-            "[???????] miss???? +%s reason=%s until=%s fail_count=%d"
+            "[日线同步] miss缓存 +%s reason=%s until=%s fail_count=%d"
             % (full, reason_s, until_d.isoformat(), fail_count)
         )
 
@@ -1002,7 +1018,7 @@ def _fetch_universe(xtdata, ContextInfo=None) -> List[str]:
         if got:
             raw = got
             if _daily_sync_verbose():
-                print("[???????] ????????=%s n_raw=%d" % (owner_label, len(raw)))
+                print("[日线同步] 股票池来源=%s n_raw=%d" % (owner_label, len(raw)))
             break
     if not raw:
         # ???????????????????????????
@@ -1014,9 +1030,9 @@ def _fetch_universe(xtdata, ContextInfo=None) -> List[str]:
                 payload = json.load(f) or {}
             raw = list(payload.get("codes") or [])
             if _daily_sync_verbose():
-                print("[???????] ?????????б? n=%d" % len(raw))
+                print("[日线同步] 股票池回退列表 n=%d" % len(raw))
         except Exception as e:
-            print("[???????] ???????????: %s" % e)
+            print("[日线同步] 股票池回退失败: %s" % e)
             raw = []
     out = []
     seen = set()
@@ -1085,28 +1101,58 @@ def _log_fetch_fail(code: str, start_s: str, end_s: str, reason: str) -> None:
         return
     _FAIL_LOG_COUNT += 1
     print(
-        "[???????] ?????? %s range=%s..%s reason=%s"
+        "[日线同步] 拉取为空 %s range=%s..%s reason=%s"
         % (code, start_s, end_s, reason)
     )
 
 
+_DISK_TRADE_DATES_CACHE: Optional[Set[date]] = None
+_DISK_TRADE_DATES_LOGGED = False
+
+
 def _disk_trade_dates() -> Set[date]:
-    """读取 data/trade_calendar.json；空则返回空集。"""
+    """读取 data/trade_calendar.json；空则返回空集。结果进程内缓存。"""
+    global _DISK_TRADE_DATES_CACHE, _DISK_TRADE_DATES_LOGGED
+    if _DISK_TRADE_DATES_CACHE is not None:
+        return _DISK_TRADE_DATES_CACHE
     try:
+        candidates = []
+        try:
+            candidates.append(os.path.join(str(DATA_DIR), "trade_calendar.json"))
+        except Exception:
+            pass
+        if _PROJECT_ROOT:
+            candidates.append(os.path.join(_PROJECT_ROOT, "data", "trade_calendar.json"))
+        # 与 ant_qmt_paths 同构的 DATA_ROOT，避免中文路径在个别环境下 isfile 失败
+        candidates.append(
+            "D:\\"
+            + "\u8682\u8681\u91cf\u5316\u7cfb\u7edf"
+            + "\\data\\trade_calendar.json"
+        )
         here = os.path.dirname(os.path.abspath(__file__))
-        path = ""
         cur = here
         for _ in range(5):
-            cand = os.path.join(cur, "data", "trade_calendar.json")
-            if os.path.isfile(cand):
-                path = cand
-                break
+            candidates.append(os.path.join(cur, "data", "trade_calendar.json"))
             parent = os.path.dirname(cur)
             if parent == cur:
                 break
             cur = parent
+        path = ""
+        for cand in candidates:
+            if not cand:
+                continue
+            try:
+                if os.path.isfile(cand):
+                    path = cand
+                    break
+            except Exception:
+                continue
         if not path:
-            return set()
+            if not _DISK_TRADE_DATES_LOGGED:
+                _DISK_TRADE_DATES_LOGGED = True
+                print("[日线同步] 磁盘交易日历未找到 candidates=%d" % len(candidates))
+            _DISK_TRADE_DATES_CACHE = set()
+            return _DISK_TRADE_DATES_CACHE
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f) or {}
         raw = payload.get("dates") if isinstance(payload, dict) else None
@@ -1114,71 +1160,61 @@ def _disk_trade_dates() -> Set[date]:
         for item in raw or []:
             s = str(item or "").strip()[:10]
             if len(s) == 10 and s[4] == "-" and s[7] == "-":
-                out.add(date.fromisoformat(s))
+                try:
+                    out.add(datetime.strptime(s, "%Y-%m-%d").date())
+                except ValueError:
+                    continue
+        if not _DISK_TRADE_DATES_LOGGED:
+            _DISK_TRADE_DATES_LOGGED = True
+            if out:
+                print(
+                    "[日线同步] 磁盘交易日历已加载 n=%d path=%s"
+                    % (len(out), path)
+                )
+            else:
+                print("[日线同步] 磁盘交易日历为空 path=%s" % path)
+        _DISK_TRADE_DATES_CACHE = out
         return out
-    except Exception:
-        return set()
+    except Exception as e:
+        if not _DISK_TRADE_DATES_LOGGED:
+            _DISK_TRADE_DATES_LOGGED = True
+            print("[日线同步] 磁盘交易日历读取失败: %s" % e)
+        _DISK_TRADE_DATES_CACHE = set()
+        return _DISK_TRADE_DATES_CACHE
 
 
 def _fallback_is_tradeday(day: date) -> bool:
-    """xtdata 不可用时：优先 utils.trading_day / 磁盘日历，禁止把法定休市工作日当交易日。"""
-    try:
-        from utils.trading_day import is_tradeday as _td
-
-        return bool(_td(day))
-    except Exception:
-        pass
+    """磁盘日历优先；不可用时失败闭合（当休市），勿 weekday 兜底。"""
     disk = _disk_trade_dates()
     if disk:
         lo, hi = min(disk), max(disk)
         if lo <= day <= hi:
             return day in disk
-    return day.weekday() < 5
+    return False
 
 
 def _trading_dates_between(xtdata, start_d: date, end_d: date) -> List[date]:
+    """区间交易日：只走磁盘日历（xtdata 日历已不可靠，参数保留兼容）。"""
+    del xtdata
     if end_d < start_d:
         return []
-    xtdata_ok = False
-    try:
-        arr = xtdata.get_trading_dates(
-            "SH",
-            start_d.strftime("%Y%m%d"),
-            end_d.strftime("%Y%m%d"),
-        ) or []
-        xtdata_ok = True
-    except Exception:
-        arr = []
-    out = []
-    for ts in arr:
-        d = _parse_trade_date_from_ts(ts)
-        if d is not None and start_d <= d <= end_d:
-            out.append(d)
-    if out:
-        return sorted(set(out))
-    # API 正常但区间为空：整段休市，勿用「周一到周五」填假日
-    if xtdata_ok:
-        return []
-    # API 失败：本地日历 / 工作日兜底
-    cur = start_d
-    while cur <= end_d:
-        if _fallback_is_tradeday(cur):
-            out.append(cur)
-        cur += timedelta(days=1)
-    return out
+    disk = _disk_trade_dates()
+    if disk:
+        lo, hi = min(disk), max(disk)
+        # 与查询区间有交集才用磁盘；否则空（失败闭合，勿 weekday 填）
+        if hi >= start_d and lo <= end_d:
+            return sorted(d for d in disk if start_d <= d <= end_d)
+    return []
 
 
 def _is_tradeday(xtdata, day: date) -> bool:
-    ds = day.strftime("%Y%m%d")
-    try:
-        arr = xtdata.get_trading_dates("SH", ds, ds) or []
-    except Exception:
-        return _fallback_is_tradeday(day)
-    # 空列表=休市（如中秋周五）；切勿再按 weekday 兜底，否则会写假日线
-    for ts in arr:
-        d = _parse_trade_date_from_ts(ts)
-        if d == day:
-            return True
+    """是否交易日。只信磁盘交易日历；不可用则当休市（勿 xtdata/weekday 兜底）。"""
+    del xtdata  # 接口保留；QMT 侧 get_trading_dates 已不可靠
+    disk = _disk_trade_dates()
+    if disk:
+        lo, hi = min(disk), max(disk)
+        if lo <= day <= hi:
+            return day in disk
     return False
 
 
@@ -1220,13 +1256,8 @@ def _resolve_sync_end_date(xtdata, now: datetime) -> date:
 
 
 def _last_weekday_before(day: date) -> date:
-    """?????????????????????????????????????????"""
-    cur = day - timedelta(days=1)
-    for _ in range(14):
-        if cur.weekday() < 5:
-            return cur
-        cur -= timedelta(days=1)
-    return day - timedelta(days=1)
+    """上一「会话日」：只走磁盘交易日历，勿用 weekday（国庆会落到假日）。"""
+    return _last_tradeday_before(None, day)
 
 
 def _pool_daily_write_end_date(
@@ -1428,7 +1459,7 @@ def _mirror_qfq_cache_csv(
     ContextInfo=None,
     xtdata=None,
 ) -> None:
-    """???д?? daily_cache_qfq??????????????????? 1/1 .. rows ????"""
+    """同步写入 daily_cache_qfq（前复权）；窗口：当年 1/1 .. rows 末日。"""
     if not rows_none or ContextInfo is None:
         return
     d0, d1 = _rows_date_bounds(rows_none)
@@ -1469,7 +1500,7 @@ def _mirror_qfq_full_csv(
     ContextInfo=None,
     xtdata=None,
 ) -> None:
-    """????????????д?? daily_full_qfq????????????????????"""
+    """按需全量成功后写入 daily_full_qfq（前复权，裁至去年末）。"""
     if ContextInfo is None:
         return
     cap_d = _qfq_full_cap_date()
@@ -1506,7 +1537,7 @@ def _mirror_hfq_cache_csv(
     ContextInfo=None,
     xtdata=None,
 ) -> None:
-    """???д?? daily_cache_hfq?????????????????? 1/1 .. rows ????"""
+    """同步写入 daily_cache_hfq（后复权）；窗口：当年 1/1 .. rows 末日。"""
     if not rows_none or ContextInfo is None:
         return
     d0, d1 = _rows_date_bounds(rows_none)
@@ -1547,7 +1578,7 @@ def _mirror_hfq_full_csv(
     ContextInfo=None,
     xtdata=None,
 ) -> None:
-    """????????????д?? daily_full_hfq???????????????????"""
+    """按需全量成功后写入 daily_full_hfq（后复权，裁至去年末）。"""
     if ContextInfo is None:
         return
     cap_d = _hfq_full_cap_date()
@@ -1589,11 +1620,11 @@ def _write_daily_cache_csv(
     try:
         _mirror_qfq_cache_csv(cache_dir, code, rows, ContextInfo=ContextInfo, xtdata=xtdata)
     except Exception as e:
-        print("[???????] qfq cache mirror %s: %s" % (code, e))
+        print("[日线同步] qfq cache mirror %s: %s" % (code, e))
     try:
         _mirror_hfq_cache_csv(cache_dir, code, rows, ContextInfo=ContextInfo, xtdata=xtdata)
     except Exception as e:
-        print("[???????] hfq cache mirror %s: %s" % (code, e))
+        print("[日线同步] hfq cache mirror %s: %s" % (code, e))
 
 
 def _last_date_in_csv(path: str) -> Optional[date]:
@@ -1680,13 +1711,13 @@ def _ensure_builtin_download_bound() -> bool:
         if not _BUILTIN_DL_BIND_LOGGED:
             _BUILTIN_DL_BIND_LOGGED = True
             if not ready:
-                print("[???????] ???? download_history_data ??=no")
+                print("[日线同步] 内置 download_history_data 绑定=no")
         return ready
     except Exception as e:
         if not _BUILTIN_DL_BIND_LOGGED:
             _BUILTIN_DL_BIND_LOGGED = True
             print(
-                "[???????] ???? download_history_data ?????: %s: %s"
+                "[日线同步] 内置 download_history_data 绑定错误: %s: %s"
                 % (type(e).__name__, e)
             )
         return False
@@ -2153,7 +2184,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 if d is not None:
                     out[code6] = d
     except Exception as e:
-        print("[???????] ??? csv ?б????????: %s" % e)
+        print("[日线同步] 读取 csv 列表日期失败: %s" % e)
     # Optional JSON overlays (OpenDate / list_date / ????).
     for name in ("all_a_stock_info.json", "all_a_stock_info_em_boards.json"):
         jpath = os.path.join(base, "data", name)
@@ -2215,7 +2246,7 @@ def _load_list_date_map() -> Dict[str, date]:
                 out[code6] = d
     _LIST_DATE_BY_CODE = out
     if _daily_sync_verbose():
-        print("[???????] ?? CSV ????????? n=%d" % len(out))
+        print("[日线同步] 从 CSV 收集上市日 n=%d" % len(out))
     return out
 
 
@@ -2430,7 +2461,7 @@ def _bar_field_float(bar: Dict[str, Any], key: str) -> float:
 
 
 def _daily_today_bar_differs(old: Dict[str, Any], new: Dict[str, Any]) -> bool:
-    """?????? >= 1 ???????/???????? >= 1%??????????? > 1????"""
+    """收盘价差 >= 1 分，或量/额相对偏差 >= 1%（且绝对量差 > 1）。"""
     if not old:
         return True
     for key in ("open", "high", "low", "close"):
@@ -2452,10 +2483,10 @@ def patch_daily_cache_today_from_tick_row(
     trade_d: date,
     tick_row: Any,
 ) -> str:
-    """?? tick ??????????У????? daily_cache ???? K??
+    """用 tick 末笔（或指定行）覆盖 daily_cache 当日 K。
 
-    ?? tick ??????????????? data/daily_cache/{code}.csv?????? qfq/hfq ????
-    ????: patched / same / skip / fail
+    供 tick 全量落盘后调用：只改 data/daily_cache/{code}.csv，不做 qfq/hfq 镜像。
+    返回: patched / same / skip / fail
     """
     try:
         bar = _tick_row_to_daily_bar(tick_row, trade_d)
@@ -2536,7 +2567,7 @@ def _fetch_today_bars_from_full_tick(
             if isinstance(tick_map, dict) and tick_map:
                 source = "ctx"
         except Exception as e:
-            print("[???????] ContextInfo.get_full_tick ???: %s" % e)
+            print("[日线同步] ContextInfo.get_full_tick 失败: %s" % e)
             tick_map = None
     # get_full_tick ?????????????? download_history???????? xtdata download ??????
     if (not isinstance(tick_map, dict) or not tick_map) and xtdata is not None:
@@ -2552,7 +2583,7 @@ def _fetch_today_bars_from_full_tick(
                     if ENABLE_XTDATA_DOWNLOAD:
                         _mark_xtdata_rpc_dead(str(e))
                 else:
-                    print("[???????] xtdata.get_full_tick ???: %s" % e)
+                    print("[日线同步] xtdata.get_full_tick 失败: %s" % e)
                 tick_map = None
     if not isinstance(tick_map, dict) or not tick_map:
         return out
@@ -2563,7 +2594,7 @@ def _fetch_today_bars_from_full_tick(
             out[code] = bar
     if out and source and _daily_sync_verbose():
         print(
-            "[???????] full_tick K?? source=%s hit=%d/%d day=%s"
+            "[日线同步] full_tick K线 source=%s hit=%d/%d day=%s"
             % (source, len(out), len(code_list), end_d.isoformat())
         )
     return out
@@ -2945,7 +2976,7 @@ def _download_slice(
         if _FAIL_LOG_COUNT < 8:
             _FAIL_LOG_COUNT += 1
             print(
-                "[???????] ??????? %s %s-%s | %s"
+                "[日线同步] 下载错误 %s %s-%s | %s"
                 % (code, s_short, e_short, last_err)
             )
     return False
@@ -2979,7 +3010,7 @@ def _download_batch(
                 continue
             except Exception as e:
                 print(
-                    "[???????] %s ??? n=%d %s-%s | %s: %s"
+                    "[日线同步] %s 失败 n=%d %s-%s | %s: %s"
                     % (label, len(codes), s_short, e_short, type(e).__name__, e)
                 )
                 if _is_quote_rpc_error(e):
@@ -3399,7 +3430,7 @@ def _download_one_code(
             _mark_xtdata_rpc_dead(str(e))
             return "rpc_dead"
         print(
-            "[???????] ????????????? %s | %s: %s"
+            "[日线同步] 无日期下载失败 %s | %s: %s"
             % (code, type(e).__name__, e)
         )
         return "none"
@@ -3832,7 +3863,7 @@ def _sync_one_code(
     fetch_start_s, fetch_end_s = _range_strings(fetch_start, end_d)
 
     def _ensure_today_from_tick(cur_bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """?? 1d ? end_d???? get_full_tick ?????? K?????????????????????"""
+        """若 1d 缺 end_d，用 get_full_tick 补当日 K（仅补缺，不对账覆盖）。"""
         nonlocal last_dl, tick_bar
         has_end = any(
             str(b.get("date") or "")[:10] == end_d.isoformat() for b in (cur_bars or [])
@@ -4061,7 +4092,7 @@ def _sync_one_code(
                         bars = _merge_bar_lists(bars, more)
                         last_dl = "builtin_dl_%s_%d" % (src or "ok", len(more))
                         print(
-                            "[???????] ???????????? %s bars=%d src=%s %s..%s"
+                            "[按需同步] 内置下载后读回 %s bars=%d src=%s %s..%s"
                             % (
                                 code,
                                 len(more),
@@ -4073,7 +4104,7 @@ def _sync_one_code(
                     else:
                         last_dl = "builtin_dl_empty_%s" % (dl_detail or "ok")
                         print(
-                            "[???????] ??????????????????? %s detail=%s range=%s..%s"
+                            "[按需同步] 内置下载已调用但读回空 %s detail=%s range=%s..%s"
                             % (
                                 code,
                                 dl_detail or "ok",
@@ -4364,7 +4395,7 @@ def _sync_start_date(
     if last > end_d:
         return end_d + timedelta(days=1)
     # After-hours: re-pull from the CSV's last trade day (most likely incomplete
-    # freeze) through end_d. ???? K ??????/????????? tick ????? patch??
+    # freeze) through end_d. 当日 K 的收盘/量对账改由 tick 落盘时 patch。
     if refresh_today:
         return last
     if last == end_d:
@@ -4437,7 +4468,7 @@ def _in_intraday_blocking_window(now: Optional[datetime] = None) -> bool:
 
 
 def _in_continuous_quote_watch(now: Optional[datetime] = None) -> bool:
-    """??????????????? ant_shadow_strategy ??????"""
+    """连续竞价监控窗（与 ant_shadow_strategy 一致）。"""
     now = now or datetime.now()
     t = now.time()
     return (dt_time(9, 30) <= t <= dt_time(11, 30)) or (
@@ -4475,7 +4506,7 @@ def _arm_force_defer_after_hours() -> None:
     _FORCE_SLICE_IDLE_UNTIL = time.time() + 5.0
     remain = max(0.0, (target - now).total_seconds()) if now < target else 0.0
     print(
-        "[???????] ?????? ???????????????? remain=%.0fs target=%02d:%02d (slice_idle=5s only)"
+        "[日线同步] 强制补数 推迟软短深挖至盘后 remain=%.0fs target=%02d:%02d (slice_idle=5s only)"
         % (remain, int(SYNC_HOUR), int(SYNC_MINUTE))
     )
 
@@ -4495,18 +4526,26 @@ def _manifest_partial_running(manifest: Optional[Dict[str, Any]] = None) -> bool
 
 def _should_schedule_failed_manifest_recovery() -> bool:
     """init: schedule FORCE/catch-up; market hours OK (time-sliced)."""
+    now = datetime.now()
+    try:
+        xtdata = _load_xtdata()
+    except Exception:
+        xtdata = None
+    # 法定休市：不安排补跑（否则会把 running 中的假日进度继续跑完）
+    if not _is_tradeday(xtdata, now.date()):
+        print(
+            "[日线同步] 非交易日跳过补跑安排: %s" % now.date().isoformat()
+        )
+        return False
     _, cache_dir, _, manifest_path = _data_paths()
     if _force_backfill_requested(cache_dir):
         return True
     if _manifest_partial_running(_load_manifest(manifest_path)):
         return True
-    now = datetime.now()
     if not _past_daily_sync_cutoff(now):
         return False
     manifest = _load_manifest(manifest_path)
-    try:
-        xtdata = _load_xtdata()
-    except Exception:
+    if xtdata is None:
         return str(manifest.get("status") or "") == "failed"
     end_d = _resolve_sync_end_date(xtdata, now)
     if _maybe_reopen_completed_for_stale_bars(end_d):
@@ -4527,7 +4566,7 @@ def schedule_failed_manifest_recovery_on_init() -> None:
     delay = float(FORCE_INIT_DELAY_SEC if force else FAILED_RECOVERY_DELAY_SEC)
     _FAILED_RECOVERY_DUE_AT = time.time() + delay
     print(
-        "[???????] ????????? %ds ??????; quality=%d ???=%s slice=%s idle=%.0fs)"
+        "[日线同步] 补跑已安排 %ds 后（初始化; quality=%d 强制=%s slice=%s idle=%.0fs)"
         % (
             int(delay),
             QUALITY_VERSION,
@@ -4547,11 +4586,11 @@ def maybe_run_failed_manifest_recovery(ContextInfo=None) -> bool:
     _FAILED_RECOVERY_ATTEMPTED = True
     _FAILED_RECOVERY_DUE_AT = 0.0
     if not _should_schedule_failed_manifest_recovery():
-        print("[???????] ????????嵥?????????δ????")
+        print("[日线同步] 无需失败清单恢复（条件未满足）")
         if _daily_gate_open_for_tick():
             _schedule_tick_pipeline()
         return False
-    print("[???????] ???????嵥???")
+    print("[日线同步] 开始失败清单恢复")
     ok = run_catch_up_sync(ContextInfo, source="init_catchup")
     # ???? FORCE ??????????? tick???????????????
     if ok and _past_daily_sync_cutoff():
@@ -4594,7 +4633,7 @@ def maybe_run_force_year_backfill(ContextInfo=None) -> bool:
         remain_ah = max(0.0, (target - now).total_seconds())
         if now_ts - _FORCE_IDLE_LOG_TS >= 60.0:
             print(
-                "[???????] ?????? ????????????; ????????? %02d:%02d remain=%.0fs"
+                "[日线同步] 强制补数 盘后推迟（软短）; 盘后深挖于 %02d:%02d remain=%.0fs"
                 % (int(SYNC_HOUR), int(SYNC_MINUTE), remain_ah)
             )
             _FORCE_IDLE_LOG_TS = now_ts
@@ -4607,13 +4646,13 @@ def maybe_run_force_year_backfill(ContextInfo=None) -> bool:
         else:
             if now_ts - _FORCE_IDLE_LOG_TS >= 60.0:
                 print(
-                    "[???????] ?????? ???м?? remain=%.0fs?????鲹???"
+                    "[日线同步] 强制补数 空闲间隙 remain=%.0fs（行情补跑）"
                     % max(0.0, remain_idle)
                 )
                 _FORCE_IDLE_LOG_TS = now_ts
             return False
     print(
-        "[???????] ???/????????? ???=%s partial=%s progress=%s/%s "
+        "[日线同步] 强制/部分已武装 强制=%s partial=%s progress=%s/%s "
         "slice=%s quantum=%.0fs idle=%.0fs"
         % (
             "yes" if force else "no",
@@ -4636,7 +4675,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     global _SYNC_DONE_END_DATE, _SYNC_RUNNING, _FAIL_LOG_COUNT, _XTDATA_RPC_OK
     global _MISS_LOG_COUNT
     if _SYNC_RUNNING:
-        print("[???????] ????: ????????? (source=%s)" % source)
+        print("[日线同步] 跳过: 同步进行中 (source=%s)" % source)
         return False
 
     # Skip while tick full sync owns ContextInfo.
@@ -4646,7 +4685,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
         except ImportError:
             import qmt_builtin.ant_tick_full_sync_runner as tick_full
         if bool(getattr(tick_full, "_BUSY", False)):
-            print("[???????] ????: ????????? (source=%s)" % source)
+            print("[日线同步] 跳过: 同步进行中 (source=%s)" % source)
             return False
     except Exception:
         pass
@@ -4670,7 +4709,15 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     try:
         xtdata = _load_xtdata()
     except Exception as e:
-        print("[???????] ???? xtdata ???: %s" % e)
+        print("[日线同步] 加载 xtdata 失败: %s" % e)
+        return False
+
+    # 法定休市（国庆等）：任何入口都不得把周中假日写成 end_d / 假 K
+    if not _is_tradeday(xtdata, now.date()):
+        print(
+            "[日线同步] 非交易日跳过追赶: %s source=%s"
+            % (now.date().isoformat(), source)
+        )
         return False
 
     end_d = _resolve_sync_end_date(xtdata, now)
@@ -4679,12 +4726,12 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
 
     # Skip done unless FORCE / partial resume.
     if _SYNC_DONE_END_DATE == end_s and not force_year and not partial_running:
-        print("[???????] ????: ????????? end=%s source=%s" % (end_s, source))
+        print("[日线同步] 跳过: 当日已完成 end=%s source=%s" % (end_s, source))
         return False
     if _already_synced_to_end(old_manifest, end_d):
         _SYNC_DONE_END_DATE = end_s
         print(
-            "[???????] ????: manifest ????? end=%s source=%s"
+            "[日线同步] 跳过: manifest 已完成 end=%s source=%s"
             % (end_s, source)
         )
         return False
@@ -4695,18 +4742,18 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     verbose = _daily_sync_verbose()
     if verbose:
         print(
-            "[???????] ??·??=ContextInfo.get_market_data_ex(1d) builtin_dl=%s xtdata_dl=off"
+            "[日线同步] 主路径=ContextInfo.get_market_data_ex(1d) builtin_dl=%s xtdata_dl=off"
             % ("on" if builtin_dl_ready else "miss")
         )
     if ContextInfo is None:
         print(
-            "[???????] ????: ContextInfo ? None; ContextInfo ·????????"
+            "[日线同步] 警告: ContextInfo 为 None; ContextInfo 路径不可用"
         )
     if verbose and (
         force_year or int(old_manifest.get("quality_version") or 0) < QUALITY_VERSION
     ):
         print(
-            "[???????] ???????? start=%s min_bars~%d quality=%d->%d force=%s slice=%s quantum=%.0fs batch=%d"
+            "[日线同步] 回补已武装 start=%s min_bars~%d quality=%d->%d force=%s slice=%s quantum=%.0fs batch=%d"
             % (
                 bf_start_ymd,
                 MIN_BACKFILL_BARS,
@@ -4748,13 +4795,13 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
     try:
         universe = _fetch_universe(xtdata, ContextInfo=ContextInfo)
         if not universe:
-            print("[???????] ???: ????????")
+            print("[日线同步] 中止: 股票池为空")
             return False
 
         os.makedirs(cache_dir, exist_ok=True)
         _save_universe(universe_path, universe, end_s)
         print(
-            "[???????] ?????? ?汾=%s source=%s end=%s count=%d"
+            "[日线同步] 补跑开始 版本=%s source=%s end=%s count=%d"
             % (DAILY_SYNC_VERSION, source, end_s, len(universe))
         )
         if force_year:
@@ -4815,7 +4862,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             filtered.append(code)
         if miss_skip_count:
             print(
-                "[???????] miss???? skip=%d remain=%d path=%s"
+                "[日线同步] miss缓存 skip=%d remain=%d path=%s"
                 % (miss_skip_count, len(filtered), _miss_cache_path(cache_dir))
             )
         # FORCE: truncated-first order. Cache after first scan; reuse on slices.
@@ -4825,7 +4872,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 filtered = _apply_force_ordered_cache(filtered, cached_ord)
                 if verbose:
                     print(
-                        "[???????] ?????? ????????? n=%d?????? CSV ?????"
+                        "[日线同步] 强制补数 复用有序缓存 n=%d（跳过 CSV 重扫）"
                         % len(cached_ord)
                     )
             else:
@@ -4840,7 +4887,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 if cold:
                     if verbose:
                         print(
-                            "[???????] ?????? ???? truncated=%d warm=%d"
+                            "[日线同步] 强制补数 优先 truncated=%d warm=%d"
                             % (len(cold), len(warm))
                         )
                     filtered = cold + warm
@@ -4869,7 +4916,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 failed_codes = [str(c) for c in prev_failed[:200]]
             if verbose:
                 print(
-                    "[???????] ???????=%d/%d ok=%d skip=%d fail=%d ????=%d"
+                    "[日线同步] 从进度恢复=%d/%d ok=%d skip=%d fail=%d 软短=%d"
                     % (
                         resume_from,
                         total,
@@ -4891,7 +4938,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             # Mid-walk disarm: FORCE flag cleared => stop incomplete loop now.
             if force_year and (not _force_backfill_requested(cache_dir)):
                 print(
-                    "[???????] ??????????????б????; ????? %d/%d (source=%s)"
+                    "[日线同步] 强制补数标志运行中被清除; 中止于 %d/%d (source=%s)"
                     "" % (max(0, pos - 1), total, source)
                 )
                 try:
@@ -4951,7 +4998,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     pass
                 _arm_force_slice_idle()
                 print(
-                    "[???????] ?????ó??????????after %.1fs progress=%d/%d idle=%.0fs"
+                    "[日线同步] 时间片让出（代码前）after %.1fs progress=%d/%d idle=%.0fs"
                     % (
                         time.time() - t_slice_start,
                         max(0, pos - 1),
@@ -5004,7 +5051,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         pass
                     _arm_force_slice_idle()
                     print(
-                        "[???????] ?????ó???ContextInfo ???after %.1fs progress=%d/%d idle=%.0fs"
+                        "[日线同步] 时间片让出（ContextInfo 前）after %.1fs progress=%d/%d idle=%.0fs"
                         % (
                             time.time() - t_slice_start,
                             max(0, pos - 1),
@@ -5021,7 +5068,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 batch_tried = False
                 if verbose:
                     print(
-                        "[???????] ???? %d-%d/%d ??? (ContextInfo 1d size=%d)"
+                        "[日线同步] 批次 %d-%d/%d 开始 (ContextInfo 1d size=%d)"
                         % (pos, batch_end, total, batch_sz)
                     )
                 fetch_start = end_d - timedelta(days=CTX_INCREMENTAL_LOOKBACK_DAYS)
@@ -5050,7 +5097,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     batch_tried = True
                     if verbose:
                         print(
-                            "[???????] ???? ContextInfo 1d source=%s hit=%d/%d range=%s..%s cold=%d"
+                            "[日线同步] 批次 ContextInfo 1d source=%s hit=%d/%d range=%s..%s cold=%d"
                             % (
                                 primary_source,
                                 len(bars_prefetch),
@@ -5062,7 +5109,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         )
                 except Exception as e:
                     print(
-                        "[???????] ???? ContextInfo 1d ????: %s: %s"
+                        "[日线同步] 批次 ContextInfo 1d 错误: %s: %s"
                         % (type(e).__name__, e)
                     )
                     bars_prefetch = {}
@@ -5125,7 +5172,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                     pass
                                 _arm_force_slice_idle()
                                 print(
-                                    "[???????] ?????ó?????????????? after %.1fs progress=%d/%d dl=%d/%d idle=%.0fs"
+                                    "[日线同步] 时间片让出（前）内置下载 after %.1fs progress=%d/%d dl=%d/%d idle=%.0fs"
                                     % (
                                         time.time() - t_slice_start,
                                         max(0, pos - 1),
@@ -5146,7 +5193,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 dl_ok += 1
                             elif detail and dl_tried <= 3:
                                 print(
-                                    "[???????] ????????δ???? %s %s..%s | %s%Y%m%d%Y%m%d"
+                                    "[日线同步] 内置下载未命中 %s %s..%s | %s%Y%m%d%Y%m%d"
                                     % (
                                         bc,
                                         eff.strftime(""),
@@ -5156,7 +5203,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                         if verbose:
                             print(
-                                "[???????] ???????? 1d ok=%d/%d cold_short=%d range_floor=%s"
+                                "[日线同步] 内置下载 1d ok=%d/%d cold_short=%d range_floor=%s"
                                 % (
                                     dl_ok,
                                     dl_tried,
@@ -5205,12 +5252,12 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                                 if verbose:
                                     print(
-                                        "[???????] ???????????? ????=%d/%d source=%s"
+                                        "[日线同步] 内置下载后重取 改善=%d/%d source=%s"
                                         % (improved, len(short_need), src2)
                                     )
                             except Exception as e:
                                 print(
-                                    "[???????] ???????????? ????: %s: %s"
+                                    "[日线同步] 内置下载后重取 错误: %s: %s"
                                     % (type(e).__name__, e)
                                 )
 
@@ -5236,7 +5283,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 ContextInfo=ContextInfo,
                             )
                         except Exception as e:
-                            print("[???????] ???? full_tick ???????: %s" % e)
+                            print("[日线同步] 批量 full_tick 补数失败: %s" % e)
                             tick_prefetch = {}
 
                 # Optional xtdata download: after hours only.
@@ -5254,7 +5301,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                             end_d,
                         )
                         print(
-                            "[???????] ??????????? %s n=%d ??ContextInfo ????????"
+                            "[日线同步] 可选批量下载 %s n=%d （ContextInfo 命中偏低）"
                             % (pre_tag, len(batch_codes))
                         )
                         if pre_tag == "batch_rpc_dead":
@@ -5281,7 +5328,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                                 )
                     except Exception as e:
                         print(
-                            "[???????] ??????????: %s: %s"
+                            "[日线同步] 可选下载错误: %s: %s"
                             % (type(e).__name__, e)
                         )
                         if _is_quote_rpc_error(e):
@@ -5295,7 +5342,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     time.sleep(CTX_BATCH_SLEEP_SEC)
 
             if verbose:
-                print("[???????] %d/%d ?????? %s" % (pos, total, code))
+                print("[日线同步] %d/%d 处理中 %s" % (pos, total, code))
 
             # Instrument status / halt classification.
             inst_reason = _classify_instrument_status(
@@ -5308,7 +5355,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 if last_d is not None and (end_d - last_d).days <= 15:
                     if verbose:
                         print(
-                            "[???????] ????????????? %s last_bar=%s"
+                            "[按需同步] 已清除误判退市 %s last_bar=%s"
                             % (code, last_d.isoformat())
                         )
                     inst_reason = None
@@ -5341,7 +5388,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                 ok_count += 1
                 if verbose:
                     print(
-                        "[???????] ??? %s valid_rows=%d"
+                        "[日线同步] 成功 %s valid_rows=%d"
                         % (code, row_count)
                     )
             elif status == "skip":
@@ -5358,7 +5405,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         pass
                 # Default quiet: fail reasons only in summary counts / VERBOSE.
                 if verbose and reason:
-                    print("[???????] ??? %s: %s" % (code, reason))
+                    print("[日线同步] 失败 %s: %s" % (code, reason))
 
             do_progress = (
                 pos % PROGRESS_EVERY == 0
@@ -5368,7 +5415,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             if do_progress:
                 t_progress_log = time.time()
                 print(
-        "[???????] ???? %d/%d ok=%d skip=%d fail=%d ????=%d miss_skip=%d primary=%s"
+        "[日线同步] 进度 %d/%d ok=%d skip=%d fail=%d 软短=%d miss_skip=%d primary=%s"
                     % (
                         pos,
                         total,
@@ -5451,7 +5498,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     pass
                 _arm_force_slice_idle()
                 print(
-                    "[???????] ?????ó? after %.1fs progress=%d/%d remain~%d idle=%.0fs"
+                    "[日线同步] 时间片让出 after %.1fs progress=%d/%d remain~%d idle=%.0fs"
                     % (
                         time.time() - t_slice_start,
                         pos,
@@ -5493,7 +5540,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                     continue
                 truncated_left += 1
         except Exception as e:
-            print("[???????] ??βд?????: %s" % e)
+            print("[日线同步] 收尾写盘失败: %s" % e)
             truncated_left = max(truncated_left, 1)
         coverage_ok_ratio = (
             float(sample_n - truncated_left) / float(sample_n) if sample_n else 0.0
@@ -5527,9 +5574,9 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
                         _miss_cache_put(code, "short_history", end_d, cache_dir)
                 _miss_cache_save(cache_dir, force=True)
             except Exception as e:
-                print("[???????] ??? miss ?????????: %s" % e)
+                print("[日线同步] 刷新 miss 覆盖率失败: %s" % e)
             print(
-                "[???????] ??????δ??? coverage_ok=%.1f%% truncated=%d/%d ????=%d soft_deferred=%d; ???????????????????????"
+                "[日线同步] 强制补数未完成 coverage_ok=%.1f%% truncated=%d/%d 软短=%d soft_deferred=%d; 保留标志，重置进度以便重试"
                 % (
                     100.0 * coverage_ok_ratio,
                     truncated_left,
@@ -5617,7 +5664,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
         _SYNC_DONE_END_DATE = end_s
         _clear_force_backfill_flag(cache_dir)
         print(
-            "[???????] ??? end=%s ok=%d skip=%d fail=%d ????=%d miss_skip=%d primary=%s start=%s min_bars~%d"
+            "[日线同步] 完成 end=%s ok=%d skip=%d fail=%d 软短=%d miss_skip=%d primary=%s start=%s min_bars~%d"
             % (
                 end_s,
                 ok_count,
@@ -5657,7 +5704,7 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
             pass
         return True
     except Exception as e:
-        print("[???????] ??: %s" % e)
+        print("[日线同步] 异常: %s" % e)
         try:
             _save_manifest(
                 manifest_path,
@@ -5704,13 +5751,25 @@ def run_catch_up_sync(ContextInfo=None, source: str = "timer") -> bool:
 
 
 def startup_catch_up(ContextInfo=None) -> bool:
-    """??????????????????????? 15:35 ??? + ???貹??"""
-    print("[???????] ???????????????????? 15:35 ??? + ???貹??")
+    """启动时不追赶全量；正式日线见 15:35 定时 + 按需补齐。"""
+    print("[日线同步] 启动跳过追赶；正式同步见 15:35 定时 + 按需补齐")
     return False
 
 
 def daily_bar_sync(ContextInfo):
-    """15:35 ????????????????????д??? tick ??? / ????????"""
+    """15:35 定时日线同步；成功后可串行触发 tick 全量 / 盘后量能。"""
+    now = datetime.now()
+    try:
+        xtdata = _load_xtdata()
+    except Exception:
+        xtdata = None
+    # 法定休市（国庆等）直接跳过：勿写假日 K、勿串联分笔
+    if not _is_tradeday(xtdata, now.date()):
+        print(
+            "[日线同步] 非交易日跳过定时同步: %s"
+            % now.date().isoformat()
+        )
+        return False
     ok = run_catch_up_sync(ContextInfo, source="timer")
     # ???????????????/???????????????????????????
     if ok or _daily_gate_open_for_tick():
@@ -5760,7 +5819,7 @@ def _schedule_tick_pipeline() -> None:
         return
     due = datetime.fromtimestamp(_TICK_CHAIN_DUE_AT).strftime("%H:%M:%S")
     print(
-        "[???????] ????????????? %ds ??? %s???汾=%s??"
+        "[日线同步] 分笔流水线已安排 %ds 后（约 %s，版本=%s）"
         % (delay, due, DAILY_SYNC_VERSION)
     )
 
@@ -5777,7 +5836,7 @@ def _tick_chain_delay_ready() -> bool:
     if now - float(_TICK_CHAIN_WAIT_LOG_TS) >= 60.0:
         _TICK_CHAIN_WAIT_LOG_TS = now
         left = int(float(_TICK_CHAIN_DUE_AT) - now)
-        print("[???????] FORCE ????????У???? %ds ??????" % left)
+        print("[日线同步] FORCE 分片空闲中，剩余 %ds 后再跑" % left)
     return False
 
 
@@ -5810,7 +5869,7 @@ def _load_tick_full_sync_runner():
         tick_full = importlib.reload(tick_full)
         _TICK_FULL_SYNC_MTIME = mtime
         print(
-            "[???????] ???????????? ?汾=%s"
+            "[日线同步] 分笔模块已重载 版本=%s"
             % getattr(tick_full, "TICK_FULL_SYNC_VERSION", "?")
         )
     return tick_full
@@ -5841,7 +5900,7 @@ def _load_sector_sync_runner():
         sector = importlib.reload(sector)
         _SECTOR_SYNC_MTIME = mtime
         print(
-            "[???????] ???????????? ?汾=%s"
+            "[日线同步] 板块模块已重载 版本=%s"
             % getattr(sector, "SECTOR_SYNC_VERSION", "?")
         )
     return sector
@@ -5853,13 +5912,13 @@ def _chain_tick_pipeline(ContextInfo) -> None:
         return
     try:
         tick_full = _load_tick_full_sync_runner()
-        print("[???????] ????????? tick ??? + ???????")
+        print("[日线同步] 已串行启动 tick 全量 + 盘后量能")
         if hasattr(tick_full, "run_post_daily_pipeline"):
             tick_full.run_post_daily_pipeline(ContextInfo)
         else:
             tick_full.tick_full_sync(ContextInfo)
     except Exception as e:
-        print("[???????] ??? FORCE ?????????: %s" % e)
+        print("[日线同步] 清除 FORCE 回填标记失败: %s" % e)
 
 
 def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
@@ -5881,8 +5940,8 @@ def maybe_catch_up_after_hours_pipeline(ContextInfo=None) -> bool:
         if not _is_tradeday(xtdata, now.date()):
             return False
     except Exception:
-        if now.weekday() >= 5:
-            return False
+        # 勿仅按周末跳过：国庆等周中休市也必须拦住；异常则失败闭合
+        return False
 
     # Completed gate can hide codes unblocked after false-delisted miss clear.
     # Reopen once/day for today-incremental (never arms FORCE).
@@ -5952,11 +6011,11 @@ def register_daily_sync_timer(ContextInfo) -> None:
             "SH",
         )
         print(
-            "[???????] ?????????? %02d:%02d ??????? ???????????????飩"
+            "[日线同步] 定时器已注册 %02d:%02d （随后串联 分笔→盘后排名→板块）"
             % (SYNC_HOUR, SYNC_MINUTE)
         )
     except Exception as e:
-        print("[???????] run_time ??????: %s" % e)
+        print("[日线同步] run_time 注册失败: %s" % e)
 
 
 _ON_DEMAND_BUSY = False
@@ -6011,10 +6070,10 @@ def _purge_bad_pool_csv(code: str, cache_dir: str, end_d: date) -> bool:
             return False
     try:
         os.remove(csv_path)
-        print("[???????] ?????? csv %s reason=%s" % (code, reason or ""))
+        print("[日线同步] 审计剔除 csv %s reason=%s" % (code, reason or ""))
         return True
     except Exception as e:
-        print("[???????] ?????? csv ?? %s: %s" % (code, e))
+        print("[日线同步] 审计剔除 csv 异常 %s: %s" % (code, e))
         return False
 
 
@@ -6079,7 +6138,7 @@ def audit_pool_daily_cache(
     if fixed:
         save_requests(data)
         print(
-            "[???????] audit pool daily: requeue %d codes (through=%s)"
+            "[日线同步] audit pool daily: requeue %d codes (through=%s)"
             % (fixed, end_s)
         )
     return fixed
@@ -6172,7 +6231,7 @@ def requeue_priority_daily_requests(
         save_requests(data)
     if requeued:
         print(
-            "[???????] requeue pool daily: %d codes (through=%s)"
+            "[日线同步] requeue pool daily: %d codes (through=%s)"
             % (requeued, end_s)
         )
     return requeued + marked_done
@@ -6272,7 +6331,7 @@ def _ipo_full_coverage_ok(
     list_date: Optional[date],
     bar_count: int,
 ) -> bool:
-    """???????????????/????????????????? 2 ?????????"""
+    """全量是否已挖到上市/请求起点附近（不能把近 2 年当全量）。"""
     if earliest is None or int(bar_count or 0) < 4:
         return False
     target = list_date if list_date is not None else start_d
@@ -6287,10 +6346,10 @@ def _sync_one_code_ipo_full(
     ContextInfo=None,
     meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Optional[str], int]:
-    """???????????????? QMT ???? download ????????????? 1d??д?? data/daily_full/??
+    """岳教授新建票：经大 QMT 内置 download 拉上市以来全量 1d，写入 data/daily_full/。
 
-    ContextInfo ????????????????? 2 ???谴??? download ???? get ???????
-    ???ü??? BACKFILL_START(2025-01-01)???????? MiniQMT xtdata/58610??
+    ContextInfo 一次取区间常只返回本地近 2 年；需按年片 download 后再 get 并合并。
+    不裁剪到 BACKFILL_START(2025-01-01)；不走外部 MiniQMT xtdata/58610。
     """
     end_d = _pool_daily_write_end_date(xtdata, end_d)
     list_date = _instrument_list_date(ContextInfo, xtdata, code)
@@ -6314,7 +6373,7 @@ def _sync_one_code_ipo_full(
         if len(merged) > n0:
             src_parts.append("%s+%d" % (tag, len(merged) - n0))
 
-    # 1) ?????? download + ??? range get??????????н?????????
+    # 1) 先整段 download + 一次 range get（可能仍只有近端本地窗）
     n_ok, dl_detail = _download_1d_via_builtin([code], start_d, end_d)
     dl_ok_total += int(n_ok or 0)
     if n_ok > 0 and FULL_POST_DOWNLOAD_SLEEP_SEC > 0:
@@ -6330,8 +6389,8 @@ def _sync_one_code_ipo_full(
     )
     _merge_fetched(batch_map.get(code) or [], src0 or "ctx0")
 
-    # 2) ?????????????? start ????? download+get??????????????????
-    #    ??QMT ????????????? ~600 ????????????????磩
+    # 2) 若起点仍偏晚：自 start 起按年片 download+get，向前拼到覆盖上市日
+    #    （QMT 本地窗常见只吐近 ~600 根，必须切片补更早）
     chunk_days = 370
     max_slices = 40
     for slice_i in range(max_slices):
@@ -6339,7 +6398,7 @@ def _sync_one_code_ipo_full(
         earliest = _bars_earliest_date(bars_now)
         if _ipo_full_coverage_ok(earliest, start_d, list_date, len(bars_now)):
             break
-        # ?????????????????????????????? start ????????δ?????????
+        # 下一片：覆盖「当前最早日之前」一年，或从 start 顺序推进尚未覆盖的区间
         if earliest is None:
             dig_start = start_d
             dig_end = min(start_d + timedelta(days=chunk_days - 1), end_d)
@@ -6366,7 +6425,7 @@ def _sync_one_code_ipo_full(
         before = len(merged)
         _merge_fetched(batch2.get(code) or [], "slice%d_%s" % (slice_i, src2 or "ctx"))
         if len(merged) <= before and not (batch2.get(code) or []):
-            # ????????????? dig_start..earliest ????
+            # 无进展：再试一次 dig_start..earliest 整段
             if earliest is not None and dig_start < earliest:
                 n_ok3, _dl3 = _download_1d_via_builtin([code], dig_start, earliest)
                 dl_ok_total += int(n_ok3 or 0)
@@ -6407,11 +6466,11 @@ def _sync_one_code_ipo_full(
     try:
         _mirror_qfq_full_csv(code, start_d, end_d, ContextInfo=ContextInfo, xtdata=xtdata)
     except Exception as e:
-        print("[???????] qfq full mirror %s: %s" % (code, e))
+        print("[按需同步] qfq full mirror %s: %s" % (code, e))
     try:
         _mirror_hfq_full_csv(code, start_d, end_d, ContextInfo=ContextInfo, xtdata=xtdata)
     except Exception as e:
-        print("[???????] hfq full mirror %s: %s" % (code, e))
+        print("[按需同步] hfq full mirror %s: %s" % (code, e))
 
     valid_n = _count_valid_rows(rows)
     earliest = _rows_earliest_date(rows)
@@ -6422,7 +6481,7 @@ def _sync_one_code_ipo_full(
         last_d = None
     covered = _ipo_full_coverage_ok(earliest, start_d, list_date, valid_n)
     print(
-        "[???????] ??????? %s n=%d first=%s last=%s list=%s covered=%s src=%s dl_ok=%d"
+        "[按需同步] 全量日线 %s n=%d first=%s last=%s list=%s covered=%s src=%s dl_ok=%d"
         % (
             code,
             valid_n,
@@ -6437,7 +6496,7 @@ def _sync_one_code_ipo_full(
     if last_d is None or last_d < end_d - timedelta(days=POOL_MAX_DATE_LAG_DAYS):
         return "fail", "full_lag_%s" % (last_d.isoformat() if last_d else "none"), valid_n
     if not covered:
-        # ??д????????????????????????????? 2 ??????????
+        # 仍写入部分结果，但标记失败以便重试（不把近 2 年当全量成功）
         return (
             "fail",
             "full_truncated_first_%s" % (earliest.isoformat() if earliest else "none"),
@@ -6500,7 +6559,7 @@ def _run_on_demand_batch(
                 mark_tick_failed,
             )
         except ImportError as e:
-            print("[???????] ???账?????: %s" % e)
+            print("[日线同步] 按需处理失败: %s" % e)
             return 0
 
     _, cache_dir, _, _ = _data_paths()
@@ -6508,7 +6567,7 @@ def _run_on_demand_batch(
     daily_need_sync: List[Tuple[str, date, Dict[str, Any]]] = []
     daily_cache_hit = 0
     for code, through_d, meta in pending_daily:
-        # ????????rolling daily_cache ???в??????
+        # 全量日线：rolling daily_cache 命中不算完成
         if _full_history_request(meta):
             full_path = os.path.join(_daily_full_dir(), code + ".csv")
             rows_f = _read_csv_rows(full_path)
@@ -6554,7 +6613,7 @@ def _run_on_demand_batch(
 
     if daily_cache_hit or tick_cache_hit:
         print(
-            "[???????] ???????? daily=%d tick=%d"
+            "[按需同步] 缓存命中 daily=%d tick=%d"
             % (daily_cache_hit, tick_cache_hit)
         )
 
@@ -6564,7 +6623,7 @@ def _run_on_demand_batch(
     try:
         xtdata = _load_xtdata()
     except Exception as e:
-        print("[???????] xtdata ??????: %s" % e)
+        print("[日线同步] xtdata 不可用: %s" % e)
         return handled
 
     # ???????????????????? download_history_data???????? bind??
@@ -6588,7 +6647,7 @@ def _run_on_demand_batch(
             else:
                 mark_daily_failed(code, through_d, reason or status)
                 synced_fail += 1
-                print("[???????] ?????? %s: %s" % (code, reason or status))
+                print("[按需同步] 全量失败 %s: %s" % (code, reason or status))
             continue
         miss = _miss_cache_active(code, through_d, cache_dir)
         if miss is not None:
@@ -6600,14 +6659,14 @@ def _run_on_demand_batch(
                 if last_d is not None and (through_d - last_d).days <= 15:
                     _miss_cache_clear(code, cache_dir)
                     print(
-                        "[???????] ????????????? %s last_bar=%s"
+                        "[按需同步] 已清除误判退市 %s last_bar=%s"
                         % (code, last_d.isoformat())
                     )
                 else:
                     reason = "miss_cache_%s" % miss_reason
                     mark_daily_failed(code, through_d, reason)
                     synced_fail += 1
-                    print("[???????] miss ???? %s: %s" % (code, reason))
+                    print("[日线同步] miss 记入 %s: %s" % (code, reason))
                     continue
             if miss_reason in ("today_halt", "suspended"):
                 csv_p = os.path.join(cache_dir, code + ".csv")
@@ -6615,7 +6674,7 @@ def _run_on_demand_batch(
                     reason = "miss_cache_%s" % miss_reason
                     mark_daily_failed(code, through_d, reason)
                     synced_fail += 1
-                    print("[???????] miss ???? %s: %s" % (code, reason))
+                    print("[日线同步] miss 记入 %s: %s" % (code, reason))
                     continue
             # empty_history / local_miss / invalid_0 / no_ctx??????? miss ???????????
             if miss_reason in (
@@ -6626,7 +6685,7 @@ def _run_on_demand_batch(
             ):
                 _miss_cache_clear(code, cache_dir)
                 print(
-                    "[???????] ?????? miss %s reason=%s ?? ????????"
+                    "[按需同步] 忽略软 miss %s reason=%s → 重试日线"
                     % (code, miss_reason)
                 )
         sync_through = through_d
@@ -6671,7 +6730,7 @@ def _run_on_demand_batch(
             mark_daily_failed(code, through_d, reason or status)
             synced_fail += 1
             print(
-                "[???????] ??? %s: %s" % (code, reason or status)
+                "[日线同步] 失败 %s: %s" % (code, reason or status)
             )
     _miss_cache_save(cache_dir)
 
@@ -6684,20 +6743,20 @@ def _run_on_demand_batch(
             handled += 1
             synced_ok += 1
             print(
-                "[???????] ????? %s %s%Y%m%d"
+                "[按需同步] 分笔成功 %s %s%Y%m%d"
                 % (code_6, trade_d.strftime(""))
             )
         else:
             mark_tick_failed(code_6, trade_d, reason or status)
             synced_fail += 1
             print(
-                "[???????] ?????? %s %s: %s%Y%m%d"
+                "[按需同步] 分笔失败 %s %s: %s%Y%m%d"
                 % (code_6, trade_d.strftime(""), reason or status)
             )
 
     if synced_ok or synced_fail:
         print(
-            "[???????] ????? ok=%d fail=%d"
+            "[按需同步] 已同步 ok=%d fail=%d"
             % (synced_ok, synced_fail)
         )
     return handled
@@ -6742,7 +6801,7 @@ def _process_on_demand_sync_requests_body(
         if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
             reason = "sync_running" if _SYNC_RUNNING else "busy"
             print(
-                "[???????] ???? (%s); ?????????"
+                "[按需同步] 跳过 (%s); 空闲时重试"
                 % reason
             )
             _ON_DEMAND_SKIP_LOG_TS = now_skip
@@ -6760,7 +6819,7 @@ def _process_on_demand_sync_requests_body(
         else:
             if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
                 print(
-                    "[???????] ?????? ???м?? remain=%.0fs?????鲹???"
+                    "[日线同步] 强制补数 空闲间隙 remain=%.0fs（行情补跑）"
                     % max(0.0, remain_idle)
                 )
                 _ON_DEMAND_SKIP_LOG_TS = now_skip
@@ -6768,7 +6827,7 @@ def _process_on_demand_sync_requests_body(
 
     _, cache_dir, _, manifest_path = _data_paths()
     # No ON_DEMAND_PAUSE full-stop; cooldown + intraday limits throttle storms.
-    # ????????????????????????10s/????????? FORCE/manifest ?????????
+    # 连续竞价窗仍允许按需日线（10s/只），不因 FORCE/manifest 整段暂停。
     if (
         _in_intraday_blocking_window()
         and not _in_continuous_quote_watch()
@@ -6779,7 +6838,7 @@ def _process_on_demand_sync_requests_body(
     ):
         if now_skip - _ON_DEMAND_SKIP_LOG_TS >= 60.0:
             print(
-                "[???????] ?????????/?????????; ?????????"
+                "[按需同步] 跳过（强制/部分进行中; 行情优先）"
             )
             _ON_DEMAND_SKIP_LOG_TS = now_skip
         return 0
@@ -6809,7 +6868,7 @@ def _process_on_demand_sync_requests_body(
                 list_pending_ticks,
             )
         except Exception as e:
-            print("[???????] ???账?????: %s" % e)
+            print("[日线同步] 按需处理失败: %s" % e)
             return 0
 
     # ??????????k?????????????????????????????????
@@ -6832,7 +6891,7 @@ def _process_on_demand_sync_requests_body(
             pending_daily = pick
             if pending_daily and (now_ts - _ON_DEMAND_DEFER_LOG_TS) >= 60.0:
                 print(
-                    "[???????] ???????????? %d?/%.0fs (pool=%d queue??%d; ?????????????)"
+                    "[按需同步] 盘中日线限速 %d只/%.0fs (pool=%d queue≈%d; 拉至上一交易日)"
                     % (
                         int(INTRADAY_ON_DEMAND_DAILY_BATCH),
                         interval,
@@ -6850,7 +6909,7 @@ def _process_on_demand_sync_requests_body(
             ]
             if missing:
                 print(
-                    "[???????] ??????????? %d ? ???????????У?: %s"
+                    "[日线同步] 池内日线仍缺 %d 只 （等待按需队列）: %s"
                     % (
                         len(missing),
                         ", ".join(missing[:6])
@@ -6873,7 +6932,7 @@ def _process_on_demand_sync_requests_body(
         return 0
 
     print(
-        "[???????] ??? daily=%d tick=%d (queue daily=%d)"
+        "[按需同步] 开始 daily=%d tick=%d (queue daily=%d)"
         % (
             len(pending_daily),
             len(pending_tick),

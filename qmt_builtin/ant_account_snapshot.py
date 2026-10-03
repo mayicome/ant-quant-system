@@ -1,5 +1,5 @@
 #coding:gbk
-"""´ó QMT Ä£ÐÍ½»Ò×ÄÚ£º´Ó get_trade_detail_data / »Øµ÷»º´æÀ­È¡×Ê½ð/³Ö²ÖÐ´Èë results.json¡£"""
+"""ï¿½ï¿½ QMT Ä£ï¿½Í½ï¿½ï¿½ï¿½ï¿½Ú£ï¿½ï¿½ï¿½ get_trade_detail_data / ï¿½Øµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½Ê½ï¿½/ï¿½Ö²ï¿½Ð´ï¿½ï¿½ results.jsonï¿½ï¿½"""
 import os
 import time
 from datetime import datetime, timedelta, date, time as dt_time
@@ -18,36 +18,36 @@ _BOUND_ACCOUNT_ID = ""
 _DIAG_DONE = False
 _BJ_SECTOR_PROBE_DONE = False
 
-# ³Ö²Ö¿Õµ«¹ÉÆ±ÊÐÖµÃ÷ÏÔÆ«¸ß ¡ú ¿ÉÒÉ£¨Õæ¿Õ²Ö£ºÊÐÖµ¡Ö0£¬²»¸æ¾¯£©
+# ï¿½Ö²Ö¿Õµï¿½ï¿½ï¿½Æ±ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½Æ«ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½É£ï¿½ï¿½ï¿½Õ²Ö£ï¿½ï¿½ï¿½Öµï¿½ï¿½0ï¿½ï¿½ï¿½ï¿½ï¿½æ¾¯ï¿½ï¿½
 _POSITION_ALERT_MV_THRESHOLD = 5000.0
-_POSITION_ALERT_LOG_INTERVAL_SEC = 300.0  # ÈÕÖ¾½ÚÁ÷£ºÔ¼Ã¿ 5 ·ÖÖÓ
-_POSITION_ALERT_NOTIFY_COOLDOWN_SEC = 3600.0  # ½»Ò×Ê±¶Î Server½´£ºÔ¼ 1 Ð¡Ê±Ò»´Î
-_POSITION_ALERT_NOTIFY_COOLDOWN_OFFHOURS_SEC = 28800.0  # ·Ç½»Ò×Ê±¶Î£ºÔ¼ 8 Ð¡Ê±Ò»´Î£¨Ò¹¼ä/ÖÜÄ©²»Ë¢ÆÁ£©
+_POSITION_ALERT_LOG_INTERVAL_SEC = 300.0  # ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¼Ã¿ 5 ï¿½ï¿½ï¿½ï¿½
+_POSITION_ALERT_NOTIFY_COOLDOWN_SEC = 3600.0  # ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ Serverï¿½ï¿½ï¿½ï¿½Ô¼ 1 Ð¡Ê±Ò»ï¿½ï¿½
+_POSITION_ALERT_NOTIFY_COOLDOWN_OFFHOURS_SEC = 28800.0  # ï¿½Ç½ï¿½ï¿½ï¿½Ê±ï¿½Î£ï¿½Ô¼ 8 Ð¡Ê±Ò»ï¿½Î£ï¿½Ò¹ï¿½ï¿½/ï¿½ï¿½Ä©ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½ï¿½
 _LAST_POSITION_ALERT_LOG_TS = 0.0
 _POSITION_ALERT_ACTIVE = False
 
-# Óë XtQuant / ´ó QMT Î¯ÍÐ×´Ì¬ÂëÒ»ÖÂ£¨86=¹ñÌ¨¡¸ÒÑÈ·ÈÏ¡¹£¬³£¼ûÓÚÄ£ÐÍ½»Ò×£©
-# ×¢Òâ£ºÎ¯ÍÐÀàÐÍ IPO_SUBSCRIBE Ò²ÊÇ 86£¬Á½Ì×Ã¶¾ÙÍ¬Öµ£¬Îð»ìÓÃ×Ö¶Î¡£
+# ï¿½ï¿½ XtQuant / ï¿½ï¿½ QMT Î¯ï¿½ï¿½×´Ì¬ï¿½ï¿½Ò»ï¿½Â£ï¿½86=ï¿½ï¿½Ì¨ï¿½ï¿½ï¿½ï¿½È·ï¿½Ï¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½Í½ï¿½ï¿½×£ï¿½
+# ×¢ï¿½â£ºÎ¯ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ IPO_SUBSCRIBE Ò²ï¿½ï¿½ 86ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¶ï¿½ï¿½Í¬Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¶Î¡ï¿½
 ORDER_STATUS_TEXT = {
-    48: "Î´±¨",
-    49: "´ý±¨",
-    50: "ÒÑ±¨",
-    51: "ÒÑ±¨´ý³·",
-    52: "²¿³É´ý³·",
-    53: "²¿³·",
-    54: "ÒÑ³·",
-    55: "²¿³É",
-    56: "ÒÑ³É",
-    57: "·Ïµ¥",
-    86: "ÒÑÈ·ÈÏ",
+    48: "Î´ï¿½ï¿½",
+    49: "ï¿½ï¿½ï¿½ï¿½",
+    50: "ï¿½Ñ±ï¿½",
+    51: "ï¿½Ñ±ï¿½ï¿½ï¿½ï¿½ï¿½",
+    52: "ï¿½ï¿½ï¿½É´ï¿½ï¿½ï¿½",
+    53: "ï¿½ï¿½ï¿½ï¿½",
+    54: "ï¿½Ñ³ï¿½",
+    55: "ï¿½ï¿½ï¿½ï¿½",
+    56: "ï¿½Ñ³ï¿½",
+    57: "ï¿½Ïµï¿½",
+    86: "ï¿½ï¿½È·ï¿½ï¿½",
     255: "Î´Öª",
 }
 
-# xtconstant Î¯ÍÐÒµÎñÀàÐÍ£¨order_type£©£»86=ÍøÉÏÐÂ¹ÉÉê¹º£¬Óë×´Ì¬Âë 86 ÎÞ¹Ø
+# xtconstant Î¯ï¿½ï¿½Òµï¿½ï¿½ï¿½ï¿½ï¿½Í£ï¿½order_typeï¿½ï¿½ï¿½ï¿½86=ï¿½ï¿½ï¿½ï¿½ï¿½Â¹ï¿½ï¿½ê¹ºï¿½ï¿½ï¿½ï¿½×´Ì¬ï¿½ï¿½ 86 ï¿½Þ¹ï¿½
 ORDER_TYPE_TEXT = {
-    23: "ÆÕÍ¨ÂòÈë",
-    24: "ÆÕÍ¨Âô³ö",
-    86: "ÐÂ¹ÉÉê¹º",
+    23: "ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½",
+    24: "ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½",
+    86: "ï¿½Â¹ï¿½ï¿½ê¹º",
 }
 
 _ORDER_FIELD_DIAG_DONE = False
@@ -70,7 +70,7 @@ def _pick(row, *keys, **kwargs):
     return default
 
 
-# SWIG / ´ó QMT ¶ÔÏóÓÐÊ±²»ÔÚ dir() Àï±©Â¶ m_*£¬ÐèÏÔÊ½ getattr
+# SWIG / ï¿½ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ dir() ï¿½ï±©Â¶ m_*ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ getattr
 _KNOWN_DETAIL_ATTRS = (
     "m_strAccountID",
     "m_dBalance",
@@ -231,7 +231,7 @@ def _object_row(item):
 
 
 def _is_detail_row_obj(item):
-    """ÅÐ¶ÏÊÇ·ñÎªµ¥Ìõ×Ê½ð/³Ö²Ö/Î¯ÍÐ¶ÔÏó£¨¶ø·Ç¿Éµü´úÈÝÆ÷£©¡£"""
+    """ï¿½Ð¶ï¿½ï¿½Ç·ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½/ï¿½Ö²ï¿½/Î¯ï¿½Ð¶ï¿½ï¿½ó£¨¶ï¿½ï¿½Ç¿Éµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     if item is None or isinstance(item, (str, bytes, int, float, bool)):
         return False
     if isinstance(item, dict):
@@ -273,7 +273,7 @@ def _rows(raw):
             if row:
                 out.append(row)
         return out
-    # ´ó QMT ³£·µ»Ø·Ç list µÄ Vector °ü×°£»ÈôÕûÈÝÆ÷µ±µ¥ÐÐ»á¶ª¹â³Ö²Ö
+    # ï¿½ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ï¿½Ø·ï¿½ list ï¿½ï¿½ Vector ï¿½ï¿½×°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð»á¶ªï¿½ï¿½Ö²ï¿½
     if _is_detail_row_obj(raw):
         row = _object_row(raw)
         return [row] if row else []
@@ -302,7 +302,7 @@ def _raw_len(raw):
 
 
 def _diagnose_position_parse_miss(pos_raw, pos_rows, parsed_n):
-    """raw ÌõÊý¶àÓÚ½âÎö½á¹ûÊ±´òÓ¡¶ªÐÐÔ­Òò¡£"""
+    """raw ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½Ó¡ï¿½ï¿½ï¿½ï¿½Ô­ï¿½ï¿½"""
     raw_n = _raw_len(pos_raw)
     if not raw_n:
         return
@@ -310,7 +310,7 @@ def _diagnose_position_parse_miss(pos_raw, pos_rows, parsed_n):
         return
     drops = list(getattr(_parse_position_rows, "last_drops", None) or [])
     print(
-        "[½»Ò×ºËÐÄ] ³Ö²Ö½âÎö²»È«: raw_len=%s rows=%s parsed=%s drops=%s"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ö²Ö½ï¿½ï¿½ï¿½ï¿½ï¿½È«: raw_len=%s rows=%s parsed=%s drops=%s"
         % (raw_n, len(pos_rows or []), parsed_n, drops[:8])
     )
     if parsed_n > 0:
@@ -340,15 +340,15 @@ def _diagnose_position_parse_miss(pos_raw, pos_rows, parsed_n):
             "Position",
             "m_nCanUseVolume",
             "m_strExchangeID",
-            "¹ÉÆ±Óà¶î",
-            "³Ö²ÖÊýÁ¿",
+            "ï¿½ï¿½Æ±ï¿½ï¿½ï¿½",
+            "ï¿½Ö²ï¿½ï¿½ï¿½ï¿½ï¿½",
         ):
             try:
                 sample[a] = getattr(item, a, None)
             except Exception as e:
                 sample[a] = "err:%s" % e
     print(
-        "[½»Ò×ºËÐÄ] ³Ö²Ö½âÎöÎ´ÃüÖÐ: raw_type=%s raw_len=%s rows=%s attrs=%s sample=%s"
+        "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ö²Ö½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ï¿½ï¿½: raw_type=%s raw_len=%s rows=%s attrs=%s sample=%s"
         % (type(pos_raw).__name__, raw_n, len(pos_rows or []), names, sample)
     )
 
@@ -367,10 +367,10 @@ def _norm_code(raw):
 
 
 def _resolve_account_id(ContextInfo, explicit=""):
-    """ÕËºÅÓÅÏÈ£ºÏÔÊ½²ÎÊý ¡ú config.ini ¡ú ContextInfo¡£
+    """ï¿½Ëºï¿½ï¿½ï¿½ï¿½È£ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ config.ini ï¿½ï¿½ ContextInfoï¿½ï¿½
 
-    »»ÕËºÅºóÈôÖ»¸Ä config.ini£¬ÈÔÅÜ×ÅµÄ²ßÂÔ ContextInfo ¿ÉÄÜ»¹ÊÇ¾ÉºÅ£»
-    ÒÔÅäÖÃÎª×¼£¬±ÜÃâ results.json ¼ÌÐøÐ´¾É³Ö²Ö¡£
+    ï¿½ï¿½ï¿½ËºÅºï¿½ï¿½ï¿½Ö»ï¿½ï¿½ config.iniï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÅµÄ²ï¿½ï¿½ï¿½ ContextInfo ï¿½ï¿½ï¿½Ü»ï¿½ï¿½Ç¾ÉºÅ£ï¿½
+    ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îª×¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ results.json ï¿½ï¿½ï¿½ï¿½Ð´ï¿½É³Ö²Ö¡ï¿½
     """
     if explicit:
         return str(explicit).strip()
@@ -412,7 +412,7 @@ def _trade_detail_fn(ContextInfo):
             if mod is None:
                 continue
             mod_name = str(name)
-            if "ÂìÒÏÁ¿»¯¹æÔò" not in mod_name:
+            if "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½" not in mod_name:
                 continue
             for attr in ("ant_get_trade_detail_data", "get_trade_detail_data"):
                 fn = getattr(mod, attr, None)
@@ -455,11 +455,11 @@ def _trade_detail_fn(ContextInfo):
 
 
 def bind_trading_account(ContextInfo, account_id=""):
-    """init ÖÐ°ó¶¨½»Ò×ÕËºÅ£¬get_trade_detail_data ²ÅÄÜ·µ»Ø×Ê½ð/³Ö²Ö¡£"""
+    """init ï¿½Ð°ó¶¨½ï¿½ï¿½ï¿½ï¿½ËºÅ£ï¿½get_trade_detail_data ï¿½ï¿½ï¿½Ü·ï¿½ï¿½ï¿½ï¿½Ê½ï¿½/ï¿½Ö²Ö¡ï¿½"""
     aid = _resolve_account_id(ContextInfo, account_id)
     if not aid:
         return False, "no_account_id"
-    # ½Ì³ÌÒªÇóÍ¬Ê±ÉèÖÃ account_type£»È±Ê¡°´ÆÕÍ¨¹ÉÆ±ÕË»§
+    # ï¿½Ì³ï¿½Òªï¿½ï¿½Í¬Ê±ï¿½ï¿½ï¿½ï¿½ account_typeï¿½ï¿½È±Ê¡ï¿½ï¿½ï¿½ï¿½Í¨ï¿½ï¿½Æ±ï¿½Ë»ï¿½
     acct_type = ""
     for attr in ("account_type", "accountType", "acc_type"):
         val = getattr(ContextInfo, attr, None)
@@ -490,7 +490,7 @@ def bind_trading_account(ContextInfo, account_id=""):
 
 
 def _fetch_trade_detail(ContextInfo, account_id, data_type, strategy_names=None):
-    """²éÑ¯½»Ò×Ã÷Ï¸¡£ORDER/DEAL ÇÐÎð´« strategyName=""£¨»á¹ýÂËµôÈ«²¿ÓÐ²ßÂÔÃûµÄÎ¯ÍÐ£©¡£"""
+    """ï¿½ï¿½Ñ¯ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¸ï¿½ï¿½ORDER/DEAL ï¿½ï¿½ï¿½ï¿½ strategyName=""ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ëµï¿½È«ï¿½ï¿½ï¿½Ð²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¯ï¿½Ð£ï¿½ï¿½ï¿½"""
     fn = _trade_detail_fn(ContextInfo)
     if not callable(fn):
         return []
@@ -560,9 +560,9 @@ def _diagnose_trade_detail(ContextInfo, account_id):
             except Exception as e:
                 parts.append("%s->err=%s" % (args, e))
     parts.append(
-        "hint=Ä£ÐÍ½»Ò×ÇëÓÃÊµÅÌÄ£Ê½;´óQMT½»Ò×¶ËÐèÒÑµÇÂ¼¸Ã×Ê½ðÕËºÅ(·Ç½ö¸±±¾MiniQMT)"
+        "hint=Ä£ï¿½Í½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½Ä£Ê½;ï¿½ï¿½QMTï¿½ï¿½ï¿½×¶ï¿½ï¿½ï¿½ï¿½Ñµï¿½Â¼ï¿½ï¿½ï¿½Ê½ï¿½ï¿½Ëºï¿½(ï¿½Ç½ï¿½ï¿½ï¿½ï¿½ï¿½MiniQMT)"
     )
-    print("[½»Ò×ºËÐÄ] ÕË»§Õï¶Ï: %s" % "; ".join(parts))
+    print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ë»ï¿½ï¿½ï¿½ï¿½: %s" % "; ".join(parts))
 
 
 def _parse_account_row(row, account_id):
@@ -576,7 +576,7 @@ def _parse_account_row(row, account_id):
         _pick(row, "market_value", "marketValue", "m_dMarketValue", "m_dInstrumentValue", default=0)
         or 0
     )
-    # ÓÐÏÔÊ½¹ÉÆ±ÊÐÖµÊ±ÒÔÖ®Îª×¼£»·ñÔòÑØÓÃÕË»§ market_value
+    # ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½Æ±ï¿½ï¿½ÖµÊ±ï¿½ï¿½Ö®Îª×¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë»ï¿½ market_value
     if stock_mv > 0:
         market = stock_mv
     frozen = float(_pick(row, "frozen_cash", "frozenCash", "m_dFrozenCash", default=0) or 0)
@@ -617,8 +617,8 @@ def _parse_position_rows(rows, account_id):
                 "m_strInstrumentID",
                 "m_strStockCode",
                 "code",
-                "Ö¤È¯´úÂë",
-                "´úÂë",
+                "Ö¤È¯ï¿½ï¿½ï¿½ï¿½",
+                "ï¿½ï¿½ï¿½ï¿½",
             )
         )
         vol = _int_qty(
@@ -628,10 +628,10 @@ def _parse_position_rows(rows, account_id):
             "m_nPosition",
             "Position",
             "current_qty",
-            "³Ö²ÖÊýÁ¿",
-            "¹ÉÆ±Óà¶î",
-            "¹É·ÝÓà¶î",
-            "µ±Ç°³Ö²Ö",
+            "ï¿½Ö²ï¿½ï¿½ï¿½ï¿½ï¿½",
+            "ï¿½ï¿½Æ±ï¿½ï¿½ï¿½",
+            "ï¿½É·ï¿½ï¿½ï¿½ï¿½",
+            "ï¿½ï¿½Ç°ï¿½Ö²ï¿½",
             "nVolume",
             "qty",
         )
@@ -644,9 +644,9 @@ def _parse_position_rows(rows, account_id):
                 }
             )
             continue
-        # Óà¶îÎª 0 Ò²±£Áô£¨´ó QMT ³Ö²ÖÒ³»áÁôÏÂµ±ÈÕÒÑÇå²ÖÐÐ£©£»¹ÉÊýÈÔ¼Ç 0£¬²»ÓÃ×ò²ÖÃ°³äÏÖ²Ö
-        yest = _int_qty(row, "yesterday_volume", "m_nYesterdayVolume", "×ò²Ö")
-        on_road = _int_qty(row, "on_road_volume", "m_nOnRoadVolume", "ÔÚÍ¾ÊýÁ¿", "ÔÚÍ¾¹É·Ý")
+        # ï¿½ï¿½ï¿½Îª 0 Ò²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ QMT ï¿½Ö²ï¿½Ò³ï¿½ï¿½ï¿½ï¿½ï¿½Âµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¼ï¿½ 0ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã°ï¿½ï¿½ï¿½Ö²ï¿½
+        yest = _int_qty(row, "yesterday_volume", "m_nYesterdayVolume", "ï¿½ï¿½ï¿½")
+        on_road = _int_qty(row, "on_road_volume", "m_nOnRoadVolume", "ï¿½ï¿½Í¾ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½Í¾ï¿½É·ï¿½")
         can_use = _int_qty(
             row,
             "can_use_volume",
@@ -654,8 +654,8 @@ def _parse_position_rows(rows, account_id):
             "m_nCanUsePosition",
             "CanUseVolume",
             "enable_amount",
-            "¿ÉÓÃÊýÁ¿",
-            "¿ÉÓÃÓà¶î",
+            "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
+            "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½",
             default=vol,
         )
         open_px = float(
@@ -667,12 +667,12 @@ def _parse_position_rows(rows, account_id):
                 "m_dAvgPrice",
                 "m_dCostPrice",
                 "m_dCost",
-                "³É±¾¼Û",
+                "ï¿½É±ï¿½ï¿½ï¿½",
                 default=0,
             )
             or 0
         )
-        mv = float(_pick(row, "market_value", "m_dMarketValue", "ÊÐÖµ", default=0) or 0)
+        mv = float(_pick(row, "market_value", "m_dMarketValue", "ï¿½ï¿½Öµ", default=0) or 0)
         name = str(
             _pick(
                 row,
@@ -680,8 +680,8 @@ def _parse_position_rows(rows, account_id):
                 "m_strInstrumentName",
                 "InstrumentName",
                 "instrument_name",
-                "Ö¤È¯Ãû³Æ",
-                "Ö¤È¯¼ò³Æ",
+                "Ö¤È¯ï¿½ï¿½ï¿½ï¿½",
+                "Ö¤È¯ï¿½ï¿½ï¿½",
                 default="",
             )
             or ""
@@ -719,21 +719,21 @@ def _status_text(code, traded_volume=0, volume=0):
     text = ORDER_STATUS_TEXT.get(c)
     if text:
         return text
-    # Î´ÊÕÂ¼×´Ì¬Âë£ºÓÃ³É½»Á¿ÍÆ¶Ï£¬±ÜÃâ½çÃæ¡¸ÂòÈë-Î´Öª¡¹
+    # Î´ï¿½ï¿½Â¼×´Ì¬ï¿½ë£ºï¿½Ã³É½ï¿½ï¿½ï¿½ï¿½Æ¶Ï£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ¡¸ï¿½ï¿½ï¿½ï¿½-Î´Öªï¿½ï¿½
     try:
         tv = int(traded_volume or 0)
         ov = int(volume or 0)
     except (TypeError, ValueError):
         tv, ov = 0, 0
     if ov > 0 and tv >= ov:
-        return "ÒÑ³É"
+        return "ï¿½Ñ³ï¿½"
     if tv > 0:
-        return "²¿³É"
-    return "ÒÑ±¨"
+        return "ï¿½ï¿½ï¿½ï¿½"
+    return "ï¿½Ñ±ï¿½"
 
 
 def _normalize_order_time(raw):
-    """QMT ³£¼ûÎª HHMMSS / HH:MM:SS / ´øÈÕÆÚ×Ö·û´®£¬Í³Ò»³É HH:MM:SS¡£"""
+    """QMT ï¿½ï¿½ï¿½ï¿½Îª HHMMSS / HH:MM:SS / ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö·ï¿½ï¿½ï¿½ï¿½ï¿½Í³Ò»ï¿½ï¿½ HH:MM:SSï¿½ï¿½"""
     if raw is None:
         return ""
     if isinstance(raw, (int, float)):
@@ -764,7 +764,7 @@ def _normalize_order_time(raw):
 
 
 def _normalize_order_date(raw):
-    """QMT Î¯ÍÐÈÕÆÚ ¡ú YYYY-MM-DD£»Ê§°Ü·µ»Ø¿Õ´®¡£"""
+    """QMT Î¯ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ YYYY-MM-DDï¿½ï¿½Ê§ï¿½Ü·ï¿½ï¿½Ø¿Õ´ï¿½ï¿½ï¿½"""
     if raw is None:
         return ""
     try:
@@ -798,21 +798,21 @@ def _normalize_order_date(raw):
 
 
 def _extract_order_at(raw, date_raw=None):
-    """¾¡Á¿±£ÁôÍêÕûÎ¯ÍÐÊ±¼ä£¨ISO£©£¬¹©¿çÈÕ¹ýÂË£»Ê§°Ü·µ»Ø¿Õ´®¡£
+    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¯ï¿½ï¿½Ê±ï¿½ä£¨ISOï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¹ï¿½ï¿½Ë£ï¿½Ê§ï¿½Ü·ï¿½ï¿½Ø¿Õ´ï¿½ï¿½ï¿½
 
-    QMT ³£¼û²ð³É m_strInsertDate + m_strInsertTime£¬ÐèºÏ²¢¡£
+    QMT ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ m_strInsertDate + m_strInsertTimeï¿½ï¿½ï¿½ï¿½Ï²ï¿½ï¿½ï¿½
     """
     if raw is None and date_raw is None:
         return ""
     try:
-        # ÒÑÓÐÍêÕûÊ±¼ä´Á / ×Ö·û´®
+        # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ / ï¿½Ö·ï¿½ï¿½ï¿½
         if isinstance(raw, (int, float)):
             n = float(raw)
             if n > 1e12:
                 return datetime.fromtimestamp(n / 1000.0).strftime("%Y-%m-%dT%H:%M:%S")
             if n > 1e9:
                 return datetime.fromtimestamp(n).strftime("%Y-%m-%dT%H:%M:%S")
-            # ´¿ HHMMSS£ºÈôÓÐ¶ÀÁ¢ÈÕÆÚÔòºÏ²¢
+            # ï¿½ï¿½ HHMMSSï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï²ï¿½
             time_part = _normalize_order_time(raw)
             date_part = _normalize_order_date(date_raw)
             if date_part and time_part and ":" in time_part:
@@ -828,13 +828,13 @@ def _extract_order_at(raw, date_raw=None):
             if len(digits) >= 14:
                 dt = datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
                 return dt.strftime("%Y-%m-%dT%H:%M:%S")
-            # ½öÊ±¼ä£ººÏ²¢ÈÕÆÚ
+            # ï¿½ï¿½Ê±ï¿½ä£ºï¿½Ï²ï¿½ï¿½ï¿½ï¿½ï¿½
             time_part = _normalize_order_time(s)
             date_part = _normalize_order_date(date_raw)
             if date_part and time_part and ":" in time_part:
                 return "%sT%s" % (date_part, time_part[:8])
             return ""
-        # ½öÓÐÈÕÆÚ×Ö¶Î
+        # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¶ï¿½
         date_part = _normalize_order_date(date_raw)
         if date_part:
             return "%sT00:00:00" % date_part
@@ -844,7 +844,7 @@ def _extract_order_at(raw, date_raw=None):
 
 
 def _parse_session_date(raw):
-    """´Ó at/order_at ½âÎöÈÕÆÚ£»½ö HH:MM:SS ·µ»Ø None¡£"""
+    """ï¿½ï¿½ at/order_at ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú£ï¿½ï¿½ï¿½ HH:MM:SS ï¿½ï¿½ï¿½ï¿½ Noneï¿½ï¿½"""
     if raw is None:
         return None
     try:
@@ -864,18 +864,18 @@ def _parse_session_date(raw):
 
 
 def _is_session_order_rec(rec):
-    """µ±Ç°»á»°Î¯ÍÐ£º½ñÈÕ£¬»òÉÏÒ»½»Ò×ÈÕ 15:00 ºóµÄÒ¹ÊÐµ¥¡£ÎÞÈÕÆÚÔò¶ªÆú¡£"""
+    """ï¿½ï¿½Ç°ï¿½á»°Î¯ï¿½Ð£ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 15:00 ï¿½ï¿½ï¿½Ò¹ï¿½Ðµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     if not isinstance(rec, dict):
         return False
     raw = rec.get("order_at") or rec.get("at") or ""
     d = _parse_session_date(raw)
     if d is None:
-        # ¹ñÌ¨¿ìÕÕÎÞÎ¯ÍÐÈÕ ¡ú µ±×÷¿çÈÕ²ÐÁô£¬²»ÈëÁÐ±í/»º´æ
+        # ï¿½ï¿½Ì¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¯ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½/ï¿½ï¿½ï¿½ï¿½
         return False
     today = datetime.now().date()
     if d == today:
         return True
-    # Ò¹ÊÐ´°¿Ú£ºÉÏÒ»×ÔÈ»ÈÕ / ÉÏÒ»½»Ò×ÈÕ 15:00 ºó£¬ÇÒÉÐÎ´½øÈëÏÂÒ»½»Ò×ÈÕÅÌÖÐ
+    # Ò¹ï¿½Ð´ï¿½ï¿½Ú£ï¿½ï¿½ï¿½Ò»ï¿½ï¿½È»ï¿½ï¿½ / ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 15:00 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     try:
         tpart = str(raw)
         if "T" in tpart:
@@ -892,7 +892,7 @@ def _is_session_order_rec(rec):
         now = datetime.now()
         if d == today - timedelta(days=1):
             return True
-        # ¿çÖÜÄ©£º½ö±£Áô¡¸ÉÏÒ»½»Ò×ÈÕ¡¹Ò¹ÊÐµ¥£¬¿ªÅÌºó¶ªµô
+        # ï¿½ï¿½ï¿½ï¿½Ä©ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Õ¡ï¿½Ò¹ï¿½Ðµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ìºó¶ªµï¿½
         last_td = None
         try:
             from utils.trading_day import last_tradeday_on_or_before, is_tradeday
@@ -902,7 +902,7 @@ def _is_session_order_rec(rec):
                 if not is_tradeday(today) or now.time() < dt_time(9, 15):
                     return True
         except Exception:
-            # QMT ÄÚ¿ÉÄÜÎÞ utils£º×î¶à»ØËÝµ½ÉÏÖÜÎå£¨3 ¸ö×ÔÈ»ÈÕ£©
+            # QMT ï¿½Ú¿ï¿½ï¿½ï¿½ï¿½ï¿½ utilsï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ýµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½å£¨3 ï¿½ï¿½ï¿½ï¿½È»ï¿½Õ£ï¿½
             if 0 < (today - d).days <= 3 and now.time() < dt_time(9, 15):
                 return True
     except Exception:
@@ -911,7 +911,7 @@ def _is_session_order_rec(rec):
 
 
 def _prune_cached_orders():
-    """ÇåÀíÄÚ´æÖÐ¿çÈÕÎ¯ÍÐ»º´æ¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½Ú´ï¿½ï¿½Ð¿ï¿½ï¿½ï¿½Î¯ï¿½Ð»ï¿½ï¿½æ¡£"""
     global _CACHED_ORDERS
     if not _CACHED_ORDERS:
         return
@@ -923,10 +923,10 @@ def _prune_cached_orders():
 
 
 def _prefer_richer_order(old, new):
-    """ºÏ²¢Á½±ÊÍ¬ºÏÍ¬ºÅÎ¯ÍÐ£º±£ÁôÈÕÆÚ/Ê±¼äµÈ×Ö¶Î£¬×´Ì¬È¡¸üÐÂµÄ¡£
+    """ï¿½Ï²ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½Í¬ï¿½ï¿½Î¯ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/Ê±ï¿½ï¿½ï¿½ï¿½Ö¶Î£ï¿½×´Ì¬È¡ï¿½ï¿½ï¿½ÂµÄ¡ï¿½
 
-    DEAL ÐÐ³£È± m_strInsertDate£¬ÈôÖ±½Ó¸²¸Ç ORDER »áµ¼ÖÂ order_at ¶ªÊ§£¬
-    Ëæºó±»»á»°¹ýÂË¶ªµô£¬UI ÔÚ¡¸È«ÈÕµ¥¡¹Óë¡¸½öÎ´³Éµ¥¡¹Ö®¼äÉÁË¸¡£
+    DEAL ï¿½Ð³ï¿½È± m_strInsertDateï¿½ï¿½ï¿½ï¿½Ö±ï¿½Ó¸ï¿½ï¿½ï¿½ ORDER ï¿½áµ¼ï¿½ï¿½ order_at ï¿½ï¿½Ê§ï¿½ï¿½
+    ï¿½ï¿½ó±»»á»°ï¿½ï¿½ï¿½Ë¶ï¿½ï¿½ï¿½ï¿½ï¿½UI ï¿½Ú¡ï¿½È«ï¿½Õµï¿½ï¿½ï¿½ï¿½ë¡¸ï¿½ï¿½Î´ï¿½Éµï¿½ï¿½ï¿½Ö®ï¿½ï¿½ï¿½ï¿½Ë¸ï¿½ï¿½
     """
     if not isinstance(new, dict):
         return old if isinstance(old, dict) else {}
@@ -939,7 +939,7 @@ def _prefer_richer_order(old, new):
         if isinstance(v, str) and not v.strip():
             continue
         out[k] = v
-    # ÏÔÊ½±£×¡ÈÕÆÚÊ±¼ä
+    # ï¿½ï¿½Ê½ï¿½ï¿½×¡ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½
     for k in ("order_at", "at", "order_time", "order_date"):
         nv = new.get(k)
         ov = old.get(k)
@@ -962,13 +962,13 @@ def _prefer_richer_order(old, new):
 
 
 def _upsert_cached_orders(parsed_list):
-    """½«±¾ÂÖ½âÎö½á¹û²¢Èë»º´æ£¨²»Òò¹ñÌ¨Â©·µ»Ø¶øÉ¾µôÒÑÓÐµ±ÈÕµ¥£©¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½Ö½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë»ºï¿½æ£¨ï¿½ï¿½ï¿½ï¿½ï¿½Ì¨Â©ï¿½ï¿½ï¿½Ø¶ï¿½É¾ï¿½ï¿½ï¿½ï¿½ï¿½Ðµï¿½ï¿½Õµï¿½ï¿½ï¿½ï¿½ï¿½"""
     global _CACHED_ORDERS
     for bo in parsed_list or []:
         if not isinstance(bo, dict):
             continue
         if not _is_session_order_rec(bo):
-            # ÎÞÈÕÆÚµÄÐÂÐÐ£ºÈô»º´æÒÑÓÐÍ¬ºÏÍ¬ºÅ´øÈÕÆÚ°æ±¾£¬ºÏ²¢±£Áô
+            # ï¿½ï¿½ï¿½ï¿½ï¿½Úµï¿½ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½Í¬ï¿½Å´ï¿½ï¿½ï¿½ï¿½Ú°æ±¾ï¿½ï¿½ï¿½Ï²ï¿½ï¿½ï¿½ï¿½ï¿½
             sid = str(bo.get("order_sysid") or "").strip()
             if not sid:
                 continue
@@ -1003,14 +1003,14 @@ def _order_type_text(code):
 
 
 def _is_ipo_subscribe(order_type=None, offset_flag=None, opt_name="", price_type=None):
-    """ÐÂ¹ÉÉê¹º£ºÒµÎñÀàÐÍ 86 / ±¨¼ÛÀàÐÍÉê¹º / OptName º¬Éê¹º¡£
+    """ï¿½Â¹ï¿½ï¿½ê¹ºï¿½ï¿½Òµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 86 / ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ê¹º / OptName ï¿½ï¿½ï¿½ê¹ºï¿½ï¿½
 
-    ×¢Òâ£ºÎ¯ÍÐ×´Ì¬ 86=ÒÑÈ·ÈÏ£¬²»µÃµ±×÷Éê¹ºÀàÐÍ¡£
+    ×¢ï¿½â£ºÎ¯ï¿½ï¿½×´Ì¬ 86=ï¿½ï¿½È·ï¿½Ï£ï¿½ï¿½ï¿½ï¿½Ãµï¿½ï¿½ï¿½ï¿½ê¹ºï¿½ï¿½ï¿½Í¡ï¿½
     """
     opt = str(opt_name or "")
-    if "Éê¹º" in opt:
+    if "ï¿½ê¹º" in opt:
         return True
-    # xtconstant.IPO_SUBSCRIBE = 86£¨ÒµÎñÀàÐÍ£¬·Ç×´Ì¬£©
+    # xtconstant.IPO_SUBSCRIBE = 86ï¿½ï¿½Òµï¿½ï¿½ï¿½ï¿½ï¿½Í£ï¿½ï¿½ï¿½×´Ì¬ï¿½ï¿½
     if _to_int(order_type) == 86 or _to_int(offset_flag) == 86:
         return True
     # BROKER_PRICE_PROP_SUBSCRIBE = 54
@@ -1020,7 +1020,7 @@ def _is_ipo_subscribe(order_type=None, offset_flag=None, opt_name="", price_type
 
 
 def _resolve_order_side(row):
-    """·µ»Ø (side, order_type, offset_flag, direction, opt_name, price_type)¡£
+    """ï¿½ï¿½ï¿½ï¿½ (side, order_type, offset_flag, direction, opt_name, price_type)ï¿½ï¿½
 
     side: buy / sell / subscribe
     """
@@ -1044,14 +1044,14 @@ def _resolve_order_side(row):
     )
     if _is_ipo_subscribe(order_type, offset_flag, opt, price_type):
         return "subscribe", order_type, offset_flag, direction, opt, price_type
-    # OptName ÓÅÏÈ£ºÊÖ»ú/Íâ²¿Î¯ÍÐ³£¼û direction=48 È´ÊµÎªÂô³ö£¬Óë¡¸ÏÞ¼ÛÂô³ö¡¹Ã¬¶Ü
-    has_sell = "Âô" in opt
-    has_buy = "Âò" in opt
+    # OptName ï¿½ï¿½ï¿½È£ï¿½ï¿½Ö»ï¿½/ï¿½â²¿Î¯ï¿½Ð³ï¿½ï¿½ï¿½ direction=48 È´ÊµÎªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë¡¸ï¿½Þ¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¬ï¿½ï¿½
+    has_sell = "ï¿½ï¿½" in opt
+    has_buy = "ï¿½ï¿½" in opt
     if has_sell and not has_buy:
         return "sell", order_type, offset_flag, direction, opt, price_type
     if has_buy and not has_sell:
         return "buy", order_type, offset_flag, direction, opt, price_type
-    # ÊýÖµ£ºÓÅÏÈ STOCK_BUY/SELL(23/24)£¬ÔÙ direction / offset
+    # ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ STOCK_BUY/SELL(23/24)ï¿½ï¿½ï¿½ï¿½ direction / offset
     ot = _to_int(order_type, -1)
     if ot == 24:
         return "sell", order_type, offset_flag, direction, opt, price_type
@@ -1067,17 +1067,17 @@ def _resolve_order_side(row):
 
 
 def _diag_order_fields_once(parsed):
-    """Ê×´Î½âÎöÎ¯ÍÐÊ±¿ÉÑ¡Õï¶Ï£»Ä¬ÈÏ¾²Ä¬£¨Æô¶¯Ë¢Ò»±ÊÒÑ³Éµ¥ÎÞÐÅÏ¢Á¿£©¡£"""
+    """ï¿½×´Î½ï¿½ï¿½ï¿½Î¯ï¿½ï¿½Ê±ï¿½ï¿½Ñ¡ï¿½ï¿½Ï£ï¿½Ä¬ï¿½Ï¾ï¿½Ä¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¢Ò»ï¿½ï¿½ï¿½Ñ³Éµï¿½ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     global _ORDER_FIELD_DIAG_DONE
     if _ORDER_FIELD_DIAG_DONE:
         return
     _ORDER_FIELD_DIAG_DONE = True
-    # ÐèÒªÅÅ²éÎ¯ÍÐ×Ö¶ÎÓ³ÉäÊ±Éè»·¾³±äÁ¿ ANT_ORDER_FIELD_DIAG=1
+    # ï¿½ï¿½Òªï¿½Å²ï¿½Î¯ï¿½ï¿½ï¿½Ö¶ï¿½Ó³ï¿½ï¿½Ê±ï¿½è»·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ANT_ORDER_FIELD_DIAG=1
     if str(os.environ.get("ANT_ORDER_FIELD_DIAG") or "").strip() not in ("1", "true", "TRUE"):
         return
     try:
         print(
-            "[½»Ò×ºËÐÄ] Î¯ÍÐ×Ö¶ÎÕï¶Ï: code=%s sysid=%s status=%s(%s) "
+            "[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] Î¯ï¿½ï¿½ï¿½Ö¶ï¿½ï¿½ï¿½ï¿½: code=%s sysid=%s status=%s(%s) "
             "order_type=%s(%s) offset=%s direction=%s price_type=%s "
             "opt=%s side=%s remark=%s"
             % (
@@ -1100,10 +1100,10 @@ def _diag_order_fields_once(parsed):
 
 
 def _parse_order_row(row, account_id=""):
-    """½âÎöµ¥±ÊÎ¯ÍÐÎª¿ÉÐòÁÐ»¯ dict¡£"""
+    """ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¯ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½Ð»ï¿½ dictï¿½ï¿½"""
     if not isinstance(row, dict):
         row = _object_row(row)
-    # ×´Ì¬Ö»¶Á m_nOrderStatus / order_status£¬¾ø²»Óë order_type(IPO=86) »ìÓÃ
+    # ×´Ì¬Ö»ï¿½ï¿½ m_nOrderStatus / order_statusï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ order_type(IPO=86) ï¿½ï¿½ï¿½ï¿½
     status = _pick(row, "order_status", "m_nOrderStatus", default=255)
     status = _to_int(status, 255)
     if status is None:
@@ -1157,7 +1157,7 @@ def _parse_order_row(row, account_id=""):
     order_time = _normalize_order_time(raw_time)
     order_at = _extract_order_at(raw_time, raw_date)
     if not order_at:
-        # ¶µµ×£º½öÓÐÈÕÆÚÊ±Ò²Ð´Èë£¬±ãÓÚ»á»°¹ýÂË
+        # ï¿½ï¿½ï¿½×£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±Ò²Ð´ï¿½ë£¬ï¿½ï¿½ï¿½Ú»á»°ï¿½ï¿½ï¿½ï¿½
         order_at = _extract_order_at(None, raw_date)
     stock_name = str(
         _pick(
@@ -1166,8 +1166,8 @@ def _parse_order_row(row, account_id=""):
             "m_strInstrumentName",
             "InstrumentName",
             "instrument_name",
-            "Ö¤È¯Ãû³Æ",
-            "Ö¤È¯¼ò³Æ",
+            "Ö¤È¯ï¿½ï¿½ï¿½ï¿½",
+            "Ö¤È¯ï¿½ï¿½ï¿½",
             default="",
         )
         or ""
@@ -1176,14 +1176,14 @@ def _parse_order_row(row, account_id=""):
         _pick(row, "strategy_name", "m_strStrategyName", "StrategyName", default="") or ""
     ).strip()
     if not strategy_name and side == "subscribe":
-        strategy_name = "ÐÂ¹ÉÉê¹º"
+        strategy_name = "ï¿½Â¹ï¿½ï¿½ê¹º"
     elif not strategy_name and opt:
-        # OptName Èç¡¸Ö¤È¯ÂòÈë¡¹¿É×÷ËµÃ÷£¬µ«Îð¸²¸Ç±¾µØ²ßÂÔÃû
-        if "Éê¹º" in opt:
-            strategy_name = "ÐÂ¹ÉÉê¹º"
+        # OptName ï¿½ç¡¸Ö¤È¯ï¿½ï¿½ï¿½ë¡¹ï¿½ï¿½ï¿½ï¿½Ëµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ð¸²¸Ç±ï¿½ï¿½Ø²ï¿½ï¿½ï¿½ï¿½ï¿½
+        if "ï¿½ê¹º" in opt:
+            strategy_name = "ï¿½Â¹ï¿½ï¿½ê¹º"
     type_text = _order_type_text(order_type_i)
     if not type_text and side == "subscribe":
-        type_text = "ÐÂ¹ÉÉê¹º"
+        type_text = "ï¿½Â¹ï¿½ï¿½ê¹º"
     parsed = {
         "account_id": str(account_id or _pick(row, "account_id", "m_strAccountID", default="") or ""),
         "order_sysid": sysid,
@@ -1221,7 +1221,7 @@ def _parse_order_rows(rows, account_id=""):
     return out
 
 
-# ±¾µØÖÕ½áÌ¬ÉÚ±ø£º´ÓÎ´ÕæÊµ passorder£¬½ûÖ¹°ÑºóÐø¹ñÌ¨³É½»»ØÌîµ½ÕâÐ©ÐÐÉÏ
+# ï¿½ï¿½ï¿½ï¿½ï¿½Õ½ï¿½Ì¬ï¿½Ú±ï¿½ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½Êµ passorderï¿½ï¿½ï¿½ï¿½Ö¹ï¿½Ñºï¿½ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½É½ï¿½ï¿½ï¿½ï¿½îµ½ï¿½ï¿½Ð©ï¿½ï¿½ï¿½ï¿½
 _LOCAL_SKIP_SYSIDS = frozenset(
     {
         "SKIPPED_MIN_BUY",
@@ -1252,7 +1252,7 @@ def _is_unique_broker_sysid(sysid) -> bool:
 
 
 def _is_local_skip_order(local) -> bool:
-    """×Ê½ð²»×ã/×îÐ¡ÂòÈëµÈÌø¹ýµ¥£º²»¿ÉÓë¹ñÌ¨³É½»°´ task_id ´íÅäºÏ²¢¡£"""
+    """ï¿½Ê½ï¿½ï¿½ï¿½/ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½É½ï¿½ï¿½ï¿½ task_id ï¿½ï¿½ï¿½ï¿½Ï²ï¿½ï¿½ï¿½"""
     if not isinstance(local, dict):
         return True
     if str(local.get("cash_block") or "").strip():
@@ -1299,10 +1299,10 @@ def _remark_matches_local(remark, local):
 
 
 def _match_broker_order(local, broker_orders):
-    """ÓÃ remark(userOrderId) ÓÅÏÈ£¬Æä´Î ´úÂë+·½Ïò+¼ÛÁ¿ ¶ÔÆë±¾µØ passorder ¼ÇÂ¼¡£"""
+    """ï¿½ï¿½ remark(userOrderId) ï¿½ï¿½ï¿½È£ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½+ï¿½ï¿½ï¿½ï¿½+ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ë±¾ï¿½ï¿½ passorder ï¿½ï¿½Â¼ï¿½ï¿½"""
     if not isinstance(local, dict) or not broker_orders:
         return None
-    # Ìø¹ýµ¥´ÓÎ´ÏÂµ½¹ñÌ¨£¬½ûÖ¹°´ remark/task_id ÍÌµôºóÀ´µÄÕæÊµ³É½»
+    # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î´ï¿½Âµï¿½ï¿½ï¿½Ì¨ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ remark/task_id ï¿½Ìµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½É½ï¿½
     if _is_local_skip_order(local):
         return None
     for bo in broker_orders:
@@ -1332,10 +1332,10 @@ def _match_broker_order(local, broker_orders):
 
 
 def _note_filled_leg_from_local_order(loc):
-    """¹ñÌ¨»ØÌîÎªÒÑ³ÉÊ±£¬°ÑÍÈÐ´Èë filled_legs.json¡£"""
+    """ï¿½ï¿½Ì¨ï¿½ï¿½ï¿½ï¿½Îªï¿½Ñ³ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ filled_legs.jsonï¿½ï¿½"""
     if not isinstance(loc, dict):
         return
-    # ²¹È« leg_key / rule_name£¨ÏÂµ¥Ê±¿ÉÄÜÖ»ÓÐ task_id£©
+    # ï¿½ï¿½È« leg_key / rule_nameï¿½ï¿½ï¿½Âµï¿½Ê±ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ task_idï¿½ï¿½
     if not loc.get("leg_key") or not loc.get("rule_name"):
         try:
             import ant_filled_legs as _fl
@@ -1370,7 +1370,7 @@ def _note_filled_leg_from_local_order(loc):
 
 
 def merge_broker_orders_into_results(results, broker_orders):
-    """Ð´Èë broker_orders£¬²¢»ØÌî±¾µØ passorder ¼ÇÂ¼µÄÕæÊµ×´Ì¬¡£"""
+    """Ð´ï¿½ï¿½ broker_ordersï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½î±¾ï¿½ï¿½ passorder ï¿½ï¿½Â¼ï¿½ï¿½ï¿½ï¿½Êµ×´Ì¬ï¿½ï¿½"""
     if not isinstance(results, dict):
         return False
     broker_orders = [bo for bo in list(broker_orders or []) if _is_session_order_rec(bo)]
@@ -1379,7 +1379,7 @@ def merge_broker_orders_into_results(results, broker_orders):
     if not isinstance(local, list):
         local = []
         results["orders"] = local
-    # ±¾µØ passorder ¼ÇÂ¼Ò²°´»á»°²Ã¼ô£¬±ÜÃâ UI ·´¸´¶Áµ½¼¸ÌìÇ°µÄµ¥
+    # ï¿½ï¿½ï¿½ï¿½ passorder ï¿½ï¿½Â¼Ò²ï¿½ï¿½ï¿½á»°ï¿½Ã¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ UI ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½Äµï¿½
     pruned_local = []
     for loc in local:
         if not isinstance(loc, dict):
@@ -1401,10 +1401,10 @@ def merge_broker_orders_into_results(results, broker_orders):
     for loc in local:
         if not isinstance(loc, dict):
             continue
-        # ±¾µØÌø¹ý/×Ê½ð²»×ãÉÚ±ø£º¾ø²»»ØÌî¹ñÌ¨³É½»£¨·ñÔòÉÏÎç no_cash »áÍÌÏÂÎçºÏÍ¬ºÅ£©
+        # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½Ê½ï¿½ï¿½ï¿½ï¿½Ú±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½É½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ no_cash ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½Å£ï¿½
         if _is_local_skip_order(loc):
             continue
-        # ÒÑÓÐÕæÊµºÏÍ¬ºÅ£ºÓÃ×îÐÂ¹ñÌ¨¿ìÕÕË¢ÐÂ×´Ì¬£¨Ò¹ÊÐÐèµÈ ÒÑ±¨£©
+        # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½Í¬ï¿½Å£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â¹ï¿½Ì¨ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½×´Ì¬ï¿½ï¿½Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½Ñ±ï¿½ï¿½ï¿½
         cur_sys = str(loc.get("order_sysid") or "").strip()
         if cur_sys and _is_unique_broker_sysid(cur_sys):
             used.add(cur_sys)
@@ -1473,8 +1473,8 @@ def merge_broker_orders_into_results(results, broker_orders):
             if loc.get(k) != val:
                 loc[k] = val
                 changed = True
-        # ¹ñÌ¨È±Ê±¼äÊ±ÓÃ±¾µØ passorder ¼ÇÂ¼Ê±¼ä»ØÌî£¬²¢Ð´»Ø broker ÐÐ¹© UI Õ¹Ê¾
-        # ×¢Òâ£ºÓÐ¹ñÌ¨ order_time Ê±²»ÒªÓÃ±¾µØ¾É at ¸²¸Ç
+        # ï¿½ï¿½Ì¨È±Ê±ï¿½ï¿½Ê±ï¿½Ã±ï¿½ï¿½ï¿½ passorder ï¿½ï¿½Â¼Ê±ï¿½ï¿½ï¿½ï¿½î£¬ï¿½ï¿½Ð´ï¿½ï¿½ broker ï¿½Ð¹ï¿½ UI Õ¹Ê¾
+        # ×¢ï¿½â£ºï¿½Ð¹ï¿½Ì¨ order_time Ê±ï¿½ï¿½Òªï¿½Ã±ï¿½ï¿½Ø¾ï¿½ at ï¿½ï¿½ï¿½ï¿½
         broker_ot = _normalize_order_time(bo.get("order_time") or "")
         if broker_ot:
             if loc.get("order_time") != broker_ot:
@@ -1513,7 +1513,7 @@ def merge_broker_orders_into_results(results, broker_orders):
 
 
 def apply_deals_to_results(results, deal_raw, account_id=""):
-    """³É½»Ã÷Ï¸¶µµ×£º°ÑÄÜÆ¥Åäµ½µÄ±¾µØµ¥±êÎªÒÑ³É¡£"""
+    """ï¿½É½ï¿½ï¿½ï¿½Ï¸ï¿½ï¿½ï¿½×£ï¿½ï¿½ï¿½ï¿½ï¿½Æ¥ï¿½äµ½ï¿½Ä±ï¿½ï¿½Øµï¿½ï¿½ï¿½Îªï¿½Ñ³É¡ï¿½"""
     if not isinstance(results, dict):
         return False
     deal_rows = _rows(deal_raw)
@@ -1537,9 +1537,9 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
         except (TypeError, ValueError):
             pass
         parsed["broker_status"] = 56
-        parsed["broker_status_text"] = "ÒÑ³É"
+        parsed["broker_status_text"] = "ï¿½Ñ³ï¿½"
         like_orders.append(parsed)
-    # merge with existing broker_orders£¨±£Áô ORDER ÉÏµÄ order_at£¬±ÜÃâ DEAL È±ÈÕÆÚ°Ñµ¥Ë¢Ã»£©
+    # merge with existing broker_ordersï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ORDER ï¿½Ïµï¿½ order_atï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ DEAL È±ï¿½ï¿½ï¿½Ú°Ñµï¿½Ë¢Ã»ï¿½ï¿½
     existing = list(results.get("broker_orders") or [])
     by_sys = {}
     for bo in existing + like_orders:
@@ -1548,7 +1548,7 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
         sid = str(bo.get("order_sysid") or "").strip()
         key = sid or ("tmp|%s|%s|%s" % (bo.get("stock_code"), bo.get("price"), bo.get("volume")))
         by_sys[key] = _prefer_richer_order(by_sys.get(key), bo)
-    # Í¬²½»ØÄÚ´æ»º´æ£¬·ÀÖ¹ÏÂÒ»ÂÖ ORDER Â©·µ»ØÊ±¶ªÒÑ³Éµ¥
+    # Í¬ï¿½ï¿½ï¿½ï¿½ï¿½Ú´æ»ºï¿½æ£¬ï¿½ï¿½Ö¹ï¿½ï¿½Ò»ï¿½ï¿½ ORDER Â©ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½Ñ³Éµï¿½
     try:
         _upsert_cached_orders(list(by_sys.values()))
     except Exception:
@@ -1561,7 +1561,7 @@ def apply_deal_callback_to_results(results, dealInfo, account_id=""):
 
 
 def on_order_callback(ContextInfo, orderInfo):
-    """QMT order_callback£º»º´æÎ¯ÍÐ¿ìÕÕ¡£"""
+    """QMT order_callbackï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¯ï¿½Ð¿ï¿½ï¿½Õ¡ï¿½"""
     global _CACHED_ORDERS
     try:
         aid = str(_resolve_account_id(ContextInfo) or "").strip()
@@ -1570,14 +1570,14 @@ def on_order_callback(ContextInfo, orderInfo):
         if sysid and _is_session_order_rec(parsed):
             _CACHED_ORDERS[sysid] = parsed
         elif sysid:
-            # ¿çÈÕ²ÐÁô£ºÈ·±£²»ÁôÔÚ»º´æ
+            # ï¿½ï¿½ï¿½Õ²ï¿½ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú»ï¿½ï¿½ï¿½
             _CACHED_ORDERS.pop(sysid, None)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] order_callback ´íÎó: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] order_callback ï¿½ï¿½ï¿½ï¿½: %s" % e)
 
 
 def apply_order_callback_to_results(results, orderInfo, account_id=""):
-    """order_callback ¡ú ¸üÐÂ results.broker_orders Óë±¾µØ orders ×´Ì¬¡£"""
+    """order_callback ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ results.broker_orders ï¿½ë±¾ï¿½ï¿½ orders ×´Ì¬ï¿½ï¿½"""
     if not isinstance(results, dict):
         return False
     aid = str(account_id or "").strip()
@@ -1601,7 +1601,7 @@ def apply_order_callback_to_results(results, orderInfo, account_id=""):
 
 
 def on_account_callback(ContextInfo, accountInfo):
-    """QMT account_callback Èë¿Ú£º»º´æ×Ê½ð¿ìÕÕ¡£"""
+    """QMT account_callback ï¿½ï¿½Ú£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½Õ¡ï¿½"""
     global _CACHED_ACCOUNT
     try:
         row = _object_row(accountInfo)
@@ -1613,11 +1613,11 @@ def on_account_callback(ContextInfo, accountInfo):
             return
         _CACHED_ACCOUNT = _parse_account_row(row, aid)
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] account_callback ´íÎó: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] account_callback ï¿½ï¿½ï¿½ï¿½: %s" % e)
 
 
 def on_position_callback(ContextInfo, positionInfo):
-    """QMT position_callback Èë¿Ú£º»º´æ³Ö²Ö¿ìÕÕ¡£"""
+    """QMT position_callback ï¿½ï¿½Ú£ï¿½ï¿½ï¿½ï¿½ï¿½Ö²Ö¿ï¿½ï¿½Õ¡ï¿½"""
     global _CACHED_POSITIONS
     try:
         row = _object_row(positionInfo)
@@ -1668,7 +1668,7 @@ def on_position_callback(ContextInfo, positionInfo):
         except Exception:
             pass
     except Exception as e:
-        print("[½»Ò×ºËÐÄ] position_callback ´íÎó: %s" % e)
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] position_callback ï¿½ï¿½ï¿½ï¿½: %s" % e)
 
 
 def resolve_account_id(ContextInfo, explicit=""):
@@ -1676,7 +1676,7 @@ def resolve_account_id(ContextInfo, explicit=""):
 
 
 def _apply_parsed_positions(results, positions):
-    """ÒÔ trade_detail ½âÎö½á¹ûÕû±í¸²¸Ç³Ö²Ö£¬²¢Í¬²½ÄÚ´æ»º´æ£¨º¬¿Õ²ÖÇå¿Õ£©¡£"""
+    """ï¿½ï¿½ trade_detail ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç³Ö²Ö£ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½Ú´æ»ºï¿½æ£¨ï¿½ï¿½ï¿½Õ²ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½"""
     global _CACHED_POSITIONS
     if not isinstance(results, dict):
         return False
@@ -1685,7 +1685,7 @@ def _apply_parsed_positions(results, positions):
     _CACHED_POSITIONS.clear()
     if pos:
         _CACHED_POSITIONS.update(pos)
-    # ½¨²ÖÈÕ£ºËæ³Ö²Ö¿ìÕÕÎ¬»¤£¬²»ÒÀÀµÍâ²¿Ö÷³ÌÐò
+    # ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½ï¿½ï¿½Ö²Ö¿ï¿½ï¿½ï¿½Î¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½â²¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     try:
         import ant_position_entry_dates as _ped
 
@@ -1697,7 +1697,7 @@ def _apply_parsed_positions(results, positions):
             _ped.sync_from_positions(pos)
         except Exception:
             pass
-    # ³Ö²Ö¹éÁãÊ±Çå³ýÒÑÖ´ÐÐÍÈ£¬±ãÓÚÏÂ´ÎÔÙÂòÔÙÂô
+    # ï¿½Ö²Ö¹ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½Ö´ï¿½ï¿½ï¿½È£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     try:
         import ant_filled_legs as _fl
 
@@ -1713,7 +1713,7 @@ def _apply_parsed_positions(results, positions):
 
 
 def _account_stock_market_value(account):
-    """È¡¹ÉÆ±²àÊÐÖµ¡£ÓÅÏÈÏÔÊ½¹ÉÆ±ÊÐÖµ×Ö¶Î£»·ñÔòÓÃ market_value£¨´ó QMT ÕË»§ÐÐ³£¼û¿Ú¾¶£©¡£"""
+    """È¡ï¿½ï¿½Æ±ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½Æ±ï¿½ï¿½Öµï¿½Ö¶Î£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ market_valueï¿½ï¿½ï¿½ï¿½ QMT ï¿½Ë»ï¿½ï¿½Ð³ï¿½ï¿½ï¿½ï¿½Ú¾ï¿½ï¿½ï¿½ï¿½ï¿½"""
     if not isinstance(account, dict):
         return 0.0
     for key in (
@@ -1736,9 +1736,9 @@ def _account_stock_market_value(account):
 
 def _is_suspicious_empty_positions(account, positions_parsed):
     """
-    Õæ¿Õ²Ö£º³Ö²Ö¿ÕÇÒ¹ÉÆ±ÊÐÖµ¡Ö0£¨¿ÉÓÐ´óÁ¿ÏÖ½ð£©¡ú ²»¸æ¾¯¡£
-    ¿ÉÒÉ£º³Ö²Ö¿Õµ«ÊÐÖµÏÔÖøÆ«¸ß£¨ÇÒ×Ê½ðÖ÷ÒªÔÚÊÐÖµ²à£¬·ÇÈ«ÏÖ½ð£©¡ú ¸æ¾¯¡£
-    Èô market_value »ìÈëÀí²ÆµÈ·Ç¹ÉÆ±×Ê²ú£¬Ìá¸ßãÐÖµ²¢ÓÃ¡¸ÏÖ½ð << ÊÐÖµ¡¹ÊÕ½ô£¬½µµÍÎó±¨¡£
+    ï¿½ï¿½Õ²Ö£ï¿½ï¿½Ö²Ö¿ï¿½ï¿½Ò¹ï¿½Æ±ï¿½ï¿½Öµï¿½ï¿½0ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½Ö½ð£©¡ï¿½ ï¿½ï¿½ï¿½æ¾¯ï¿½ï¿½
+    ï¿½ï¿½ï¿½É£ï¿½ï¿½Ö²Ö¿Õµï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½Æ«ï¿½ß£ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½Öµï¿½à£¬ï¿½ï¿½È«ï¿½Ö½ð£©¡ï¿½ ï¿½æ¾¯ï¿½ï¿½
+    ï¿½ï¿½ market_value ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÆµÈ·Ç¹ï¿½Æ±ï¿½Ê²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½Ã¡ï¿½ï¿½Ö½ï¿½ << ï¿½ï¿½Öµï¿½ï¿½ï¿½Õ½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ó±¨¡ï¿½
     """
     if positions_parsed:
         return False, "has_positions"
@@ -1754,24 +1754,35 @@ def _is_suspicious_empty_positions(account, positions_parsed):
         total = float(acc.get("total_asset") or 0)
     except (TypeError, ValueError):
         total = 0.0
-    # Õæ¿Õ²Ö / ½öÏÖ½ð£ºÊÐÖµµÍÓÚãÐÖµ
+    # ï¿½ï¿½Õ²ï¿½ / ï¿½ï¿½ï¿½Ö½ï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµ
     if mv < _POSITION_ALERT_MV_THRESHOLD:
         return False, "flat_or_low_mv"
-    # È«ÏÖ½ð¿Õ²ÖÎó±ê¸ßÊÐÖµÊ±£ºÏÖ½ð½Ó½ü×Ü×Ê²úÔò²»µ±×÷¿ÉÒÉ
+    # È«ï¿½Ö½ï¿½Õ²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÖµÊ±ï¿½ï¿½ï¿½Ö½ï¿½Ó½ï¿½ï¿½ï¿½ï¿½Ê²ï¿½ï¿½ò²»µï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if total > 0 and cash >= total * 0.85 and mv < total * 0.2:
         return False, "cash_dominant"
-    # ¿ÉÒÉ£ºÓÐÃ÷ÏÔ¹ÉÆ±ÊÐÖµµ«³Ö²ÖÐÐÎª¿Õ£¨ÖØÆôÇ° bug ÐÎÌ¬£ºÏÖ½ðÉÙ + ÊÐÖµ¸ß + positions=[]£©
+    # ï¿½ï¿½ï¿½É£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¹ï¿½Æ±ï¿½ï¿½Öµï¿½ï¿½ï¿½Ö²ï¿½ï¿½ï¿½Îªï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½Ç° bug ï¿½ï¿½Ì¬ï¿½ï¿½ï¿½Ö½ï¿½ï¿½ï¿½ + ï¿½ï¿½Öµï¿½ï¿½ + positions=[]ï¿½ï¿½
     if cash >= mv:
-        # ÏÖ½ð²»µÍÓÚÊÐÖµÊ±¸üÏñ¿Ú¾¶ÔëÉù£¬ÈÔ¼Ç×Ö¶Îµ«²»Ç¿ÍÆÎª¸æ¾¯Ö÷Òò£»ÈÔ¸æ¾¯ÒòÊÐÖµÒÑ³¬ãÐÖµ
+        # ï¿½Ö½ð²»µï¿½ï¿½ï¿½ï¿½ï¿½ÖµÊ±ï¿½ï¿½ï¿½ï¿½Ú¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¼ï¿½ï¿½Ö¶Îµï¿½ï¿½ï¿½Ç¿ï¿½ï¿½Îªï¿½æ¾¯ï¿½ï¿½ï¿½ï¿½ï¿½Ô¸æ¾¯ï¿½ï¿½ï¿½ï¿½Öµï¿½Ñ³ï¿½ï¿½ï¿½Öµ
         return True, "empty_pos_high_mv"
     return True, "empty_pos_high_mv_low_cash"
 
 
 def _in_cn_equity_session(now=None):
-    """A ¹É³£¹æ½»Ò×Ê±¶Î£º¹¤×÷ÈÕ 09:00¨C15:30£¨º¬ÎçÐÝ£»·Ç½»Ò×ÈÕ/Ò¹ÅÌ²»Ëã£©¡£"""
+    """A ï¿½É³ï¿½ï¿½æ½»ï¿½ï¿½Ê±ï¿½Î£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 09:00ï¿½C15:30ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/Ò¹ï¿½Ì²ï¿½ï¿½ã£©ï¿½ï¿½
+
+    ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ utils.trading_day.is_tradedayï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½å¡ªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    ï¿½ï¿½ï¿½ï¿½ï¿½Õ¼ï¿½ï¿½Õ»á°´ï¿½ï¿½ï¿½ï¿½ 1 Ð¡Ê±ï¿½ï¿½È´Ë¢ Serverï¿½ï¿½ï¿½ï¿½
+    """
     now = now or datetime.now()
-    if now.weekday() >= 5:
-        return False
+    try:
+        from utils.trading_day import is_tradeday
+
+        if not is_tradeday(now.date()):
+            return False
+    except Exception:
+        # QMT ï¿½ï¿½Å¼ï¿½ï¿½ï¿½ï¿½ utilsï¿½ï¿½ï¿½Ë»ï¿½ï¿½ï¿½Ä©ï¿½Ð¶Ï£ï¿½ï¿½Ô¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½
+        if now.weekday() >= 5:
+            return False
     t = now.time()
     return dt_time(9, 0) <= t <= dt_time(15, 30)
 
@@ -1797,7 +1808,7 @@ def _parse_iso_ts(raw):
 
 
 def _prev_notify_sent_at(results):
-    """´Ó results.position_alert È¡ÉÏ´Î³É¹¦ÍÆËÍÊ±¼ä£¨½ø³ÌÖØÔØºóÈÔ¿É½ÚÁ÷£©¡£"""
+    """ï¿½ï¿½ results.position_alert È¡ï¿½Ï´Î³É¹ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ä£¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Øºï¿½ï¿½Ô¿É½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     if not isinstance(results, dict):
         return None
     prev = results.get("position_alert")
@@ -1839,7 +1850,7 @@ def _clear_position_alert(results):
 
 def _notify_position_alert_once(title, body, results=None):
     cool = _position_alert_notify_cooldown_sec()
-    # results ÂäÅÌ´Á£º²ßÂÔÖØÔØ»áÇå¿Õ ant_server_chan ÄÚ´æÀäÈ´£¬Ò¹¼äÎðÒò´ËÁ¬·¢
+    # results ï¿½ï¿½ï¿½Ì´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø»ï¿½ï¿½ï¿½ï¿½ ant_server_chan ï¿½Ú´ï¿½ï¿½ï¿½È´ï¿½ï¿½Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     last_dt = _prev_notify_sent_at(results)
     if last_dt is not None and cool > 0:
         age = (datetime.now() - last_dt).total_seconds()
@@ -1867,8 +1878,8 @@ def _notify_position_alert_once(title, body, results=None):
 
 def _update_position_alert(results, positions_parsed, extra=None):
     """
-    Ð´Èë results.position_alert£»¿ÉÒÉÊ±¿Õ²Ö¸æ¾¯£¨ÈÕÖ¾½ÚÁ÷ + ¿ÉÑ¡ Server½´£©¡£
-    ³Ö²Ö»Ö¸´»òÕæ¿Õ²ÖÊ±Çå³ý active¡£
+    Ð´ï¿½ï¿½ results.position_alertï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½Õ²Ö¸æ¾¯ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ + ï¿½ï¿½Ñ¡ Serverï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    ï¿½Ö²Ö»Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½Õ²ï¿½Ê±ï¿½ï¿½ï¿½ activeï¿½ï¿½
     """
     global _LAST_POSITION_ALERT_LOG_TS, _POSITION_ALERT_ACTIVE
     if not isinstance(results, dict):
@@ -1907,7 +1918,7 @@ def _update_position_alert(results, positions_parsed, extra=None):
         "parsed_positions": pos_n,
         "threshold": _POSITION_ALERT_MV_THRESHOLD,
         "message": (
-            "position empty but market_value=%.2f ¡ª check QMT ³Ö²Ö/ÖØÆô"
+            "position empty but market_value=%.2f ï¿½ï¿½ check QMT ï¿½Ö²ï¿½/ï¿½ï¿½ï¿½ï¿½"
             % mv
         ),
         "updated_at": _now_iso(),
@@ -1926,14 +1937,14 @@ def _update_position_alert(results, positions_parsed, extra=None):
     if should_log:
         _LAST_POSITION_ALERT_LOG_TS = now
         print(
-            "[ÕË»§] ¾¯¸æ ³Ö²ÖÎª¿Õµ«¹ÉÆ±ÊÐÖµ=%.2f cash=%.2f "
-            "total=%.2f parsed=%d ¡ª Çë¼ì²é QMT ³Ö²Ö/ÖØÆô (%s)"
+            "[ï¿½Ë»ï¿½] ï¿½ï¿½ï¿½ï¿½ ï¿½Ö²ï¿½Îªï¿½Õµï¿½ï¿½ï¿½Æ±ï¿½ï¿½Öµ=%.2f cash=%.2f "
+            "total=%.2f parsed=%d ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ QMT ï¿½Ö²ï¿½/ï¿½ï¿½ï¿½ï¿½ (%s)"
             % (mv, cash, total, pos_n, reason)
         )
         notify_r = _notify_position_alert_once(
-            "´óQMT³Ö²Ö²éÑ¯Òì³£",
-            "³Ö²ÖÎª¿Õµ«¹ÉÆ±ÊÐÖµ=%.2f£¨ãÐÖµ>=%.0f£©\nÏÖ½ð=%.2f ×Ü×Ê²ú=%.2f\n"
-            "Çë¼ì²é QMT ³Ö²ÖÃæ°å»òÖØÆôÄ£ÐÍ½»Ò×¡£\nÔ­Òò=%s"
+            "ï¿½ï¿½QMTï¿½Ö²Ö²ï¿½Ñ¯ï¿½ì³£",
+            "ï¿½Ö²ï¿½Îªï¿½Õµï¿½ï¿½ï¿½Æ±ï¿½ï¿½Öµ=%.2fï¿½ï¿½ï¿½ï¿½Öµ>=%.0fï¿½ï¿½\nï¿½Ö½ï¿½=%.2f ï¿½ï¿½ï¿½Ê²ï¿½=%.2f\n"
+            "ï¿½ï¿½ï¿½ï¿½ QMT ï¿½Ö²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½Í½ï¿½ï¿½×¡ï¿½\nÔ­ï¿½ï¿½=%s"
             % (mv, _POSITION_ALERT_MV_THRESHOLD, cash, total, reason),
             results=results,
         )
@@ -1945,7 +1956,7 @@ def _update_position_alert(results, positions_parsed, extra=None):
 
 
 def _probe_bj_sectors_once(ContextInfo):
-    """Ò»´ÎÐÔÌ½²â±¾»ú QMT ±±½»Ëù°å¿éÊÇ·ñ¿ÉÓÃ£¬Ð´Èë data/bj_sector_probe.json¡£"""
+    """Ò»ï¿½ï¿½ï¿½ï¿½Ì½ï¿½â±¾ï¿½ï¿½ QMT ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½ï¿½Ã£ï¿½Ð´ï¿½ï¿½ data/bj_sector_probe.jsonï¿½ï¿½"""
     global _BJ_SECTOR_PROBE_DONE
     if _BJ_SECTOR_PROBE_DONE:
         return
@@ -1976,13 +1987,13 @@ def _probe_bj_sectors_once(ContextInfo):
             pass
 
         sector_candidates = (
-            "\u4eac\u5e02A\u80a1",  # ¾©ÊÐA¹É
-            "\u6caa\u6df1\u4eacA\u80a1",  # »¦Éî¾©A¹É
-            "\u5317\u4ea4\u6240",  # ±±½»Ëù
-            "\u5317\u4ea4\u6240A\u80a1",  # ±±½»ËùA¹É
+            "\u4eac\u5e02A\u80a1",  # ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½
+            "\u6caa\u6df1\u4eacA\u80a1",  # ï¿½ï¿½ï¿½î¾©Aï¿½ï¿½
+            "\u5317\u4ea4\u6240",  # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+            "\u5317\u4ea4\u6240A\u80a1",  # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Aï¿½ï¿½
             "BJ",
-            "\u4eacA\u80a1",  # ¾©A¹É
-            "\u6caa\u6df1A\u80a1",  # »¦ÉîA¹É£¨¶ÔÕÕ£©
+            "\u4eacA\u80a1",  # ï¿½ï¿½Aï¿½ï¿½
+            "\u6caa\u6df1A\u80a1",  # ï¿½ï¿½ï¿½ï¿½Aï¿½É£ï¿½ï¿½ï¿½ï¿½Õ£ï¿½
         )
         sector_counts = {}
         samples = {}
@@ -2044,13 +2055,13 @@ def _probe_bj_sectors_once(ContextInfo):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, out_path)
-        # Ì½²â½á¹ûÒÑÐ´Èë bj_sector_probe.json£¬²»ÔÙË¢Æô¶¯ÈÕÖ¾
+        # Ì½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ bj_sector_probe.jsonï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾
     except Exception:
         pass
 
 
 def _positions_match_account(positions, account_id: str) -> dict:
-    """Ö»±£ÁôÓëµ±Ç°ÕËºÅÒ»ÖÂµÄ³Ö²Ö£»È± account_id µÄ¾É¼ÇÂ¼Ò²¶ªµô¡£"""
+    """Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ëµ±Ç°ï¿½Ëºï¿½Ò»ï¿½ÂµÄ³Ö²Ö£ï¿½È± account_id ï¿½Ä¾É¼ï¿½Â¼Ò²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½"""
     aid = str(account_id or "").strip()
     out = {}
     for code, rec in (positions or {}).items():
@@ -2066,7 +2077,7 @@ def _positions_match_account(positions, account_id: str) -> dict:
 
 
 def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id="", order_raw=None, deal_raw=None):
-    """Èë¿ÚÎÄ¼þÒÑµ÷ÓÃ get_trade_detail_data£¬´Ë´¦½ö½âÎöÐ´Èë results¡£"""
+    """ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½ï¿½Ñµï¿½ï¿½ï¿½ get_trade_detail_dataï¿½ï¿½ï¿½Ë´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ resultsï¿½ï¿½"""
     global _CACHED_ACCOUNT, _CACHED_ORDERS, _CACHED_POSITIONS
     try:
         _probe_bj_sectors_once(ContextInfo)
@@ -2104,7 +2115,7 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
             results["account"] = dict(_CACHED_ACCOUNT)
             wrote = True
 
-    # ÈÎºÎÂ·¾¶Ð´»ØÇ°£¬ÏÈ¶ªµô results Àï±ðµÄÕËºÅ²ÐÁô³Ö²Ö
+    # ï¿½Îºï¿½Â·ï¿½ï¿½Ð´ï¿½ï¿½Ç°ï¿½ï¿½ï¿½È¶ï¿½ï¿½ï¿½ results ï¿½ï¿½ï¿½ï¿½ï¿½ËºÅ²ï¿½ï¿½ï¿½ï¿½Ö²ï¿½
     cur_pos = results.get("positions") if isinstance(results.get("positions"), dict) else {}
     cleaned = _positions_match_account(cur_pos, aid)
     if cleaned != cur_pos:
@@ -2116,7 +2127,7 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
     if acc_rows:
         results["account"] = _parse_account_row(acc_rows[0], aid)
         wrote = True
-    # pos_raw ·Ç None£º²éÑ¯ÒÑ·¢Éú¡£¿Õ½á¹ûÄ¬ÈÏÕû±í¸²¸Ç£»µ«ÈôÊÐÖµÏÔÊ¾ÓÐ²ÖÇÒ½âÎöÎª 0£¬ÓÅÏÈ±£Áô»º´æ£¬±ÜÃâ API/ÈÝÆ÷½âÎöÊ§°ÜÄ¨²Ö¡£
+    # pos_raw ï¿½ï¿½ Noneï¿½ï¿½ï¿½ï¿½Ñ¯ï¿½Ñ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ½ï¿½ï¿½Ä¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½Ê¾ï¿½Ð²ï¿½ï¿½Ò½ï¿½ï¿½ï¿½Îª 0ï¿½ï¿½ï¿½ï¿½ï¿½È±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ£¬ï¿½ï¿½ï¿½ï¿½ API/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½ï¿½Ä¨ï¿½Ö¡ï¿½
     positions = {}
     alert_positions = {}
     if pos_raw is not None:
@@ -2145,7 +2156,7 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
             wrote = True
             alert_positions = dict(kept)
         else:
-            # ³Ö²Ö²éÑ¯Î´·µ»ØÊ±£¬²»Òª¼ÌÐøÕ¹Ê¾±ðµÄÕËºÅ¾É²Ö
+            # ï¿½Ö²Ö²ï¿½Ñ¯Î´ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½Õ¹Ê¾ï¿½ï¿½ï¿½ï¿½ËºÅ¾É²ï¿½
             if results.get("positions"):
                 results["positions"] = {}
                 wrote = True
@@ -2158,12 +2169,12 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
     else:
         parsed_orders = _parse_order_rows(order_rows, aid)
         if parsed_orders:
-            # ²¢Èë»º´æ£¬ÎðÕû±íÌæ»»£º¹ñÌ¨Å¼·¢Â©·µ»ØÊ±±£ÁôÒÑ¼ûµ±ÈÕµ¥
+            # ï¿½ï¿½ï¿½ë»ºï¿½æ£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ»»ï¿½ï¿½ï¿½ï¿½Ì¨Å¼ï¿½ï¿½Â©ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¼ï¿½ï¿½ï¿½ï¿½Õµï¿½
             broker_orders = _upsert_cached_orders(parsed_orders)
         else:
             _prune_cached_orders()
             broker_orders = list(_CACHED_ORDERS.values()) if _CACHED_ORDERS else []
-    # ¿ÕÁÐ±íÒ²Ð´Èë£¬±ÜÃâÖ÷³ÌÐòÎóÒÔÎª¡¸ÉÐÎ´²éÑ¯¡¹
+    # ï¿½ï¿½ï¿½Ð±ï¿½Ò²Ð´ï¿½ë£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½Ñ¯ï¿½ï¿½
     if merge_broker_orders_into_results(results, broker_orders):
         wrote = True
     results["order_query"] = {
@@ -2198,10 +2209,10 @@ def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id=""
             "acc_len=%s" % (_raw_len(acc_raw) if acc_raw is not None else "none"),
             "pos_len=%s" % (_raw_len(pos_raw) if pos_raw is not None else "none"),
         ]
-        print("[½»Ò×ºËÐÄ] ÕË»§Õï¶Ï(Èë¿Ú): %s" % "; ".join(parts))
+        print("[ï¿½ï¿½ï¿½×ºï¿½ï¿½ï¿½] ï¿½Ë»ï¿½ï¿½ï¿½ï¿½(ï¿½ï¿½ï¿½): %s" % "; ".join(parts))
         return False, "trade_detail_empty"
 
-    # ¸æ¾¯ÒÀ¾Ý£º±¾´Î½âÎö³öµÄ³Ö²Ö£¨²»ÊÇÕ¹Ê¾ÓÃ»º´æ£©¡£Õæ¿Õ²Ö+ÊÐÖµ¡Ö0 ²»¸æ¾¯¡£
+    # ï¿½æ¾¯ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½ï¿½Î½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä³Ö²Ö£ï¿½ï¿½ï¿½ï¿½ï¿½Õ¹Ê¾ï¿½Ã»ï¿½ï¿½æ£©ï¿½ï¿½ï¿½ï¿½Õ²ï¿½+ï¿½ï¿½Öµï¿½ï¿½0 ï¿½ï¿½ï¿½æ¾¯ï¿½ï¿½
     if pos_raw is not None:
         _update_position_alert(
             results,
@@ -2222,7 +2233,7 @@ _BOUND_ACCOUNT_ID = ""
 
 
 def _clear_account_caches_if_switched(aid: str) -> bool:
-    """»»ÕËºÅºóÇåµô¾ÉºÅ×Ê½ð/³Ö²Ö»º´æ£¬±ÜÃâ¼ÌÐøÐ´»Ø results.json¡£"""
+    """ï¿½ï¿½ï¿½ËºÅºï¿½ï¿½ï¿½ï¿½ï¿½Éºï¿½ï¿½Ê½ï¿½/ï¿½Ö²Ö»ï¿½ï¿½æ£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ results.jsonï¿½ï¿½"""
     global _CACHED_ACCOUNT, _CACHED_POSITIONS, _BOUND_ACCOUNT_ID, _CACHED_ORDERS
     new_aid = str(aid or "").strip()
     old_aid = str(_BOUND_ACCOUNT_ID or "").strip()
@@ -2235,7 +2246,7 @@ def _clear_account_caches_if_switched(aid: str) -> bool:
             _CACHED_ORDERS = {}
         except Exception:
             pass
-        print("[ÕË»§] ÒÑÇÐ»» %s ¡ú %s£¬ÒÑÇå¿Õ¾É³Ö²Ö»º´æ" % (old_aid, new_aid))
+        print("[ï¿½Ë»ï¿½] ï¿½ï¿½ï¿½Ð»ï¿½ %s ï¿½ï¿½ %sï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¾É³Ö²Ö»ï¿½ï¿½ï¿½" % (old_aid, new_aid))
         _BOUND_ACCOUNT_ID = new_aid
         return True
     _BOUND_ACCOUNT_ID = new_aid
@@ -2243,7 +2254,7 @@ def _clear_account_caches_if_switched(aid: str) -> bool:
 
 
 def sync_account_snapshot_to_results(ContextInfo, results, account_id=""):
-    """½«×Ê½ð/³Ö²Ö/Î¯ÍÐÐ´Èë results¡£"""
+    """ï¿½ï¿½ï¿½Ê½ï¿½/ï¿½Ö²ï¿½/Î¯ï¿½ï¿½Ð´ï¿½ï¿½ resultsï¿½ï¿½"""
     global _CACHED_ACCOUNT, _CACHED_ORDERS
     if not isinstance(results, dict):
         return False, "results_not_dict"
@@ -2256,7 +2267,7 @@ def sync_account_snapshot_to_results(ContextInfo, results, account_id=""):
             bind_trading_account(ContextInfo, aid)
         except Exception:
             pass
-        # ¾ÉºÅ¿ìÕÕÁ¢¿ÌÇåµô£¬½»Ò×ÏµÍ³²»»áÔÙÏÔÊ¾ÉÏÒ»»§³Ö²Ö
+        # ï¿½ÉºÅ¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÏµÍ³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¾ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Ö²ï¿½
         results["account"] = {
             "account_id": aid,
             "total_asset": 0.0,
@@ -2282,19 +2293,19 @@ def sync_account_snapshot_to_results(ContextInfo, results, account_id=""):
         ContextInfo,
         aid,
         "order",
-        strategy_names=("ÂìÒÏ-µ¥µãÂòÈë", "ÂìÒÏ-µ¥µãÂô³ö", "ÂìÒÏ-Í»ÆÆÂòÈë", "ÂìÒÏ-Í»ÆÆÂô³ö", "ÂìÒÏ-µ¯ÐÔÂô³ö", "ÂìÒÏ-µ¯ÐÔÂòÈë", "ÂìÒÏ-Áý×ÓÂòÈë", "ÂìÒÏ-Áý×ÓÂô³ö", "ÂìÒÏ-Íø¸ñÂòÈë", "ÂìÒÏ-Íø¸ñÂô³ö", "ÂìÒÏ-¶¨Ê±Çå²Ö", "ÂìÒÏ-Ò¹ÊÐÂòÈë", "ÂìÒÏ-Ò¹ÊÐÂô³ö", "ÂìÒÏ-ÌáÇ°ÂòÈë", "ÂìÒÏ-ÌáÇ°Âô³ö", "ÂìÒÏ-ÌáÇ°È·ÈÏ", "ÂìÒÏ-ÌáÇ°³·µ¥", "ÂìÒÏ-ÄÚÖÃÏÂµ¥"),
+        strategy_names=("ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ê±ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°È·ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½Âµï¿½"),
     )
     deal_rows = _fetch_trade_detail(
         ContextInfo,
         aid,
         "deal",
-        strategy_names=("ÂìÒÏ-µ¥µãÂòÈë", "ÂìÒÏ-µ¥µãÂô³ö", "ÂìÒÏ-Í»ÆÆÂòÈë", "ÂìÒÏ-Í»ÆÆÂô³ö", "ÂìÒÏ-µ¯ÐÔÂô³ö", "ÂìÒÏ-µ¯ÐÔÂòÈë", "ÂìÒÏ-Áý×ÓÂòÈë", "ÂìÒÏ-Áý×ÓÂô³ö", "ÂìÒÏ-Íø¸ñÂòÈë", "ÂìÒÏ-Íø¸ñÂô³ö", "ÂìÒÏ-¶¨Ê±Çå²Ö", "ÂìÒÏ-Ò¹ÊÐÂòÈë", "ÂìÒÏ-Ò¹ÊÐÂô³ö", "ÂìÒÏ-ÌáÇ°ÂòÈë", "ÂìÒÏ-ÌáÇ°Âô³ö", "ÂìÒÏ-ÌáÇ°È·ÈÏ", "ÂìÒÏ-ÌáÇ°³·µ¥", "ÂìÒÏ-ÄÚÖÃÏÂµ¥"),
+        strategy_names=("ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ê±ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-Ò¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°È·ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½", "ï¿½ï¿½ï¿½ï¿½-ï¿½ï¿½ï¿½ï¿½ï¿½Âµï¿½"),
     )
 
     if acc_rows:
         results["account"] = _parse_account_row(acc_rows[0], aid)
         wrote = True
-    # ³Ö²Ö²éÑ¯½á¹ûÕû±í¸²¸Ç£¨¿Õ²Ö / È« 0 Ò²Çå¿Õ£©£¬²¢Í¬²½»º´æ£¬±ÜÃâÂô¹âºóÈÔÏÔÊ¾¾É¹ÉÊý
+    # ï¿½Ö²Ö²ï¿½Ñ¯ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç£ï¿½ï¿½Õ²ï¿½ / È« 0 Ò²ï¿½ï¿½Õ£ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½æ£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¾ï¿½É¹ï¿½ï¿½ï¿½
     positions = _parse_position_rows(pos_rows, aid)
     acc_probe = results.get("account") if isinstance(results.get("account"), dict) else {}
     market = _account_stock_market_value(acc_probe)

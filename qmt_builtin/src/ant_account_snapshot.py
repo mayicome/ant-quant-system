@@ -1768,10 +1768,21 @@ def _is_suspicious_empty_positions(account, positions_parsed):
 
 
 def _in_cn_equity_session(now=None):
-    """A 股常规交易时段：工作日 09:00–15:30（含午休；非交易日/夜盘不算）。"""
+    """A 股常规交易时段：交易日 09:00–15:30（含午休；法定休市/夜盘不算）。
+
+    必须用 utils.trading_day.is_tradeday，不能只看周一到周五——否则国庆等
+    工作日假日会按盘中 1 小时冷却刷 Server酱。
+    """
     now = now or datetime.now()
-    if now.weekday() >= 5:
-        return False
+    try:
+        from utils.trading_day import is_tradeday
+
+        if not is_tradeday(now.date()):
+            return False
+    except Exception:
+        # QMT 内偶发无 utils：退回周末判断（仍可能误判法定假日）
+        if now.weekday() >= 5:
+            return False
     t = now.time()
     return dt_time(9, 0) <= t <= dt_time(15, 30)
 

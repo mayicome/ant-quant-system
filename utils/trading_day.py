@@ -21,7 +21,7 @@ _trade_date_cache = None
 _cache_date_range = None
 # 记录缓存构建当天；用于跨自然日后对“今天是否交易日”做一次刷新兜底
 _cache_built_on = None
-# 同日早盘 xtdata 日历不含“今天”时，是否已尝试过强制刷新（避免死循环）
+# 同日缓存缺「今天」时是否已尝试过强制刷新（避免死循环）
 _same_day_missing_today_refresh_on: Optional[date] = None
 # 今日 weekday 兜底告警是否已打印
 _today_weekday_fallback_logged_on: Optional[date] = None
@@ -60,9 +60,39 @@ def _calendar_disk_path() -> str:
     return os.path.join(root, "data", "trade_calendar.json")
 
 
+def _calendar_disk_candidates() -> List[str]:
+    out: List[str] = []
+    try:
+        out.append(_calendar_disk_path())
+    except Exception:
+        pass
+    try:
+        from ant_qmt_paths import DATA_DIR  # type: ignore
+
+        out.append(os.path.join(str(DATA_DIR), "trade_calendar.json"))
+    except Exception:
+        pass
+    try:
+        out.append(
+            "D:\\"
+            + "\u8682\u8681\u91cf\u5316\u7cfb\u7edf"
+            + "\\data\\trade_calendar.json"
+        )
+    except Exception:
+        pass
+    return out
+
+
 def _load_disk_trade_dates() -> Set[date]:
-    path = _calendar_disk_path()
-    if not os.path.isfile(path):
+    path = ""
+    for cand in _calendar_disk_candidates():
+        try:
+            if cand and os.path.isfile(cand):
+                path = cand
+                break
+        except Exception:
+            continue
+    if not path:
         return set()
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -72,7 +102,10 @@ def _load_disk_trade_dates() -> Set[date]:
         for item in raw or []:
             s = str(item or "").strip()[:10]
             if len(s) == 10 and s[4] == "-" and s[7] == "-":
-                out.add(date.fromisoformat(s))
+                try:
+                    out.add(datetime.strptime(s, "%Y-%m-%d").date())
+                except ValueError:
+                    continue
         return out
     except Exception:
         return set()
@@ -139,66 +172,13 @@ def _apply_trade_dates(
 
 
 def _build_trade_date_cache(cache_start: date, cache_end: date, today: date) -> bool:
-    """从 xtdata / akshare 构建交易日历缓存，成功返回 True。"""
+    """从新浪 / 本地 trade_calendar.json 构建交易日历缓存，成功返回 True。
+
+    不再使用 xtdata.get_trading_dates（大 QMT 侧不可靠）。
+    """
     global _trade_date_cache, _cache_date_range, _cache_built_on, _warning_printed, _success_printed
 
-    def _parse_ts_to_date(ts_val: Any) -> Optional[date]:
-        if isinstance(ts_val, (int, float)):
-            ts_float = float(ts_val)
-            d = datetime.fromtimestamp(ts_float / 1000.0 if ts_float > 1e10 else ts_float).date()
-            return d
-        if isinstance(ts_val, str):
-            ds = ts_val.replace("-", "").strip()[:8]
-            if ds.isdigit():
-                return datetime.strptime(ds, "%Y%m%d").date()
-        return None
-
-    trade_dates_set = set()
-    last_xt_error = RuntimeError("xtdata 未调用")
-    xtdata_had_partial = False
-
-    # 1) xtdata
-    try:
-        import xtquant.xtdata as xtdata
-        try:
-            xtdata.enable_hello = False
-        except Exception:
-            pass
-
-        start_str = cache_start.strftime("%Y%m%d")
-        end_str = cache_end.strftime("%Y%m%d")
-        trading_dates_ts = xtdata.get_trading_dates("SH", start_time=start_str, end_time=end_str)
-
-        trade_dates_set = set()
-        for ts_val in (trading_dates_ts or []):
-            d = _parse_ts_to_date(ts_val)
-            if d:
-                trade_dates_set.add(d)
-
-        if trade_dates_set:
-            if today in trade_dates_set:
-                _trade_date_cache = trade_dates_set
-                _cache_date_range = (cache_start, cache_end)
-                _cache_built_on = today
-                if not _success_printed:
-                    _success_printed = True
-                    _safe_print("成功从 xtdata 获取交易日历")
-                    _safe_print(
-                        f"  - 缓存范围: {cache_start} 至 {cache_end} "
-                        f"(共{len(_trade_date_cache)}个交易日)"
-                    )
-                return True
-            # xtdata 有历史日历但缺「今天」（早盘 QMT 未就绪时常见），继续用 akshare 补充
-            _trade_date_cache = trade_dates_set
-            xtdata_had_partial = True
-            last_xt_error = RuntimeError("xtdata 日历未包含今日")
-    except Exception as e_xt:
-        last_xt_error = e_xt
-    else:
-        if not trade_dates_set:
-            last_xt_error = RuntimeError("xtdata 返回的交易日期为空")
-
-    # 2) 新浪交易日历（走当前环境代理）
+    # 1) 新浪交易日历（成功则写回磁盘）
     try:
         sina_dates = _fetch_sina_trade_dates()
         if _apply_trade_dates(sina_dates, cache_start, cache_end, today, "新浪交易日历"):
@@ -206,41 +186,43 @@ def _build_trade_date_cache(cache_start: date, cache_end: date, today: date) -> 
             return True
         raise RuntimeError("新浪交易日历筛选后为空")
     except Exception as e_ak:
+        # 2) 本地磁盘缓存
         disk_dates = _load_disk_trade_dates()
         if disk_dates and _apply_trade_dates(
             disk_dates, cache_start, cache_end, today, "本地交易日历缓存"
         ):
             return True
-        if _trade_date_cache and today in _trade_date_cache:
+        if _trade_date_cache and (
+            today in _trade_date_cache or _cache_covers_today(today)
+        ):
             _cache_date_range = (cache_start, cache_end)
             _cache_built_on = today
             return True
         if not _warning_printed:
             _warning_printed = True
             _safe_print(
-                f"警告: 交易日历获取失败（xtdata/新浪均失败），"
-                f"使用简单周末判断（{type(last_xt_error).__name__}/{type(e_ak).__name__}）"
+                f"警告: 交易日历获取失败（新浪失败且无可用本地缓存），"
+                f"按非交易日处理（{type(e_ak).__name__}）"
             )
         return False
 
 
 def _today_weekday_fallback(check_date: date) -> bool:
-    """仅当日历源失败或未覆盖到今天时，对当日 Mon–Fri 做兜底。
+    """日历不可用时的兜底：失败闭合为非交易日。
 
-    注意：日历已覆盖到今天、但今天不在集合内，表示法定休市，不得走此兜底
-    （否则中秋等「周五假日」会被误判为交易日）。
+    旧逻辑按 Mon–Fri=交易日，会把国庆等法定休市误判为开市。
     """
     global _today_weekday_fallback_logged_on
     today = date.today()
-    if check_date != today or check_date.weekday() >= 5:
+    if check_date != today:
         return False
     if _today_weekday_fallback_logged_on != today:
         _today_weekday_fallback_logged_on = today
         _safe_print(
-            f"警告: 交易日历未覆盖今日({today})，暂按工作日兜底判定为交易日；"
-            f"若今日为法定节假日，请稍后重连 QMT 或重启程序刷新日历"
+            f"警告: 交易日历未覆盖今日({today})，按非交易日处理（失败闭合）；"
+            f"请检查 data/trade_calendar.json 或稍后重连刷新日历"
         )
-    return True
+    return False
 
 
 def _cache_covers_today(today: date) -> bool:
@@ -268,9 +250,9 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
     判断指定日期是否为交易日。
 
     优先策略：
-    1) 用 xtdata.get_trading_dates() 取交易日历（不依赖 akshare 的 is_trade_date API）
-    2) xtdata 获取失败才回退到 akshare 的交易日历（不调用 is_trade_date 逐日接口）
-    3) 仍失败则回退简单“周末判断”
+    1) 新浪交易日历（akshare），成功则写回 data/trade_calendar.json
+    2) 本地 trade_calendar.json
+    3) 仍失败则按非交易日（失败闭合，不用 weekday）
     """
     global _trade_date_cache, _cache_date_range, _cache_built_on, _same_day_missing_today_refresh_on
     global _calendar_build_failed_on
@@ -280,9 +262,13 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
 
     today = date.today()
     if _trade_date_cache is None and _calendar_build_failed_on == today:
-        if check_date == today:
-            return _today_weekday_fallback(check_date)
-        return check_date.weekday() < 5
+        disk = _load_disk_trade_dates()
+        if disk:
+            lo, hi = min(disk), max(disk)
+            if lo <= check_date <= hi:
+                return check_date in disk
+        # 失败闭合：勿 weekday 兜底
+        return False
     cache_start = today.replace(year=today.year - 3)  # 从3年前开始
     cache_end = today.replace(year=today.year + 1)    # 到明年结束
     # 历史回测/选股若问到更早日期，把缓存起点前推（含约 60 自然日缓冲，供「前 N 交易日」）
@@ -301,12 +287,12 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
         and check_date not in _trade_date_cache
     )
 
-    # 同日早盘：xtdata 在 QMT 未就绪时可能返回不含「今天」的日历，
-    # 旧逻辑因 _cache_built_on == today 不会刷新，导致全天误判为非交易日。
+    # 同日：缓存未覆盖到今天时再刷一次；已覆盖且缺今天=休市，不必再刷
     same_day_incomplete_cache = (
         missing_today_in_cache
         and check_date == today
         and _same_day_missing_today_refresh_on != today
+        and not _cache_covers_today(today)
     )
 
     need_refresh = (
@@ -331,7 +317,13 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
             cache_end = max(cache_end, _cache_date_range[1])
         if not _build_trade_date_cache(cache_start, cache_end, today):
             _calendar_build_failed_on = today
-            return _today_weekday_fallback(check_date) if check_date == today else check_date.weekday() < 5
+            # 构建失败时仍优先磁盘：覆盖范围内缺日=休市，勿把国庆等周中假当交易日
+            disk = _load_disk_trade_dates()
+            if disk:
+                lo, hi = min(disk), max(disk)
+                if lo <= check_date <= hi:
+                    return check_date in disk
+            return False
         _calendar_build_failed_on = None
 
     if _trade_date_cache and check_date in _trade_date_cache:
@@ -340,6 +332,13 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
     # 日历已覆盖到今天：不在集合内 = 休市（含周五法定假日），禁止再按工作日兜底
     if check_date == today and _cache_covers_today(today):
         return False
+
+    # 磁盘日历覆盖范围内：缺日=休市（国庆等），优先于工作日兜底
+    disk = _load_disk_trade_dates()
+    if disk:
+        lo, hi = min(disk), max(disk)
+        if lo <= check_date <= hi:
+            return check_date in disk
 
     # 仅日历失败/过期未覆盖到今天时，才对今日做工作日兜底
     if check_date == today and _today_weekday_fallback(check_date):
@@ -406,7 +405,7 @@ def _warm_trade_date_cache(start_date: date, end_date: date) -> None:
 
 
 def get_trading_dates_set_for_range(start_date: date, end_date: date) -> Set[date]:
-    """返回区间内交易日集合（优先 xtdata/akshare 缓存）。"""
+    """返回区间内交易日集合（新浪/本地日历缓存）。"""
     if start_date > end_date:
         start_date, end_date = end_date, start_date
     _warm_trade_date_cache(start_date, end_date)

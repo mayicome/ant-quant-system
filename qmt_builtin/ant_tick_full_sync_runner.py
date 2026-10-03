@@ -19,11 +19,12 @@
 import json
 import os
 import shutil
+import sys
 import time
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-TICK_FULL_SYNC_VERSION = "20260811.05"
+TICK_FULL_SYNC_VERSION = "20261002.01"
 # 与日线同点：仅作 catch-up 判断；正式启动由 daily_sync 串行触发
 SYNC_HOUR = 15
 SYNC_MINUTE = 35
@@ -216,19 +217,57 @@ def _load_xtdata():
         return None
 
 
+def _ensure_project_on_path():
+    # type: () -> None
+    root = _project_root()
+    if root and root not in sys.path:
+        sys.path.insert(0, root)
+
+
+def _calendar_is_tradeday(day):
+    # type: (date) -> Optional[bool]
+    """共享交易日历。磁盘优先；成功返回 True/False；失败返回 None。"""
+    _ensure_project_on_path()
+    # 1) 磁盘日历（不受 utils 旧缓存 / weekday 兜底影响）
+    try:
+        path = os.path.join(_data_dir(), "trade_calendar.json")
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f) or {}
+        raw = payload.get("dates") if isinstance(payload, dict) else None
+        if raw:
+            keys = set()
+            parsed = []
+            for x in raw:
+                s = str(x or "").strip()[:10]
+                if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                    keys.add(s)
+                    try:
+                        parsed.append(datetime.strptime(s, "%Y-%m-%d").date())
+                    except ValueError:
+                        pass
+            if parsed:
+                lo, hi = min(parsed), max(parsed)
+                if lo <= day <= hi:
+                    return day.isoformat() in keys
+    except Exception:
+        pass
+    # 2) utils.trading_day
+    try:
+        from utils.trading_day import is_tradeday as _td
+
+        return bool(_td(day))
+    except Exception:
+        return None
+
+
 def _is_tradeday(xtdata, day):
     # type: (Any, date) -> bool
-    try:
-        ds = day.strftime("%Y%m%d")
-        arr = xtdata.get_trading_dates("SH", ds, ds) or []
-        return bool(arr)
-    except Exception:
-        try:
-            from utils.trading_day import is_tradeday as _td
-
-            return bool(_td(day))
-        except Exception:
-            return day.weekday() < 5
+    """是否交易日。日历不可用则当休市（勿 xtdata/weekday 兜底）。"""
+    del xtdata
+    cal = _calendar_is_tradeday(day)
+    if cal is not None:
+        return cal
+    return False
 
 
 def _load_universe_from_file():
@@ -1155,11 +1194,8 @@ def run_tick_full_sync(
         trade_d = now.date()
         day_s = trade_d.strftime("%Y%m%d")
 
-    if xtdata is not None and not _is_tradeday(xtdata, trade_d):
+    if not _is_tradeday(xtdata, trade_d):
         _log("非交易日: %s" % day_s)
-        return False
-    if xtdata is None and trade_d.weekday() >= 5:
-        _log("非交易日（周末）: %s" % day_s)
         return False
 
     subset_mode = bool(
@@ -2166,20 +2202,11 @@ def run_post_daily_pipeline(ContextInfo=None):
 def _today_is_tradeday(ContextInfo=None):
     # type: (Any) -> bool
     """今日是否交易日；供默认盘后流水线早退（不建空 ticks 目录）。"""
-    today = date.today()
-    xtdata = _load_xtdata()
-    if xtdata is not None:
-        return bool(_is_tradeday(xtdata, today))
-    if ContextInfo is not None:
-        fn = getattr(ContextInfo, "get_trading_dates", None)
-        if callable(fn):
-            try:
-                ds = today.strftime("%Y%m%d")
-                arr = fn("SH", ds, ds) or []
-                return bool(arr)
-            except Exception:
-                pass
-    return today.weekday() < 5
+    del ContextInfo
+    cal = _calendar_is_tradeday(date.today())
+    if cal is not None:
+        return cal
+    return False
 
 
 def _daily_gate_open():
