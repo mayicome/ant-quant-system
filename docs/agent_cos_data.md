@@ -50,10 +50,11 @@ cos/   （离线 zip 解压后根目录；COS 上为桶内 cos/ 前缀）
 ```
 cos/runtime/
 ├── a_share_universe.json      ← 全 A 代码列表
-└── qmt_sector_index.json      ← QMT 板块反查索引
+├── qmt_sector_index.json      ← QMT 板块反查索引
+└── daily_cache.zip            ← 滚动日线近窗（manifest.json + 个股 CSV）
 ```
 
-**日更习惯**：`board_rank` / `main_flow` / `lhb` 当日分片按天新增或覆盖；`after_hours_top.jsonl`、`all_a_stock_info.jsonl`、`lhb_base_*.jsonl` 为合并/全量文件，整文件覆盖。盘后上传会把本机 `data/a_share_universe.json`、`data/qmt_sector_index.json` 拷到 `cos/runtime/` 后覆盖远端。
+**日更习惯**：`board_rank` / `main_flow` / `lhb` 当日分片按天新增或覆盖；`after_hours_top.jsonl`、`all_a_stock_info.jsonl`、`lhb_base_*.jsonl` 为合并/全量文件，整文件覆盖。盘后上传会把本机 `data/a_share_universe.json`、`data/qmt_sector_index.json` 拷到 `cos/runtime/`，并把 `data/daily_cache` 打成 `daily_cache.zip` 后覆盖远端。新机仅在本地日线目录缺失或不完整时下载该 zip。
 
 ---
 

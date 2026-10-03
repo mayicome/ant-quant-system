@@ -165,7 +165,7 @@ class _UpdateWorker(QThread):
 
 
 class _RuntimeIndexWorker(QThread):
-    """本地缺股票池/板块索引时从 COS 拉取底稿，不覆盖已有文件。"""
+    """本地缺股票池/板块索引/日线近窗时从 COS 拉取底稿，不覆盖已有完整目录。"""
 
     finished_ok = pyqtSignal(object)
 
@@ -178,12 +178,13 @@ class _RuntimeIndexWorker(QThread):
             boot = _load_py_from_disk(
                 "utils/runtime_index_bootstrap.py", "ant_runtime_index_bootstrap"
             )
-            if not boot.missing_files(self.root):
+            if not boot.missing_runtime(self.root):
                 self.finished_ok.emit({"fetched": [], "skipped": True, "errors": {}})
                 return
             result = boot.fetch_missing(
                 self.root,
                 should_abort=self.isInterruptionRequested,
+                include_daily_cache=True,
             )
             self.finished_ok.emit(result)
         except Exception as e:
@@ -888,7 +889,7 @@ class AntLauncherWindow(QMainWindow):
             boot = _load_py_from_disk(
                 "utils/runtime_index_bootstrap.py", "ant_runtime_index_bootstrap"
             )
-            needed = boot.missing_files(self._project_root())
+            needed = boot.missing_runtime(self._project_root())
             paths = boot.dest_paths(self._project_root())
         except Exception as e:
             self._append_launcher_log("runtime index: check failed %s" % e)
@@ -901,20 +902,29 @@ class AntLauncherWindow(QMainWindow):
                     sizes.append("%s=%s" % (name, os.path.getsize(p)))
                 except OSError:
                     sizes.append("%s=missing" % name)
+            try:
+                sizes.append("daily_cache_csv=%s" % boot.count_daily_cache_csv(self._project_root()))
+            except Exception:
+                sizes.append("daily_cache_csv=?")
             self._append_launcher_log(
                 "runtime index: skip (already present) %s" % "; ".join(sizes)
             )
             self._after_runtime_index_bootstrap()
             return
+        first = needed[0]
+        if first == getattr(boot, "DAILY_CACHE_ZIP_NAME", "daily_cache.zip"):
+            dest_hint = boot.daily_cache_dir(self._project_root())
+        else:
+            dest_hint = os.path.dirname(paths[first])
         self._append_launcher_log(
             "runtime index: need %s dest=%s url0=%s"
             % (
                 ",".join(needed),
-                os.path.dirname(paths[needed[0]]),
-                boot.public_object_url(needed[0]),
+                dest_hint,
+                boot.public_object_url(first),
             )
         )
-        self._set_update_status("正在从云端获取股票池与板块索引…")
+        self._set_update_status("正在从云端获取股票池、板块索引或日线缓存…")
         worker = _RuntimeIndexWorker(self._project_root(), parent=self)
         self._bootstrap_worker = worker
         worker.finished_ok.connect(self._on_runtime_index_bootstrap_done)

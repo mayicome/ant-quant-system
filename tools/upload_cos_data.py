@@ -4,7 +4,8 @@
 默认：
   本地 data/cos/**  →  cos://{bucket}/cos/**
   上传前把 data/a_share_universe.json、data/qmt_sector_index.json
-  拷到 data/cos/runtime/（每次覆盖上传；不打进 ant-quant-data.zip）
+  以及 data/daily_cache 打成的 daily_cache.zip
+  放到 data/cos/runtime/（每次覆盖上传；不打进 ant-quant-data.zip）
   可选打包并上传离线包 ant-quant-data.zip → 桶根目录
 
 密钥（勿写入仓库）：
@@ -179,7 +180,15 @@ def _ensure_public_read(client, bucket: str, key: str) -> None:
 
 
 def iter_local_files(src_dir: Path) -> List[Path]:
-    return sorted(p for p in src_dir.rglob("*") if p.is_file())
+    skip_suffix = (".part", ".installing", ".tmp")
+    out: List[Path] = []
+    for p in src_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.name.endswith(skip_suffix):
+            continue
+        out.append(p)
+    return sorted(out)
 
 
 def sync_cos_tree(
@@ -279,7 +288,7 @@ def main() -> None:
     ap.add_argument(
         "--runtime-only",
         action="store_true",
-        help="只上传 data/cos/runtime/（股票池与板块索引底稿）",
+        help="只上传 data/cos/runtime/（股票池、板块索引、日线缓存 zip）",
     )
     ap.add_argument("--src", default=str(LOCAL_COS_DIR), help="本地目录，默认 data/cos")
     args = ap.parse_args()
@@ -356,6 +365,7 @@ def main() -> None:
         "zip": "%s/%s" % (base, zip_key.lstrip("/")),
         "a_share_universe": prefix_url + "runtime/a_share_universe.json",
         "qmt_sector_index": prefix_url + "runtime/qmt_sector_index.json",
+        "daily_cache_zip": prefix_url + "runtime/daily_cache.zip",
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if (summary.get("tree") or {}).get("fail"):
