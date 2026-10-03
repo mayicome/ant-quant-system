@@ -3534,7 +3534,12 @@ class SectorStockFilterDialog(QDialog):
             _root = os.path.dirname(os.path.abspath(__file__))
             if missing_files(_root):
                 logger.info("选股启动：本地缺股票池/板块索引，尝试从云端获取")
-                fetch_missing(_root)
+                _got = fetch_missing(_root)
+                logger.info(
+                    "选股启动：云端补齐 fetched=%s errors=%s",
+                    (_got or {}).get("fetched"),
+                    (_got or {}).get("errors"),
+                )
         except Exception as e:
             logger.warning("选股启动：云端补齐板块索引失败: %s", e)
 

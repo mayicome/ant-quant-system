@@ -125,17 +125,24 @@ def _download_url(
 
 
 def _atomic_place(src: str, dest: str) -> None:
-    """同盘 rename；跨盘（WinError 17）则复制再删源。"""
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    """写入目标盘上的 dest。
+
+    先复制到 dest 同目录的 .installing，再 replace。
+    不要对跨盘的 C:\\Temp 源文件直接 os.replace（WinError 17）。
+    """
+    dest_dir = os.path.dirname(dest) or "."
+    os.makedirs(dest_dir, exist_ok=True)
+    staging = dest + ".installing"
     try:
-        os.replace(src, dest)
-        return
-    except OSError:
-        shutil.copy2(src, dest)
+        shutil.copy2(src, staging)
+        os.replace(staging, dest)
+    except Exception:
         try:
-            os.remove(src)
+            if os.path.isfile(staging):
+                os.remove(staging)
         except OSError:
             pass
+        raise
 
 
 def _install_download(tmp_path: str, dest: str, name: str) -> Optional[str]:

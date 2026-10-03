@@ -316,7 +316,8 @@ def check_for_updates(
     )
 
     if behind <= 0 and ahead <= 0:
-        msg = "已是最新。"
+        short = (local_sha or "")[:10]
+        msg = "已是最新（%s）。" % short if short else "已是最新。"
         can = False
     elif behind > 0 and ahead > 0:
         msg = (

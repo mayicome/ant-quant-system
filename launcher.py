@@ -44,16 +44,18 @@ if _BOOT_ROOT and _BOOT_ROOT not in sys.path:
 
 
 def _load_py_from_disk(rel_path: str, module_name: str):
-    """从项目根加载 .py（打包 exe 也读磁盘，便于 git pull 生效）。"""
+    """从项目根加载 .py（打包 exe 也读磁盘，便于 git pull 生效）。
+
+    每次从磁盘重新 exec，避免「检查更新」拉到新文件后仍用内存里的旧模块
+    （例如仍走 C:\\Temp + os.replace，触发 WinError 17）。
+    """
     import importlib.util
     import sys as _sys
 
     path = os.path.join(_BOOT_ROOT, *rel_path.replace("\\", "/").split("/"))
     if not os.path.isfile(path):
         raise FileNotFoundError(f"找不到模块文件：{path}")
-    existing = _sys.modules.get(module_name)
-    if existing is not None and getattr(existing, "__file__", None) == path:
-        return existing
+    _sys.modules.pop(module_name, None)
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"无法加载模块：{path}")
@@ -62,6 +64,25 @@ def _load_py_from_disk(rel_path: str, module_name: str):
     _sys.modules[module_name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _git_head_short(root: str) -> str:
+    try:
+        cp = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if int(cp.returncode or 0) == 0:
+            return (cp.stdout or "").strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _load_repo_updater():
@@ -326,6 +347,11 @@ class AntLauncherWindow(QMainWindow):
         self._setup_ui()
         self._arm_post_market_watch()
         self._ensure_app_config_ini()
+        head = _git_head_short(self._project_root())
+        self._append_launcher_log(
+            "launcher start: version=%s head=%s root=%s"
+            % (_display_version() or "?", head or "?", self._project_root())
+        )
         QTimer.singleShot(0, self._start_runtime_index_bootstrap)
 
     def _get_apps_config_path(self) -> str:
@@ -881,7 +907,12 @@ class AntLauncherWindow(QMainWindow):
             self._after_runtime_index_bootstrap()
             return
         self._append_launcher_log(
-            "runtime index: need %s dest=%s" % (",".join(needed), os.path.dirname(paths[needed[0]]))
+            "runtime index: need %s dest=%s url0=%s"
+            % (
+                ",".join(needed),
+                os.path.dirname(paths[needed[0]]),
+                boot.public_object_url(needed[0]),
+            )
         )
         self._set_update_status("正在从云端获取股票池与板块索引…")
         worker = _RuntimeIndexWorker(self._project_root(), parent=self)
@@ -1026,14 +1057,25 @@ class AntLauncherWindow(QMainWindow):
             return
 
         if result.behind <= 0:
+            sha = (getattr(result, "local_sha", None) or "")[:10]
             if silent_if_latest:
-                tip = f"代码已是最新（{ver}）。" if ver else "代码已是最新。"
-                self._set_update_status(tip, auto_clear_ms=2000)
+                bits = [x for x in (ver, sha) if x]
+                tip = (
+                    "代码已是最新（%s）。" % " ".join(bits)
+                    if bits
+                    else "代码已是最新。"
+                )
+                self._set_update_status(tip, auto_clear_ms=4000)
             else:
                 self._clear_update_status()
                 msg = result.message
+                extra = []
                 if ver_hint:
-                    msg = f"{msg}\n\n{ver_hint}"
+                    extra.append(ver_hint)
+                if sha:
+                    extra.append("本地提交：%s" % sha)
+                if extra:
+                    msg = f"{msg}\n\n" + "\n".join(extra)
                 QMessageBox.information(self, "检查更新", msg)
             return
 
@@ -1113,13 +1155,21 @@ class AntLauncherWindow(QMainWindow):
             return
         self._append_launcher_log(f"update apply: {result.message}")
         if getattr(result, "updated", False):
+            try:
+                self.setWindowTitle(
+                    f"蚂蚁量化系统启动器 {_display_version()}".strip()
+                )
+            except Exception:
+                pass
             if from_manual:
                 self._clear_update_status()
             else:
                 self._set_update_status(
-                    "更新完成，请重启已打开的子系统。", auto_clear_ms=2000
+                    "更新完成，正在补齐股票池/板块索引…", auto_clear_ms=4000
                 )
             QMessageBox.information(self, "更新完成", result.message)
+            # 拉完代码立刻用磁盘上的新模块再下 COS，不必等重启启动器
+            QTimer.singleShot(0, self._start_runtime_index_bootstrap)
             return
         if result.ok and result.behind <= 0:
             if from_manual:

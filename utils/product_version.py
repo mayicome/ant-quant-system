@@ -13,7 +13,7 @@ PRODUCT_NAME = "蚂蚁量化系统"
 VERSION_BASE = "4.2"
 
 # 提交后缀（.githooks/pre-commit → scripts/bump_product_version_suffix.py 自动改）
-VERSION_SUFFIX = "20261003.04"
+VERSION_SUFFIX = "20261003.06"
 
 
 def display_version() -> str:
