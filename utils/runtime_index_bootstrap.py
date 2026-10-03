@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import tempfile
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 UNIVERSE_NAME = "a_share_universe.json"
@@ -93,25 +92,50 @@ def _download_url(
     timeout_sec: float = 120.0,
     should_abort: Optional[Callable[[], bool]] = None,
 ) -> Optional[str]:
+    import ssl
     from urllib.request import Request, urlopen
 
     req = Request(url, headers={"User-Agent": "ant-quant-launcher"})
+    contexts = [ssl.create_default_context()]
     try:
-        with urlopen(req, timeout=timeout_sec) as resp:
-            status = getattr(resp, "status", None) or getattr(resp, "code", None)
-            if status not in (None, 200):
-                return "HTTP %s" % status
-            with open(dest_tmp, "wb") as out:
-                while True:
-                    if should_abort and should_abort():
-                        return "aborted"
-                    chunk = resp.read(256 * 1024)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-    except Exception as e:
-        return str(e) or type(e).__name__
-    return None
+        contexts.append(ssl._create_unverified_context())
+    except Exception:
+        pass
+    last_err = None
+    for i, ctx in enumerate(contexts):
+        try:
+            with urlopen(req, timeout=timeout_sec, context=ctx) as resp:
+                status = getattr(resp, "status", None) or getattr(resp, "code", None)
+                if status not in (None, 200):
+                    last_err = "HTTP %s" % status
+                    continue
+                with open(dest_tmp, "wb") as out:
+                    while True:
+                        if should_abort and should_abort():
+                            return "aborted"
+                        chunk = resp.read(256 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+            return None
+        except Exception as e:
+            last_err = str(e) or type(e).__name__
+            continue
+    return last_err
+
+
+def _atomic_place(src: str, dest: str) -> None:
+    """同盘 rename；跨盘（WinError 17）则复制再删源。"""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        os.replace(src, dest)
+        return
+    except OSError:
+        shutil.copy2(src, dest)
+        try:
+            os.remove(src)
+        except OSError:
+            pass
 
 
 def _install_download(tmp_path: str, dest: str, name: str) -> Optional[str]:
@@ -123,8 +147,10 @@ def _install_download(tmp_path: str, dest: str, name: str) -> Optional[str]:
     err = _validator_for(name)(payload)
     if err:
         return err
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    os.replace(tmp_path, dest)
+    try:
+        _atomic_place(tmp_path, dest)
+    except Exception as e:
+        return "写入失败：%s" % e
     return None
 
 
@@ -148,21 +174,20 @@ def fetch_missing(
         return result
 
     paths = dest_paths(root)
-    tmp_dir = tempfile.mkdtemp(prefix="ant_runtime_idx_")
-    try:
-        for name in needed:
+    for name in needed:
+        tmp_path = ""
+        try:
             if should_abort and should_abort():
                 result["aborted"] = True
                 break
             dest = paths[name]
-            # 下载过程中若另一进程已写入，仍不覆盖
             if not _file_missing(dest):
                 result["skipped"].append(name)
                 continue
             if on_progress:
                 on_progress("正在获取 %s …" % name)
             url = public_object_url(name)
-            tmp_path = os.path.join(tmp_dir, name + ".part")
+            tmp_path = dest + ".part"
             dl_err = _download_url(url, tmp_path, should_abort=should_abort)
             if dl_err == "aborted":
                 result["aborted"] = True
@@ -178,8 +203,15 @@ def fetch_missing(
                 result["errors"][name] = inst_err
             else:
                 result["fetched"].append(name)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            result["errors"][name] = str(e) or type(e).__name__
+        finally:
+            if tmp_path:
+                try:
+                    if os.path.isfile(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
     return result
 
 

@@ -326,8 +326,7 @@ class AntLauncherWindow(QMainWindow):
         self._setup_ui()
         self._arm_post_market_watch()
         self._ensure_app_config_ini()
-        QTimer.singleShot(400, self._start_runtime_index_bootstrap)
-        QTimer.singleShot(600, self._maybe_prompt_qmt_setup)
+        QTimer.singleShot(0, self._start_runtime_index_bootstrap)
 
     def _get_apps_config_path(self) -> str:
         root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -864,13 +863,26 @@ class AntLauncherWindow(QMainWindow):
                 "utils/runtime_index_bootstrap.py", "ant_runtime_index_bootstrap"
             )
             needed = boot.missing_files(self._project_root())
+            paths = boot.dest_paths(self._project_root())
         except Exception as e:
             self._append_launcher_log("runtime index: check failed %s" % e)
             self._after_runtime_index_bootstrap()
             return
         if not needed:
+            sizes = []
+            for name, p in paths.items():
+                try:
+                    sizes.append("%s=%s" % (name, os.path.getsize(p)))
+                except OSError:
+                    sizes.append("%s=missing" % name)
+            self._append_launcher_log(
+                "runtime index: skip (already present) %s" % "; ".join(sizes)
+            )
             self._after_runtime_index_bootstrap()
             return
+        self._append_launcher_log(
+            "runtime index: need %s dest=%s" % (",".join(needed), os.path.dirname(paths[needed[0]]))
+        )
         self._set_update_status("正在从云端获取股票池与板块索引…")
         worker = _RuntimeIndexWorker(self._project_root(), parent=self)
         self._bootstrap_worker = worker
@@ -889,13 +901,20 @@ class AntLauncherWindow(QMainWindow):
         fetched = list((result or {}).get("fetched") or []) if isinstance(result, dict) else []
         errors = dict((result or {}).get("errors") or {}) if isinstance(result, dict) else {}
         self._append_launcher_log(
-            "runtime index: fetched=%s errors=%s" % (fetched, errors)
+            "runtime index: fetched=%s skipped=%s errors=%s aborted=%s"
+            % (
+                fetched,
+                list((result or {}).get("skipped") or []) if isinstance(result, dict) else [],
+                errors,
+                bool((result or {}).get("aborted")) if isinstance(result, dict) else False,
+            )
         )
         if tip:
             self._set_update_status(tip, auto_clear_ms=4000 if ok else 6000)
         self._after_runtime_index_bootstrap()
 
     def _after_runtime_index_bootstrap(self) -> None:
+        self._maybe_prompt_qmt_setup()
         if self._post_market_settings.get("auto_update_check_on_start", True):
             QTimer.singleShot(800, lambda: self._start_update_check(silent_if_latest=True))
 

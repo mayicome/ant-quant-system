@@ -3527,6 +3527,17 @@ class SectorStockFilterDialog(QDialog):
         
         self.setLayout(outer_layout)
 
+        # 新机缺板块索引时先从 COS 补齐（不覆盖已有文件）
+        try:
+            from utils.runtime_index_bootstrap import fetch_missing, missing_files
+
+            _root = os.path.dirname(os.path.abspath(__file__))
+            if missing_files(_root):
+                logger.info("选股启动：本地缺股票池/板块索引，尝试从云端获取")
+                fetch_missing(_root)
+        except Exception as e:
+            logger.warning("选股启动：云端补齐板块索引失败: %s", e)
+
         # 加载板块列表（在 status_label 等控件创建之后）
         self.load_sectors_to_list()
 
