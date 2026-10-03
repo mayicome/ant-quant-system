@@ -25,7 +25,8 @@ metadata:
 - 需要按交易日查行业/概念涨跌幅与资金流、龙虎榜席位、个股主力流入
 - 连接器日更目录或离线试用包解压后的同一套文件
 
-**Don't use for:** 实盘下单、QMT 行情 tick、非本包内的 CSV/Excel 原始抓取文件。
+**Don't use for:** 实盘下单、QMT 行情 tick、非本包内的 CSV/Excel 原始抓取文件。  
+`cos/runtime/`（`a_share_universe.json` / `qmt_sector_index.json`）是启动器底稿，不进离线 zip，不要当 JSONL 分析。
 
 ## Data root
 

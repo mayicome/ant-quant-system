@@ -347,14 +347,20 @@ class QmtSectorStore:
         if not isinstance(payload, dict):
             return False
         built_at = str(payload.get("built_at") or "").strip()
-        if not built_at:
-            return False
-        try:
-            age_days = (date.today() - date.fromisoformat(built_at)).days
-        except Exception:
-            return False
-        if age_days < 0 or age_days > CACHE_MAX_AGE_DAYS:
-            return False
+        age_days = None
+        if built_at:
+            try:
+                age_days = (date.today() - date.fromisoformat(built_at)).days
+            except Exception:
+                age_days = None
+        else:
+            logger.warning("板块索引缺少 built_at，仍作为底稿使用")
+        if age_days is not None and (age_days < 0 or age_days > CACHE_MAX_AGE_DAYS):
+            logger.warning(
+                "板块索引超过 %d 天（built_at=%s），仍作为底稿使用；有大 QMT 时由盘后同步刷新",
+                CACHE_MAX_AGE_DAYS,
+                built_at,
+            )
         cached_sectors = payload.get("ui_sectors") or []
         if not cached_sectors:
             return False

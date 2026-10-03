@@ -139,6 +139,32 @@ class _UpdateWorker(QThread):
             self.finished_ok.emit(result)
 
 
+class _RuntimeIndexWorker(QThread):
+    """本地缺股票池/板块索引时从 COS 拉取底稿，不覆盖已有文件。"""
+
+    finished_ok = pyqtSignal(object)
+
+    def __init__(self, root: str, parent=None):
+        super().__init__(parent)
+        self.root = root
+
+    def run(self) -> None:
+        try:
+            boot = _load_py_from_disk(
+                "utils/runtime_index_bootstrap.py", "ant_runtime_index_bootstrap"
+            )
+            if not boot.missing_files(self.root):
+                self.finished_ok.emit({"fetched": [], "skipped": True, "errors": {}})
+                return
+            result = boot.fetch_missing(
+                self.root,
+                should_abort=self.isInterruptionRequested,
+            )
+            self.finished_ok.emit(result)
+        except Exception as e:
+            self.finished_ok.emit({"fetched": [], "errors": {"_": str(e)}, "aborted": False})
+
+
 class AntLauncherWindow(QMainWindow):
     """蚂蚁量化系统启动器：统一入口，启动三个子系统。"""
 
@@ -153,11 +179,11 @@ class AntLauncherWindow(QMainWindow):
         )
         self._post_market_settings = self._load_post_market_settings()
         self._update_worker = None
+        self._bootstrap_worker = None
         self._setup_icon()
         self._setup_ui()
         self._arm_post_market_watch()
-        if self._post_market_settings.get("auto_update_check_on_start", True):
-            QTimer.singleShot(1800, lambda: self._start_update_check(silent_if_latest=True))
+        QTimer.singleShot(400, self._start_runtime_index_bootstrap)
 
     def _get_apps_config_path(self) -> str:
         root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -628,6 +654,49 @@ class AntLauncherWindow(QMainWindow):
             return [str(x).strip() for x in mirrors if str(x).strip()]
         return list(_DEFAULT_UPDATE_MIRRORS)
 
+    def _start_runtime_index_bootstrap(self) -> None:
+        if self._bootstrap_worker is not None and self._bootstrap_worker.isRunning():
+            return
+        try:
+            boot = _load_py_from_disk(
+                "utils/runtime_index_bootstrap.py", "ant_runtime_index_bootstrap"
+            )
+            needed = boot.missing_files(self._project_root())
+        except Exception as e:
+            self._append_launcher_log("runtime index: check failed %s" % e)
+            self._after_runtime_index_bootstrap()
+            return
+        if not needed:
+            self._after_runtime_index_bootstrap()
+            return
+        self._set_update_status("正在从云端获取股票池与板块索引…")
+        worker = _RuntimeIndexWorker(self._project_root(), parent=self)
+        self._bootstrap_worker = worker
+        worker.finished_ok.connect(self._on_runtime_index_bootstrap_done)
+        worker.start()
+
+    def _on_runtime_index_bootstrap_done(self, result) -> None:
+        self._bootstrap_worker = None
+        try:
+            boot = _load_py_from_disk(
+                "utils/runtime_index_bootstrap.py", "ant_runtime_index_bootstrap"
+            )
+            ok, tip = boot.summarize_fetch(result if isinstance(result, dict) else {})
+        except Exception as e:
+            ok, tip = False, "未能从云端获取板块索引（%s）。" % e
+        fetched = list((result or {}).get("fetched") or []) if isinstance(result, dict) else []
+        errors = dict((result or {}).get("errors") or {}) if isinstance(result, dict) else {}
+        self._append_launcher_log(
+            "runtime index: fetched=%s errors=%s" % (fetched, errors)
+        )
+        if tip:
+            self._set_update_status(tip, auto_clear_ms=4000 if ok else 6000)
+        self._after_runtime_index_bootstrap()
+
+    def _after_runtime_index_bootstrap(self) -> None:
+        if self._post_market_settings.get("auto_update_check_on_start", True):
+            QTimer.singleShot(800, lambda: self._start_update_check(silent_if_latest=True))
+
     def _set_update_status(self, text: str, *, auto_clear_ms: int = 0) -> None:
         """启动器底部短提示；auto_clear_ms>0 时到期自动清空。"""
         lbl = getattr(self, "update_status", None)
@@ -861,8 +930,10 @@ class AntLauncherWindow(QMainWindow):
                 self._watch_timer = None
         except Exception:
             pass
-        worker = getattr(self, "_update_worker", None)
-        if worker is not None:
+        for attr in ("_bootstrap_worker", "_update_worker"):
+            worker = getattr(self, attr, None)
+            if worker is None:
+                continue
             try:
                 if worker.isRunning():
                     worker.requestInterruption()
@@ -875,7 +946,7 @@ class AntLauncherWindow(QMainWindow):
                 worker.deleteLater()
             except Exception:
                 pass
-            self._update_worker = None
+            setattr(self, attr, None)
         try:
             app = QApplication.instance()
             if app is not None:

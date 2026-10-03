@@ -4020,10 +4020,9 @@ class SectorStockFilterDialog(QDialog):
                 mode = get_qmt_mode()
                 if mode in ("builtin", "standalone"):
                     tip = (
-                        "未读到板块列表（builtin 模式应使用大 QMT 同步的 "
-                        "data/qmt_sector_index.json）。\n"
-                        "请确认大 QMT 已运行「蚂蚁量化规则」，并等待板块同步完成"
-                        "（启动约数十秒，或次日 0 点定时同步）。"
+                        "未读到板块列表（builtin 模式使用 data/qmt_sector_index.json）。\n"
+                        "请先打开启动器补齐云端底稿；或待交易日 15:35 后"
+                        "大 QMT「蚂蚁量化规则」盘后流水线写完该文件。"
                     )
                 else:
                     tip = (

@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""同步 data/cos/ 到腾讯云 COS（智能体数据）。
+"""同步 data/cos/ 到腾讯云 COS（智能体数据 + 启动器运行时索引）。
 
 默认：
   本地 data/cos/**  →  cos://{bucket}/cos/**
+  上传前把 data/a_share_universe.json、data/qmt_sector_index.json
+  拷到 data/cos/runtime/（每次覆盖上传；不打进 ant-quant-data.zip）
   可选打包并上传离线包 ant-quant-data.zip → 桶根目录
 
 密钥（勿写入仓库）：
@@ -14,6 +16,7 @@
   python tools/upload_cos_data.py --dry-run
   python tools/upload_cos_data.py --with-zip
   python tools/upload_cos_data.py --force
+  python tools/upload_cos_data.py --runtime-only
 """
 from __future__ import annotations
 
@@ -29,6 +32,11 @@ from typing import Any, Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from utils.runtime_index_bootstrap import (  # noqa: E402
+    is_runtime_relpath,
+    stage_runtime_for_upload,
+)
 
 LOCAL_COS_DIR = ROOT / "data" / "cos"
 ZIP_PATH = ROOT / "ant-quant-data.zip"
@@ -146,7 +154,10 @@ def build_offline_zip(
         for p in sorted(src_dir.rglob("*")):
             if not p.is_file():
                 continue
-            zf.write(p, arcname=_rel_posix(p, src_dir))
+            rel = _rel_posix(p, src_dir)
+            if is_runtime_relpath(rel):
+                continue
+            zf.write(p, arcname=rel)
     return zip_path
 
 
@@ -156,6 +167,15 @@ def _head_size(client, bucket: str, key: str) -> Optional[int]:
         return int(h.get("Content-Length") or 0)
     except Exception:
         return None
+
+
+def _ensure_public_read(client, bucket: str, key: str) -> None:
+    """启动器无密钥 GET，仅 runtime 对象设公共读。"""
+    try:
+        client.put_object_acl(Bucket=bucket, Key=key, ACL="public-read")
+        print("    ACL public-read", key)
+    except Exception as e:
+        print("    ACL public-read FAIL", key, e)
 
 
 def iter_local_files(src_dir: Path) -> List[Path]:
@@ -170,16 +190,20 @@ def sync_cos_tree(
     src_dir: Path,
     force: bool = False,
     dry_run: bool = False,
+    runtime_only: bool = False,
 ) -> Dict[str, int]:
     stats = {"total": 0, "upload": 0, "skip": 0, "fail": 0}
     files = iter_local_files(src_dir)
+    if runtime_only:
+        files = [p for p in files if is_runtime_relpath(_rel_posix(p, src_dir))]
     stats["total"] = len(files)
     for i, path in enumerate(files, 1):
         rel = _rel_posix(path, src_dir)
         key = _object_key(prefix, rel)
         local_size = path.stat().st_size
-        remote_size = None if force else _head_size(client, bucket, key)
-        if remote_size is not None and remote_size == local_size and not force:
+        force_this = bool(force) or is_runtime_relpath(rel)
+        remote_size = None if force_this else _head_size(client, bucket, key)
+        if remote_size is not None and remote_size == local_size and not force_this:
             stats["skip"] += 1
             if i == 1 or i % 40 == 0 or i == len(files):
                 print("  [%d/%d] skip %s" % (i, len(files), key))
@@ -201,6 +225,8 @@ def sync_cos_tree(
                 EnableMD5=False,
             )
             stats["upload"] += 1
+            if is_runtime_relpath(rel):
+                _ensure_public_read(client, bucket, key)
         except Exception as e:
             stats["fail"] += 1
             print("    FAIL", key, e)
@@ -250,6 +276,11 @@ def main() -> None:
         help="重新打包 ant-quant-data.zip 并上传到桶根（试用离线包）",
     )
     ap.add_argument("--zip-only", action="store_true", help="只打包/上传 zip，不同步 cos/ 树")
+    ap.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="只上传 data/cos/runtime/（股票池与板块索引底稿）",
+    )
     ap.add_argument("--src", default=str(LOCAL_COS_DIR), help="本地目录，默认 data/cos")
     args = ap.parse_args()
 
@@ -267,8 +298,11 @@ def main() -> None:
         "bucket=%s region=%s prefix=%s src=%s"
         % (bucket, region, prefix or "(root)", src)
     )
-    if not args.dry_run and Path(args.src).resolve() == LOCAL_COS_DIR.resolve():
-        refresh_embedded_skill()
+    if Path(args.src).resolve() == LOCAL_COS_DIR.resolve():
+        staged = stage_runtime_for_upload(str(ROOT), str(src))
+        print("[runtime] staged=%s" % (",".join(staged) if staged else "(none)"))
+        if not args.dry_run and not args.runtime_only:
+            refresh_embedded_skill()
     client = _client(cfg)
 
     summary: Dict[str, Any] = {
@@ -286,6 +320,7 @@ def main() -> None:
             src_dir=src,
             force=bool(args.force),
             dry_run=bool(args.dry_run),
+            runtime_only=bool(args.runtime_only),
         )
         summary["tree"] = stats
         print(
@@ -293,7 +328,7 @@ def main() -> None:
             % (stats["total"], stats["upload"], stats["skip"], stats["fail"])
         )
 
-    if args.with_zip or args.zip_only:
+    if (args.with_zip or args.zip_only) and not args.runtime_only:
         print("[zip] packing", ZIP_PATH.name, "from", src)
         if not args.dry_run:
             build_offline_zip(src, ZIP_PATH)
@@ -315,9 +350,12 @@ def main() -> None:
                 )
 
     base = "https://%s.cos.%s.myqcloud.com" % (bucket, region)
+    prefix_url = "%s/%s/" % (base, prefix.strip("/")) if prefix.strip("/") else base + "/"
     summary["urls"] = {
-        "tree_prefix": "%s/%s/" % (base, prefix.strip("/")) if prefix.strip("/") else base + "/",
+        "tree_prefix": prefix_url,
         "zip": "%s/%s" % (base, zip_key.lstrip("/")),
+        "a_share_universe": prefix_url + "runtime/a_share_universe.json",
+        "qmt_sector_index": prefix_url + "runtime/qmt_sector_index.json",
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if (summary.get("tree") or {}).get("fail"):
