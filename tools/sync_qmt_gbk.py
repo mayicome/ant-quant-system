@@ -78,12 +78,27 @@ def _inject_data_root(text: str, data_root: str) -> str:
     return re.sub(pattern, lambda _m: block, text, count=1, flags=re.DOTALL)
 
 
-def main() -> None:
+def _to_gbk_bytes(text: str, name: str) -> bytes:
+    payload = _to_gbk_text(text)
+    try:
+        encoded = payload.encode("gbk", errors="strict")
+        encoded.decode("gbk")
+    except UnicodeError as e:
+        raise SyncError("%s 无法转成 QMT 所需的 GBK：%s" % (name, e)) from e
+    return encoded
+
+
+class SyncError(RuntimeError):
+    """UTF-8 源转 GBK 失败。"""
+
+
+def sync() -> list:
+    """从 qmt_builtin/src（UTF-8）生成 qmt_builtin/*.py（合法 GBK）。"""
     if not SRC.is_dir():
-        raise SystemExit("missing qmt_builtin/src")
+        raise SyncError("missing qmt_builtin/src")
 
     data_root = str((ROOT / "data").resolve())
-
+    written = []
     for name in PY_FILES:
         src = SRC / name
         if not src.is_file():
@@ -93,10 +108,24 @@ def main() -> None:
         if name == "ant_qmt_paths.py":
             raw = _inject_data_root(raw, data_root)
         out = DST / name
-        out.write_bytes(_to_gbk_text(raw).encode("gbk", errors="strict"))
-        print("deploy", out)
+        encoded = _to_gbk_bytes(raw, name)
+        if out.is_file() and out.read_bytes() == encoded:
+            continue
+        out.write_bytes(encoded)
+        written.append(name)
+        print("sync", out)
+    return written
 
-    print("done. next: python tools/deploy_to_qmt.py")
+
+def main() -> None:
+    try:
+        written = sync()
+    except SyncError as e:
+        raise SystemExit(str(e)) from e
+    if written:
+        print("done. %d file(s). next: python tools/deploy_to_qmt.py" % len(written))
+    else:
+        print("unchanged. next: python tools/deploy_to_qmt.py")
 
 
 if __name__ == "__main__":

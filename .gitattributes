@@ -1,0 +1,3 @@
+# 源码 UTF-8。根目录生成的 GBK *.py 已 gitignore；若被误加则当二进制，避免按 UTF-8 合并。
+qmt_builtin/*.py binary
+qmt_builtin/src/** text

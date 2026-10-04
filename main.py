@@ -324,7 +324,7 @@ class TradingApp(QMainWindow):
             raise
 
     def _deploy_builtin_to_qmt(self) -> None:
-        """启动时把 qmt_builtin 脚本复制到大 QMT python 目录，等同运行 tools/deploy_to_qmt.py。"""
+        """启动时先从 UTF-8 源生成 GBK，再复制到大 QMT python 目录。"""
         try:
             import importlib.util
 

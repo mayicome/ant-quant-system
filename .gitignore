@@ -1,3 +1,8 @@
+# ===== 大 QMT 用的 GBK 副本（不进仓库）=====
+# 源码只在 qmt_builtin/src/（UTF-8）。根目录 *.py 由 tools/sync_qmt_gbk.py 在部署前生成。
+/qmt_builtin/*.py
+!/qmt_builtin/__init__.py
+
 # ===== 策略生成器里的策略（用导入/导出同步，不进仓库）=====
 strategy_generator_app/config/strategies/
 # 批量导入选股池设置（各机本地配置）

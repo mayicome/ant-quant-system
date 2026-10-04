@@ -38,7 +38,7 @@ ENTRY_FILE = "蚂蚁量化规则.py"
 
 
 class DeployError(RuntimeError):
-    """部署失败（配置缺失、目录不存在或源文件缺失）。"""
+    """部署失败（配置缺失、目录不存在、源文件缺失或不是合法 GBK）。"""
 
 
 def _same_bytes(src: Path, dst: Path) -> bool:
@@ -50,8 +50,37 @@ def _same_bytes(src: Path, dst: Path) -> bool:
         return False
 
 
+def _assert_gbk(path: Path) -> None:
+    data = path.read_bytes()
+    try:
+        data.decode("gbk")
+    except UnicodeDecodeError as e:
+        raise DeployError(
+            "%s 不是合法 GBK，QMT 加载会报 SyntaxError。已拒绝复制。%s"
+            % (path.name, e)
+        ) from e
+
+
+def _sync_from_utf8_src() -> None:
+    """部署前始终从 src UTF-8 重生 GBK，避免 git/编辑器把副本弄成 UTF-8。"""
+    import importlib.util
+
+    script = ROOT / "tools" / "sync_qmt_gbk.py"
+    spec = importlib.util.spec_from_file_location("sync_qmt_gbk", str(script))
+    if spec is None or spec.loader is None:
+        raise DeployError("无法加载 " + str(script))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        mod.sync()
+    except Exception as e:
+        raise DeployError("sync_qmt_gbk 失败: %s" % e) from e
+
+
 def deploy() -> list:
-    """复制有变化的脚本到大 QMT python 目录。返回本次内容有变化的文件名。"""
+    """先 sync GBK，再复制有变化的脚本到大 QMT python 目录。返回本次内容有变化的文件名。"""
+    _sync_from_utf8_src()
+
     cp = configparser.ConfigParser()
     cp.read(CONFIG, encoding="utf-8")
     raw = ""
@@ -68,8 +97,8 @@ def deploy() -> list:
     for name in names:
         src = SRC / name
         if not src.is_file():
-            hint = "（请先运行 tools/sync_qmt_gbk.py）" if name != ENTRY_FILE else ""
-            raise DeployError("缺少 " + str(src) + hint)
+            raise DeployError("缺少 " + str(src) + "（sync_qmt_gbk 未生成）")
+        _assert_gbk(src)
         target = dst / name
         if _same_bytes(src, target):
             continue
