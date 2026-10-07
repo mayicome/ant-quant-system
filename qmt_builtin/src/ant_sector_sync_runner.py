@@ -327,6 +327,13 @@ def _members_of(ContextInfo, sector: str, universe: Set[str]) -> Set[str]:
 
 
 def _save_index(index_path: str, ui_sectors: List[str], code_sectors: Dict[str, List[str]]) -> None:
+    # 与 utils/runtime_index_bootstrap 下限一致：禁止把空扫结果写成 1KB 假底稿
+    if len(ui_sectors) < 30 or len(code_sectors) < 500:
+        print(
+            "[板块同步] 拒绝写入过瘦索引 sectors=%d stocks=%d"
+            % (len(ui_sectors), len(code_sectors))
+        )
+        return
     os.makedirs(os.path.dirname(index_path), exist_ok=True)
     payload = {
         "built_at": date.today().isoformat(),

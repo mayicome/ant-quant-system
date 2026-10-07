@@ -480,7 +480,39 @@ def _seed_done_from_results_orders() -> None:
 
 
 def _is_trading_day_local(d):
+    """优先磁盘 trade_calendar.json（与日线同步一致）；失败再 utils，最后才 weekday。"""
     try:
+        import json
+
+        path = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data", "trade_calendar.json")
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f) or {}
+        raw = payload.get("dates") if isinstance(payload, dict) else None
+        if raw:
+            key = d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
+            keys = set()
+            parsed = []
+            for x in raw:
+                s = str(x or "").strip()[:10]
+                if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                    keys.add(s)
+                    try:
+                        from datetime import datetime as _dt
+
+                        parsed.append(_dt.strptime(s, "%Y-%m-%d").date())
+                    except ValueError:
+                        pass
+            if parsed:
+                lo, hi = min(parsed), max(parsed)
+                dd = d if hasattr(d, "year") else None
+                if dd is not None and lo <= dd <= hi:
+                    return key in keys
+    except Exception:
+        pass
+    try:
+        root = str(PROJECT_ROOT).rstrip("\\/")
+        if root and root not in sys.path:
+            sys.path.insert(0, root)
         from utils.trading_day import is_tradeday
 
         return bool(is_tradeday(d))
@@ -2669,11 +2701,16 @@ def _iso_recv_age_sec(raw, now=None) -> Optional[float]:
 
 
 def _in_continuous_quote_watch(now=None) -> bool:
-    """连续竞价监控窗（含午后）；集合竞价另有更勤 seed。"""
+    """连续竞价监控窗（含午后）；集合竞价另有更勤 seed。
+
+    非交易日不做墙钟过期补种：当天无推送，否则会每 ~18s 刷一次 full_tick。
+    """
     from datetime import datetime as _dt
     from datetime import time as dt_time
 
     now = now or _dt.now()
+    if not _is_trading_day_local(now.date()):
+        return False
     t = now.time()
     return (dt_time(9, 30) <= t <= dt_time(11, 30)) or (
         dt_time(13, 0) <= t <= dt_time(15, 0)

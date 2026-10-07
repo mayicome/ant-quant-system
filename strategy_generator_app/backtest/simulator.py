@@ -905,8 +905,8 @@ def _check_fill_buy(rule_type: str, intent: Dict[str, Any], last_price: float) -
         # cage_buy 在 tick 撮合中走“先进入内区间(考虑壁厚)，再突破端点”状态机
         return False
     if rule_type == "best_buy":
-        # best_buy（弹性买入）在 tick 撮合中走“先跌破 trigger，再按最低价反弹 rise_percent”状态机，
-        # 这里返回 False，避免被当作普通“>= trigger”直接成交。
+        # best_buy（弹性买入）在 tick 撮合中走“先严格跌破 trigger（<），再按最低价反弹 rise_percent”状态机，
+        # 这里返回 False，避免被当作普通限价直接成交。
         return False
     return False
 
@@ -1527,8 +1527,8 @@ def simulate_fills_with_ticks(
                         to_remove.append(idx)
                         continue
                     if not state["triggered"]:
-                        # 必须先“跌破触发价”
-                        if last_price <= trigger:
+                        # 与实盘 ant_tick_runner 一致：严格 < 触发价才开始追踪（等于触发价不算跌破）
+                        if last_price < trigger:
                             state["triggered"] = True
                             state["lowest"] = float(last_price)
                             state["lowest_tick_idx"] = int(state["tick_idx"])
@@ -2095,7 +2095,8 @@ def simulate_fills_with_ticks(
                             to_remove.append(idx)
                             continue
                         if not state["triggered"]:
-                            if last_price >= trigger:
+                            # 与实盘 ant_tick_runner 一致：严格 > 触发价才开始追踪（等于触发价不算上破）
+                            if last_price > trigger:
                                 state["triggered"] = True
                                 state["highest"] = float(last_price)
                                 state["highest_tick_idx"] = int(state["tick_idx"])

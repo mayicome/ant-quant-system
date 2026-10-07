@@ -369,6 +369,15 @@ class QmtSectorStore:
         code_sectors = payload.get("code_sectors") or {}
         if not isinstance(code_sectors, dict) or not code_sectors:
             return False
+        try:
+            from utils.runtime_index_bootstrap import validate_index_payload
+
+            thin = validate_index_payload(payload)
+        except Exception:
+            thin = None
+        if thin:
+            logger.warning("忽略不完整板块索引: %s", thin)
+            return False
         self._ui_sectors = _with_virtual_sector(_qmt_sectors_only(cached_sectors))
         self._code_sectors = {
             code_to_6(k): sorted(v for v in (val or []) if v)
@@ -384,20 +393,48 @@ class QmtSectorStore:
         )
         return True
 
-    def _save_disk_cache(self, ui_sectors: List[str]) -> None:
+    def _save_disk_cache(self, ui_sectors: List[str]) -> bool:
+        """仅在索引足够完整时落盘。QMT 未连上时的空结果不得覆盖 COS 底稿。"""
         path = _cache_path()
         payload = {
             "built_at": date.today().isoformat(),
             "sector_count": len(ui_sectors),
             "ui_sectors": ui_sectors,
-            "code_sectors": self._code_sectors,
+            "code_sectors": self._code_sectors or {},
+            "source": "qmt_sector_store",
         }
+        try:
+            from utils.runtime_index_bootstrap import validate_index_payload
+
+            thin = validate_index_payload(payload)
+        except Exception:
+            thin = None
+        if thin:
+            logger.warning("跳过写入板块索引（未生成完整结果）: %s", thin)
+            return False
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    old = json.load(f)
+                old_n = len((old or {}).get("code_sectors") or {})
+                new_n = len(self._code_sectors or {})
+                if old_n > new_n:
+                    logger.warning(
+                        "跳过写入板块索引：磁盘已有 %d 只，本次仅 %d 只",
+                        old_n,
+                        new_n,
+                    )
+                    return False
+            except Exception:
+                pass
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
             logger.info("已写入板块索引缓存: %s", path)
+            return True
         except Exception as e:
             logger.warning("写入板块索引缓存失败: %s", e)
+            return False
 
     def ensure_inverted_index(self, force_rebuild: bool = False) -> None:
         ui_sectors = self.list_ui_sectors()
@@ -410,6 +447,11 @@ class QmtSectorStore:
                 if self._index_built_for == key:
                     return
 
+            if not qmt_sectors:
+                logger.warning("无 QMT 板块列表，不写板块索引文件")
+                self._load_disk_cache([])
+                return
+
             logger.info("构建 QMT 板块反查索引（%d 个板块）…", len(qmt_sectors))
             code_to_set: Dict[str, Set[str]] = {}
             for i, sector in enumerate(qmt_sectors, 1):
@@ -418,12 +460,15 @@ class QmtSectorStore:
                 if i % 50 == 0:
                     logger.info("  索引进度 %d/%d", i, len(qmt_sectors))
 
-            self._code_sectors = {c: sorted(ss) for c, ss in code_to_set.items()}
+            rebuilt = {c: sorted(ss) for c, ss in code_to_set.items()}
+            self._code_sectors = rebuilt
             self._index_built_for = key
-            self._save_disk_cache(qmt_sectors)
+            if not self._save_disk_cache(qmt_sectors):
+                if self._load_disk_cache([]):
+                    return
             logger.info(
                 "板块反查索引完成: %d 只有标签, %d 未归属",
-                len(self._code_sectors),
+                len(self._code_sectors or {}),
                 len(self.unclassified_codes()),
             )
 
