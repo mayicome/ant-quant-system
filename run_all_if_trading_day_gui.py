@@ -20,6 +20,19 @@ import traceback
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Set
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+os.chdir(ROOT)
+
+# 须在 PyQt / 打日志前关闭 Quick Edit，否则误点黑窗会冻住整批跑
+try:
+    from utils.win_console import disable_quick_edit
+
+    disable_quick_edit()
+except Exception:
+    pass
+
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
@@ -41,11 +54,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-ROOT = os.path.dirname(os.path.abspath(__file__))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-os.chdir(ROOT)
 
 from utils.post_market_completeness import check_all  # noqa: E402
 from utils.post_market_pipeline import (  # noqa: E402
