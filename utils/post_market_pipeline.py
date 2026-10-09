@@ -301,12 +301,31 @@ def run_step(
         if step_id == "capital_flow":
             # 始终按目标交易日保存。非交易日补跑不要冻日历，否则缺 freezegun 时
             # 脚本还没开始抓取就退出，界面只能看到文件缺失。
-            rc = run(
-                "get_capital_flow_selenium.py",
-                (f"--save-date={d8}",),
-                freeze=False,
-            )
-            return _ok_after_run(step_id, day, rc)
+            # 东财 push2 偶发整段掐线：脚本内已有同花顺兜底；此处再做整步重试。
+            last: Optional[StepRunResult] = None
+            for attempt in range(1, 4):
+                rc = run(
+                    "get_capital_flow_selenium.py",
+                    (f"--save-date={d8}",),
+                    freeze=False,
+                )
+                last = _ok_after_run(step_id, day, rc)
+                if last.ok:
+                    if attempt > 1:
+                        last = StepRunResult(
+                            ok=True,
+                            exit_code=0,
+                            detail=(last.detail or "") + f"（第{attempt}次成功）",
+                        )
+                    return last
+                if attempt < 3:
+                    wait_s = 30 * attempt
+                    print(
+                        f"[重试] 主力资金流第 {attempt} 次失败"
+                        f"（{last.detail or f'exit={rc}'}），{wait_s}s 后重试…"
+                    )
+                    time.sleep(wait_s)
+            return last or StepRunResult(ok=False, exit_code=1, detail="capital_flow failed")
 
         if step_id == "board_snapshot":
             extra = ("--with-fund-flow", "--date", d)

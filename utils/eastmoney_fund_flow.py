@@ -6,13 +6,17 @@
 
 网络：先直连；若被对端掐断，再试本机代理（EM_FUND_FLOW_PROXY / EM_HIST_PROXY /
 环境变量 HTTPS_PROXY，以及常见本地端口 7078/7890）。
+push2 全挂时由 fetch_individual_fund_flow_df_resilient 改走同花顺兜底。
 """
 from __future__ import annotations
 
 import os
 import random
+import socket
 import time
+from datetime import date
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -35,6 +39,8 @@ _HOSTS = (
     "https://82.push2.eastmoney.com/api/qt/clist/get",
     "https://push2.eastmoney.com/api/qt/clist/get",
     "https://7.push2.eastmoney.com/api/qt/clist/get",
+    "https://55.push2.eastmoney.com/api/qt/clist/get",
+    "https://94.push2.eastmoney.com/api/qt/clist/get",
 )
 
 _HEADERS = {
@@ -44,13 +50,16 @@ _HEADERS = {
         "Chrome/122.0.0.0 Safari/537.36"
     ),
     "Referer": "https://data.eastmoney.com/zjlx/detail.html",
-    "Accept": "*/*",
+    "Origin": "https://data.eastmoney.com",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Connection": "keep-alive",
 }
 
 # 进程内记住本轮可用的代理（None=直连）
 _WORKING_PROXIES: Optional[Dict[str, str]] = None
 _WORKING_PROXIES_RESOLVED = False
+_DEAD_PROXIES: set = set()
 
 
 def _proxy_candidates() -> List[Optional[Dict[str, str]]]:
@@ -60,16 +69,49 @@ def _proxy_candidates() -> List[Optional[Dict[str, str]]]:
 
     def _add(url: str) -> None:
         u = (url or "").strip()
-        if not u or u in seen:
+        if not u or u in seen or u in _DEAD_PROXIES:
             return
         seen.add(u)
         out.append({"http": u, "https": u})
 
-    for key in ("EM_FUND_FLOW_PROXY", "EM_HIST_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+    for key in (
+        "EM_FUND_FLOW_PROXY",
+        "EM_HIST_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+    ):
         _add(os.environ.get(key, ""))
     for port in (7078, 7890, 7897, 10809, 10808, 1080):
         _add(f"http://127.0.0.1:{port}")
     return out
+
+
+def _proxy_key(proxies: Optional[Dict[str, str]]) -> str:
+    if not proxies:
+        return ""
+    return str(proxies.get("https") or proxies.get("http") or "")
+
+
+def _proxy_tcp_alive(proxies: Optional[Dict[str, str]], *, timeout: float = 0.6) -> bool:
+    """本地代理端口不通则直接跳过，避免拖死盘后批跑。"""
+    if not proxies:
+        return True
+    url = _proxy_key(proxies)
+    if not url:
+        return True
+    try:
+        u = urlparse(url)
+        host = u.hostname or "127.0.0.1"
+        port = int(u.port or (443 if u.scheme == "https" else 80))
+    except Exception:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        _DEAD_PROXIES.add(url)
+        return False
 
 
 def _session() -> requests.Session:
@@ -83,44 +125,55 @@ def _get_json(
     params: Dict[str, Any],
     *,
     hosts: Sequence[str] = _HOSTS,
-    retries: int = 8,
+    rounds: int = 3,
 ) -> dict:
+    """多轮 × 多 host × 可用代理；单次失败短暂退避，整轮失败再拉长等待。"""
     global _WORKING_PROXIES, _WORKING_PROXIES_RESOLVED
     last_err: Optional[Exception] = None
-    proxy_list = _proxy_candidates()
-    if _WORKING_PROXIES_RESOLVED:
-        # 已知可用代理（或直连）放最前，减少重试成本
-        preferred = _WORKING_PROXIES
-        rest = [p for p in proxy_list if p != preferred]
-        proxy_list = [preferred] + rest
 
-    attempt = 0
-    for proxies in proxy_list:
-        for _ in range(2):  # 每个代理最多试 2 个 host
-            if attempt >= max(1, retries):
-                break
-            host = hosts[attempt % len(hosts)]
-            attempt += 1
-            try:
-                r = session.get(
-                    host,
-                    params=params,
-                    headers=_HEADERS,
-                    timeout=30,
-                    proxies=proxies or {},
-                )
-                r.raise_for_status()
-                data = r.json()
-                if isinstance(data, dict) and data.get("data") is not None:
-                    _WORKING_PROXIES = proxies
-                    _WORKING_PROXIES_RESOLVED = True
-                    return data
-                last_err = RuntimeError(f"empty payload from {host}")
-            except Exception as e:
-                last_err = e
-                time.sleep(0.4 * attempt + random.random() * 0.3)
-        if attempt >= max(1, retries):
-            break
+    for round_i in range(max(1, rounds)):
+        proxy_list = _proxy_candidates()
+        if _WORKING_PROXIES_RESOLVED:
+            preferred = _WORKING_PROXIES
+            rest = [p for p in proxy_list if p != preferred]
+            proxy_list = [preferred] + rest
+
+        attempt = 0
+        for proxies in proxy_list:
+            if not _proxy_tcp_alive(proxies):
+                continue
+            for host in hosts:
+                attempt += 1
+                try:
+                    r = session.get(
+                        host,
+                        params=params,
+                        headers=_HEADERS,
+                        timeout=25,
+                        proxies=proxies or {},
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    if isinstance(data, dict) and data.get("data") is not None:
+                        _WORKING_PROXIES = proxies
+                        _WORKING_PROXIES_RESOLVED = True
+                        return data
+                    last_err = RuntimeError(f"empty payload from {host}")
+                except Exception as e:
+                    last_err = e
+                    msg = str(e).lower()
+                    # 代理拒绝/不存在：记入死名单，本轮不再试
+                    if proxies and (
+                        "10061" in msg
+                        or "refused" in msg
+                        or "unable to connect to proxy" in msg
+                    ):
+                        _DEAD_PROXIES.add(_proxy_key(proxies))
+                        break
+                    time.sleep(0.25 * attempt + random.random() * 0.25)
+        if round_i + 1 < rounds:
+            time.sleep(1.5 * (round_i + 1) + random.random())
+
     raise RuntimeError(f"东方财富资金流接口失败: {last_err}")
 
 
@@ -167,12 +220,19 @@ def fetch_individual_fund_flow_rows(
     for pn in range(2, total_pages + 1):
         params = dict(params)
         params["pn"] = str(pn)
-        payload = _get_json(session, params)
+        # 翻页失败时重置「可用代理」记忆，再试一轮（push2 中途掐线常见）
+        try:
+            payload = _get_json(session, params, rounds=2)
+        except Exception:
+            global _WORKING_PROXIES_RESOLVED
+            _WORKING_PROXIES_RESOLVED = False
+            payload = _get_json(session, params, rounds=3)
         _extend((payload.get("data") or {}).get("diff"))
         if pause_s > 0:
             time.sleep(pause_s)
 
     meta = {
+        "source": "eastmoney_push2",
         "total": total,
         "fetched": len(rows),
         "pages": total_pages,
@@ -277,3 +337,33 @@ def fetch_individual_fund_flow_df(
     df = rows_to_flow_dataframe(rows)
     meta["dataframe_rows"] = len(df)
     return df, meta
+
+
+def fetch_individual_fund_flow_df_resilient(
+    *,
+    page_size: int = 100,
+    pause_s: float = 0.08,
+    as_of: Optional[date] = None,
+    allow_ths: bool = True,
+) -> Tuple[pd.DataFrame, dict]:
+    """东财 push2 优先；失败则同花顺全市场兜底。"""
+    errors: List[str] = []
+    try:
+        df, meta = fetch_individual_fund_flow_df(page_size=page_size, pause_s=pause_s)
+        if df is not None and not df.empty and len(df) >= 1000:
+            return df, meta
+        errors.append(f"eastmoney rows too few: {0 if df is None else len(df)}")
+    except Exception as e:
+        errors.append(f"eastmoney: {type(e).__name__}: {e}")
+
+    if allow_ths:
+        try:
+            from utils.ths_fund_flow import fetch_ths_individual_fund_flow_df
+
+            df, meta = fetch_ths_individual_fund_flow_df(as_of=as_of)
+            meta["fallback_errors"] = errors
+            return df, meta
+        except Exception as e:
+            errors.append(f"ths: {type(e).__name__}: {e}")
+
+    raise RuntimeError("个股资金流全部数据源失败: " + " | ".join(errors))
