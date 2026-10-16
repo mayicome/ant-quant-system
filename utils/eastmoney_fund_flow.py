@@ -6,7 +6,7 @@
 
 网络：先直连；若被对端掐断，再试本机代理（EM_FUND_FLOW_PROXY / EM_HIST_PROXY /
 环境变量 HTTPS_PROXY，以及常见本地端口 7078/7890）。
-push2 全挂时由 fetch_individual_fund_flow_df_resilient 改走同花顺兜底。
+东财不通就失败，不改用同花顺：同花顺「净额」不是这里的主力净流入。
 """
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import os
 import random
 import socket
 import time
-from datetime import date
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
@@ -343,10 +342,8 @@ def fetch_individual_fund_flow_df_resilient(
     *,
     page_size: int = 100,
     pause_s: float = 0.08,
-    as_of: Optional[date] = None,
-    allow_ths: bool = True,
 ) -> Tuple[pd.DataFrame, dict]:
-    """东财 push2 优先；失败则同花顺全市场兜底。"""
+    """只拉东财 push2。行数不足或请求失败时直接报错，不改写其他来源。"""
     errors: List[str] = []
     try:
         df, meta = fetch_individual_fund_flow_df(page_size=page_size, pause_s=pause_s)
@@ -356,14 +353,4 @@ def fetch_individual_fund_flow_df_resilient(
     except Exception as e:
         errors.append(f"eastmoney: {type(e).__name__}: {e}")
 
-    if allow_ths:
-        try:
-            from utils.ths_fund_flow import fetch_ths_individual_fund_flow_df
-
-            df, meta = fetch_ths_individual_fund_flow_df(as_of=as_of)
-            meta["fallback_errors"] = errors
-            return df, meta
-        except Exception as e:
-            errors.append(f"ths: {type(e).__name__}: {e}")
-
-    raise RuntimeError("个股资金流全部数据源失败: " + " | ".join(errors))
+    raise RuntimeError("东财个股资金流失败: " + " | ".join(errors))

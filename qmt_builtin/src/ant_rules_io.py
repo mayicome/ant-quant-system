@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """rules_armed.json / results.json 读写（QMT 内置策略侧）。"""
-import json
 import os
-import shutil
-import tempfile
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -48,42 +44,11 @@ def _as_int(val: Any, default: int = 0) -> int:
 
 
 def load_json(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data if isinstance(data, dict) else {}
+    return {}
 
 
 def save_json_atomic(path: str, data: Dict[str, Any]) -> None:
-    folder = os.path.dirname(path) or "."
-    os.makedirs(folder, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        last_err = None
-        for attempt in range(12):
-            try:
-                os.replace(tmp, path)
-                tmp = ""
-                return
-            except OSError as e:
-                last_err = e
-                if attempt >= 7:
-                    try:
-                        shutil.copy2(tmp, path)
-                        tmp = ""
-                        return
-                    except OSError:
-                        pass
-                time.sleep(0.08 * (attempt + 1))
-        if last_err is not None:
-            raise last_err
-    finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    return
 
 
 def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -231,6 +196,11 @@ def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+# 行情探针：任务、自选、策略池都空时仍订阅这一只，用来确认 QMT 行情回调还在。
+# 000001.SZ 是平安银行。没有它的任务时只收行情，不记价格、不触发买卖。
+QUOTE_CANARY_CODE = "000001.SZ"
+
+
 def normalize_watch_codes(codes: Any) -> List[str]:
     out: List[str] = []
     seen = set()
@@ -251,7 +221,7 @@ def collect_subscribe_codes(
     watch_codes: Optional[List[str]] = None,
     strategy_pool_watch: Optional[List[str]] = None,
 ) -> List[str]:
-    """tasks ∪ watch_codes ∪ strategy_pool_watch → subscribe_whole_quote 列表。"""
+    """tasks ∪ watch_codes ∪ strategy_pool_watch ∪ 行情探针。"""
     codes = set()
     for item in tasks or []:
         if not isinstance(item, dict):
@@ -263,6 +233,8 @@ def collect_subscribe_codes(
         codes.add(code)
     for code in normalize_watch_codes(strategy_pool_watch):
         codes.add(code)
+    if QUOTE_CANARY_CODE:
+        codes.add(QUOTE_CANARY_CODE)
     return sorted(codes)
 
 
@@ -326,64 +298,23 @@ def prune_results_stocks(results: Dict[str, Any], keep_codes: Any) -> int:
 
 
 def rules_file_signature(path: str) -> str:
-    """规则内容签名。不含 mtime / updated_at / strategy_pool_watch_at，TTL 续期写盘不触发重载。"""
-    if not os.path.isfile(path):
-        return ""
-    try:
-        data = load_json(path)
-    except OSError:
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    payload = {
-        "version": data.get("version"),
-        "trade_date": str(data.get("trade_date") or ""),
-        "tasks": data.get("tasks") or [],
-        "watch_codes": data.get("watch_codes") or [],
-        "strategy_pool_watch": data.get("strategy_pool_watch") or [],
-        "orders_enabled": bool(data.get("orders_enabled", True)),
-        "early_order_enabled": bool(data.get("early_order_enabled", False)),
-        "min_buy_amount": data.get("min_buy_amount") or 0,
-        "buy_block_window_enabled": bool(data.get("buy_block_window_enabled", False)),
-        "buy_block_start": str(data.get("buy_block_start") or ""),
-        "buy_block_end": str(data.get("buy_block_end") or ""),
-    }
-    try:
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    except (TypeError, ValueError):
-        return ""
+    return ""
 
 
 def load_rules_armed(path: str) -> Dict[str, Any]:
-    if not os.path.isfile(path):
-        return {
-            "version": RULES_VERSION,
-            "trade_date": "",
-            "updated_at": _now_iso(),
-            "tasks": [],
-            "watch_codes": [],
-            "strategy_pool_watch": [],
-        }
-    data = load_json(path)
-    tasks_in = data.get("tasks") or []
-    tasks: List[Dict[str, Any]] = []
-    if isinstance(tasks_in, list):
-        for item in tasks_in:
-            if isinstance(item, dict):
-                tasks.append(normalize_armed_task(item))
     return {
-        "version": int(data.get("version") or RULES_VERSION),
-        "trade_date": str(data.get("trade_date") or ""),
-        "updated_at": str(data.get("updated_at") or ""),
-        "tasks": [t for t in tasks if t.get("enabled") and t.get("stock_code")],
-        "watch_codes": normalize_watch_codes(data.get("watch_codes")),
-        "strategy_pool_watch": normalize_watch_codes(data.get("strategy_pool_watch")),
-        "orders_enabled": bool(data.get("orders_enabled", True)),
-        "early_order_enabled": bool(data.get("early_order_enabled", False)),
-        "min_buy_amount": float(data.get("min_buy_amount") or 0),
-        "buy_block_window_enabled": bool(data.get("buy_block_window_enabled", False)),
-        "buy_block_start": str(data.get("buy_block_start") or "09:30:00"),
-        "buy_block_end": str(data.get("buy_block_end") or "09:31:30"),
+        "version": RULES_VERSION,
+        "trade_date": "",
+        "updated_at": _now_iso(),
+        "tasks": [],
+        "watch_codes": [],
+        "strategy_pool_watch": [],
+        "orders_enabled": True,
+        "early_order_enabled": False,
+        "min_buy_amount": 0,
+        "buy_block_window_enabled": False,
+        "buy_block_start": "09:30:00",
+        "buy_block_end": "09:31:30",
     }
 
 
@@ -639,165 +570,21 @@ def update_price_snapshot(
 
 
 def load_results_prices(path: str) -> Dict[str, Dict[str, Any]]:
-#  results.json  UI 
-    if not os.path.isfile(path):
-        return {}
-    try:
-        data = load_json(path)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    stocks = data.get("stocks") or {}
-    if not isinstance(stocks, dict):
-        return {}
-    out: Dict[str, Dict[str, Any]] = {}
-    for code, bucket in stocks.items():
-        if not isinstance(bucket, dict):
-            continue
-        price = float(bucket.get("last_price") or 0)
-        if price <= 0:
-            continue
-        norm = str(code or "").strip().upper()
-        if not norm:
-            continue
-        out[norm] = {
-            "last_price": price,
-            "last_tick_time": str(bucket.get("last_tick_time") or ""),
-            "quote_recv_at": str(
-                bucket.get("quote_recv_at") or data.get("quotes_recv_at") or ""
-            ),
-            "quotes_recv_at": str(data.get("quotes_recv_at") or ""),
-            "last_close": float(bucket.get("last_close") or 0),
-            "today_open": float(bucket.get("today_open") or 0),
-            "today_high": float(bucket.get("today_high") or 0),
-            "today_low": float(bucket.get("today_low") or 0),
-            "updated_at": str(data.get("updated_at") or ""),
-        }
-    return out
+    return {}
 
 
 def load_account_positions_snapshot(path: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
-    """从 results.json 读取内置策略写入的资金/持仓（供外部主程序 UI）。"""
-    if not os.path.isfile(path):
-        return None, {}
-    try:
-        data = load_json(path)
-    except (OSError, json.JSONDecodeError):
-        return None, {}
-    account = data.get("account") if isinstance(data.get("account"), dict) else {}
-    pos_root = data.get("positions") if isinstance(data.get("positions"), dict) else {}
-    if not account and not pos_root:
-        return None, {}
-
-    asset = None
-    if account:
-        total = float(account.get("total_asset") or 0)
-        cash = float(account.get("cash") or 0)
-        if total > 0 or cash != 0:
-            asset = {
-                "total_asset": total,
-                "cash": cash,
-                "frozen_cash": float(account.get("frozen_cash") or 0),
-                "market_value": float(account.get("market_value") or 0),
-                "account_id": str(account.get("account_id") or ""),
-            }
-
-    get_name = None
-    try:
-        from utils.stock_info_manager import get_stock_name as _get_stock_name
-
-        get_name = _get_stock_name
-    except Exception:
-        get_name = None
-
-    positions: Dict[str, Dict[str, Any]] = {}
-    for code, meta in pos_root.items():
-        if not isinstance(meta, dict):
-            continue
-        norm = str(code or "").strip().upper()
-        if not norm:
-            continue
-        vol = _as_int(meta.get("volume"), 0)
-        # 余额 0 也保留（当日已清仓行），仓位条会画成空灰框
-        name = str(meta.get("stock_name") or "").strip()
-        if (not name or name in ("未知名称", "未知")) and get_name is not None:
-            try:
-                name = str(get_name(norm.split(".")[0]) or "").strip()
-            except Exception:
-                name = name or ""
-            if name in ("未知名称", "未知"):
-                name = ""
-        # 可用=0 表示今日买入尚未解锁（T+1），必须保留 0，否则仓位条会全绿
-        raw_can = meta.get("can_use_volume")
-        if raw_can is None or raw_can == "":
-            can_use = vol
-        else:
-            can_use = _as_int(raw_can, 0)
-        if vol > 0:
-            can_use = max(0, min(can_use, vol))
-        else:
-            can_use = 0
-        positions[norm] = {
-            "account_id": str(meta.get("account_id") or account.get("account_id") or ""),
-            "stock_code": norm,
-            "stock_name": name,
-            "volume": vol,
-            "can_use_volume": can_use,
-            "open_price": float(meta.get("open_price") or meta.get("cost_price") or 0),
-            "market_value": float(meta.get("market_value") or 0),
-        }
-    return asset, positions
+    return None, {}
 
 
 def load_orders_snapshot(path: str) -> list:
-    """从 results.json 读取内置 passorder 订单（供主程序订单列表/图表状态）。"""
-    if not os.path.isfile(path):
-        return []
-    try:
-        data = load_json(path)
-    except (OSError, json.JSONDecodeError):
-        return []
-    raw = data.get("orders") if isinstance(data, dict) else None
-    if not isinstance(raw, list):
-        return []
-    out = []
-    for item in raw:
-        if isinstance(item, dict):
-            out.append(dict(item))
-    return out
+    return []
 
 
 def load_elastic_states_snapshot(path: str) -> dict:
-    """从 results.json 读取弹性买卖跟踪状态（triggered / 极值价）。"""
-    if not os.path.isfile(path):
-        return {}
-    try:
-        data = load_json(path)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    raw = data.get("elastic_states") if isinstance(data, dict) else None
-    if not isinstance(raw, dict):
-        return {}
-    out = {}
-    for tid, st in raw.items():
-        if tid and isinstance(st, dict):
-            out[str(tid)] = dict(st)
-    return out
+    return {}
 
 
 def load_broker_orders_snapshot(path: str) -> list:
-    """从 results.json 读取大 QMT get_trade_detail_data(ORDER) 快照。"""
-    if not os.path.isfile(path):
-        return []
-    try:
-        data = load_json(path)
-    except (OSError, json.JSONDecodeError):
-        return []
-    raw = data.get("broker_orders") if isinstance(data, dict) else None
-    if not isinstance(raw, list):
-        return []
-    out = []
-    for item in raw:
-        if isinstance(item, dict):
-            out.append(dict(item))
-    return out
+    return []
 

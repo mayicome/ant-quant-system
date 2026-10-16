@@ -12,9 +12,7 @@
 """
 from __future__ import annotations
 
-import json
 import os
-import tempfile
 from datetime import date, datetime
 from typing import Any, Dict, Optional
 
@@ -62,73 +60,35 @@ def _parse_day(val: Any) -> Optional[str]:
 
 
 def _load_path(path: str) -> Dict[str, str]:
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception:
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    out = {}
-    for k, v in raw.items():
-        c6 = _norm_code(k)
-        ds = _parse_day(v)
-        if c6 and ds:
-            out[c6] = ds
-    return out
+    return {}
 
 
 def _save_path(path: str, data: Dict[str, str]) -> None:
-    parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        try:
-            os.makedirs(parent)
-        except Exception:
-            return
-    clean = {}
-    for k, v in (data or {}).items():
-        c6 = _norm_code(k)
-        ds = _parse_day(v)
-        if c6 and ds:
-            clean[c6] = ds
-    try:
-        fd, tmp = tempfile.mkstemp(prefix="ped_", suffix=".json", dir=parent or None)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(clean, f, ensure_ascii=False, indent=2, sort_keys=True)
-                f.write("\n")
-            os.replace(tmp, path)
-        except Exception:
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-            raise
-    except Exception:
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(clean, f, ensure_ascii=False, indent=2, sort_keys=True)
-                f.write("\n")
-        except Exception:
-            pass
+    return
+
+
+_MEM: Dict[str, str] = {}
+_MEM_LAST: Dict[str, str] = {}
 
 
 def _load() -> Dict[str, str]:
-    return _load_path(_entry_path())
+    return _MEM
 
 
 def _save(data: Dict[str, str]) -> None:
-    _save_path(_entry_path(), data)
+    snap = dict(data or {})
+    _MEM.clear()
+    _MEM.update(snap)
 
 
 def _load_last() -> Dict[str, str]:
-    return _load_path(_last_buy_path())
+    return _MEM_LAST
 
 
 def _save_last(data: Dict[str, str]) -> None:
-    _save_path(_last_buy_path(), data)
+    snap = dict(data or {})
+    _MEM_LAST.clear()
+    _MEM_LAST.update(snap)
 
 
 def ensure_on_buy(code: Any, fill_day: Any = None) -> bool:

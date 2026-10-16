@@ -67,6 +67,7 @@ class TaskManager(QObject):
         
         # 初始化QMT适配器
         self.qmt_adapter = None
+        self._ui_boot_pending = False
         
         # 设置任务文件路径 - 使用日期后缀
         current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1249,15 +1250,68 @@ class TaskManager(QObject):
             return []
     
     def _sync_rules_armed_if_builtin(self) -> None:
-        """builtin/standalone 模式下，将任务与持仓同步到 rules_armed.json。"""
+        """builtin/standalone 模式下，将任务与持仓同步到 rules_armed.json。
+
+        任务或规则有变化时，顺手把同一份写成 QMT 的 ant_session_local.py。
+        运行中的策略约 1 秒内自行重载，不必再点「部署到QMT」。
+        """
         try:
             from utils.qmt_execution_config import use_builtin_price_feed
             if not use_builtin_price_feed():
                 return
             from utils.rules_armed_sync import sync_rules_armed
-            sync_rules_armed(self, self.qmt_adapter, logger=self.logger)
+            changed = sync_rules_armed(self, self.qmt_adapter, logger=self.logger)
+            if self._ui_boot_pending and self.tasks:
+                self._publish_qmt_session(ui_boot=True)
+                self._ui_boot_pending = False
+                return
+            if changed:
+                self._publish_qmt_session()
         except Exception as e:
             self.logger.debug(f"sync rules_armed skipped: {e}")
+
+    def publish_ui_boot_session(self) -> None:
+        """交易程序刚启动时写一次带启动标志的会话。任务还没载入就先记着，等第一次有任务再写。"""
+        self._ui_boot_pending = True
+        if not self.tasks:
+            return
+        try:
+            from utils.qmt_execution_config import use_builtin_price_feed
+            if not use_builtin_price_feed():
+                self._ui_boot_pending = False
+                return
+            from utils.rules_armed_sync import sync_rules_armed
+            sync_rules_armed(self, self.qmt_adapter, logger=self.logger)
+            self._publish_qmt_session(ui_boot=True)
+            self._ui_boot_pending = False
+        except Exception as e:
+            self.logger.debug("启动会话写入跳过: %s" % e)
+
+    def _publish_qmt_session(self, ui_boot=False) -> None:
+        """把刚写好的 rules_armed 整份打进 QMT 会话文件。内容未变时不会进到这里。"""
+        try:
+            from tools.export_qmt_session import deploy_session_file, export_enabled
+
+            session = export_enabled(ui_boot=ui_boot)
+            target = deploy_session_file()
+        except SystemExit as e:
+            self.logger.info("跳过自动写入 QMT 会话: %s" % e)
+            return
+        except Exception as e:
+            self.logger.warning("自动写入 QMT 会话失败: %s" % e)
+            return
+        tasks = session.get("tasks") or []
+        enabled = sum(1 for t in tasks if isinstance(t, dict) and t.get("enabled", True))
+        if ui_boot:
+            self.logger.info(
+                "交易程序启动已写入 QMT 会话 tasks=%d enabled=%d -> %s"
+                % (len(tasks), enabled, target)
+            )
+        else:
+            self.logger.info(
+                "任务变化已写入 QMT 会话 tasks=%d enabled=%d -> %s"
+                % (len(tasks), enabled, target)
+            )
     
     @staticmethod
     def _normalize_stock_code(sc):
@@ -2221,12 +2275,14 @@ class TaskManager(QObject):
         except Exception:
             pass
 
-    def stop_task(self, task_id, *, persist=True):
+    def stop_task(self, task_id, *, persist=True, fast=False, sync_rules=True):
         """停止指定任务。
 
         进程缺失/已死时也必须清掉 running_tasks，避免「停不掉 / 退不出」。
         不在 running_tasks 但 params/status 仍显示运行中时，做幂等对齐。
         persist=False 时只更新内存/停进程，不立刻 save_tasks（供批量暂停后统一写盘）。
+        fast=True 时不等进程自己退出，直接结束，供关闭窗口使用。
+        sync_rules=False 时本条不写 rules_armed，由批量调用方最后写一次。
         """
         try:
             if task_id in self.running_tasks:
@@ -2271,7 +2327,7 @@ class TaskManager(QObject):
 
                 # 无论 process/pipe 是否完整，都强制清掉运行登记
                 try:
-                    self._force_remove_running_task(task_id, send_stop=True)
+                    self._force_remove_running_task(task_id, send_stop=True, fast=fast)
                 except Exception as e:
                     self.logger.warning(f"强制移除运行记录失败，尝试直接删除: {e}")
                     try:
@@ -2307,10 +2363,11 @@ class TaskManager(QObject):
                                 0
                             ].strip()
 
-                try:
-                    self._sync_rules_armed_if_builtin()
-                except Exception:
-                    pass
+                if sync_rules:
+                    try:
+                        self._sync_rules_armed_if_builtin()
+                    except Exception:
+                        pass
                 return True
 
             if task_id in self.tasks:
@@ -2355,7 +2412,7 @@ class TaskManager(QObject):
             # 失败也尽量清掉脏登记，避免永久卡死退出
             try:
                 if task_id in self.running_tasks:
-                    self._force_remove_running_task(task_id, send_stop=False)
+                    self._force_remove_running_task(task_id, send_stop=False, fast=fast)
             except Exception:
                 self.running_tasks.pop(task_id, None)
             try:
@@ -3847,7 +3904,7 @@ class TaskManager(QObject):
         task = self.tasks[task_id]
         return task.get('is_monitoring', False) 
 
-    def _force_remove_running_task(self, task_id, send_stop=True):
+    def _force_remove_running_task(self, task_id, send_stop=True, fast=False):
         """强制移除 running_tasks 中的任务（任务可能已从 tasks 删除）"""
         if task_id not in self.running_tasks:
             return False
@@ -3869,19 +3926,21 @@ class TaskManager(QObject):
 
         if process:
             try:
-                process.join(timeout=2)
-            except Exception as e:
-                self.logger.warning(f"等待进程退出时出错：{str(e)}")
-
-            if process.is_alive():
-                try:
-                    process.terminate()
-                    process.join(timeout=1)
+                if fast:
                     if process.is_alive():
-                        process.kill()
-                        self.logger.warning(f"强制终止任务 {task_id} 的进程")
-                except Exception as e:
-                    self.logger.error(f"强制终止进程时出错：{str(e)}")
+                        process.terminate()
+                        if process.is_alive():
+                            process.kill()
+                else:
+                    process.join(timeout=2)
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(timeout=1)
+                        if process.is_alive():
+                            process.kill()
+                            self.logger.warning(f"强制终止任务 {task_id} 的进程")
+            except Exception as e:
+                self.logger.warning(f"结束任务进程时出错：{str(e)}")
 
         for pipe_key in ('control_pipe', 'log_pipe'):
             try:

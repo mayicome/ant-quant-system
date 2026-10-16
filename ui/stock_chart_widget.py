@@ -1900,8 +1900,8 @@ class StockChartWidget(QWidget):
                 return tid
         return task_id
 
-    def start_task(self):
-        """启动任务"""
+    def start_task(self, *, confirm=True):
+        """启动任务。confirm=False 时跳过「可能立即触发」确认，供全部启动使用。"""
         from PyQt5.QtWidgets import QMessageBox
         
         # 安全检查：检测是否有规则会立即触发
@@ -2042,8 +2042,16 @@ class StockChartWidget(QWidget):
                                 })
                                 break  # 只记录第一个会触发的网格点
         
-        # 如果有会立即触发的规则，显示警告
-        if immediate_triggers:
+        # 如果有会立即触发的规则，显示警告。全部启动不逐只弹窗。
+        if immediate_triggers and not confirm:
+            try:
+                names = "、".join(t.get("name") or "" for t in immediate_triggers)
+                self.logger.info(
+                    f"[{self.stock_code}] 全部启动：{len(immediate_triggers)} 条规则可能立即触发：{names}"
+                )
+            except Exception:
+                pass
+        elif immediate_triggers:
             trigger_list = "\n".join([
                 f"• {t['name']} ({t['type']} {t['volume']}股) - {t['reason']}"
                 for t in immediate_triggers
@@ -2156,12 +2164,13 @@ class StockChartWidget(QWidget):
             except Exception:
                 pass
     
-    def pause_task(self, *, persist=True, stop_via_tm=True):
+    def pause_task(self, *, persist=True, stop_via_tm=True, fast=False):
         """暂停任务。
         
         Args:
             persist: 是否写盘；全部暂停批量调用时传 False，最后统一 save 一次
             stop_via_tm: 是否通过 TaskManager.stop_task 停进程
+            fast: 关闭窗口时不等进程自己退出
         """
         # 先立刻刷新按钮，再做停进程/写盘，避免点了半天没反馈
         self.task_running = False
@@ -2176,10 +2185,14 @@ class StockChartWidget(QWidget):
         tm_saved = False
         if stop_via_tm:
             task_id = self._resolve_live_task_id()
+            if self.task_manager and getattr(self.task_manager, "_exit_fast_stop", False):
+                fast = True
             if self.task_manager and task_id:
                 ok = False
                 try:
-                    ok = bool(self.task_manager.stop_task(task_id, persist=persist))
+                    ok = bool(self.task_manager.stop_task(
+                        task_id, persist=persist, fast=fast, sync_rules=not fast
+                    ))
                     tm_saved = bool(persist and ok)
                 except TypeError:
                     # 兼容旧签名 stop_task(task_id)
@@ -2197,7 +2210,7 @@ class StockChartWidget(QWidget):
                     try:
                         if task_id in getattr(self.task_manager, "running_tasks", {}):
                             self.task_manager._force_remove_running_task(
-                                task_id, send_stop=False
+                                task_id, send_stop=False, fast=fast
                             )
                         mark = getattr(self.task_manager, "_mark_task_stopped_params", None)
                         if callable(mark):

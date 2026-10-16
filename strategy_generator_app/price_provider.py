@@ -1,7 +1,7 @@
 """
 行情获取：为策略生成器提供 当前价、昨收 及关键价格点（涨跌停、均线重合点、前高前低、布林带、今开最高最低等）。
 
-实盘 builtin：results.json 现价 + daily_cache 关键价（P2）；mini 仍走 xtdata tick。
+实盘 builtin：东财现价 + daily_cache 关键价；不再等 results.json。mini 仍走 xtdata tick。
 回测日线仅 data/daily_cache（builtin 无 xtdata 回退，见 backtest/data_provider.py）。"""
 
 import os
@@ -215,18 +215,127 @@ def _opening_auction_wait_timeout_sec() -> float:
     return 30.0
 
 
+def _tencent_symbol(full: str) -> str:
+    num, _, market = str(full or "").partition(".")
+    if market == "SH":
+        prefix = "sh"
+    elif market == "BJ":
+        prefix = "bj"
+    else:
+        prefix = "sz"
+    return prefix + num
+
+
+def _fetch_tencent_spots(fulls: List[str]) -> Dict[str, Dict[str, float]]:
+    """腾讯 qt.gtimg.cn。字段：3现价 4昨收 5今开 33最高 34最低。"""
+    import requests
+
+    os.environ.setdefault("NO_PROXY", "*")
+    out: Dict[str, Dict[str, float]] = {}
+    if not fulls:
+        return out
+    sess = requests.Session()
+    sess.trust_env = False
+    sess.headers["User-Agent"] = "Mozilla/5.0"
+    for i in range(0, len(fulls), 40):
+        chunk = fulls[i : i + 40]
+        url = "https://qt.gtimg.cn/q=" + ",".join(_tencent_symbol(c) for c in chunk)
+        try:
+            resp = sess.get(url, timeout=5.0)
+            resp.raise_for_status()
+            text = resp.content.decode("gbk", errors="replace")
+        except Exception:
+            continue
+        for line in text.split(";"):
+            if "~" not in line or "=" not in line:
+                continue
+            body = line.split("=", 1)[1].strip().strip('"')
+            parts = body.split("~")
+            if len(parts) < 35:
+                continue
+            num = str(parts[2] or "").zfill(6)
+            full = next((c for c in chunk if c.split(".")[0] == num), "")
+            if not full:
+                continue
+            try:
+                price = float(parts[3] or 0)
+                pre = float(parts[4] or 0)
+                opn = float(parts[5] or 0)
+                high = float(parts[33] or 0)
+                low = float(parts[34] or 0)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            out[full] = {
+                "price": price,
+                "pre_close": pre,
+                "open": opn,
+                "high": high,
+                "low": low,
+            }
+    return out
+
+
+def _load_public_live_prices(codes: List[str]) -> Dict[str, Dict[str, float]]:
+    """东财现价，缺的用腾讯补。QMT 不再写 results.json。"""
+    from utils.eastmoney_spot import fetch_spot_quotes
+    from utils.strategy_pool_watch import code_6_to_full
+
+    fulls = []
+    for c6 in codes:
+        full = code_6_to_full(c6)
+        if full:
+            fulls.append(full)
+    quotes: Dict[str, Dict[str, float]] = {}
+    for _attempt in range(2):
+        for i in range(0, len(fulls), 80):
+            try:
+                quotes.update(fetch_spot_quotes(fulls[i : i + 80], timeout=5.0))
+            except Exception:
+                continue
+        if len(quotes) >= len(fulls):
+            break
+        time.sleep(0.4)
+    missing_fulls = [c for c in fulls if c not in quotes]
+    if missing_fulls:
+        try:
+            quotes.update(_fetch_tencent_spots(missing_fulls))
+        except Exception:
+            pass
+    out: Dict[str, Dict[str, float]] = {}
+    for c6 in codes:
+        q = quotes.get(code_6_to_full(c6)) or {}
+        try:
+            price = float(q.get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            continue
+        try:
+            pre = float(q.get("pre_close") or 0)
+        except (TypeError, ValueError):
+            pre = 0.0
+        row = {
+            "current": price,
+            "pre_close": pre,
+            "最新价": price,
+            "今开盘": float(q.get("open") or 0),
+            "今日最高": float(q.get("high") or 0),
+            "今日最低": float(q.get("low") or 0),
+        }
+        if pre > 0:
+            row["昨收盘"] = pre
+        out[c6] = row
+    return out
+
+
 def _get_prices_with_key_points_builtin(
     stock_codes_6: List[str],
     on_progress=None,
 ) -> tuple:
-    """builtin：strategy_pool_watch → 等 results.json → KeyPriceCalculator(daily_cache)。"""
-    from utils.builtin_live_prices import (
-        format_not_ready_message,
-        format_partial_ready_message,
-        load_live_prices_for_codes,
-        wait_results_ready,
-    )
-    from utils.strategy_pool_watch import code_6_to_full, set_strategy_pool_watch
+    """builtin：东财现价 → KeyPriceCalculator(daily_cache)。不等 results.json。"""
+    from utils.strategy_pool_watch import code_6_to_full
 
     def _progress(msg: str) -> None:
         if callable(on_progress):
@@ -244,13 +353,6 @@ def _get_prices_with_key_points_builtin(
     if not codes:
         return {}, errors
 
-    try:
-        set_strategy_pool_watch(codes)
-        _progress(f"已请求订阅 {len(codes)} 只，等待 results.json…")
-    except Exception as e:
-        errors.append(f"[strategy_pool_watch] 写入失败: {e}")
-        return {}, errors
-
     from datetime import date as _date
     from utils.data_sync_request import (
         submit_daily_requests,
@@ -258,24 +360,27 @@ def _get_prices_with_key_points_builtin(
         _pump_ui_events,
     )
 
-    full_codes = [_code_with_suffix(c) for c in codes]
-    submit_daily_requests(full_codes, through_date=_date.today())
-
-    wait_sec = _opening_auction_wait_timeout_sec()
-    ready, missing, stats = wait_results_ready(codes, timeout_sec=wait_sec)
-    if not ready:
-        errors.append(format_not_ready_message(missing, stats))
+    _progress(f"正在取公开行情现价 {len(codes)} 只…")
+    live = _load_public_live_prices(codes)
+    missing = [code_6_to_full(c) for c in codes if c not in live]
+    if not live:
+        miss_show = ", ".join(missing[:12])
+        if len(missing) > 12:
+            miss_show += f", ...（共 {len(missing)} 只）"
+        errors.append(f"[行情未就绪] 东财现价未取到: {miss_show}")
         return {}, errors
     if missing:
-        errors.append(format_partial_ready_message(missing, stats))
-        miss_set = {str(m).strip().upper() for m in missing}
-        codes = [c for c in codes if code_6_to_full(c) not in miss_set]
-        if not codes:
-            errors.append("[行情未就绪] 过滤缺失后无可用股票")
-            return {}, errors
-    _progress(
-        f"现价就绪 {int(stats.get('ready') or 0)}/{int(stats.get('pool') or len(codes))}，等待日线…"
-    )
+        miss_show = ", ".join(missing[:12])
+        if len(missing) > 12:
+            miss_show += f", ...（共 {len(missing)} 只）"
+        errors.append(
+            f"[行情部分就绪] 东财有价 {len(live)}/{len(codes)}，跳过: {miss_show}"
+        )
+        codes = [c for c in codes if c in live]
+    _progress(f"现价就绪 {len(live)}/{len(codes) + len(missing)}，等待日线…")
+
+    full_codes = [_code_with_suffix(c) for c in codes]
+    submit_daily_requests(full_codes, through_date=_date.today())
 
     def _daily_prog(ready_n: int, total_n: int, label: str) -> None:
         _progress(f"等待{label}缓存 {ready_n}/{total_n}")
@@ -315,7 +420,7 @@ def _get_prices_with_key_points_builtin(
             # 重新提交，清掉误标 short_history(vol=0) / soft miss
             submit_daily_requests(still_missing, through_date=_date.today())
 
-    result = load_live_prices_for_codes(codes)
+    result = {c: dict(live.get(c) or {}) for c in codes}
     ensure_repo_root_on_sys_path()
     try:
         from key_price_calculator import KeyPriceCalculator
@@ -392,7 +497,7 @@ def get_prices_with_key_points(stock_codes_6: List[str], on_progress=None) -> tu
         if not _LIVE_SOURCE_LOGGED:
             _LIVE_SOURCE_LOGGED = True
             errors.append(
-                "[配置] 实盘行情来源: results.json 现价/今开 + daily_cache 关键价（builtin；超时失败不回退）"
+                "[配置] 实盘行情来源: 东财现价/今开 + daily_cache 关键价（不再等 results.json）"
             )
         return _get_prices_with_key_points_builtin(
             stock_codes_6, on_progress=on_progress

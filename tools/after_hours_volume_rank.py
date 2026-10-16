@@ -23,7 +23,8 @@
 用法：
   python tools/after_hours_volume_rank.py
   python tools/after_hours_volume_rank.py --day 20260714 --limit 200
-  python tools/after_hours_volume_rank.py --keep-qmt-tick   # 调试：算完不删 QMT tick
+  python tools/after_hours_volume_rank.py                  # 默认保留 QMT datadir tick
+  python tools/after_hours_volume_rank.py --purge-qmt-tick # 算完删除该日 datadir tick
   python tools/after_hours_volume_rank.py --skip-download   # 仅用已有本地 tick（仍可 --purge）
 
 全市场约 5200 只，通常 2～3 小时；峰值磁盘仅约一批 tick，不算长期堆积。
@@ -734,7 +735,12 @@ def main() -> int:
     parser.add_argument(
         "--keep-qmt-tick",
         action="store_true",
-        help="算完后保留 QMT datadir 里该日 tick（默认删除以省磁盘）",
+        help="保留 QMT datadir 里该日 tick（现为默认，可省略）",
+    )
+    parser.add_argument(
+        "--purge-qmt-tick",
+        action="store_true",
+        help="算完后删除 QMT datadir 里该日 tick（默认保留，供 QMT 内回测）",
     )
     parser.add_argument("--top", type=int, default=10, help="排名条数，默认 10")
     args = parser.parse_args()
@@ -746,7 +752,7 @@ def main() -> int:
             batch_size=max(10, int(args.batch_size or 80)),
             skip_download=bool(args.skip_download),
             top_n=max(1, int(args.top or 10)),
-            purge_qmt_tick=not bool(args.keep_qmt_tick),
+            purge_qmt_tick=bool(args.purge_qmt_tick) and not bool(args.keep_qmt_tick),
         )
     except Exception as e:
         print(f"[rank] FAILED: {e}")

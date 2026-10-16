@@ -67,7 +67,8 @@ def resolve_asof_day(now: Optional[datetime] = None) -> date:
 
 def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
     steps: List[PipelineStep] = [
-        PipelineStep("daily_cache", "等待日线缓存就绪", is_gate=True, selectable=True),
+        PipelineStep("qmt_quote", "导出沪深京行情", selectable=True),
+        PipelineStep("daily_cache", "下载日线缓存", is_gate=True, selectable=True),
         PipelineStep("limit_up", "涨停日抓取", selectable=True),
         PipelineStep("lu_board_rank", "涨停家数排名导出", selectable=True),
         PipelineStep("capital_flow", "主力资金流", selectable=True),
@@ -75,7 +76,6 @@ def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
         PipelineStep("stock_filter", "选股", selectable=True),
         PipelineStep("profit_index", "盈亏指数", full_only=True),
         PipelineStep("main_line_group", "主线分组", full_only=True),
-        PipelineStep("limit_up_structure", "涨停结构", full_only=True),
         PipelineStep("seal_rating", "封单评级验证", full_only=True),
         PipelineStep("limit_up_gene", "涨停基因", full_only=True),
         PipelineStep("main_force_net_inflow", "主力净流入分析", full_only=True),
@@ -90,8 +90,6 @@ def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
             in_scheduled=True,
             default_rerun_if_missing=False,
         ),
-        PipelineStep("after_hours_wait", "等待盘后量能", full_only=True),
-        PipelineStep("after_hours_export", "导出盘后量能到COS目录", full_only=True),
         PipelineStep("cos_upload", "上传腾讯云COS", full_only=True),
         PipelineStep("wechat_draft", "微信公众号草稿", full_only=True),
         PipelineStep("market_regime", "市场行情描绘增量", full_only=True),
@@ -267,15 +265,24 @@ def run_step(
         return _run_plain(root, script, args)
 
     try:
-        if step_id == "daily_cache":
-            # 手动 asof：只做一次就绪检查，不长时间轮询
-            if use_asof_freeze:
-                from utils.post_market_completeness import check_daily_cache
+        if step_id == "qmt_quote":
+            rc = run(
+                "tools/export_qmt_hsj_quote.py",
+                ("--date", d),
+            )
+            detail = "QMT行情页沪深京A股"
+            return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
 
-                ok, detail = check_daily_cache(day)
-                return StepRunResult(ok=ok, exit_code=0 if ok else 1, detail=detail)
-            rc = run("wait_daily_cache_ready.py")
-            return StepRunResult(ok=rc == 0, exit_code=rc)
+        if step_id == "daily_cache":
+            from utils.trading_day import previous_tradeday
+
+            prev = previous_tradeday(day).strftime("%Y-%m-%d")
+            rc = run(
+                "tools/append_daily_cache_external.py",
+                ("--date", d, "--prev", prev),
+            )
+            detail = "行情导出为主，缺的再东财 → 腾讯 → 同花顺"
+            return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
 
         if step_id == "limit_up":
             from utils.limit_up_day_path import ensure_limit_up_day_data_dir
@@ -301,7 +308,7 @@ def run_step(
         if step_id == "capital_flow":
             # 始终按目标交易日保存。非交易日补跑不要冻日历，否则缺 freezegun 时
             # 脚本还没开始抓取就退出，界面只能看到文件缺失。
-            # 东财 push2 偶发整段掐线：脚本内已有同花顺兜底；此处再做整步重试。
+            # 东财 push2 偶发整段掐线：只重试东财，不用同花顺净额顶替主力净流入。
             last: Optional[StepRunResult] = None
             for attempt in range(1, 4):
                 rc = run(
@@ -324,8 +331,28 @@ def run_step(
                         f"[重试] 主力资金流第 {attempt} 次失败"
                         f"（{last.detail or f'exit={rc}'}），{wait_s}s 后重试…"
                     )
+                    print(
+                        "[重试] 若东财接口被掐断，请用浏览器登录"
+                        " https://data.eastmoney.com/zjlx/detail.html 后再等本次重试"
+                    )
                     time.sleep(wait_s)
-            return last or StepRunResult(ok=False, exit_code=1, detail="capital_flow failed")
+            if last is not None and not last.ok:
+                last = StepRunResult(
+                    ok=False,
+                    exit_code=last.exit_code or 1,
+                    detail=(
+                        "东财主力净流入失败。请用浏览器登录"
+                        " https://data.eastmoney.com/zjlx/detail.html 后重跑这一步"
+                    ),
+                )
+            return last or StepRunResult(
+                ok=False,
+                exit_code=1,
+                detail=(
+                    "东财主力净流入失败。请用浏览器登录"
+                    " https://data.eastmoney.com/zjlx/detail.html 后重跑这一步"
+                ),
+            )
 
         if step_id == "board_snapshot":
             extra = ("--with-fund-flow", "--date", d)
@@ -347,7 +374,6 @@ def run_step(
         gui_map = {
             "profit_index": ("profit_index_gui.py", ("--auto-run",)),
             "main_line_group": ("main_line_group_gui.py", ("--auto-run",)),
-            "limit_up_structure": ("limit_up_structure_analysis_gui.py", ("--auto-run",)),
             "limit_up_gene": ("limit_up_gene_analysis_gui.py", ("--auto-run",)),
             "main_force_net_inflow": ("main_force_net_inflow_gui.py", ("--auto-run",)),
             "lhb_analysis": ("lhb_analysis_gui.py", ("--auto-run",)),
@@ -382,26 +408,20 @@ def run_step(
 
         if step_id == "history_archive":
             from utils.history_data_archive import archive_history_before
+            from utils.post_market_step_status import mark_step_finished
 
             history_dir = os.path.join(root, "history_data")
-            moved, skipped, errors = archive_history_before(
-                history_dir, day, exclude_prefixes=("选股结果",)
-            )
+            try:
+                moved, skipped, errors = archive_history_before(
+                    history_dir, day, exclude_prefixes=("选股结果",)
+                )
+            except Exception as e:
+                detail = str(e)
+                mark_step_finished(day, step_id, ok=False, detail=detail)
+                return StepRunResult(ok=False, exit_code=1, detail=detail)
             detail = f"moved={moved} skipped={skipped} errors={len(errors)}"
+            mark_step_finished(day, step_id, ok=not errors, detail=detail)
             return StepRunResult(ok=not errors, exit_code=1 if errors else 0, detail=detail)
-
-        if step_id == "after_hours_wait":
-            if use_asof_freeze:
-                from utils.post_market_completeness import check_after_hours
-
-                ok, detail = check_after_hours(day)
-                return StepRunResult(ok=ok, exit_code=0 if ok else 1, detail=detail)
-            rc = run("wait_after_hours_rank_ready.py")
-            return StepRunResult(ok=rc == 0, exit_code=rc)
-
-        if step_id == "after_hours_export":
-            rc = run("tools/export_after_hours_top_to_jsonl.py", freeze=True)
-            return _ok_after_run(step_id, day, rc)
 
         if step_id == "cos_upload":
             rc = run("tools/upload_cos_data.py", ("--with-zip",))

@@ -43,7 +43,6 @@ LIVE_JOBS: List[JobStep] = [
 FULL_EXTRA_JOBS: List[JobStep] = [
     ("profit_index_gui.py", ("--auto-run",), "盈亏指数"),
     ("main_line_group_gui.py", ("--auto-run",), "主线分组"),
-    ("limit_up_structure_analysis_gui.py", ("--auto-run",), "涨停结构"),
     ("tools/seal_rating_daily_verify.py", ("--auto-run",), "封单评级验证"),
     ("limit_up_gene_analysis_gui.py", ("--auto-run",), "涨停基因"),
     ("main_force_net_inflow_gui.py", ("--auto-run",), "主力净流入分析"),
@@ -363,22 +362,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     mode_s = _mode_tag(live_only)
     print(f"[执行] {today} 是交易日，开始盘后批跑。模式={mode_s}")
     if live_only:
-        print("[模式] 仅实盘：跳过研究 GUI / 盘后量能 / COS / 公众号 / 行情描绘；归档时保留选股结果")
+        print("[模式] 仅实盘：跳过研究 GUI / COS / 公众号 / 行情描绘；归档时保留选股结果")
     failed: List[str] = []
     cos_status: Optional[str] = None
     wechat_draft_status: Optional[str] = None
     today_str = today.strftime("%Y-%m-%d")
 
-    # 1) 先等日线；失败则整批跳过
-    print("[步骤] 等待 daily_cache 今日同步完成…")
+    # 1) 先导出 QMT 行情表。失败不中止，日线步骤会改向东财
+    print("[步骤] 导出 QMT 沪深京行情…")
+    export_rc = _run_job(script_dir, "tools/export_qmt_hsj_quote.py")
+    if export_rc != 0:
+        print("[行情导出] 失败。日线能用表的用表，凑不齐的仍向东财要。")
+
+    # 2) 写下当日日线；失败则整批跳过
+    print("[步骤] 下载日线缓存（行情导出为主，缺的再东财 → 腾讯 → 同花顺）…")
     wait_rc = _run_job(script_dir, "wait_daily_cache_ready.py")
     if wait_rc != 0:
-        print("[中止] daily_cache 未就绪，跳过全部后续程序。")
+        print("[中止] 日线下载未完成，跳过全部后续程序。")
         _notify_daily_batch(
             today,
             status="aborted",
             failed=["wait_daily_cache_ready.py"],
-            note="daily_cache 未就绪，后续全部未跑",
+            note="公开行情日线未写入 daily_cache，后续全部未跑",
             live_only=live_only,
         )
         return 1
@@ -440,33 +445,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     if not live_only:
-        # 4.5) 等今日盘后量能 top10（避免批跑早于 QMT 量能导致 COS 缺当日）
-        print("[步骤] 等待 after_hours_rank 今日 top10 就绪…")
-        ah_wait_rc = _run_job(script_dir, "wait_after_hours_rank_ready.py")
-        if ah_wait_rc != 0:
-            _record_fail(
-                failed,
-                today,
-                label=_job_label("wait_after_hours_rank_ready.py"),
-                step="等待盘后量能",
-                detail=f"exit={ah_wait_rc}",
-                live_only=live_only,
-            )
-            print("[警告] 盘后量能未就绪，仍将导出当前已有 top10 并继续上传 COS。")
-
-        # 4.6) COS 导出兜底
-        print("[步骤] 导出 after_hours → data/cos …")
-        ah_rc = _run_job(script_dir, "tools/export_after_hours_top_to_jsonl.py")
-        if ah_rc != 0:
-            _record_fail(
-                failed,
-                today,
-                label=_job_label("tools/export_after_hours_top_to_jsonl.py"),
-                step="after_hours导出",
-                detail=f"exit={ah_rc}",
-                live_only=live_only,
-            )
-
         # 5) 上传 COS
         print("[步骤] 上传 data/cos 到腾讯云 COS…")
         cos_args = ("--with-zip",)
@@ -514,7 +492,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 live_only=live_only,
             )
     else:
-        print("[跳过] 仅实盘模式：盘后量能 / COS / 公众号 / 行情描绘 均未执行")
+        print("[跳过] 仅实盘模式：COS / 公众号 / 行情描绘 均未执行")
 
     # 7) Server酱终局摘要（保留）
     status = "ok" if not failed else "partial_fail"

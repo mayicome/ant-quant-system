@@ -10,7 +10,7 @@ try:
 except Exception:
     PROJECT_ROOT = ""
 
-PASSORDER_VERSION = "20260803.01"
+PASSORDER_VERSION = "20261013.05"
 
 # QMT 注入的 passorder（由入口文件 bind_runtime_globals 绑定）
 _PASSORDER = None
@@ -181,17 +181,6 @@ def _resolve_account_id(ContextInfo) -> str:
         return str(resolve_account_id(ContextInfo) or "").strip()
     except Exception:
         pass
-    try:
-        import configparser
-
-        ini_path = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data", "config.ini")
-        if PROJECT_ROOT and os.path.isfile(ini_path):
-            cfg = configparser.ConfigParser()
-            cfg.read(ini_path, encoding="utf-8")
-            if cfg.has_option("Account", "account_id"):
-                return str(cfg.get("Account", "account_id") or "").strip()
-    except Exception:
-        pass
     return ""
 
 
@@ -213,11 +202,12 @@ def place_limit_buy(
     *,
     strategy_name: str = "蚂蚁-单点买入",
     user_order_id: str = "",
-    quick_trade: int = 1,
+    quick_trade: int = 2,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """
     限价买入。返回 (ok, reason, record)。
     ok=True 表示已调用 passorder（不代表一定成交）。
+    策略挂在日线上，委托从行情回调发出，必须 quickTrade=2 才会立即报给柜台。
     """
     code = str(stock_code or "").strip().upper()
     px = _round_price(code, float(price or 0))
@@ -297,11 +287,12 @@ def place_limit_sell(
     *,
     strategy_name: str = "蚂蚁-单点卖出",
     user_order_id: str = "",
-    quick_trade: int = 1,
+    quick_trade: int = 2,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """
     限价卖出。返回 (ok, reason, record)。
     ok=True 表示已调用 passorder（不代表一定成交）。
+    策略挂在日线上，委托从行情回调发出，必须 quickTrade=2 才会立即报给柜台。
     """
     code = str(stock_code or "").strip().upper()
     px = _round_price(code, float(price or 0))
@@ -510,6 +501,17 @@ def append_order_record(results: Dict[str, Any], record: Dict[str, Any]) -> None
     if len(orders) > 200:
         results["orders"] = orders[-200:]
     results["updated_at"] = _now_iso()
+    try:
+        import ant_result_log as _rl
+
+        _rl.emit_order(record)
+    except Exception:
+        try:
+            from qmt_builtin.src import ant_result_log as _rl
+
+            _rl.emit_order(record)
+        except Exception:
+            pass
     # 买入成交记建仓日（QMT 内完成，不依赖主程序）
     try:
         import ant_position_entry_dates as _ped

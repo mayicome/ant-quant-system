@@ -60,10 +60,7 @@ def save_requests(data: Dict[str, Any]) -> None:
 
 
 def process_pending_cancels(ContextInfo, po_module=None) -> int:
-    """
-    处理 pending 撤单。返回成功发出 cancel 的条数。
-    po_module: ant_passorder 模块（可选，缺省动态 import）。
-    """
+    """处理 pending 撤单。返回成功发出 cancel 的条数。"""
     data = load_requests()
     items = data.get("items") or []
     if not isinstance(items, list) or not items:
@@ -110,10 +107,7 @@ def process_pending_cancels(ContextInfo, po_module=None) -> int:
         if ok:
             it["status"] = "sent"
             sent += 1
-            print(
-                "[撤单请求] 撤单已发 sysid=%s code=%s"
-                % (sysid, code or "-")
-            )
+            print("[撤单请求] 撤单已发 sysid=%s code=%s" % (sysid, code or "-"))
         else:
             it["status"] = "error"
             print(
@@ -123,7 +117,6 @@ def process_pending_cancels(ContextInfo, po_module=None) -> int:
         changed = True
 
     if changed:
-        # 保留最近 100 条
         if len(items) > 100:
             data["items"] = items[-100:]
         save_requests(data)

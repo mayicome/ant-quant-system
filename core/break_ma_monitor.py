@@ -353,8 +353,7 @@ class BreakMAMonitor:
             float: 与均线重合的价格，如果无法计算则返回None
         """
         try:
-            # 需要前(period-1)天的数据来计算重合点
-            # 例如5日线需要前4天的数据
+            # 重合点：前 (period-1) 天收盘均价。10日 = 前9根 / 9
             days_needed = period - 1
             if len(df) < days_needed:
                 return None

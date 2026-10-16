@@ -52,6 +52,13 @@ class BuiltinPricePoller(QObject):
         self._health_last_check_ts = 0.0
         self._health_alert_since_ts = 0.0
         self._health_sct_sustain_sec = 120.0  # 持续异常这么久才推 Server酱，避免闪断刷屏
+        # 右下角交易/行情灯。只在刷新持仓委托时看一次，变红推过就等到恢复绿色再推。
+        self._link_red_key = ""
+        self._link_notified = False
+        self._link_log_text = ""
+        # 策略日志心跳。还没读到 ANTRES 心跳时不报警，右下角指示灯照旧。
+        self._hb_stale = False
+        self._hb_notified = False
 
     def start(self) -> None:
         if not use_builtin_price_feed():
@@ -68,21 +75,360 @@ class BuiltinPricePoller(QObject):
         if not self.task_manager:
             return
         try:
-            if not os.path.isfile(self._results_path):
-                self._set_health_alert("大QMT无results.json（策略可能未运行）")
-                return
-            mtime = os.path.getmtime(self._results_path)
-            prices = load_results_prices(self._results_path)
-            if prices or mtime != self._last_file_mtime:
-                self._last_file_mtime = mtime
-                self._apply_prices(prices)
-            self._apply_account_snapshot()
-            self._apply_orders_snapshot()
-            self._apply_elastic_states_snapshot()
-            self._check_qmt_health(prices, mtime)
+            self._poll_formula_log()
+            if os.path.isfile(self._results_path):
+                # 现价仍走东财。弹性、委托、持仓优先用策略日志还原的结果。
+                # 窗口自动读持仓/委托/资金由 QMT_WINDOW_ACCOUNT_POLL 控制，默认已停。
+                self._apply_elastic_states_snapshot()
+            if not self._link_red_key and not self._hb_stale:
+                self._set_health_alert("")
+            self._overlay_eastmoney_prices()
+            self._overlay_gjzq_asset()
+            self._note_formula_heartbeat()
         except Exception as e:
             if self.logger:
                 self.logger.debug(f"[builtin_price] 轮询失败: {e}")
+
+    def _poll_formula_log(self) -> None:
+        try:
+            from utils.qmt_formula_result_log import poll as poll_formula
+        except Exception:
+            return
+        state = poll_formula(self._results_path)
+        if not state.get("live"):
+            return
+        if state.get("orders_changed"):
+            self._apply_orders_snapshot()
+        if state.get("early_changed"):
+            self._apply_early_states_snapshot()
+        if state.get("snapshot_changed"):
+            self._formula_snap = {
+                "positions": state.get("positions") or {},
+                "asset": state.get("asset") or {},
+                "fills": list(state.get("fills") or []),
+            }
+        self._flush_formula_snap()
+
+    def _flush_formula_snap(self) -> None:
+        """持仓和委托一起填。界面还没准备好时先留着，下一轮再填。"""
+        snap = getattr(self, "_formula_snap", None)
+        if not snap:
+            return
+        positions = snap.get("positions") or {}
+        asset = snap.get("asset") or {}
+        fills = list(snap.get("fills") or [])
+        view = self._resolve_charts_view()
+        if view is not None and hasattr(view, "_apply_gjzq_holdings"):
+            try:
+                view._apply_gjzq_holdings(positions, asset)
+            except Exception:
+                pass
+            painted = True
+            if hasattr(view, "_apply_gjzq_fills"):
+                try:
+                    painted = bool(view._apply_gjzq_fills(fills))
+                except Exception:
+                    painted = False
+            if painted or not fills:
+                self._formula_snap = None
+            return
+        adapter = self.qmt_adapter
+        if adapter is None:
+            return
+        adapter.cached_positions = positions
+        adapter._ths_positions = positions
+        if asset:
+            cached = dict(getattr(adapter, "cached_asset", None) or {})
+            cached.update(asset)
+            adapter.cached_asset = cached
+
+    def _prefer_formula_asset(self) -> None:
+        """日志里已经有资产时，以日志为准。还没有时继续用「我的」。"""
+        try:
+            from utils.qmt_formula_result_log import current
+        except Exception:
+            return
+        data = current()
+        acc = data.get("account") if isinstance(data, dict) else None
+        if not isinstance(acc, dict):
+            return
+        adapter = self.qmt_adapter
+        if adapter is None:
+            return
+        asset = dict(getattr(adapter, "cached_asset", None) or {})
+        changed = False
+        for key in ("cash", "market_value", "total_asset"):
+            if acc.get(key) is None:
+                continue
+            if asset.get(key) != acc.get(key):
+                changed = True
+            asset[key] = acc.get(key)
+        if changed:
+            adapter.cached_asset = asset
+
+    def _note_formula_heartbeat(self) -> None:
+        """早盘：见过心跳后再停 90 秒才报。午后：13:00 起算，30 秒没有推送就报。"""
+        self._prefer_formula_asset()
+        try:
+            from utils.qmt_formula_result_log import (
+                current,
+                heartbeat_at,
+                heartbeat_seen,
+                heartbeat_subscribe,
+            )
+        except Exception:
+            return
+        now = datetime.now()
+        if self._in_afternoon_push_watch(now):
+            self._note_afternoon_push(now, current, heartbeat_at, heartbeat_subscribe)
+            return
+        if not heartbeat_seen():
+            return
+        if not self._in_health_watch_window(now):
+            self._hb_stale = False
+            self._hb_notified = False
+            return
+        from datetime import time as dt_time
+
+        start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        hb = float(heartbeat_at() or 0)
+        if hb < start.timestamp():
+            return
+        self._raise_heartbeat_stop(now, hb, heartbeat_subscribe, limit_sec=90.0)
+
+    def _in_afternoon_push_watch(self, now: Optional[datetime] = None) -> bool:
+        """交易日 13:00–15:00。30 秒宽限在计时里，不把整段排除在监控外。"""
+        now = now or datetime.now()
+        try:
+            from utils.trading_day import is_tradeday
+        except Exception:
+            return False
+        if not is_tradeday(now.date()):
+            return False
+        from datetime import time as dt_time
+
+        t = now.time()
+        return dt_time(13, 0) <= t <= dt_time(15, 0)
+
+    @staticmethod
+    def _tick_clock(text: str):
+        parts = str(text or "").strip().split(":")
+        if len(parts) < 2:
+            return None
+        try:
+            from datetime import time as dt_time
+
+            sec = int(parts[2]) if len(parts) > 2 else 0
+            return dt_time(int(parts[0]), int(parts[1]), sec)
+        except (TypeError, ValueError):
+            return None
+
+    def _note_afternoon_push(self, now, current, heartbeat_at, heartbeat_subscribe) -> None:
+        """13:00 起算。还没有午后推送时，30 秒就报，不等第一拍心跳。"""
+        from datetime import time as dt_time
+
+        if now.time() < dt_time(13, 0, 30):
+            return
+        row = {}
+        try:
+            data = current() or {}
+            got = data.get("heartbeat") if isinstance(data, dict) else None
+            if isinstance(got, dict):
+                row = got
+        except Exception:
+            row = {}
+        tick = self._tick_clock(row.get("t"))
+        seen_afternoon = tick is not None and dt_time(13, 0) <= tick <= dt_time(15, 0)
+        session_start = now.replace(hour=13, minute=0, second=0, microsecond=0)
+        if seen_afternoon:
+            hb = float(heartbeat_at() or 0)
+            limit = 90.0
+        else:
+            hb = session_start.timestamp()
+            limit = 30.0
+        self._raise_heartbeat_stop(now, hb, heartbeat_subscribe, limit_sec=limit)
+
+    def _raise_heartbeat_stop(
+        self,
+        now: datetime,
+        hb: float,
+        heartbeat_subscribe,
+        limit_sec: float,
+    ) -> None:
+        # 任务、自选、策略池都空：没有行情回调是预期的。缺心跳不说明 QMT 断了。
+        if heartbeat_subscribe is not None and heartbeat_subscribe() == 0:
+            if self._hb_stale:
+                self._hb_stale = False
+                self._hb_notified = False
+                if not self._link_red_key:
+                    self._set_health_alert("")
+            return
+        # 9:25–9:30 没有行情回调是正常的，这段不报心跳停止。
+        # 9:30 之后若最后一拍还在 9:30 之前，90 秒从 9:30 起算。
+        if self._in_auction_match_quiet(now):
+            if self._hb_stale:
+                self._hb_stale = False
+                if not self._link_red_key:
+                    self._set_health_alert("")
+            return
+        age = time.time() - hb
+        from datetime import time as dt_time
+
+        if dt_time(9, 30) <= now.time() < dt_time(11, 30):
+            quiet_end = now.replace(hour=9, minute=30, second=0, microsecond=0)
+            if hb < quiet_end.timestamp():
+                age = time.time() - quiet_end.timestamp()
+        if age < limit_sec:
+            if self._hb_stale:
+                self._hb_stale = False
+                self._hb_notified = False
+                if not self._link_red_key:
+                    self._set_health_alert("")
+            return
+        waited = int(limit_sec)
+        msg = "⚠ QMT策略心跳停了（超过%d秒没有日志心跳）" % waited
+        self._hb_stale = True
+        self._health_alert = msg
+        for holder in (self.qmt_adapter, self.task_manager, self.main_window):
+            if holder is not None:
+                try:
+                    setattr(holder, "builtin_health_alert", msg)
+                except Exception:
+                    pass
+        try:
+            if self.main_window is not None and hasattr(self.main_window, "update_status_bar"):
+                self.main_window.update_status_bar()
+        except Exception:
+            pass
+        if self._hb_notified:
+            return
+        self._hb_notified = True
+        try:
+            from utils.server_chan_notify import notify_alert
+
+            result = notify_alert(
+                "QMT策略心跳停止",
+                "交易时段里，蚂蚁量化规则超过 %d 秒没有打出日志心跳。\n\n请看一下 QMT 里的蚂蚁量化规则是否还在运行。"
+                % waited,
+                alert_key="qmt_hb_%s" % now.strftime("%Y%m%d"),
+                cooldown_sec=0,
+            )
+            if self.logger and result.get("success"):
+                self.logger.warning("[大QMT健康] 策略心跳停止已通过 Server酱 推送")
+        except Exception as exc:
+            self._hb_notified = False
+            if self.logger:
+                self.logger.debug("[大QMT健康] 策略心跳推送失败: %s" % exc)
+
+    def _quote_aliases(self) -> Dict[str, tuple]:
+        from utils.daily_cache_reader import to_full_stock_code
+
+        aliases: Dict[str, set] = {}
+
+        def add(raw) -> None:
+            text = str(raw or "").strip()
+            if not text:
+                return
+            full = to_full_stock_code(text)
+            if "." not in full or not full.split(".")[0].isdigit():
+                return
+            aliases.setdefault(full, set()).add(text)
+            aliases[full].add(full)
+
+        tm = self.task_manager
+        for raw in (getattr(tm, "latest_prices", {}) or {}):
+            add(raw)
+        tasks = getattr(tm, "tasks", {}) or {}
+        if isinstance(tasks, dict):
+            for task in tasks.values():
+                if isinstance(task, dict):
+                    add(task.get("stock_code"))
+        return {key: tuple(vals) for key, vals in aliases.items()}
+
+    def _overlay_eastmoney_prices(self) -> None:
+        """图表现价改用东财，6 秒一次。results.json 仍先写入，这里覆盖显示。"""
+        now = time.time()
+        if now - float(getattr(self, "_em_quote_at", 0) or 0) < 6.0:
+            return
+        self._em_quote_at = now
+        aliases = self._quote_aliases()
+        if not aliases:
+            return
+        try:
+            from utils.eastmoney_spot import fetch_spot_quotes
+
+            quotes = fetch_spot_quotes(aliases.keys())
+        except Exception as e:
+            if self.logger and not getattr(self, "_em_quote_logged_fail", False):
+                self._em_quote_logged_fail = True
+                self.logger.warning("[显示] 东财现价读取失败: %s" % e)
+            return
+        if not quotes:
+            return
+        if self.logger and not getattr(self, "_em_quote_logged", False):
+            self._em_quote_logged = True
+            self.logger.info("[显示] 图表现价改用东财，仅供查看，下单仍用 QMT")
+        stamp = datetime.now().strftime("%H:%M:%S")
+        recv = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        snaps: Dict[str, Dict[str, Any]] = {}
+        for full, quote in quotes.items():
+            row = {
+                "last_price": quote["price"],
+                "last_tick_time": stamp,
+                "quotes_recv_at": recv,
+                "today_open": quote.get("open") or 0,
+                "today_high": quote.get("high") or 0,
+                "today_low": quote.get("low") or 0,
+                "last_close": quote.get("pre_close") or 0,
+            }
+            for shown in aliases.get(full, (full,)):
+                snaps[shown] = row
+        if snaps:
+            self._apply_prices(snaps)
+
+    def _overlay_gjzq_asset(self) -> None:
+        """可用资金和市值用上一次从 QMT「我的」读到的数字。这里不再点窗口。"""
+        now = time.time()
+        if now - float(getattr(self, "_gjzq_asset_at", 0) or 0) < 5.0:
+            return
+        self._gjzq_asset_at = now
+        try:
+            from utils.qmt_model_trade_readonly import last_asset
+
+            labels = last_asset()
+        except Exception as e:
+            if self.logger and not getattr(self, "_gjzq_asset_logged_fail", False):
+                self._gjzq_asset_logged_fail = True
+                self.logger.warning("[显示] QMT持仓市值读取失败: %s" % e)
+            return
+        if not labels:
+            return
+        self._ths_asset_labels = labels
+        adapter = self.qmt_adapter
+        if adapter is None:
+            return
+        asset = dict(getattr(adapter, "cached_asset", None) or {})
+        changed = False
+        for key in ("cash", "market_value", "total_asset"):
+            if key not in labels:
+                continue
+            if asset.get(key) != labels[key]:
+                changed = True
+            asset[key] = labels[key]
+        asset["updated_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        adapter.cached_asset = asset
+        if self.logger and not getattr(self, "_gjzq_asset_logged", False):
+            self._gjzq_asset_logged = True
+            self.logger.info(
+                "[显示] 资金概览改用 QMT「我的」里的资产"
+            )
+        if not changed:
+            return
+        positions = getattr(adapter, "cached_positions", None) or {}
+        try:
+            adapter.position_updated.emit(asset, positions)
+        except Exception:
+            pass
 
     def _set_health_alert(self, msg: str) -> None:
         """更新健康告警；变化时刷新状态栏，并节流打日志/音效/Server酱。"""
@@ -239,6 +585,80 @@ class BuiltinPricePoller(QObject):
 
         t = now.time()
         return dt_time(9, 25) <= t < dt_time(9, 30)
+
+    def _log_offhours_link(self, state) -> None:
+        """非交易时段把灯的颜色写进日志。颜色没变就不重复打。"""
+        if not isinstance(state, dict):
+            text = "没有看到右下角指示灯"
+        else:
+            names = {"green": "绿色", "red": "红色"}
+            text = "交易灯%s，行情灯%s" % (
+                names.get(str(state.get("trade") or ""), "不明"),
+                names.get(str(state.get("quote") or ""), "不明"),
+            )
+        if text == self._link_log_text:
+            return
+        self._link_log_text = text
+        if self.logger:
+            self.logger.info("[大QMT] 非交易时段 %s" % text)
+
+    def note_link_lights(self, state) -> None:
+        """刷新持仓委托时顺手看过的灯。非交易时段只写日志。"""
+        now = datetime.now()
+        if not self._in_health_watch_window(now):
+            self._link_red_key = ""
+            self._link_notified = False
+            self._log_offhours_link(state)
+            return
+        if not isinstance(state, dict):
+            return
+        bad = []
+        if state.get("trade") == "red":
+            bad.append("交易")
+        if state.get("quote") == "red":
+            bad.append("行情")
+        key = "、".join(bad)
+        if not key:
+            if self._link_red_key:
+                self._link_red_key = ""
+                self._link_notified = False
+                self._set_health_alert("")
+            return
+        if key != self._link_red_key:
+            self._link_red_key = key
+            self._link_notified = False
+        msg = "⚠ QMT%s连接断开（右下角指示灯变红）" % key
+        self._health_alert = msg
+        for holder in (self.qmt_adapter, self.task_manager, self.main_window):
+            if holder is not None:
+                try:
+                    setattr(holder, "builtin_health_alert", msg)
+                except Exception:
+                    pass
+        try:
+            if self.main_window is not None and hasattr(self.main_window, "update_status_bar"):
+                self.main_window.update_status_bar()
+        except Exception:
+            pass
+        if self._link_notified:
+            return
+        self._link_notified = True
+        try:
+            from utils.server_chan_notify import notify_alert
+
+            result = notify_alert(
+                "QMT连接断开",
+                "交易时段里，QMT 右下角%s指示灯变红，和券商服务器的连接断了。\n\n请看一下 QMT 交易端是否还登录着。"
+                % key,
+                alert_key="qmt_link_%s_%s" % (now.strftime("%Y%m%d"), key),
+                cooldown_sec=4 * 3600,
+            )
+            if self.logger and result.get("success"):
+                self.logger.warning("[大QMT健康] 连接断开已通过 Server酱 推送")
+        except Exception as exc:
+            self._link_notified = False
+            if self.logger:
+                self.logger.debug("[大QMT健康] 连接断开推送失败: %s" % exc)
 
     def _check_qmt_health(self, prices: Dict[str, Dict[str, Any]], file_mtime: float) -> None:
         """根据 results.json 的 tick/账户时间尽早发现大 QMT 卡顿或断连。"""
@@ -463,6 +883,17 @@ class BuiltinPricePoller(QObject):
         adapter = self.qmt_adapter
         if adapter is None:
             return
+        labels = getattr(self, "_ths_asset_labels", None) or {}
+        if asset and labels:
+            asset = dict(asset)
+            for key in ("cash", "market_value", "total_asset"):
+                if key in labels:
+                    asset[key] = labels[key]
+        ths_positions = getattr(self, "_ths_positions", None)
+        if not (isinstance(ths_positions, dict) and ths_positions):
+            ths_positions = getattr(adapter, "_ths_positions", None)
+        if isinstance(ths_positions, dict) and ths_positions:
+            positions = ths_positions
         if asset:
             adapter.cached_asset = asset
         if isinstance(positions, dict):
@@ -596,6 +1027,13 @@ class BuiltinPricePoller(QObject):
             seen.add(key)
             display.append(rec)
 
+        # 成交表已改由「刷新成交」手写时，不再用 results.json 覆盖。图表回写仍继续。
+        if getattr(self.qmt_adapter, "_ths_fills", None) is None:
+            self._push_orders_to_table(display)
+        self._record_orders_after_table(local_orders)
+
+    def _push_orders_to_table(self, display) -> None:
+        """把柜台委托写入左下角成交表。手动刷新成交后不再调用。"""
         # 启动后首次 / 换日后：清空订单表再推入，去掉几天前残留行
         try:
             trade_date = ""
@@ -661,6 +1099,8 @@ class BuiltinPricePoller(QObject):
             if self.logger:
                 self.logger.warning(f"[builtin_price] 清理非柜台订单行失败: {e}")
 
+    def _record_orders_after_table(self, local_orders) -> None:
+        """执行记录与图表回写。与成交表是否手写无关。"""
         # 执行记录：每笔 passorder 各记一次（与图表回写解耦，避免无图表时下午单丢失）
         for loc in local_orders:
             if not isinstance(loc, dict):

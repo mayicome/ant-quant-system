@@ -9,9 +9,11 @@ try:
 except Exception:
     PROJECT_ROOT = ""
 
-ACCOUNT_SNAPSHOT_VERSION = "20260811.04"
+ACCOUNT_SNAPSHOT_VERSION = "20261014.02"
 
 _CACHED_ACCOUNT = None
+_TRADE_DETAIL_FN = None
+_TRADE_DETAIL_SRC = ""
 _CACHED_POSITIONS = {}
 _CACHED_ORDERS = {}  # order_sysid -> parsed
 _BOUND_ACCOUNT_ID = ""
@@ -366,44 +368,89 @@ def _norm_code(raw):
     return code
 
 
-def _resolve_account_id(ContextInfo, explicit=""):
-    """账号优先：显式参数 → config.ini → ContextInfo。
+def _clean_account_text(val):
+    if val is None or callable(val):
+        return ""
+    text = str(val).strip()
+    if not text or text.lower() in ("none", "null") or text.startswith("<"):
+        return ""
+    if len(text) > 32 or any(ch.isspace() for ch in text):
+        return ""
+    return text
 
-    换账号后若只改 config.ini，仍跑着的策略 ContextInfo 可能还是旧号；
-    以配置为准，避免 results.json 继续写旧持仓。
-    """
-    if explicit:
-        return str(explicit).strip()
+
+def _host_account_call(name):
+    """模型交易注入的 account() / accountype()。"""
+    found = []
     try:
-        import configparser
+        import builtins
 
-        ini_path = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data", "config.ini")
-        if PROJECT_ROOT and os.path.isfile(ini_path):
-            cfg = configparser.ConfigParser()
-            cfg.read(ini_path, encoding="utf-8")
-            if cfg.has_option("Account", "account_id"):
-                aid = str(cfg.get("Account", "account_id") or "").strip()
-                if aid:
-                    return aid
+        fn = getattr(builtins, name, None)
+        if callable(fn):
+            found.append(fn)
     except Exception:
         pass
-    if ContextInfo is not None:
-        for attr in ("accountID", "account_id", "account", "accid"):
-            val = getattr(ContextInfo, attr, None)
-            if val is not None and str(val).strip():
-                return str(val).strip()
+    try:
+        import sys
+
+        for mod_name, mod in list(sys.modules.items()):
+            if mod is None or "蚂蚁量化规则" not in str(mod_name):
+                continue
+            fn = getattr(mod, name, None)
+            if callable(fn) and fn not in found:
+                found.append(fn)
+    except Exception:
+        pass
+    for fn in found:
+        try:
+            text = _clean_account_text(fn())
+        except Exception:
+            continue
+        if text:
+            return text
     return ""
 
 
+def _resolve_account_id(ContextInfo, explicit=""):
+    """账号优先：显式参数 → ContextInfo → 模型交易 account()。不读 data 文件。"""
+    if explicit:
+        return str(explicit).strip()
+    if ContextInfo is not None:
+        for attr in ("accountID", "account_id", "accid", "accID", "m_strAccountID"):
+            try:
+                val = getattr(ContextInfo, attr, None)
+            except Exception:
+                val = None
+            if callable(val):
+                try:
+                    val = val()
+                except Exception:
+                    continue
+            text = _clean_account_text(val)
+            if text:
+                return text
+    return _host_account_call("account")
+
+
+def _drop_context_trade_fns(ContextInfo):
+    """QMT 会 deepcopy 整个 ContextInfo。函数挂在上面会报 can't pickle Boost.Python.function。"""
+    if ContextInfo is None:
+        return
+    for attr in ("_ant_trade_detail_fn", "_ant_trade_detail_src", "ant_get_trade_detail_data"):
+        try:
+            if hasattr(ContextInfo, attr):
+                delattr(ContextInfo, attr)
+        except Exception:
+            pass
+
+
 def _trade_detail_fn(ContextInfo):
-    cached = getattr(ContextInfo, "_ant_trade_detail_fn", None)
-    if callable(cached):
-        return cached
+    global _TRADE_DETAIL_FN, _TRADE_DETAIL_SRC
+    _drop_context_trade_fns(ContextInfo)
+    if callable(_TRADE_DETAIL_FN):
+        return _TRADE_DETAIL_FN
 
     candidates = []
-    ctx_fn = getattr(ContextInfo, "ant_get_trade_detail_data", None)
-    if callable(ctx_fn):
-        candidates.append(("ctx.ant_get_trade_detail_data", ctx_fn))
 
     try:
         import sys
@@ -437,25 +484,22 @@ def _trade_detail_fn(ContextInfo):
     except NameError:
         pass
 
-    for attr in ("get_trade_detail_data", "ant_get_trade_detail_data"):
+    for attr in ("get_trade_detail_data",):
         fn = getattr(ContextInfo, attr, None)
         if callable(fn):
             candidates.append(("ctx.%s" % attr, fn))
 
     if candidates:
         src, fn = candidates[0]
-        try:
-            setattr(ContextInfo, "_ant_trade_detail_fn", fn)
-            setattr(ContextInfo, "_ant_trade_detail_src", src)
-            setattr(ContextInfo, "ant_get_trade_detail_data", fn)
-        except Exception:
-            pass
+        _TRADE_DETAIL_FN = fn
+        _TRADE_DETAIL_SRC = src
         return fn
     return None
 
 
 def bind_trading_account(ContextInfo, account_id=""):
     """init 中绑定交易账号，get_trade_detail_data 才能返回资金/持仓。"""
+    _drop_context_trade_fns(ContextInfo)
     aid = _resolve_account_id(ContextInfo, account_id)
     if not aid:
         return False, "no_account_id"
@@ -466,6 +510,8 @@ def bind_trading_account(ContextInfo, account_id=""):
         if val is not None and str(val).strip():
             acct_type = str(val).strip()
             break
+    if not acct_type:
+        acct_type = _host_account_call("accountype") or _host_account_call("accounttype")
     if not acct_type:
         acct_type = "STOCK"
     try:
@@ -537,7 +583,7 @@ def _diagnose_trade_detail(ContextInfo, account_id):
         return
     _DIAG_DONE = True
     fn = _trade_detail_fn(ContextInfo)
-    src = getattr(ContextInfo, "_ant_trade_detail_src", "")
+    src = _TRADE_DETAIL_SRC
     parts = [
         "aid=%s" % account_id,
         "src=%s" % (src or "none"),
@@ -1298,6 +1344,40 @@ def _remark_matches_local(remark, local):
     return False
 
 
+_DEAD_BROKER_STATUS = frozenset({54, 57})
+
+
+def task_has_live_broker_order(ContextInfo, user_order_id, stock_code=""):
+    """柜台已有同备注、且不是已撤/废单的委托时返回 True。"""
+    uid = str(user_order_id or "").strip()
+    if not uid:
+        return False
+    aid = _resolve_account_id(ContextInfo)
+    if not aid:
+        return False
+    raw = _fetch_trade_detail(ContextInfo, aid, "ORDER")
+    rows = _parse_order_rows(raw, aid)
+    local = {
+        "user_order_id": uid,
+        "pass_uid": uid[-32:],
+        "task_id": uid,
+        "stock_code": stock_code,
+    }
+    code = _norm_code(stock_code)
+    for rec in rows:
+        if code and rec.get("stock_code") and _norm_code(rec.get("stock_code")) != code:
+            continue
+        try:
+            status_i = int(rec.get("broker_status"))
+        except (TypeError, ValueError):
+            status_i = 255
+        if status_i in _DEAD_BROKER_STATUS:
+            continue
+        if _remark_matches_local(rec.get("remark"), local):
+            return True
+    return False
+
+
 def _match_broker_order(local, broker_orders):
     """用 remark(userOrderId) 优先，其次 代码+方向+价量 对齐本地 passorder 记录。"""
     if not isinstance(local, dict) or not broker_orders:
@@ -1849,31 +1929,7 @@ def _clear_position_alert(results):
 
 
 def _notify_position_alert_once(title, body, results=None):
-    cool = _position_alert_notify_cooldown_sec()
-    # results 落盘戳：策略重载会清空 ant_server_chan 内存冷却，夜间勿因此连发
-    last_dt = _prev_notify_sent_at(results)
-    if last_dt is not None and cool > 0:
-        age = (datetime.now() - last_dt).total_seconds()
-        if age < cool:
-            return "cooldown"
-    try:
-        try:
-            import ant_server_chan as sct
-        except ImportError:
-            import qmt_builtin.ant_server_chan as sct
-        r = sct.notify_alert(
-            title,
-            body,
-            alert_key="qmt_position_empty_high_mv",
-            cooldown_sec=cool,
-        )
-        if r.get("skipped"):
-            return "cooldown"
-        if r.get("success"):
-            return "sent"
-        return "fail:%s" % (r.get("message") or "")
-    except Exception as e:
-        return "err:%s" % e
+    return "stopped"
 
 
 def _update_position_alert(results, positions_parsed, extra=None):
@@ -1961,103 +2017,7 @@ def _probe_bj_sectors_once(ContextInfo):
     if _BJ_SECTOR_PROBE_DONE:
         return
     _BJ_SECTOR_PROBE_DONE = True
-    try:
-        import json
-
-        data_dir = ""
-        try:
-            from ant_qmt_paths import DATA_DIR
-
-            data_dir = str(DATA_DIR or "")
-        except Exception:
-            pass
-        if not data_dir and PROJECT_ROOT:
-            data_dir = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data")
-        if not data_dir:
-            data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-
-        owners = []
-        if ContextInfo is not None:
-            owners.append(("ctx", ContextInfo))
-        try:
-            import builtins
-
-            owners.append(("builtins", builtins))
-        except Exception:
-            pass
-
-        sector_candidates = (
-            "\u4eac\u5e02A\u80a1",  # 京市A股
-            "\u6caa\u6df1\u4eacA\u80a1",  # 沪深京A股
-            "\u5317\u4ea4\u6240",  # 北交所
-            "\u5317\u4ea4\u6240A\u80a1",  # 北交所A股
-            "BJ",
-            "\u4eacA\u80a1",  # 京A股
-            "\u6caa\u6df1A\u80a1",  # 沪深A股（对照）
-        )
-        sector_counts = {}
-        samples = {}
-        for sec in sector_candidates:
-            best_n = -1
-            best_sample = []
-            src = ""
-            for label, owner in owners:
-                fn = getattr(owner, "get_stock_list_in_sector", None)
-                if not callable(fn):
-                    continue
-                try:
-                    raw = fn(sec) or []
-                except Exception:
-                    continue
-                try:
-                    n = len(raw)
-                except Exception:
-                    n = 0
-                if n > best_n:
-                    best_n = n
-                    src = label
-                    try:
-                        best_sample = [str(x) for x in list(raw)[:8]]
-                    except Exception:
-                        best_sample = []
-            sector_counts[sec] = {"n": max(0, best_n), "source": src}
-            samples[sec] = best_sample
-
-        matched_names = []
-        for label, owner in owners:
-            fn = getattr(owner, "get_sector_list", None)
-            if not callable(fn):
-                continue
-            try:
-                sl = fn() or []
-            except Exception:
-                continue
-            for s in sl:
-                t = str(s)
-                if any(k in t for k in ("\u4eac", "\u5317\u4ea4", "BJ", "bj")):
-                    if t not in matched_names:
-                        matched_names.append(t)
-            if matched_names:
-                break
-
-        payload = {
-            "probed_at": _now_iso(),
-            "snapshot_version": ACCOUNT_SNAPSHOT_VERSION,
-            "matched_sector_names": matched_names,
-            "sector_counts": sector_counts,
-            "samples": samples,
-        }
-        out_path = os.path.join(data_dir, "bj_sector_probe.json")
-        parent = os.path.dirname(out_path)
-        if parent and not os.path.isdir(parent):
-            os.makedirs(parent)
-        tmp = out_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, out_path)
-        # 探测结果已写入 bj_sector_probe.json，不再刷启动日志
-    except Exception:
-        pass
+    return
 
 
 def _positions_match_account(positions, account_id: str) -> dict:

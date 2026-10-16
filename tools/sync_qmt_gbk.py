@@ -21,20 +21,13 @@ PY_FILES = (
     "ant_true_breakthrough_lite.py",
     "ant_elastic_sell_lite.py",
     "ant_elastic_buy_lite.py",
-    "ant_daily_sync_runner.py",
-    "ant_hfq_bulk_runner.py",
-    "ant_after_hours_rank_runner.py",
-    "ant_sector_sync_runner.py",
-    "ant_data_sync_request.py",
-    "ant_tick_cache_io.py",
-    "ant_tick_full_sync_runner.py",
-    "ant_server_chan.py",
+    "ant_session_local.py",
     "ant_account_snapshot.py",
     "ant_passorder.py",
-    "ant_position_entry_dates.py",
-    "ant_speed_probe.py",
-    "ant_filled_legs.py",
+    "ant_result_log.py",
     "ant_cancel_request.py",
+    "ant_position_entry_dates.py",
+    "ant_filled_legs.py",
     "蚂蚁量化规则.py",
 )
 
@@ -78,6 +71,56 @@ def _inject_data_root(text: str, data_root: str) -> str:
     return re.sub(pattern, lambda _m: block, text, count=1, flags=re.DOTALL)
 
 
+def _read_elastic_assignments() -> str:
+    """部署时把 data/config.ini [Elastic] 写进策略常量。缺段则保留源码里的数。"""
+    import configparser
+
+    cfg = configparser.ConfigParser()
+    ini = ROOT / "data" / "config.ini"
+    if ini.is_file():
+        cfg.read(str(ini), encoding="utf-8-sig")
+    defaults = {
+        "ELASTIC_CONFIRM_TICKS": "4",
+        "ELASTIC_COOLDOWN_AFTER_EXTREME_TICKS": "2",
+        "ELASTIC_DYNAMIC_THRESHOLDS": "2",
+        "ELASTIC_ROOM_TIGHT_PP": "1.0",
+        "ELASTIC_DROP_TIGHT": "0.5",
+        "ELASTIC_LIMIT_MINUS_PP": "1.0",
+        "ELASTIC_DROP_SCALE": "0.35",
+        "ELASTIC_MAX_DROP_PERCENT": "3.5",
+    }
+    keys = {
+        "ELASTIC_CONFIRM_TICKS": "confirm_ticks",
+        "ELASTIC_COOLDOWN_AFTER_EXTREME_TICKS": "cooldown_after_extreme_ticks",
+        "ELASTIC_DYNAMIC_THRESHOLDS": "dynamic_thresholds",
+        "ELASTIC_ROOM_TIGHT_PP": "room_tight_pp",
+        "ELASTIC_DROP_TIGHT": "drop_tight",
+        "ELASTIC_LIMIT_MINUS_PP": "limit_minus_pp",
+        "ELASTIC_DROP_SCALE": "drop_scale",
+        "ELASTIC_MAX_DROP_PERCENT": "max_drop_percent",
+    }
+    lines = ["# SYNC_ELASTIC_BEGIN"]
+    for name, ini_key in keys.items():
+        val = defaults[name]
+        if cfg.has_section("Elastic"):
+            raw = cfg.get("Elastic", ini_key, fallback=val).strip()
+            if raw:
+                val = raw
+        lines.append("%s = %s" % (name, val))
+    lines.append("# SYNC_ELASTIC_END")
+    return "\n".join(lines)
+
+
+def _inject_elastic(text: str) -> str:
+    begin = "# SYNC_ELASTIC_BEGIN"
+    end = "# SYNC_ELASTIC_END"
+    block = _read_elastic_assignments()
+    pattern = begin + r".*?" + end
+    if not re.search(pattern, text, flags=re.DOTALL):
+        return text
+    return re.sub(pattern, lambda _m: block, text, count=1, flags=re.DOTALL)
+
+
 def _to_gbk_bytes(text: str, name: str) -> bytes:
     payload = _to_gbk_text(text)
     try:
@@ -107,6 +150,8 @@ def sync() -> list:
         raw = src.read_text(encoding="utf-8")
         if name == "ant_qmt_paths.py":
             raw = _inject_data_root(raw, data_root)
+        if name == "ant_elastic_sell_lite.py":
+            raw = _inject_elastic(raw)
         out = DST / name
         encoded = _to_gbk_bytes(raw, name)
         if out.is_file() and out.read_bytes() == encoded:

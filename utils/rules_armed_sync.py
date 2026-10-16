@@ -667,11 +667,11 @@ def sync_rules_armed(
         expired = expire_stale_strategy_pool_watch(root=root)
         if expired and logger is not None:
             logger.info(
-                "[rules_armed] 已释放过期 strategy_pool_watch %d 只", expired
+                "[rules_armed] 已释放过期 strategy_pool_watch %d 只" % expired
             )
     except Exception as e:
         if logger is not None:
-            logger.debug("expire strategy_pool_watch skipped: %s", e)
+            logger.debug("expire strategy_pool_watch skipped: %s" % e)
     tasks = build_armed_tasks(task_manager)
     watch_codes = collect_watch_codes(task_manager, qmt_adapter)
     pool_watch: List[str] = []

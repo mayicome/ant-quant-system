@@ -502,7 +502,7 @@ class TradingApp(QMainWindow):
             try:
                 from utils.qmt_execution_config import use_builtin_price_feed
                 if use_builtin_price_feed():
-                    self.task_manager._sync_rules_armed_if_builtin()
+                    self.task_manager.publish_ui_boot_session()
             except Exception:
                 pass
                 
@@ -532,6 +532,8 @@ class TradingApp(QMainWindow):
                     self.logger.warning(f"发现{len(self.task_manager.running_tasks)}个运行中任务，强制停止")
                     for task_id in list(self.task_manager.running_tasks.keys()):
                         try:
+                            self.task_manager.stop_task(task_id, persist=False, fast=True, sync_rules=False)
+                        except TypeError:
                             self.task_manager.stop_task(task_id)
                         except Exception as e:
                             self.logger.error(f"强制停止任务{task_id}失败: {str(e)}")

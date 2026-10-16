@@ -8,12 +8,40 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QScrollArea, QHBoxLayout,
                              QPushButton, QLineEdit, QLabel, QMessageBox,
                              QDialog, QFormLayout, QComboBox, QDoubleSpinBox,
                              QRadioButton, QButtonGroup, QSizePolicy, QGridLayout, QMenu,
-                             QApplication, QAbstractButton)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject, QEvent
+                             QApplication, QAbstractButton, QTableWidget, QTableWidgetItem)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject, QEvent, QThread
 from PyQt5.QtGui import QFont, QKeyEvent
 from ui.stock_chart_widget import StockChartWidget
 from utils.logger import Logger
 import time
+
+
+# 打开 3 秒后，以及交易时段每 10 分钟，从 QMT 窗口读持仓、委托和资金。
+# 这些已改由策略日志传递。False 停自动读取；True 恢复。手动点「刷新持仓 / 刷新委托」不受影响。
+QMT_WINDOW_ACCOUNT_POLL = False
+
+
+def _gjzq_refresh_interval_ms(now=None) -> int:
+    """交易日 9:15–11:30、13:00–15:00 为 10 分钟，其余最多 1 小时。"""
+    from datetime import datetime, timedelta, time as dt_time
+
+    from utils.trading_day import is_tradeday
+
+    now = now or datetime.now()
+    if is_tradeday(now.date()):
+        clock = now.time()
+        if dt_time(9, 15) <= clock <= dt_time(11, 30) or dt_time(13, 0) <= clock <= dt_time(15, 0):
+            return 10 * 60 * 1000
+    day = now.date()
+    for _ in range(12):
+        if is_tradeday(day):
+            for start in (dt_time(9, 15), dt_time(13, 0)):
+                cand = datetime.combine(day, start)
+                if cand > now:
+                    wait_ms = int((cand - now).total_seconds() * 1000)
+                    return max(5000, min(60 * 60 * 1000, wait_ms))
+        day = day + timedelta(days=1)
+    return 60 * 60 * 1000
 
 
 class _TaskBoxDoubleClickFilter(QObject):
@@ -48,6 +76,90 @@ class _TaskBoxDoubleClickFilter(QObject):
         except Exception:
             pass
         return True
+
+
+class _GjzqAccountRefresh(QThread):
+    """在后台读取 QMT 模型交易，避免卡住图表界面。"""
+
+    finished_payload = pyqtSignal(object)
+
+    def __init__(self, kinds, parent=None):
+        super().__init__(parent)
+        self.kinds = tuple(kinds)
+
+    def run(self):
+        payload = {
+            "kinds": self.kinds,
+            "error": "",
+            "positions": None,
+            "asset": {},
+            "hold_note": "",
+            "fills": None,
+            "fill_note": "",
+            "header": "",
+        }
+        try:
+            from utils.qmt_model_trade_readonly import (
+                hold_cursor,
+                last_asset,
+                last_header,
+                last_note,
+                read_asset,
+                read_fills,
+                read_holdings,
+            )
+
+            with hold_cursor():
+                if "holdings" in self.kinds:
+                    payload["positions"] = read_holdings()
+                    payload["hold_note"] = last_note()
+                if "fills" in self.kinds:
+                    payload["fills"] = read_fills()
+                    payload["fill_note"] = last_note()
+                    payload["header"] = last_header()
+                if "holdings" in self.kinds:
+                    read_asset()
+                    payload["asset"] = last_asset()
+                if "holdings" in self.kinds or "fills" in self.kinds:
+                    try:
+                        from utils.qmt_link_lights import read_link_lights
+
+                        payload["link_lights"] = read_link_lights()
+                    except Exception:
+                        payload["link_lights"] = None
+        except Exception as e:
+            payload["error"] = str(e)
+        self.finished_payload.emit(payload)
+
+
+def _broker_fill_side(fill):
+    text = str((fill or {}).get("side") or "")
+    if "卖" in text:
+        return "sell"
+    if "买" in text:
+        return "buy"
+    return ""
+
+
+def _remember_entry_from_broker_fill(fill):
+    """QMT 当日买入有成交量时记下建仓日。不依赖图表节点是否对上。"""
+    if _broker_fill_side(fill) != "buy":
+        return
+    status = str((fill or {}).get("status") or "")
+    if "废" in status or "撤" in status:
+        return
+    try:
+        vol = int((fill or {}).get("trade_volume") or 0)
+    except (TypeError, ValueError):
+        vol = 0
+    if vol < 100:
+        return
+    try:
+        from utils.position_entry_dates import ensure_entry_date_on_buy
+
+        ensure_entry_date_on_buy(str((fill or {}).get("stock_code") or ""))
+    except Exception:
+        pass
 
 
 class TasksChartsView(QWidget):
@@ -113,6 +225,20 @@ class TasksChartsView(QWidget):
                 self._on_rule_activation_rules_updated
             )
         
+        self._gjzq_busy = False
+        self._gjzq_thread = None
+        self._gjzq_active_manual = set()
+        self._gjzq_queue_kinds = set()
+        self._gjzq_queue_manual = set()
+        self._gjzq_auto_miss = {}
+        self._pause_all_busy = False
+        self._close_after_pause = False
+        self._gjzq_timer = QTimer(self)
+        self._gjzq_timer.timeout.connect(self._on_gjzq_auto_refresh)
+        self._arm_gjzq_timer()
+        if QMT_WINDOW_ACCOUNT_POLL:
+            QTimer.singleShot(3000, lambda: self._request_gjzq_refresh(("holdings", "fills"), manual=False))
+
         self.init_ui()
         self.load_tasks()
 
@@ -855,6 +981,24 @@ class TasksChartsView(QWidget):
         """)
         self.pause_all_btn.clicked.connect(self.pause_all_page_tasks)
         toolbar_layout.addWidget(self.pause_all_btn)
+
+        self.start_all_btn = QPushButton("全部启动")
+        self.start_all_btn.setToolTip("启动当前页所有未在运行的任务")
+        self.start_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #43a047;
+                color: white;
+                padding: 5px 15px;
+            }
+            QPushButton:hover {
+                background-color: #388e3c;
+            }
+            QPushButton:pressed {
+                background-color: #2e7d32;
+            }
+        """)
+        self.start_all_btn.clicked.connect(self.start_all_page_tasks)
+        toolbar_layout.addWidget(self.start_all_btn)
         
         toolbar_layout.addSpacing(10)
         
@@ -876,7 +1020,51 @@ class TasksChartsView(QWidget):
         reload_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 5px 15px;")
         reload_btn.clicked.connect(self._on_reload_tasks_from_file)
         toolbar_layout.addWidget(reload_btn)
-        
+
+        toolbar_layout.addSpacing(10)
+
+        deploy_btn = QPushButton("部署到QMT")
+        deploy_btn.setToolTip(
+            "新建或修改任务时会自动写入 QMT。此按钮仍可手动把当前全部规则再写一遍。"
+            "策略已在运行时，约 1 秒内自行重载，不用重启。"
+            "本进程已经报出或成交的同一笔不会再执行。"
+        )
+        deploy_btn.setStyleSheet(
+            "background-color: #1565C0; color: white; padding: 5px 15px;"
+        )
+        deploy_btn.clicked.connect(self._on_deploy_session_to_qmt)
+        toolbar_layout.addWidget(deploy_btn)
+
+        holdings_btn = QPushButton("刷新持仓")
+        holdings_btn.setToolTip(
+            "从 QMT 模型交易读取持仓，更新右侧持仓表和图表仓位线。"
+            + (
+                "平时每 10 分钟自动读一次，点击则马上再读。"
+                if QMT_WINDOW_ACCOUNT_POLL
+                else "自动读取已停，平时由策略日志更新。点击仍会马上再读一次。"
+            )
+        )
+        holdings_btn.setStyleSheet(
+            "background-color: #455A64; color: white; padding: 5px 15px;"
+        )
+        holdings_btn.clicked.connect(self._on_refresh_holdings)
+        toolbar_layout.addWidget(holdings_btn)
+
+        fills_btn = QPushButton("刷新委托")
+        fills_btn.setToolTip(
+            "从 QMT 模型交易读取委托，更新左下角委托表。"
+            + (
+                "平时每 10 分钟自动读一次，点击则马上再读。"
+                if QMT_WINDOW_ACCOUNT_POLL
+                else "自动读取已停，平时由策略日志更新。点击仍会马上再读一次。"
+            )
+        )
+        fills_btn.setStyleSheet(
+            "background-color: #455A64; color: white; padding: 5px 15px;"
+        )
+        fills_btn.clicked.connect(self._on_refresh_fills)
+        toolbar_layout.addWidget(fills_btn)
+
         toolbar_layout.addSpacing(10)
         
         # 状态信息
@@ -993,7 +1181,337 @@ class TasksChartsView(QWidget):
                 QTimer.singleShot(500, show_reload_paused_dialog)
         except Exception as e:
             self.logger.error(f"加载任务失败: {e}", exc_info=True)
-        
+
+    def _on_deploy_session_to_qmt(self):
+        """把当前全部任务整份写入 QMT 会话文件。运行中的策略会自行重载。"""
+        parent = self.window() or QApplication.activeWindow()
+        try:
+            from tools.export_qmt_session import publish_session
+
+            info = publish_session(getattr(self, "task_manager", None))
+        except SystemExit as e:
+            QMessageBox.warning(parent, "部署到QMT", str(e) or "部署失败")
+            return
+        except Exception as e:
+            self.logger.error("部署到QMT失败: %s" % e, exc_info=True)
+            QMessageBox.warning(parent, "部署到QMT", "部署失败：%s" % e)
+            return
+        if hasattr(self, "status_label") and self.status_label is not None:
+            self.status_label.setText(
+                "已部署 %d 条（启用 %d），QMT 约 1 秒内重载" % (info["tasks"], info["enabled"])
+            )
+        self.logger.info(
+            "会话已部署 tasks=%s enabled=%s -> %s"
+            % (info["tasks"], info["enabled"], info["target"])
+        )
+        QMessageBox.information(
+            parent,
+            "已部署到QMT",
+            "已把当前全部规则写入 QMT：共 %d 条，启用 %d 条。\n"
+            "「蚂蚁量化规则」正在运行时，约 1 秒内会自行重载，不用重启。\n"
+            "本进程已经报出或成交的同一笔不会再执行。"
+            % (info["tasks"], info["enabled"]),
+        )
+
+    def _arm_gjzq_timer(self):
+        """交易时段 10 分钟，其他时间 1 小时。离下次开盘不到 1 小时就对准开盘。"""
+        timer = self._gjzq_timer
+        if timer is None:
+            return
+        if not QMT_WINDOW_ACCOUNT_POLL:
+            timer.stop()
+            return
+        timer.setInterval(_gjzq_refresh_interval_ms())
+        timer.start()
+
+    def _on_gjzq_auto_refresh(self):
+        self._arm_gjzq_timer()
+        if not QMT_WINDOW_ACCOUNT_POLL:
+            return
+        self._request_gjzq_refresh(("holdings", "fills"), manual=False)
+
+    def _request_gjzq_refresh(self, kinds, manual=False):
+        if not manual and not QMT_WINDOW_ACCOUNT_POLL:
+            return
+        kinds = set(kinds)
+        if self._gjzq_busy:
+            self._gjzq_queue_kinds.update(kinds)
+            if manual:
+                self._gjzq_queue_manual.update(kinds)
+            return
+        self._gjzq_busy = True
+        self._gjzq_active_manual = set(kinds) if manual else set()
+        thread = _GjzqAccountRefresh(tuple(kinds), self)
+        thread.finished_payload.connect(self._on_gjzq_refresh_done)
+        thread.finished.connect(thread.deleteLater)
+        self._gjzq_thread = thread
+        thread.start()
+
+    def _pump_gjzq_queue(self):
+        if self._gjzq_busy or not self._gjzq_queue_kinds:
+            return
+        kinds = set(self._gjzq_queue_kinds)
+        manual_kinds = set(self._gjzq_queue_manual)
+        self._gjzq_queue_kinds.clear()
+        self._gjzq_queue_manual.clear()
+        self._gjzq_busy = True
+        self._gjzq_active_manual = manual_kinds
+        thread = _GjzqAccountRefresh(tuple(kinds), self)
+        thread.finished_payload.connect(self._on_gjzq_refresh_done)
+        thread.finished.connect(thread.deleteLater)
+        self._gjzq_thread = thread
+        thread.start()
+
+    def _apply_gjzq_holdings(self, positions, asset_labels):
+        adapter = getattr(self, "qmt_adapter", None)
+        if adapter is not None:
+            adapter._ths_positions = positions
+            adapter.cached_positions = positions
+            asset = dict(getattr(adapter, "cached_asset", None) or {})
+            for key in ("cash", "market_value", "total_asset"):
+                if key in asset_labels:
+                    asset[key] = asset_labels[key]
+            adapter.cached_asset = asset
+            try:
+                adapter.position_updated.emit(asset, positions)
+            except Exception:
+                pass
+        brief = "，".join(
+            "%s 可用%d" % (row.get("stock_name") or code, int(row.get("can_use_volume") or 0))
+            for code, row in list(positions.items())[:8]
+            if isinstance(row, dict)
+        )
+        if hasattr(self, "status_label") and self.status_label is not None:
+            self.status_label.setText("持仓已更新")
+        self.logger.info("QMT持仓已更新 %s" % brief)
+
+    def _apply_gjzq_fills(self, fills):
+        adapter = getattr(self, "qmt_adapter", None)
+        if adapter is not None:
+            adapter._ths_fills = list(fills)
+        painted = self._paint_fills_table(fills)
+        for fill in fills or []:
+            if isinstance(fill, dict):
+                _remember_entry_from_broker_fill(fill)
+        if not painted:
+            return False
+        if hasattr(self, "status_label") and self.status_label is not None:
+            if fills:
+                self.status_label.setText("委托已更新 %d 笔" % len(fills))
+            else:
+                self.status_label.setText("今日还没有委托")
+        if fills:
+            self.logger.info("QMT委托已更新 %d 笔" % len(fills))
+        return True
+
+    def _log_gjzq_auto_miss(self, label, note, manual):
+        """自动刷新同一种失败只记一行。手动点刷新仍弹窗，不靠这条日志。"""
+        if manual:
+            return
+        note = note or "失败"
+        if self._gjzq_auto_miss.get(label) == note:
+            return
+        self._gjzq_auto_miss[label] = note
+        self.logger.info("QMT%s未读到: %s" % (label, note))
+
+    def _on_gjzq_refresh_done(self, payload):
+        manual = set(self._gjzq_active_manual)
+        kinds = set(payload.get("kinds") or [])
+        if "link_lights" in payload:
+            poller = getattr(getattr(self, "qmt_adapter", None), "_builtin_price_poller", None)
+            if poller is not None and hasattr(poller, "note_link_lights"):
+                try:
+                    poller.note_link_lights(payload.get("link_lights"))
+                except Exception:
+                    pass
+        parent = self.window() or QApplication.activeWindow()
+        try:
+            if payload.get("error"):
+                self.logger.error("QMT刷新持仓委托失败: %s" % payload["error"])
+                if manual:
+                    QMessageBox.warning(parent, "刷新", "读取失败：%s" % payload["error"])
+            else:
+                hold_fresh = False
+                fill_fresh = False
+                if "holdings" in kinds:
+                    positions = payload.get("positions")
+                    hold_note = payload.get("hold_note") or ""
+                    if positions is None:
+                        self._log_gjzq_auto_miss("持仓", hold_note, "holdings" in manual)
+                        if "holdings" in manual:
+                            QMessageBox.information(
+                                parent,
+                                "刷新持仓",
+                                "没有从 QMT 读到持仓。\n请确认 QMT 交易端已登录，并打开模型交易。\n(%s)"
+                                % (hold_note or "失败"),
+                            )
+                    elif hold_note == "unchanged":
+                        self._gjzq_auto_miss.pop("持仓", None)
+                        if "holdings" in manual and hasattr(self, "status_label") and self.status_label is not None:
+                            self.status_label.setText("持仓无变化")
+                    else:
+                        self._gjzq_auto_miss.pop("持仓", None)
+                        self._apply_gjzq_holdings(positions, payload.get("asset") or {})
+                        hold_fresh = True
+                if "fills" in kinds:
+                    fills = payload.get("fills")
+                    note = payload.get("fill_note") or ""
+                    if fills is None:
+                        self._log_gjzq_auto_miss("委托", note, "fills" in manual)
+                        if "fills" in manual:
+                            if note == "bad-header":
+                                QMessageBox.information(
+                                    parent,
+                                    "刷新委托",
+                                    "读到了当日委托，但表头对不上。\n" + (payload.get("header") or ""),
+                                )
+                            else:
+                                QMessageBox.information(
+                                    parent,
+                                    "刷新委托",
+                                    "没有从 QMT 读到委托。\n请确认 QMT 交易端已登录，并打开模型交易。\n(%s)"
+                                    % (note or "失败"),
+                                )
+                    elif note == "unchanged":
+                        self._gjzq_auto_miss.pop("委托", None)
+                        if "fills" in manual and hasattr(self, "status_label") and self.status_label is not None:
+                            self.status_label.setText("委托无变化")
+                    elif note == "empty":
+                        self._gjzq_auto_miss.pop("委托", None)
+                        applied = self._apply_gjzq_fills(fills or [])
+                        if not applied and "fills" in manual:
+                            QMessageBox.warning(parent, "刷新委托", "委托表不在当前窗口里。")
+                        elif applied:
+                            fill_fresh = True
+                    elif not self._apply_gjzq_fills(fills) and "fills" in manual:
+                        QMessageBox.warning(parent, "刷新委托", "委托表不在当前窗口里。")
+                    else:
+                        fill_fresh = True
+                if hold_fresh and fill_fresh and hasattr(self, "status_label") and self.status_label is not None:
+                    self.status_label.setText("持仓和委托已更新，委托 %d 笔" % len(payload.get("fills") or []))
+        finally:
+            self._gjzq_busy = False
+            self._gjzq_active_manual = set()
+            self._pump_gjzq_queue()
+
+    def _on_refresh_holdings(self):
+        """马上从 QMT 模型交易再读一次持仓。"""
+        self._arm_gjzq_timer()
+        self._request_gjzq_refresh(("holdings",), manual=True)
+
+    def _show_fills_table(self):
+        table = None
+        splitter = None
+        win = self.window()
+        hosts = []
+        if win is not None:
+            hosts.append(getattr(win, "ext", None))
+            hosts.append(getattr(win, "ui", None))
+            hosts.append(win)
+        node = self.parent()
+        while node is not None and len(hosts) < 12:
+            hosts.append(node)
+            node = node.parent()
+        for host in hosts:
+            if host is None:
+                continue
+            found = getattr(host, "tableWidget_3", None)
+            if found is None:
+                continue
+            table = found
+            splitter = getattr(host, "splitter", None)
+            break
+        if table is None and win is not None:
+            table = win.findChild(QTableWidget, "tableWidget_3")
+        if table is None:
+            return None
+        if splitter is None:
+            parent = table.parent()
+            if parent is not None and parent.__class__.__name__ == "QSplitter":
+                splitter = parent
+        if table.columnCount() < 9:
+            table.setColumnCount(9)
+            table.setHorizontalHeaderLabels(
+                ["合同号", "代码", "名称", "委托时间", "委托/均价", "数量/成交", "状态", "说明", "操作"]
+            )
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(8, header.Fixed)
+        table.setColumnWidth(8, 120)
+        table.show()
+        table.setMinimumHeight(80)
+        if splitter is not None:
+            sizes = splitter.sizes()
+            if len(sizes) >= 2 and sizes[-1] < 40:
+                total = max(sum(sizes), 400)
+                bottom = max(160, int(total * 0.22))
+                splitter.setSizes([max(total - bottom, 1), bottom])
+        return table
+
+    def _paint_fills_table(self, fills):
+        table = self._show_fills_table()
+        if table is None:
+            return False
+        table.setRowCount(0)
+        rows = list(fills or [])
+        rows.sort(key=lambda row: str(row.get("time") or ""), reverse=True)
+        for row in rows:
+            side = str(row.get("side") or "")
+            if "卖" in side:
+                action = "卖出"
+            elif "买" in side:
+                action = "买入"
+            else:
+                action = side or "委托"
+            state = str(row.get("status") or "")
+            status = action + (" - " + state if state else "")
+            order_price = float(row.get("price") or 0)
+            trade_price = float(row.get("trade_price") or 0)
+            order_volume = int(row.get("volume") or 0)
+            trade_volume = int(row.get("trade_volume") or 0)
+            note = str(row.get("note") or "").strip() or "QMT模型交易委托"
+            order_id = str(row.get("order_id") or "")
+            values = [
+                order_id,
+                str(row.get("stock_code") or ""),
+                str(row.get("stock_name") or ""),
+                str(row.get("time") or ""),
+                "%.3f/%.3f" % (order_price, trade_price),
+                "%d/%d" % (order_volume, trade_volume),
+                status,
+                note,
+                "",
+            ]
+            r = table.rowCount()
+            table.insertRow(r)
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(r, col, item)
+            self._attach_fill_actions(table, r, state, order_id)
+        return True
+
+    def _attach_fill_actions(self, table, row_index, order_status, order_id):
+        """QMT 刷出来的委托行补上撤单。"""
+        if not order_id:
+            return
+        win = self.window()
+        ext = getattr(win, "ext", None) if win is not None else None
+        if ext is not None and hasattr(ext, "add_cancel_button"):
+            ext.add_cancel_button(
+                table, row_index, order_status or "已报", order_id, broker_refresh=True
+            )
+            return
+        mgr = getattr(ext, "trade_record_manager", None) if ext is not None else None
+        if mgr is not None:
+            mgr.add_cancel_button(
+                table, row_index, order_status or "已报", order_id, callback=ext
+            )
+
+    def _on_refresh_fills(self):
+        """马上从 QMT 模型交易再读一次委托。"""
+        self._arm_gjzq_timer()
+        self._request_gjzq_refresh(("fills",), manual=True)
+
     def load_tasks(self):
         """加载所有任务并创建图表"""
         try:
@@ -3343,6 +3861,7 @@ class TasksChartsView(QWidget):
 
     def pause_all_page_tasks(self):
         """暂停当前页所有正在运行的任务"""
+        self._pause_all_busy = True
         try:
             charts_to_pause = []
             for stock_code, chart_data in list(self.chart_widgets.items()):
@@ -3376,16 +3895,16 @@ class TasksChartsView(QWidget):
             except Exception:
                 pass
 
-            # 2) 停进程：批量不写盘
+            # 2) 停进程：批量不写盘。关闭窗口若已点下，后面的任务直接结束，不再逐个等 2 秒。
             tm = None
             for stock_code, chart in charts_to_pause:
                 try:
                     if tm is None:
                         tm = getattr(chart, 'task_manager', None)
+                    fast = bool(getattr(self, "_close_after_pause", False))
                     if hasattr(chart, 'pause_task'):
-                        chart.pause_task(persist=False, stop_via_tm=True)
+                        chart.pause_task(persist=False, stop_via_tm=True, fast=fast)
                     else:
-                        # 兼容旧图表：无 persist 参数
                         chart.pause_task()
                 except TypeError:
                     try:
@@ -3401,12 +3920,73 @@ class TasksChartsView(QWidget):
                     tm.save_tasks(list(tm.tasks.values()))
                 except Exception as e:
                     self.logger.warning(f"全部暂停后统一保存失败: {e}")
+                if getattr(self, "_close_after_pause", False):
+                    try:
+                        tm._sync_rules_armed_if_builtin()
+                    except Exception:
+                        pass
 
             self.logger.info(f"全部暂停：已暂停本页 {len(paused)} 个任务：{paused}")
             self.status_label.setText(f"已暂停本页 {len(paused)} 个任务")
         except Exception as e:
             self.logger.error(f"全部暂停失败: {e}", exc_info=True)
             QMessageBox.critical(self, "错误", f"全部暂停失败：{str(e)}")
+        finally:
+            self._pause_all_busy = False
+            close_after = bool(getattr(self, "_close_after_pause", False))
+            self._close_after_pause = False
+            if close_after:
+                win = self.window()
+                if win is not None:
+                    QTimer.singleShot(0, win.close)
+
+    def start_all_page_tasks(self):
+        """启动当前页所有未在运行的任务。"""
+        if getattr(self, "_pause_all_busy", False):
+            self.status_label.setText("正在暂停，请稍后再启动")
+            return
+        try:
+            charts_to_start = []
+            for stock_code, chart_data in list(self.chart_widgets.items()):
+                chart = chart_data.get("chart") if isinstance(chart_data, dict) else chart_data
+                if not chart:
+                    continue
+                running = bool(getattr(chart, "task_running", False)) and not bool(
+                    getattr(chart, "task_paused", False)
+                )
+                if not running:
+                    charts_to_start.append((stock_code, chart))
+
+            if not charts_to_start:
+                self.status_label.setText("本页任务都已在运行")
+                return
+
+            started = []
+            self.status_label.setText(f"正在启动本页 {len(charts_to_start)} 个任务…")
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+            for stock_code, chart in charts_to_start:
+                try:
+                    chart.start_task(confirm=False)
+                    name = getattr(chart, "stock_name", "") or stock_code
+                    started.append(f"{name} ({stock_code})")
+                except TypeError:
+                    try:
+                        chart.start_task()
+                        name = getattr(chart, "stock_name", "") or stock_code
+                        started.append(f"{name} ({stock_code})")
+                    except Exception as e:
+                        self.logger.error(f"启动任务失败 {stock_code}: {e}", exc_info=True)
+                except Exception as e:
+                    self.logger.error(f"启动任务失败 {stock_code}: {e}", exc_info=True)
+
+            self.logger.info(f"全部启动：已启动本页 {len(started)} 个任务：{started}")
+            self.status_label.setText(f"已启动本页 {len(started)} 个任务")
+        except Exception as e:
+            self.logger.error(f"全部启动失败: {e}", exc_info=True)
+            QMessageBox.critical(self, "错误", f"全部启动失败：{str(e)}")
 
     def _get_full_stock_code(self, stock_code):
         """获取完整的股票代码，如果是6位数字则自动补充后缀"""
@@ -3584,6 +4164,22 @@ class TasksChartsView(QWidget):
         else:
             super().keyPressEvent(event)
     
+    @staticmethod
+    def _position_for_code(positions, stock_code):
+        """持仓键可能是 600358.SH，图表代码可能不带后缀。"""
+        if not isinstance(positions, dict):
+            return None
+        if stock_code in positions and isinstance(positions[stock_code], dict):
+            return positions[stock_code]
+        want = "".join(ch for ch in str(stock_code or "") if ch.isdigit())[:6]
+        if len(want) != 6:
+            return None
+        for key, row in positions.items():
+            got = "".join(ch for ch in str(key or "") if ch.isdigit())[:6]
+            if got == want and isinstance(row, dict):
+                return row
+        return None
+
     def update_charts_position_and_cash(self, updated_asset, updated_positions):
         """更新所有图表的持仓和余额信息
         
@@ -3608,8 +4204,8 @@ class TasksChartsView(QWidget):
                 chart.available_cash = available_cash
                 
                 # 更新持仓量（每个股票不同）
-                if updated_positions and stock_code in updated_positions:
-                    position_info = updated_positions[stock_code]
+                position_info = self._position_for_code(updated_positions, stock_code)
+                if position_info:
                     volume = position_info.get('volume', 0)
                     can_use_volume = position_info.get('can_use_volume', 0)
                     

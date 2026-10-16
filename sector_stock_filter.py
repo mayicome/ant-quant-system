@@ -129,13 +129,6 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import traceback
 import re
 
-# 尽早导入 xtdata 并关闭连接成功提示（必须在首次建立连接前设置，否则会打印“设置xtdata.enable_hello = False可隐藏此消息”）
-try:
-    import xtquant.xtdata as _xtdata_early
-    _xtdata_early.enable_hello = False
-except Exception:
-    pass
-
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTableWidget, QTableWidgetItem, QLabel, QMessageBox,
                              QProgressBar, QHeaderView, QApplication, QTextEdit, QLineEdit,
@@ -1347,9 +1340,7 @@ class SectorStockFilterThread(QThread):
         """获取日线数据。
 
         经 load_daily_dataframe：近期优先 daily_cache；历史日（或 cache 回溯不足）
-        合并 data/daily_full；缺失时再回退 xtdata（mini）。
-
-        批跑/筛选路径避免默认 180s 按票同步等待（尾部缺票会把进度钉死数十分钟）。
+        合并 data/daily_full。缓存没有的股票直接跳过，不再向 xtdata 或 QMT 补。
         """
         try:
             if through_date is not None:
@@ -1373,7 +1364,7 @@ class SectorStockFilterThread(QThread):
             daily_data = load_daily_dataframe(
                 stock_code,
                 through_date=end_date,
-                allow_xtdata_fallback=True,
+                allow_xtdata_fallback=False,
                 allow_on_demand=allow_on_demand,
                 on_demand_timeout_sec=on_demand_timeout_sec,
             )
@@ -2957,8 +2948,8 @@ class SectorStockFilterThread(QThread):
                     f"  • 完全无日线数据的股票数：{skip_no_daily} / {total_stocks}",
                     "  • （模式一内置）检测到涨停候选（is_limit_up）的检查次数："
                     f"{getattr(self, '_mode1_limitup_detected_checks', 0)}",
-                    "  • 若日历/日线异常：请确认 data/daily_cache 已由大 QMT 同步（manifest.json），"
-                    f"目录={get_cache_dir()}；交易日历走 akshare/xtdata 缓存。",
+                    "  • 若日历/日线异常：请确认 data/daily_cache 已由盘后批跑写入（manifest.json），"
+                    f"目录={get_cache_dir()}。缺日线的股票直接跳过。",
                     "  • 若数据正常：说明当前备选股在设定参数下确实不满足模式条件（属正常）。",
                     "  • 模式一/二详细「窗口/逐日/淘汰」全文：设置环境变量 SECTOR_FILTER_MODE1_VERBOSE_LOG=1 后重跑；"
                     "否则默认仅一行摘要。其它日志见「[本轮]」「[提示]」等。",

@@ -2060,8 +2060,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_batch_import_btn.clicked.connect(self._on_batch_import_pool_codes)
         self.pool_import_positions_btn = QPushButton("一键导入持仓")
         self.pool_import_positions_btn.setToolTip(
+            "从 QMT 模型交易读取持仓。\n"
             "买入策略：持仓代码并入股票池。\n"
-            "卖出策略：以 QMT 当前持仓为准重建股票池，并核对/补全建仓日（无建仓日须补记）。"
+            "卖出策略：以可卖数量达到 100 股的持仓重建股票池，并核对/补全建仓日。"
         )
         self.pool_import_positions_btn.clicked.connect(self._on_import_positions)
         self.pool_sort_btn = QPushButton("按代码排序")
@@ -5026,37 +5027,53 @@ class StrategyGeneratorMainWindow(QMainWindow):
             return
         self._prompt_remove_already_touched_ma10(touched_rows)
 
+    def _read_gjzq_position_maps(self):
+        """读持仓。与生成卖出任务共用入口：优先今天的策略日志，否则导出 QMT。失败时两个表都是 None。"""
+        from account_provider import _gjzq_position_tables
+
+        avail, total, _backtest, note = _gjzq_position_tables()
+        return avail, total, note
+
     def _on_import_positions(self):
-        """从 QMT 当前持仓导入到本策略股票池。
+        """从 QMT 模型交易当前持仓导入到本策略股票池。
 
         买入策略：并入（去重）。
-        卖出策略：以当前持仓（可用>=100）重建池，核对建仓日并提示补全。
+        卖出策略：以当前可卖数量（可用>=100）重建池，核对建仓日并提示补全。
         """
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            avail, total, note = self._read_gjzq_position_maps()
+        except Exception as e:
+            avail, total, note = None, None, str(e)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if avail is None or total is None:
+            QMessageBox.warning(
+                self,
+                "同步持仓",
+                "没有从 QMT 读到持仓。\n请确认 QMT 交易端已登录，并打开模型交易。\n(%s)"
+                % (note or "失败"),
+            )
+            return
+
         sell_mode = self._current_strategy_is_sell_pool()
         if sell_mode:
-            try:
-                positions, _dbg = get_positions_with_volume_debug()
-            except Exception:
-                positions = {}
-            codes = [
-                _normalize_code(c)
-                for c, v in (positions or {}).items()
-                if _normalize_code(c) and int(v or 0) >= 100
-            ]
-            codes = sorted(set(codes))
+            positions = {c: v for c, v in avail.items() if int(v or 0) >= 100}
+            codes = sorted(positions)
             if not codes:
                 QMessageBox.warning(
                     self,
                     "同步持仓",
-                    "未获取到可用>=100股的持仓。请确认：\n"
-                    "1. 大 QMT 模型交易已运行「蚂蚁量化规则」；\n"
-                    "2. data/config.ini 已配置 account_id（builtin 下 path_qmt 可留空）。",
+                    "QMT 里没有可卖数量达到 100 股的持仓。\n请确认已登录并打开模型交易。",
                 )
                 return
             try:
                 from utils.position_entry_dates import reconcile_with_positions
 
-                reconcile_with_positions(positions or {}, project_root=self._project_root())
+                # 按持股数量核对。当天买入可卖为 0，不能因此清掉建仓日。
+                reconcile_with_positions(
+                    total, project_root=self._project_root(), allow_empty=True
+                )
             except Exception:
                 pass
             wrote = self._prompt_missing_entry_dates(codes)
@@ -5066,16 +5083,16 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "同步持仓",
-                f"已按 QMT 持仓重建卖出股票池 {len(codes)} 只并自动保存{extra}。",
+                f"已按 QMT 可卖持仓重建卖出股票池 {len(codes)} 只并自动保存{extra}。",
             )
             return
 
-        position_codes = get_positions()
+        position_codes = sorted(total)
         if not position_codes:
             QMessageBox.warning(
                 self,
                 "导入持仓",
-                "未获取到持仓。请确认：\n1. 大 QMT 模型交易已运行「蚂蚁量化规则」；\n2. data/config.ini 已配置 account_id（builtin 下 path_qmt 可留空）。",
+                "没有从 QMT 读到持仓。\n请确认 QMT 交易端已登录，并打开模型交易。",
             )
             return
         current = self._get_pool_codes_from_list()
@@ -6613,7 +6630,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         else:
             self._append_run_log(f"股票池 {len(codes)} 只")
         self._append_run_log(
-            "正在拉取行情与关键价格…（builtin：等待 results.json + daily_cache；进度会刷在下方，请勿强杀进程）"
+            "正在拉取行情与关键价格…（东财现价 + daily_cache；进度会刷在下方，请勿强杀进程）"
         )
 
         # 拉行情会写入 strategy_pool_watch；整次运行无论成功/失败都必须释放。
@@ -6705,12 +6722,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
             try:
                 from utils.position_entry_dates import reconcile_with_positions
 
-                cleared = reconcile_with_positions(
-                    params.get("positions") or {}, project_root=root
-                )
+                held = params.get("positions_volume") or {}
+                cleared = []
+                if held:
+                    cleared = reconcile_with_positions(held, project_root=root)
                 if cleared:
                     self._append_run_log(
-                        "建仓日已清除（可用<100）: " + ",".join(cleared[:30])
+                        "建仓日已清除（持股<100）: " + ",".join(cleared[:30])
                         + ("…" if len(cleared) > 30 else "")
                     )
             except Exception:
@@ -6779,7 +6797,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     else:
                         QMessageBox.warning(self, "注入持仓失败/无可用持仓", detail)
                 else:
-                    msg2 = "未拿到持仓数据（positions 为空）。请检查大 QMT 内置策略是否写入 data/results.json，以及 account_id 是否已配置。"
+                    msg2 = "未拿到持仓数据。请确认 QMT 交易端已登录，并打开模型交易。"
                     if quiet:
                         self._append_run_log(f"[定时运行] 注入持仓失败/无可用持仓：{msg2}")
                     else:

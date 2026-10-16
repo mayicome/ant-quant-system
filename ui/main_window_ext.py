@@ -98,6 +98,7 @@ class MainWindowExt(Ui_mainWindow):
         self._last_started_row = None
         # 初始化订单监控字典
         self.order_monitors = {}
+        self._cancel_requested_ids = set()
         self.position_manager = None  # 将在set_qmt_adapter中初始化
         self.trade_record_manager = TradeRecordManager()
         # 音效开关状态（默认关闭）
@@ -4056,9 +4057,55 @@ class MainWindowExt(Ui_mainWindow):
         # 返回是否有任务在运行（以任务管理器为准）
         return actual_running_tasks > 0
 
+    def _stop_running_tasks_for_exit(self):
+        """关闭窗口时停掉仍在运行的任务。不等每个进程自己退出。"""
+        tm = getattr(self, "task_manager", None)
+        if tm is None:
+            return
+        tm._exit_fast_stop = True
+        task_ids = list(getattr(tm, "running_tasks", {}).keys())
+        if not task_ids:
+            return
+        self.logger.info("关闭：停止 %d 个仍在运行的任务" % len(task_ids))
+        for task_id in task_ids:
+            try:
+                tm.stop_task(task_id, persist=False, fast=True, sync_rules=False)
+            except TypeError:
+                try:
+                    tm.stop_task(task_id)
+                except Exception as e:
+                    self.logger.error("关闭时停止任务 %s 失败: %s" % (task_id, e))
+            except Exception as e:
+                self.logger.error("关闭时停止任务 %s 失败: %s" % (task_id, e))
+        try:
+            tm.save_tasks(list(tm.tasks.values()))
+        except Exception as e:
+            self.logger.warning("关闭时保存任务失败: %s" % e)
+        try:
+            tm._sync_rules_armed_if_builtin()
+        except Exception:
+            pass
+
     def handle_close_event(self, event):
         """处理窗口关闭事件"""
         try:
+            view = getattr(self, "tasks_charts_view", None)
+            if view is not None and getattr(view, "_pause_all_busy", False):
+                view._close_after_pause = True
+                tm = getattr(self, "task_manager", None)
+                if tm is not None:
+                    tm._exit_fast_stop = True
+                try:
+                    if getattr(view, "status_label", None) is not None:
+                        view.status_label.setText("暂停完成后将关闭")
+                except Exception:
+                    pass
+                event.ignore()
+                return
+
+            if self.has_running_tasks():
+                self._stop_running_tasks_for_exit()
+
             # 设置关闭标志，防止其他方法继续调用UI
             self._is_closing = True
 
@@ -4109,17 +4156,6 @@ class MainWindowExt(Ui_mainWindow):
                     except Exception as e:
                         self.logger.error(f"停止订单监控{order_id}失败: {str(e)}")
                 #self.logger.info("已清理所有订单监控任务")
-            
-            # 检查是否有正在运行的任务
-            if self.has_running_tasks():
-                reply = QMessageBox.warning(
-                    self.window,
-                    "警告",
-                    "还有正在运行的任务，请先停止所有任务再退出程序。",
-                    QMessageBox.Ok
-                )
-                event.ignore()  # 阻止关闭
-                return
             
             # 保存所有任务（包括参数修改）
             if hasattr(self, 'task_manager') and self.task_manager:
@@ -5367,17 +5403,14 @@ class MainWindowExt(Ui_mainWindow):
         except Exception as e:
             self.logger.error(f"处理UI卡死失败: {str(e)}")
 
-    def add_cancel_button(self, table, row, order_status, order_id):
-        """添加撤单按钮"""
+    def add_cancel_button(self, table, row, order_status, order_id, broker_refresh=False):
+        """添加撤单按钮。broker_refresh 为真时按柜台状态落成已撤单或其他状态。"""
         try:
             # 检查参数
             if not table or row < 0 or not order_id:
                 self.logger.error(f"参数无效 - table: {table}, row: {row}, order_id: {order_id}")
                 return
                 
-            # 检查是否已经在监控中
-            is_monitoring = order_id in self.order_monitors
-            
             # 1. 使用 trade_record_manager 创建操作控件
             try:
                 #self.logger.info(f"创建操作控件 - row: {row}")
@@ -5419,10 +5452,9 @@ class MainWindowExt(Ui_mainWindow):
             try:
                 #self.logger.info(f"获取按钮对象 - row: {row}")
                 cancel_button = operation_container.findChild(QPushButton, "cancel_button")
-                monitor_button = operation_container.findChild(QPushButton, "monitor_button")
                 
-                if not cancel_button or not monitor_button:
-                    self.logger.error(f"获取按钮对象失败 - cancel_button: {cancel_button}, monitor_button: {monitor_button}")
+                if not cancel_button:
+                    self.logger.error(f"获取撤单按钮失败 - row: {row}")
                     return
                 #self.logger.info(f"按钮对象获取成功 - cancel_button: {cancel_button}, monitor_button: {monitor_button}")
                 
@@ -5439,7 +5471,6 @@ class MainWindowExt(Ui_mainWindow):
             try:
                 #self.logger.info(f"连接按钮信号 - row: {row}, order_id: {order_id}")
                 cancel_button.clicked.connect(lambda checked, r=row, oid=order_id: self._handle_cancel_click(r, oid))
-                monitor_button.clicked.connect(lambda checked, r=row, oid=order_id: self._handle_monitor_click(r, oid))
                 #self.logger.info(f"按钮信号连接成功 - row: {row}")
             except Exception as e:
                 self.logger.error(f"信号连接异常: {e}")
@@ -5448,21 +5479,22 @@ class MainWindowExt(Ui_mainWindow):
             # 5. 根据监控状态设置监控按钮样式（字体走统一样式）
             try:
                 from ui.trade_record_manager import (
-                    _STYLE_ENDED,
-                    _STYLE_MONITOR,
-                    _STYLE_MONITORING,
+                    _STYLE_REQUESTED,
+                    cancel_button_outcome,
                 )
 
-                if order_status in ['已成', '已撤', '废单']:
-                    monitor_button.setEnabled(False)
-                    monitor_button.setText("已结束")
-                    monitor_button.setStyleSheet(_STYLE_ENDED)
-                elif is_monitoring:
-                    monitor_button.setText("监控中")
-                    monitor_button.setStyleSheet(_STYLE_MONITORING)
-                else:
-                    monitor_button.setText("监控")
-                    monitor_button.setStyleSheet(_STYLE_MONITOR)
+                if not hasattr(self, "_cancel_requested_ids"):
+                    self._cancel_requested_ids = set()
+                outcome = cancel_button_outcome(order_status)
+                requested = order_id in self._cancel_requested_ids
+                if outcome:
+                    self._cancel_requested_ids.discard(order_id)
+                elif requested and not broker_refresh:
+                    cancel_button.setEnabled(False)
+                    cancel_button.setText("已请求撤单")
+                    cancel_button.setStyleSheet(_STYLE_REQUESTED)
+                elif broker_refresh:
+                    self._cancel_requested_ids.discard(order_id)
             except Exception as e:
                 self.logger.error(f"设置按钮样式异常: {e}")
                 
@@ -5479,12 +5511,14 @@ class MainWindowExt(Ui_mainWindow):
                 _STYLE_ENDED,
                 _STYLE_MONITOR,
                 _STYLE_MONITORING,
+                _STYLE_REQUESTED,
             )
             styles = {
                 "cancel": _STYLE_CANCEL,
                 "monitor": _STYLE_MONITOR,
                 "monitoring": _STYLE_MONITORING,
                 "ended": _STYLE_ENDED,
+                "requested": _STYLE_REQUESTED,
             }
             button.setStyleSheet(styles.get(kind, _STYLE_MONITOR))
         except Exception:
@@ -6150,12 +6184,7 @@ class MainWindowExt(Ui_mainWindow):
             if operation_container:
                 # 直接从布局中获取按钮
                 layout = operation_container.layout()
-                if layout and layout.count() >= 2:
-                    cancel_button = layout.itemAt(0).widget()  # 第一个按钮是撤单按钮
-                    monitor_button = layout.itemAt(1).widget()  # 第二个按钮是监控按钮
-                else:
-                    cancel_button = None
-                    monitor_button = None
+                cancel_button = layout.itemAt(0).widget() if layout and layout.count() >= 1 else None
                 
                 if cancel_button:
                     try:
@@ -6173,23 +6202,6 @@ class MainWindowExt(Ui_mainWindow):
                         self.logger.warning("撤单按钮在更新状态时已被删除")
                         cancel_button = None
                 
-                # 同时禁用监控按钮
-                if monitor_button:
-                    try:
-                        monitor_button.setEnabled(False)
-                        monitor_button.setText("撤单中")
-                        monitor_button.setStyleSheet("""
-                            QPushButton {
-                                background-color: #FFA726;
-                                color: white;
-                                border: 1px solid #FFA726;
-                                border-radius: 3px;
-                            }
-                        """)
-                    except RuntimeError:
-                        self.logger.warning("监控按钮在更新状态时已被删除")
-                        monitor_button = None
-            
             # 调用QMT撤单接口，传递股票代码
             print(f"🔍 [订单列表撤单] 调用撤单接口 - 订单ID: {order_id} (类型: {type(order_id)}), 股票代码: {stock_code}")
             self.logger.info(f"[订单列表撤单] 调用撤单接口 - 订单ID: {order_id} (类型: {type(order_id)}), 股票代码: {stock_code}")
@@ -6225,7 +6237,10 @@ class MainWindowExt(Ui_mainWindow):
             operation_container = safe_get_operation_container(8)
             
             if result:
-                self.logger.info(f"撤单成功: {order_id}")
+                if not hasattr(self, "_cancel_requested_ids"):
+                    self._cancel_requested_ids = set()
+                self._cancel_requested_ids.add(str(order_id))
+                self.logger.info(f"撤单已请求: {order_id}")
                 try:
                     view = getattr(self, "tasks_charts_view", None)
                     if view is not None and hasattr(view, "finalize_early_manual_cancel_if_pending"):
@@ -6236,32 +6251,18 @@ class MainWindowExt(Ui_mainWindow):
                 except Exception as e:
                     self.logger.debug(f"[订单列表撤单] 提前单人工撤单收尾失败: {e}")
                 
-                # 撤单成功后，更新按钮状态为"已结束"
+                # 先标成已请求，等 QMT 委托表刷新后再按柜台状态改文案
                 if operation_container:
-                    # 直接从布局中获取按钮
                     layout = operation_container.layout()
-                    if layout and layout.count() >= 2:
-                        cancel_button = layout.itemAt(0).widget()  # 第一个按钮是撤单按钮
-                        monitor_button = layout.itemAt(1).widget()  # 第二个按钮是监控按钮
-                    else:
-                        cancel_button = None
-                        monitor_button = None
+                    cancel_button = layout.itemAt(0).widget() if layout and layout.count() >= 1 else None
                     
                     if cancel_button:
                         try:
                             cancel_button.setEnabled(False)
-                            cancel_button.setText("已结束")
-                            self._apply_order_op_btn_style(cancel_button, "ended")
+                            cancel_button.setText("已请求撤单")
+                            self._apply_order_op_btn_style(cancel_button, "requested")
                         except RuntimeError:
-                            self.logger.warning("撤单成功后，撤单按钮已被删除，无法更新状态")
-                    
-                    if monitor_button:
-                        try:
-                            monitor_button.setEnabled(False)
-                            monitor_button.setText("已结束")
-                            self._apply_order_op_btn_style(monitor_button, "ended")
-                        except RuntimeError:
-                            self.logger.warning("撤单成功后，监控按钮已被删除，无法更新状态")
+                            self.logger.warning("撤单请求后，撤单按钮已被删除，无法更新状态")
                 
                 # 使用QTimer延迟恢复滚动位置，确保订单列表更新完成
                 #300ms不够，500ms还没试过。
@@ -6273,13 +6274,10 @@ class MainWindowExt(Ui_mainWindow):
                 # 撤单失败后，恢复按钮状态
                 if operation_container:
                     cancel_button = operation_container.findChild(QPushButton, "cancel_button")
-                    monitor_button = operation_container.findChild(QPushButton, "monitor_button")
-                    
-                    if not cancel_button or not monitor_button:
+                    if not cancel_button:
                         layout = operation_container.layout()
-                        if layout:
-                            cancel_button = layout.itemAt(0).widget() if layout.count() > 0 else None
-                            monitor_button = layout.itemAt(1).widget() if layout.count() > 1 else None
+                        if layout and layout.count() > 0:
+                            cancel_button = layout.itemAt(0).widget()
                     
                     if cancel_button:
                         try:
@@ -6288,14 +6286,6 @@ class MainWindowExt(Ui_mainWindow):
                             self._apply_order_op_btn_style(cancel_button, "cancel")
                         except RuntimeError:
                             self.logger.warning("撤单失败后，撤单按钮已被删除，无法恢复状态")
-                    
-                    if monitor_button:
-                        try:
-                            monitor_button.setEnabled(True)
-                            monitor_button.setText("监控")
-                            self._apply_order_op_btn_style(monitor_button, "monitor")
-                        except RuntimeError:
-                            self.logger.warning("撤单失败后，监控按钮已被删除，无法恢复状态")
                 
         except Exception as e:
             self.logger.error(f"撤单操作失败: {str(e)}")
@@ -6736,16 +6726,22 @@ class MainWindowExt(Ui_mainWindow):
     def exit_application(self):
         """退出应用程序"""
         try:
-            # 检查是否有正在运行的任务
-            if self.has_running_tasks():
-                reply = QMessageBox.warning(
-                    self.window,
-                    "警告",
-                    "还有正在运行的任务，请先停止所有任务再退出程序。",
-                    QMessageBox.Ok
-                )
+            view = getattr(self, "tasks_charts_view", None)
+            if view is not None and getattr(view, "_pause_all_busy", False):
+                view._close_after_pause = True
+                tm = getattr(self, "task_manager", None)
+                if tm is not None:
+                    tm._exit_fast_stop = True
+                try:
+                    if getattr(view, "status_label", None) is not None:
+                        view.status_label.setText("暂停完成后将关闭")
+                except Exception:
+                    pass
                 return
-            
+
+            if self.has_running_tasks():
+                self._stop_running_tasks_for_exit()
+
             # 设置关闭标志
             self._is_closing = True
             
@@ -6872,9 +6868,24 @@ class MainWindowExt(Ui_mainWindow):
                 QMessageBox.Ok
             )
 
+    def _hide_fills_table(self):
+        """当日成交表拿掉，把高度还给图表。持仓表保留。"""
+        table = getattr(self, "tableWidget_3", None)
+        if table is None:
+            return
+        table.hide()
+        table.setMinimumHeight(0)
+        splitter = getattr(self, "splitter", None)
+        if splitter is None:
+            return
+        sizes = splitter.sizes()
+        if len(sizes) >= 2 and sizes[-1] != 0:
+            splitter.setSizes([max(sum(sizes), 1), 0])
+
     def enable_charts_view_mode(self):
         """启用图表视图模式 - 将tableWidget_2替换为图表视图"""
         try:
+            # 成交表留在图表下面，内容由「刷新成交」从同花顺当日成交写入。
             # 检查必要的属性
             if not hasattr(self, 'task_manager') or self.task_manager is None:
                 self.logger.warning("task_manager 未设置，跳过图表视图初始化")

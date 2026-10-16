@@ -946,12 +946,13 @@ class QMTManager(QThread):
                     self.logger.error(f"account类型错误: {type(self.account)}，期望类型: StockAccount")
                     return None, {}
                 
-            # 检查xt_trader是否初始化
+            # builtin/standalone 不创建 xt_trader，持仓和委托从 QMT 模型交易导出。
             if not hasattr(self, 'xt_trader') or not self.xt_trader:
                 if self._relax_xt_trader_health():
                     asset, positions = self._load_builtin_account_snapshot()
                     if asset or positions:
                         return asset, dict(positions or {})
+                    return None, {}
                 self.logger.error("xt_trader未初始化")
                 return None, {}
                 
@@ -1521,14 +1522,30 @@ class QMTManager(QThread):
             self.logger.error(f"撤单异常: 订单号={order_id}, 股票={stock_code}, 错误={str(e)}")
             return False
 
+    def _cached_position_for(self, stock_code):
+        """按完整代码或 6 位代码取缓存持仓。"""
+        cached = getattr(self, "cached_positions", None) or {}
+        if not isinstance(cached, dict):
+            return None
+        if stock_code in cached and isinstance(cached[stock_code], dict):
+            return cached[stock_code]
+        want = "".join(ch for ch in str(stock_code or "") if ch.isdigit())[:6]
+        if len(want) != 6:
+            return None
+        for key, pos in cached.items():
+            got = "".join(ch for ch in str(key or "") if ch.isdigit())[:6]
+            if got == want and isinstance(pos, dict):
+                return pos
+        return None
+
     def get_stock_position(self, stock_code):
         """获取指定股票的持仓信息"""
-        if stock_code in self.cached_positions:
-            pos = self.cached_positions[stock_code]
+        pos = self._cached_position_for(stock_code)
+        if isinstance(pos, dict):
             return {
-                'volume': pos['volume'],
-                'can_use_volume': pos['can_use_volume'],
-                'open_price': pos['open_price']
+                'volume': pos.get('volume', 0),
+                'can_use_volume': pos.get('can_use_volume', 0),
+                'open_price': pos.get('open_price', 0),
             }
 
         try:

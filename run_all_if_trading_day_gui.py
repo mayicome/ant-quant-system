@@ -537,7 +537,7 @@ class PostMarketWindow(QMainWindow):
 
     def _on_rerun_all(self) -> None:
         ids = self._ordered_ids(set(self.row_by_id.keys()))
-        # 手动：日线只检查不长时间等；仍放入列表
+        # 手动也会下载目标交易日的日线，不再等 QMT
         self._start_worker(ids, use_asof_freeze=True, stop_on_gate_fail=True)
 
     def _on_rerun_selected(self) -> None:

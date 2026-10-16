@@ -8,7 +8,7 @@
 规则：
 - 某票从无仓到首次买入成交：若尚无建仓日则写入成交日
 - 每次买入成交都更新末笔买入日（加仓会推后无条件清仓锚定日）
-- 可用持仓 < 100：清除建仓日与末笔买入日（可再次买入后重记）
+- 持股数量 < 100 才清除建仓日与末笔买入日。买入当天可卖为 0 仍保留
 - 手动/外部买入：同步持仓时补记（界面）
 """
 from __future__ import annotations
@@ -281,13 +281,32 @@ def clear_last_buy_date(code: str, project_root: Optional[str] = None) -> bool:
         return True
 
 
+def _snapshot_shares(raw: Any) -> int:
+    """持股数量。字典里有证券数量就用它，不用可卖数量（买入当天可卖为 0）。"""
+    try:
+        if isinstance(raw, dict):
+            if raw.get("volume") is not None and raw.get("volume") != "":
+                return int(raw.get("volume") or 0)
+            return int(raw.get("can_use_volume") or 0)
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def reconcile_with_positions(
     positions: Dict[str, Any],
     *,
     min_volume: int = 100,
     project_root: Optional[str] = None,
+    allow_empty: bool = False,
 ) -> List[str]:
-    """持仓可用 < min_volume 的代码清除建仓日与末笔买入日，返回被清除代码列表。"""
+    """持股数量 < min_volume 的代码清除建仓日与末笔买入日，返回被清除代码列表。
+
+    positions 是证券数量，不是可卖数量。买入当天可卖为 0 但持股仍在，日期保留。
+    快照里没有的代码视为已卖光。空快照默认不清除，避免读持仓失败时把日期全删掉。
+    """
+    if not positions and not allow_empty:
+        return []
     cleared: List[str] = []
 
     def _vol_of(c6: str) -> int:
@@ -297,12 +316,7 @@ def reconcile_with_positions(
                 if _norm_code(k) == c6:
                     raw = v
                     break
-        try:
-            if isinstance(raw, dict):
-                return int(raw.get("volume") or raw.get("can_use_volume") or 0)
-            return int(raw or 0)
-        except (TypeError, ValueError):
-            return 0
+        return _snapshot_shares(raw)
 
     with _LOCK:
         data = load_all(project_root)
@@ -386,10 +400,10 @@ def note_fill_from_order(
         return ("buy_set", ok)
 
     if is_sell:
-        # 卖出后若仍有仓，保留建仓日；无仓则清。调用方也可再 reconcile。
-        vol = order_rec.get("can_use_volume")
+        # 卖出后若持股仍在，保留建仓日。可卖为 0 不算卖光（当天买入还不能卖）。
+        vol = order_rec.get("position_volume_after")
         if vol is None:
-            vol = order_rec.get("position_volume_after")
+            vol = order_rec.get("position_volume")
         try:
             if vol is not None and int(vol) < 100:
                 return ("sell_clear", clear_entry_date(c6, project_root=project_root))

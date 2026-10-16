@@ -5,9 +5,7 @@
 """
 from __future__ import annotations
 
-import json
 import os
-import tempfile
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set
 
@@ -92,109 +90,24 @@ def make_leg_key(code: Any, name: Any = None, leg_key: Any = None) -> str:
     return "%s:%s" % (c6, lid)
 
 
+_MEM = {"legs": [], "meta": {}}
+
+
 def _load() -> Dict[str, Any]:
-    path = _path()
-    if not os.path.isfile(path):
-        return {"legs": [], "meta": {}}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception:
-        return {"legs": [], "meta": {}}
-    if not isinstance(raw, dict):
-        if isinstance(raw, list):
-            return {"legs": [str(x) for x in raw if x], "meta": {}}
-        return {"legs": [], "meta": {}}
-    legs = raw.get("legs")
-    meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
-    out_legs = []
-    if isinstance(legs, list):
-        out_legs = [str(x) for x in legs if x]
-    elif isinstance(legs, dict):
-        out_legs = [str(k) for k, v in legs.items() if v]
-    return {"legs": out_legs, "meta": dict(meta)}
+    return _MEM
 
 
 def _save(legs: Iterable[str], meta: Dict[str, Any]) -> None:
-    path = _path()
-    parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        try:
-            os.makedirs(parent)
-        except Exception:
-            return
     clean_legs = sorted({str(x) for x in legs if x})
     clean_meta = {k: v for k, v in (meta or {}).items() if k in set(clean_legs)}
-    payload = {
-        "legs": clean_legs,
-        "meta": clean_meta,
-        "updated_at": _now_iso(),
-    }
-    try:
-        fd, tmp = tempfile.mkstemp(prefix="fl_", suffix=".json", dir=parent or None)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-            os.replace(tmp, path)
-        except Exception:
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    _MEM["legs"] = clean_legs
+    _MEM["meta"] = clean_meta
+    _MEM["updated_at"] = _now_iso()
+    return
 
 
 def _save_compat_sell(legs: Iterable[str]) -> None:
-    """同步卖腿到旧文件，供马总卖策略 _load_state_legs 读取。"""
-    sell_legs = []
-    for k in legs:
-        s = str(k or "")
-        if not s or ":" not in s:
-            continue
-        lid = s.split(":", 1)[1].upper()
-        if any(x in lid for x in ("OPEN50", "LU10", "末日")):
-            sell_legs.append(s)
-    path = _compat_sell_path()
-    parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        try:
-            os.makedirs(parent)
-        except Exception:
-            return
-    # 与旧文件合并，避免冲掉策略侧其它写入
-    existing = set()
-    if os.path.isfile(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            old = raw.get("legs") if isinstance(raw, dict) else raw
-            if isinstance(old, list):
-                existing |= set(str(x) for x in old if x)
-            elif isinstance(old, dict):
-                existing |= set(str(k) for k, v in old.items() if v)
-        except Exception:
-            pass
-    existing |= set(sell_legs)
-    payload = {
-        "legs": sorted(existing),
-        "updated_at": _now_iso(),
-    }
-    try:
-        fd, tmp = tempfile.mkstemp(prefix="mz_", suffix=".json", dir=parent or None)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-            os.replace(tmp, path)
-        except Exception:
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    return
 
 
 def note_leg(
@@ -351,36 +264,4 @@ def sync_clear_from_positions(positions: Any, min_volume: int = 100) -> List[str
 
 
 def lookup_leg_from_armed(task_id: Any, rules_path: str = "") -> Dict[str, str]:
-    """从 rules_armed 按 task_id 取 leg_key / rule_name。"""
-    tid = str(task_id or "").strip()
-    out = {"leg_key": "", "rule_name": ""}
-    if not tid:
-        return out
-    path = rules_path
-    if not path:
-        base = DATA_DIR or os.path.join(PROJECT_ROOT or ".", "data")
-        path = os.path.join(base, "rules_armed.json")
-    if not os.path.isfile(path):
-        return out
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception:
-        return out
-    tasks = []
-    if isinstance(raw, dict):
-        tasks = raw.get("tasks") or []
-    if not isinstance(tasks, list):
-        return out
-    for t in tasks:
-        if not isinstance(t, dict):
-            continue
-        if str(t.get("task_id") or "").strip() != tid:
-            continue
-        meta = t.get("metadata") if isinstance(t.get("metadata"), dict) else {}
-        out["leg_key"] = str(t.get("leg_key") or meta.get("leg_key") or "").strip()
-        out["rule_name"] = str(
-            meta.get("rule_name") or t.get("strategy_name") or ""
-        ).strip()
-        break
-    return out
+    return {"leg_key": "", "rule_name": ""}

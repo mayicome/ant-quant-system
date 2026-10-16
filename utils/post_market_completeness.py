@@ -51,6 +51,26 @@ CheckResult = Tuple[bool, str]
 Checker = Callable[[date], CheckResult]
 
 
+def check_qmt_quote(asof: date) -> CheckResult:
+    meta = ROOT / "data" / "qmt_hsj_quote.meta.json"
+    if not meta.is_file():
+        return False, "还没有行情导出"
+    try:
+        import json
+
+        payload = json.loads(meta.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"行情导出记录读失败: {exc}"
+    got = str(payload.get("trade_date") or "")[:10]
+    want = asof.isoformat()
+    count = int(payload.get("count") or 0)
+    if got != want:
+        return False, f"导出日={got or '-'} 期望={want}"
+    if count < 1000:
+        return False, f"代码只有 {count}"
+    return True, f"代码={count}"
+
+
 def check_daily_cache(asof: date) -> CheckResult:
     from utils.daily_cache_reader import MANIFEST_PATH, load_manifest
 
@@ -298,8 +318,21 @@ def check_market_regime(asof: date) -> CheckResult:
     return False, f"行情描绘未覆盖 {d}"
 
 
+def check_history_archive(asof: date) -> CheckResult:
+    """归档没有固定产物。没报错算齐全，只有记录里写了失败才算缺。"""
+    from utils.post_market_step_status import get_step_record
+
+    rec = get_step_record(asof, "history_archive")
+    if rec and not rec.get("ok", True):
+        return False, str(rec.get("detail") or "归档报错")
+    if rec:
+        return True, str(rec.get("detail") or "无报错")
+    return True, "无报错"
+
+
 # step_id -> checker（与流水线 id 对齐）
 COMPLETENESS_CHECKERS: Dict[str, Checker] = {
+    "qmt_quote": check_qmt_quote,
     "daily_cache": check_daily_cache,
     "limit_up": check_limit_up,
     "lu_board_rank": check_lu_board_rank,
@@ -316,6 +349,7 @@ COMPLETENESS_CHECKERS: Dict[str, Checker] = {
     "lhb_premium": check_lhb_premium,
     "inst_net_rank": check_inst_rank,
     "stock_info_f10": check_stock_info_f10,
+    "history_archive": check_history_archive,
     "after_hours_wait": check_after_hours,
     "after_hours_export": check_after_hours_export,
     "cos_upload": check_cos_shards,
@@ -341,7 +375,7 @@ def check_all(asof: date, step_ids: Optional[List[str]] = None) -> List[Dict[str
             ok, detail = False, f"检测异常: {e}"
         # 有文件：一律用文件时间；无文件（公众号）：用本地完成记录
         finished_at = artifact_finished_at(asof, sid, detail)
-        if not finished_at and sid == "wechat_draft":
+        if not finished_at and sid in ("wechat_draft", "history_archive"):
             finished_at = get_step_finished_at(asof, sid)
         out.append(
             {
@@ -360,6 +394,7 @@ def _artifact_paths(asof: date, step_id: str) -> List[Path]:
     hd = ROOT / "history_data"
     em = ROOT / "data" / "eastmoney_board_rank"
     mapping: Dict[str, List[Path]] = {
+        "qmt_quote": [ROOT / "data" / "qmt_hsj_quote.meta.json"],
         "daily_cache": [ROOT / "data" / "daily_cache" / "manifest.json"],
         "limit_up": [hd / "涨停日数据" / f"{d}.json"],
         "lu_board_rank": [

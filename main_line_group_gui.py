@@ -13,7 +13,7 @@ import sys
 import json
 import math
 import argparse
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -30,16 +30,6 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
 )
-
-try:
-    import xtquant.xtdata as xtdata
-except Exception:
-    xtdata = None
-else:
-    try:
-        xtdata.enable_hello = False
-    except Exception:
-        pass
 
 
 class MainLineGroupDialog(QDialog):
@@ -364,32 +354,21 @@ class MainLineGroupDialog(QDialog):
             self.run_btn.setEnabled(True)
 
     def _fetch_tech_metrics(self, stock_codes: List[str]) -> Dict[str, Dict[str, float]]:
-        """
-        通过 xtdata 拉取日线，构建连板/趋势指标。
-        若 xtdata 不可用，返回空指标（后续按 0 处理）。
-        """
+        """用 daily_cache 收盘价算连板和均线。缓存没有的股票指标留空，后面按 0。"""
+        from utils.daily_cache_reader import load_daily_from_cache
+
         metrics: Dict[str, Dict[str, float]] = {c: {} for c in stock_codes}
-        if xtdata is None or (not stock_codes):
+        if not stock_codes:
             return metrics
 
-        end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=80)).strftime("%Y%m%d")
-
+        start = date.today() - timedelta(days=80)
         for code in stock_codes:
             try:
-                full_code = self._to_xt_code(code)
-                if not full_code:
+                df = load_daily_from_cache(str(code))
+                if df is None or df.empty or "close" not in df.columns:
                     continue
-                try:
-                    xtdata.download_history_data(full_code, "1d", start_date, end_date)
-                except Exception:
-                    pass
-                data = xtdata.get_market_data_ex([], [full_code], period="1d", start_time=start_date, end_time=end_date, count=-1)
-                if not data or full_code not in data or data[full_code] is None or data[full_code].empty:
-                    continue
-                df = data[full_code]
-                if "close" not in df.columns:
-                    continue
+                if "date" in df.columns:
+                    df = df[df["date"] >= start]
                 close = pd.to_numeric(df["close"], errors="coerce").dropna()
                 close = close[close > 0]
                 if close.empty:

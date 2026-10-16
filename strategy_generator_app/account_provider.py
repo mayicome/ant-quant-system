@@ -1,6 +1,8 @@
 """
 账户资金查询：为策略生成器提供 总资金、可用资金、持仓列表。
-builtin 模式优先读 data/results.json；mini 模式需 path_qmt + account_id 连接 xt_trader。
+builtin 模式的持仓优先读今天的 data/results.json（交易系统从策略日志写入）；
+不是今天的快照时，再从 QMT 模型交易导出。资金概览仍可读 results.json。
+mini 模式需 path_qmt + account_id 连接 xt_trader。
 """
 
 import configparser
@@ -78,44 +80,106 @@ def _read_account_ini() -> Tuple[Optional[configparser.ConfigParser], str, str, 
     return cfg, path_qmt, account_id, qmt_mode
 
 
-def _builtin_snapshot_positions() -> Tuple[Dict[str, int], Dict[str, Dict[str, Any]], str]:
-    """builtin 下从 results.json 读持仓，返回 (volume_map, backtest_map, debug)。"""
-    vol_out: Dict[str, int] = {}
-    bt_out: Dict[str, Dict[str, Any]] = {}
-    try:
-        from utils.ant_rules_io_ext import default_paths, load_account_positions_snapshot
+_GJZQ_POS_CACHE: Dict[str, Any] = {"at": 0.0, "ok": False, "avail": {}, "total": {}, "note": ""}
 
-        root = repo_root()
-        _, results_path = default_paths(root)
-        _, pos_map = load_account_positions_snapshot(results_path)
-        if not pos_map:
-            return vol_out, bt_out, f"results.json 无持仓: {results_path}"
-        for code, row in (pos_map or {}).items():
-            raw = str(code or "").strip()
-            c = (raw.split(".")[0] if "." in raw else raw).strip()
-            if len(c) >= 6:
-                c = c[:6]
-            elif c:
-                c = c.zfill(6)
-            if not c:
-                continue
-            if isinstance(row, dict):
-                vol = int(row.get("can_use_volume") or row.get("volume") or 0)
-                cost = float(row.get("open_price") or row.get("cost") or 0)
+
+def _code6(raw: Any) -> str:
+    text = str(raw or "").strip()
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 6:
+        return digits[:6]
+    return digits.zfill(6) if digits else ""
+
+
+def _load_today_formula_positions() -> Optional[Dict[str, Any]]:
+    """今天由交易系统写入的策略日志持仓。文件缺失、来源不对或不是今天，返回 None。"""
+    try:
+        from datetime import date
+
+        from utils.ant_rules_io_ext import default_paths, load_json
+
+        _, results_path = default_paths(repo_root())
+        if not results_path or not os.path.isfile(results_path):
+            return None
+        data = load_json(results_path)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if str(data.get("source") or "") != "formula_log":
+        return None
+    updated = str(data.get("updated_at") or "")[:10]
+    if updated != date.today().isoformat():
+        return None
+    positions = data.get("positions")
+    if not isinstance(positions, dict):
+        return None
+    return positions
+
+
+def _gjzq_position_tables() -> Tuple[Optional[Dict[str, int]], Optional[Dict[str, int]], Optional[Dict[str, Dict[str, Any]]], str]:
+    """读持仓。优先今天的策略日志快照，否则导出 QMT 模型交易。短时间内复用上一次结果。"""
+    now = time.time()
+    cached = _GJZQ_POS_CACHE
+    if cached.get("ok") and now - float(cached.get("at") or 0) < 20.0:
+        return cached["avail"], cached["total"], cached["backtest"], str(cached.get("note") or "")
+    positions = _load_today_formula_positions()
+    from_log = positions is not None
+    note = ""
+    if not from_log:
+        try:
+            from utils.qmt_model_trade_readonly import last_note, read_holdings
+
+            positions = read_holdings()
+            note = last_note() or ""
+        except Exception as e:
+            note = "%s: %s" % (type(e).__name__, e)
+            positions = None
+    if positions is None:
+        cached.update(at=now, ok=False, note=note)
+        return None, None, None, "QMT未读到持仓: %s" % (note or "失败")
+    avail: Dict[str, int] = {}
+    total: Dict[str, int] = {}
+    backtest: Dict[str, Dict[str, Any]] = {}
+    for raw, row in (positions or {}).items():
+        code = _code6(raw)
+        if not code or not isinstance(row, dict):
+            continue
+        can_use = int(row.get("can_use_volume") or 0)
+        volume = int(row.get("volume") or 0)
+        if volume < can_use:
+            volume = can_use
+        cost = float(row.get("open_price") or row.get("cost") or 0)
+        avail[code] = avail.get(code, 0) + can_use
+        if volume > 0:
+            total[code] = total.get(code, 0) + volume
+        if can_use > 0 or volume > 0:
+            prev = backtest.get(code)
+            if prev:
+                ov, oc = int(prev["volume"]), float(prev["cost"])
+                nv = ov + can_use
+                backtest[code] = {
+                    "volume": nv,
+                    "cost": round((ov * oc + can_use * cost) / nv, 2) if nv else cost,
+                }
             else:
-                vol = int(getattr(row, "can_use_volume", 0) or getattr(row, "volume", 0) or 0)
-                cost = float(getattr(row, "open_price", 0) or getattr(row, "cost", 0) or 0)
-            vol_out[c] = vol_out.get(c, 0) + vol
-            if c in bt_out:
-                ov, oc = bt_out[c]["volume"], bt_out[c]["cost"]
-                nv = ov + vol
-                bt_out[c]["volume"] = nv
-                bt_out[c]["cost"] = round((ov * oc + vol * cost) / nv, 2) if nv else cost
-            else:
-                bt_out[c] = {"volume": vol, "cost": round(cost, 2)}
-        return vol_out, bt_out, f"results.json 持仓 {len(vol_out)} 只"
-    except Exception as e:
-        return vol_out, bt_out, f"读取 results.json 失败: {type(e).__name__}: {e}"
+                backtest[code] = {"volume": can_use, "cost": round(cost, 2)}
+    label = "策略日志持仓" if from_log else "QMT持仓"
+    note = "%s %d 只，可卖>=100 的 %d 只" % (
+        label,
+        len(total),
+        sum(1 for v in avail.values() if v >= 100),
+    )
+    cached.update(at=now, ok=True, avail=avail, total=total, backtest=backtest, note=note)
+    return avail, total, backtest, note
+
+
+def _builtin_snapshot_positions() -> Tuple[Dict[str, int], Dict[str, Dict[str, Any]], str]:
+    """builtin 下从 QMT 模型交易读持仓，返回 (可用股数, 回测用持仓, debug)。"""
+    avail, _total, backtest, note = _gjzq_position_tables()
+    if avail is None or backtest is None:
+        return {}, {}, note
+    return avail, backtest, note
 
 
 def _get_trader_and_account():
@@ -301,33 +365,8 @@ def get_positions_total_volume() -> Dict[str, int]:
     out: Dict[str, int] = {}
     _, path_qmt, account_id, qmt_mode = _read_account_ini()
     if qmt_mode in ("builtin", "standalone") and not path_qmt:
-        try:
-            from utils.ant_rules_io_ext import default_paths, load_account_positions_snapshot
-
-            _, results_path = default_paths(repo_root())
-            _, pos_map = load_account_positions_snapshot(results_path)
-            for code, row in (pos_map or {}).items():
-                raw = str(code or "").strip()
-                c = (raw.split(".")[0] if "." in raw else raw).strip()
-                if len(c) >= 6:
-                    c = c[:6]
-                elif c:
-                    c = c.zfill(6)
-                if not c:
-                    continue
-                if isinstance(row, dict):
-                    total = int(row.get("volume") or row.get("can_use_volume") or 0)
-                    avail = int(row.get("can_use_volume") or 0)
-                else:
-                    total = int(getattr(row, "volume", 0) or getattr(row, "can_use_volume", 0) or 0)
-                    avail = int(getattr(row, "can_use_volume", 0) or 0)
-                if total < avail:
-                    total = avail
-                if total > 0:
-                    out[c] = out.get(c, 0) + total
-        except Exception:
-            pass
-        return out
+        _avail, total, _bt, _note = _gjzq_position_tables()
+        return dict(total or {})
     trader, account = _get_trader_and_account()
     if trader is None or account is None:
         return out

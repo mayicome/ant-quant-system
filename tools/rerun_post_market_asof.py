@@ -94,7 +94,6 @@ def main() -> int:
         ("sector_stock_filter.py", ("--auto-run", f"--as-of={asof_dash}")),
         ("profit_index_gui.py", ("--auto-run",)),
         ("main_line_group_gui.py", ("--auto-run",)),
-        ("limit_up_structure_analysis_gui.py", ("--auto-run",)),
         ("tools/seal_rating_daily_verify.py", ("--auto-run", f"--verify-date={asof_ymd}")),
         ("limit_up_gene_analysis_gui.py", ("--auto-run",)),
         ("main_force_net_inflow_gui.py", ("--auto-run",)),

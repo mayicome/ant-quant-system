@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""弹性卖出回落价（QMT 内嵌轻量版，兼容 Py3.6+）。"""
-import configparser
+"""弹性卖出回落价（QMT 内嵌轻量版，兼容 Py3.6+）。
+
+全局参数由 tools/sync_qmt_gbk.py 在部署时从 data/config.ini 的 [Elastic] 写入下方常量。
+策略运行时不再读 config.ini。
+"""
 import math
-import os
-import sys
 
 DEFAULT_ROOM_BLEND_AT_DROP_LOW = 3.0
 DEFAULT_ROOM_BLEND_AT_DROP_HIGH = 1.5
@@ -16,26 +17,16 @@ _ELASTIC_GLOBAL_CACHE = None
 # code -> (limit_up, pre_close)，避免每 tick 重复算
 _LIMIT_CACHE = {}
 
-
-
-def _repo_root():
-    try:
-        from ant_qmt_paths import PROJECT_ROOT
-
-        root = str(PROJECT_ROOT or "").strip()
-        if root and os.path.isdir(root):
-            return root
-    except Exception:
-        pass
-    here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (
-        os.path.dirname(os.path.dirname(here)),
-        os.path.dirname(here),
-        here,
-    ):
-        if os.path.isfile(os.path.join(cand, "data", "config.ini")):
-            return cand
-    return os.path.dirname(os.path.dirname(here))
+# SYNC_ELASTIC_BEGIN
+ELASTIC_CONFIRM_TICKS = 4
+ELASTIC_COOLDOWN_AFTER_EXTREME_TICKS = 2
+ELASTIC_DYNAMIC_THRESHOLDS = 2
+ELASTIC_ROOM_TIGHT_PP = 1.0
+ELASTIC_DROP_TIGHT = 0.5
+ELASTIC_LIMIT_MINUS_PP = 1.0
+ELASTIC_DROP_SCALE = 0.35
+ELASTIC_MAX_DROP_PERCENT = 3.5
+# SYNC_ELASTIC_END
 
 
 class ElasticGlobalConfig(object):
@@ -72,54 +63,28 @@ class ElasticGlobalConfig(object):
 
 
 def load_elastic_global_config(force_reload=False):
+    """使用部署时写入的常量。不读 data/config.ini。"""
     global _ELASTIC_GLOBAL_CACHE
     if _ELASTIC_GLOBAL_CACHE is not None and not force_reload:
         return _ELASTIC_GLOBAL_CACHE
-    defaults = ElasticGlobalConfig()
-    try:
-        cfg_path = os.path.join(_repo_root(), "data", "config.ini")
-        if not os.path.exists(cfg_path):
-            _ELASTIC_GLOBAL_CACHE = defaults
-            return _ELASTIC_GLOBAL_CACHE
-        cfg = configparser.ConfigParser()
-        cfg.read(cfg_path, encoding="utf-8-sig")
-        if not cfg.has_section("Elastic"):
-            _ELASTIC_GLOBAL_CACHE = defaults
-            return _ELASTIC_GLOBAL_CACHE
-
-        def _f(key, fallback):
-            try:
-                return float(cfg.get("Elastic", key, fallback=str(fallback)))
-            except Exception:
-                return fallback
-
-        def _i(key, fallback):
-            try:
-                return int(cfg.get("Elastic", key, fallback=str(fallback)))
-            except Exception:
-                return fallback
-
-        confirm_ticks = _i("confirm_ticks", defaults.confirm_ticks)
-        cooldown_ticks = _i("cooldown_after_extreme_ticks", defaults.cooldown_after_extreme_ticks)
-        dynamic_thresholds = _i("dynamic_thresholds", defaults.dynamic_thresholds)
-        if confirm_ticks < 0:
-            confirm_ticks = defaults.confirm_ticks
-        if cooldown_ticks < 0:
-            cooldown_ticks = 0
-        _ELASTIC_GLOBAL_CACHE = ElasticGlobalConfig(
-            confirm_ticks=confirm_ticks,
-            cooldown_after_extreme_ticks=cooldown_ticks,
-            dynamic_thresholds=dynamic_thresholds,
-            room_tight_pp=_f("room_tight_pp", defaults.room_tight_pp),
-            drop_tight=_f("drop_tight", defaults.drop_tight),
-            limit_minus_pp=_f("limit_minus_pp", defaults.limit_minus_pp),
-            drop_scale=_f("drop_scale", defaults.drop_scale),
-            max_drop_percent=_f("max_drop_percent", defaults.max_drop_percent),
-        )
-        return _ELASTIC_GLOBAL_CACHE
-    except Exception:
-        _ELASTIC_GLOBAL_CACHE = defaults
-        return _ELASTIC_GLOBAL_CACHE
+    confirm_ticks = int(ELASTIC_CONFIRM_TICKS)
+    cooldown_ticks = int(ELASTIC_COOLDOWN_AFTER_EXTREME_TICKS)
+    dynamic_thresholds = int(ELASTIC_DYNAMIC_THRESHOLDS)
+    if confirm_ticks < 0:
+        confirm_ticks = 4
+    if cooldown_ticks < 0:
+        cooldown_ticks = 0
+    _ELASTIC_GLOBAL_CACHE = ElasticGlobalConfig(
+        confirm_ticks=confirm_ticks,
+        cooldown_after_extreme_ticks=cooldown_ticks,
+        dynamic_thresholds=dynamic_thresholds,
+        room_tight_pp=float(ELASTIC_ROOM_TIGHT_PP),
+        drop_tight=float(ELASTIC_DROP_TIGHT),
+        limit_minus_pp=float(ELASTIC_LIMIT_MINUS_PP),
+        drop_scale=float(ELASTIC_DROP_SCALE),
+        max_drop_percent=float(ELASTIC_MAX_DROP_PERCENT),
+    )
+    return _ELASTIC_GLOBAL_CACHE
 
 
 def load_elastic_confirm_triple():
@@ -159,16 +124,7 @@ def _code6(stock_code):
 
 
 def _limit_ratio(stock_code, stock_name=""):
-    """涨跌停幅度（小数）。优先仓库 utils.limit_ratio，失败则本地兜底。"""
-    try:
-        root = _repo_root()
-        if root and root not in sys.path:
-            sys.path.insert(0, root)
-        from utils.limit_ratio import get_limit_ratio
-
-        return float(get_limit_ratio(stock_code, stock_name or ""))
-    except Exception:
-        pass
+    """涨跌停幅度（小数）。与 utils.limit_ratio 同一套板块规则，不读外部文件。"""
     code = _code6(stock_code)
     if code.startswith(("300", "301", "688", "689")):
         return 0.20

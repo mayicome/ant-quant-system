@@ -14,13 +14,16 @@ _DATA_ROOT = ""
 
 
 def _resolve_data_root():
+    """部署进 QMT 后用 sync 写好的 _DATA_ROOT。源码布局按目录名推仓库 data，不探测任何文件。"""
     if _DATA_ROOT:
         return _DATA_ROOT
-    parent_data = os.path.join(os.path.dirname(_BUILTIN_DIR), "data")
-    if os.path.isfile(os.path.join(parent_data, "rules_armed.json")):
-        return parent_data
-    local_data = os.path.join(_BUILTIN_DIR, "data")
-    return local_data
+    here = _BUILTIN_DIR
+    parent = os.path.dirname(here) if here else ""
+    if os.path.basename(here).lower() == "src" and parent:
+        return os.path.join(os.path.dirname(parent), "data")
+    if parent:
+        return os.path.join(parent, "data")
+    return os.path.join(here, "data") if here else "data"
 
 
 DATA_DIR = _resolve_data_root()

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """选股日之后、某日之前，日线是否已触达 MA（对齐跌MA单点：low <= 早盘「N日」触发价）。
 
-早盘「10日」= 不含当日的近 9 根收盘均（与 backtest data_provider 早盘一致）。
+早盘「10日」= 不含当日的近 9 根收盘均（前 9 个交易日收盘价 / 9）。
 用于实盘冷启动：池子含多日旧票时，跳过「历史上已经第一次跌破」的腿。
 """
 from __future__ import annotations
@@ -115,7 +115,7 @@ def already_touched_ma_in_entry_window(
         return False, None
 
     period = max(2, int(ma_period or 10))
-    need_prior = period - 1  # 早盘「N日」用近 need_prior 根收盘
+    need_prior = period - 1  # 早盘「N日」= 不含当日的近 (N-1) 根收盘均
 
     start = _as_date(entry_start)
     if start is None:
@@ -187,7 +187,7 @@ def already_touched_ma_in_entry_window(
             continue
         if i < need_prior:
             continue
-        # 早盘触发价：不含当日的近 need_prior 根收盘均
+        # 早盘触发价：不含当日的近 (N-1) 根收盘均
         prior = closes[i - need_prior : i]
         if len(prior) < need_prior:
             continue

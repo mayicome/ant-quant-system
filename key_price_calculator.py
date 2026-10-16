@@ -605,11 +605,12 @@ class KeyPriceCalculator:
         计算与均线重合的可能的最新价
         
         业务逻辑：
-        - 交易日的 REFERENCE_SWITCH_TIME 后～24:00：获取到今天的历史数据，以到今天为止的四天的收盘价的均价作为5日线重合点
-        - 交易日的 00:00～REFERENCE_SWITCH_TIME 前：获取到前一交易日的历史数据，以到前一交易日为止的四天的收盘价的均价作为5日线重合点
-        - 非交易日：获取到前一交易日的历史数据，以到前一交易日为止的四天的收盘价的均价作为5日线重合点
+        - 交易日的 REFERENCE_SWITCH_TIME 后～24:00：获取到今天的历史数据，以到今天为止的前 (N-1) 天收盘均价作为重合点
+        - 交易日的 00:00～REFERENCE_SWITCH_TIME 前：不含今天，以前 (N-1) 天收盘均价作为重合点
+        - 非交易日：同样取前 (N-1) 天收盘均价
         
-        注意：5日线重合点是前4天的收盘价的平均值（除以4），不是5天除以4。
+        10日重合价 = 前 9 个交易日收盘价的平均（除以 9）。
+        20日重合价 = 前 19 个交易日收盘价的平均（除以 19）。
         
         Args:
             df: 历史数据DataFrame
@@ -622,8 +623,7 @@ class KeyPriceCalculator:
             float: 与均线重合的价格，如果无法计算则返回None
         """
         try:
-            # 需要前(period-1)天的数据来计算重合点
-            # 例如5日线需要前4天的数据
+            # 重合点：前 (period-1) 天收盘均价。10日 = 前9根 / 9
             days_needed = period - 1
             if len(df) < days_needed:
                 return None
@@ -685,7 +685,7 @@ class KeyPriceCalculator:
             else:
                 return None
             
-            # 计算前(period-1)天的收盘价的平均值
+            # 前 (period-1) 天收盘价的平均值
             if len(recent_closes) == days_needed:
                 intersection_price = sum(recent_closes) / days_needed
                 

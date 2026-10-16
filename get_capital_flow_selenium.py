@@ -54,6 +54,15 @@ def _flow_csv_path(save_date_str: str, history_dir: str = "history_data") -> str
     ensure_flow_data_dir(history_dir)
     return flow_csv_path(save_date_str, history_dir)
 
+
+def _print_eastmoney_login_hint() -> None:
+    print(
+        "东财主力净流入获取失败，本次不落盘。"
+        "请用浏览器打开并登录 https://data.eastmoney.com/zjlx/detail.html ，"
+        "然后再重新获取。"
+    )
+
+
 def parse_capital_flow_amount(value_str):
     """
     解析主力净流入金额字符串，转换为万元（数值）
@@ -1968,46 +1977,34 @@ if __name__ == "__main__":
         df = get_capital_flow_selenium(min_amount_threshold=thr)
         fetch_source = "selenium"
     else:
-        print("正在拉取全量个股主力净流入（东财 push2 → 同花顺兜底）...")
+        print("正在拉取全量个股主力净流入（仅东财 push2）...")
         print("-" * 60)
         try:
             from utils.eastmoney_fund_flow import (
                 fetch_individual_fund_flow_df_resilient,
             )
 
-            as_of_day = datetime.strptime(save_date_str, "%Y%m%d").date()
             df, meta = fetch_individual_fund_flow_df_resilient(
                 page_size=args.page_size,
-                as_of=as_of_day,
-                allow_ths=True,
             )
             fetch_source = str(meta.get("source") or "api")
             via = (
                 "代理 " + str(meta.get("proxy") or "")
                 if meta.get("via_proxy")
-                else ("同花顺" if fetch_source == "ths" else "直连")
+                else "直连"
             )
             print(
                 f"接口完成: source={fetch_source} total={meta.get('total')} "
                 f"fetched={meta.get('fetched')} pages={meta.get('pages')} "
                 f"df={meta.get('dataframe_rows')} via={via}"
             )
-            if meta.get("fallback_errors"):
-                print(f"[warn] 前置数据源失败: {meta.get('fallback_errors')}")
         except Exception as e:
-            print(f"接口/同花顺抓取失败: {e}")
+            print(f"东财接口抓取失败: {e}")
             import traceback
 
             traceback.print_exc()
-            print("自动回退 Selenium 翻页（可能仍依赖东财 push2，成功率较低）…")
-            try:
-                thr = args.min_amount if args.min_amount > 0 else 3000
-                df = get_capital_flow_selenium(min_amount_threshold=thr)
-                fetch_source = "selenium"
-            except Exception as e2:
-                print(f"Selenium 回退也失败: {e2}")
-                traceback.print_exc()
-                sys.exit(1)
+            _print_eastmoney_login_hint()
+            sys.exit(1)
 
     if df is not None and not df.empty:
         print(f"\n获取成功！共 {len(df)} 条数据：")
@@ -2024,7 +2021,6 @@ if __name__ == "__main__":
             if args.selenium or fetch_source == "selenium":
                 df_clean = clean_dataframe(df)
             else:
-                # 接口/同花顺结果已是干净中文列；再跑一遍排序/补列以统一格式
                 df_clean = df.copy()
 
             df_clean, rank_stats = enrich_and_rank_by_inflow_ratio(
@@ -2035,6 +2031,31 @@ if __name__ == "__main__":
                 f"（无流通市值 {rank_stats.get('no_cap', 0)}，低于门槛丢弃 {rank_stats.get('dropped', 0)}）"
                 f" source={fetch_source}"
             )
+            split_col = next(
+                (
+                    c
+                    for c in df_clean.columns
+                    if "超大单" in str(c) and "净额" in str(c)
+                ),
+                None,
+            )
+            split_filled = 0
+            if split_col is not None:
+                split_filled = int(
+                    df_clean[split_col]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .replace({"nan": "", "None": ""})
+                    .ne("")
+                    .sum()
+                )
+            if split_filled < 100:
+                _print_eastmoney_login_hint()
+                raise RuntimeError(
+                    "结果缺少超大单净额，不是东财主力净流入，已拒绝落盘"
+                    f"（有值 {split_filled} 行）"
+                )
             df_clean.to_csv(filename, index=False, encoding="utf_8_sig")
             print(f"\n数据已保存至 {filename} (共 {len(df_clean)} 行数据)")
             try:
@@ -2051,5 +2072,6 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         print("\n未能获取到有效的主力净流入数据。")
+        _print_eastmoney_login_hint()
         sys.exit(1)
 

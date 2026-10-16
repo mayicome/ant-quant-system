@@ -75,6 +75,34 @@ _STYLE_CANCEL = _op_btn_style("#FF5722", "#E64A19", "#D84315")
 _STYLE_MONITOR = _op_btn_style("#4CAF50", "#45A049", "#3D8B40")
 _STYLE_MONITORING = _op_btn_style("#FF9800", "#F57C00", "#E65100")
 _STYLE_ENDED = _op_btn_style("#9E9E9E")
+# 已请求保持蓝色，禁用时不要被通用灰色盖掉
+_STYLE_REQUESTED = """
+QPushButton {
+    background-color: #1976D2;
+    color: white;
+    border: 1px solid #1976D2;
+    border-radius: 3px;
+    font-family: 'Microsoft YaHei';
+    font-size: 11pt;
+    font-weight: bold;
+    padding: 0px;
+}
+QPushButton:disabled {
+    background-color: #1976D2;
+    border: 1px solid #1976D2;
+    color: white;
+}
+"""
+
+
+def cancel_button_outcome(order_status):
+    """柜台状态对应撤单按钮。未结束返回空串。"""
+    s = str(order_status or "")
+    if any(k in s for k in ("已撤", "部撤")):
+        return "已撤单"
+    if any(k in s for k in ("已成", "废单")):
+        return "已结束"
+    return ""
 
 class TradeRecordManager:
     """交易记录管理模块"""
@@ -128,7 +156,7 @@ class TradeRecordManager:
         for i in range(len(headers)):
             if i == 8:  # 操作列
                 header.setSectionResizeMode(i, header.Fixed)
-                table.setColumnWidth(i, 160)
+                table.setColumnWidth(i, 120)
             elif i == 7:  # 说明：拉伸填满，表格横向平铺
                 header.setSectionResizeMode(i, header.Stretch)
             else:
@@ -309,12 +337,8 @@ class TradeRecordManager:
                         if operation_container:
                             #self.logger.info(f"验证成功：操作控件已设置到行 0")
                             cancel_button = operation_container.findChild(QPushButton, "cancel_button")
-                            monitor_button = operation_container.findChild(QPushButton, "monitor_button")
-                            if cancel_button and monitor_button:
-                                #self.logger.info(f"验证成功：撤单和监控按钮都存在")
-                                pass
-                            else:
-                                self.logger.warning(f"验证失败：撤单按钮={cancel_button}, 监控按钮={monitor_button}")
+                            if not cancel_button:
+                                self.logger.warning("验证失败：行 0 没有撤单按钮")
                         else:
                             self.logger.error(f"验证失败：行 0 没有操作控件")
                     else:
@@ -609,30 +633,20 @@ class TradeRecordManager:
             btn_font.setBold(True)
 
             cancel_button = QPushButton("撤单")
-            cancel_button.setFixedSize(62, 24)
+            cancel_button.setFixedSize(108, 24)
             cancel_button.setFont(btn_font)
             cancel_button.setStyleSheet(_STYLE_CANCEL)
             cancel_button.setCursor(Qt.PointingHandCursor)
 
-            monitor_button = QPushButton("监控")
-            monitor_button.setFixedSize(62, 24)
-            monitor_button.setFont(btn_font)
-            monitor_button.setStyleSheet(_STYLE_MONITOR)
-            monitor_button.setCursor(Qt.PointingHandCursor)
-
-            if order_status in ['已成', '已撤', '废单']:
+            outcome = cancel_button_outcome(order_status)
+            if outcome:
                 cancel_button.setEnabled(False)
-                cancel_button.setText("已结束")
+                cancel_button.setText(outcome)
                 cancel_button.setStyleSheet(_STYLE_ENDED)
-                monitor_button.setEnabled(False)
-                monitor_button.setText("已结束")
-                monitor_button.setStyleSheet(_STYLE_ENDED)
 
             operation_layout.addWidget(cancel_button)
-            operation_layout.addWidget(monitor_button)
 
             cancel_button.setObjectName("cancel_button")
-            monitor_button.setObjectName("monitor_button")
 
             return operation_container
 
@@ -654,32 +668,15 @@ class TradeRecordManager:
                 
                 # 检查按钮是否真的在表格中
                 cancel_button = operation_container.findChild(QPushButton, "cancel_button")
-                monitor_button = operation_container.findChild(QPushButton, "monitor_button")
-                if cancel_button and monitor_button:
-                    #self.logger.info(f"按钮设置成功 - 撤单按钮: {cancel_button.text()}, 监控按钮: {monitor_button.text()}")
-                    #self.logger.info(f"按钮位置 - 撤单: {cancel_button.geometry()}, 监控: {monitor_button.geometry()}")
-                    pass
-                else:
-                    self.logger.warning(f"按钮设置失败 - 撤单按钮: {cancel_button}, 监控按钮: {monitor_button}")
+                if not cancel_button:
+                    self.logger.warning(f"按钮设置失败 - 撤单按钮: {cancel_button}")
                 
                 # 如果有回调函数或ui_callback对象，连接信号
-                if callback:
-                    cancel_button = operation_container.findChild(QPushButton, "cancel_button")
-                    monitor_button = operation_container.findChild(QPushButton, "monitor_button")
-                    
-                    # 检查callback是否是ui_callback对象（有_handle_cancel_click和_handle_monitor_click方法）
-                    if hasattr(callback, '_handle_cancel_click') and hasattr(callback, '_handle_monitor_click'):
-                        # 这是ui_callback对象，直接连接信号到它的处理方法
-                        if cancel_button:
-                            cancel_button.clicked.connect(lambda checked, r=row, oid=order_id: callback._handle_cancel_click(r, oid))
-                        if monitor_button:
-                            monitor_button.clicked.connect(lambda checked, r=row, oid=order_id: callback._handle_monitor_click(r, oid))
+                if callback and cancel_button:
+                    if hasattr(callback, '_handle_cancel_click'):
+                        cancel_button.clicked.connect(lambda checked, r=row, oid=order_id: callback._handle_cancel_click(r, oid))
                     elif callable(callback):
-                        # 这是普通的回调函数
-                        if cancel_button:
-                            cancel_button.clicked.connect(lambda: callback('cancel', row, order_id))
-                        if monitor_button:
-                            monitor_button.clicked.connect(lambda: callback('monitor', row, order_id))
+                        cancel_button.clicked.connect(lambda: callback('cancel', row, order_id))
             
         except Exception as e:
             self.logger.error(f"添加撤单按钮失败: {e}")
@@ -691,26 +688,18 @@ class TradeRecordManager:
                 return
             
             cancel_button = operation_container.findChild(QPushButton, "cancel_button")
-            monitor_button = operation_container.findChild(QPushButton, "monitor_button")
-            
-            if not cancel_button or not monitor_button:
+            if not cancel_button:
                 return
             
-            # 根据订单状态更新按钮
-            if order_status in ['已成', '已撤', '废单']:
+            outcome = cancel_button_outcome(order_status)
+            if outcome:
                 cancel_button.setEnabled(False)
-                cancel_button.setText("已结束")
+                cancel_button.setText(outcome)
                 cancel_button.setStyleSheet(_STYLE_ENDED)
-                monitor_button.setEnabled(False)
-                monitor_button.setText("已结束")
-                monitor_button.setStyleSheet(_STYLE_ENDED)
             else:
                 cancel_button.setEnabled(True)
                 cancel_button.setText("撤单")
                 cancel_button.setStyleSheet(_STYLE_CANCEL)
-                monitor_button.setEnabled(True)
-                monitor_button.setText("监控")
-                monitor_button.setStyleSheet(_STYLE_MONITOR)
             
         except Exception as e:
             self.logger.error(f"更新操作按钮失败: {e}")
