@@ -13,6 +13,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 # 公众号 IP 白名单
 EXIT_WECHAT_IP_WHITELIST = 64
 WECHAT_RETRY_SEC = 60
+CAPITAL_FLOW_RETRY_SEC = 60
 
 
 @dataclass
@@ -67,7 +68,8 @@ def resolve_asof_day(now: Optional[datetime] = None) -> date:
 
 def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
     steps: List[PipelineStep] = [
-        PipelineStep("daily_cache", "等待日线缓存就绪", is_gate=True, selectable=True),
+        PipelineStep("qmt_quote", "导出沪深京行情", selectable=True),
+        PipelineStep("daily_cache", "下载日线缓存", is_gate=True, selectable=True),
         PipelineStep("limit_up", "涨停日抓取", selectable=True),
         PipelineStep("lu_board_rank", "涨停家数排名导出", selectable=True),
         PipelineStep("capital_flow", "主力资金流", selectable=True),
@@ -90,8 +92,6 @@ def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
             in_scheduled=True,
             default_rerun_if_missing=False,
         ),
-        PipelineStep("after_hours_wait", "等待盘后量能", full_only=True),
-        PipelineStep("after_hours_export", "导出盘后量能到COS目录", full_only=True),
         PipelineStep("cos_upload", "上传腾讯云COS", full_only=True),
         PipelineStep("wechat_draft", "微信公众号草稿", full_only=True),
         PipelineStep("market_regime", "市场行情描绘增量", full_only=True),
@@ -251,6 +251,8 @@ def run_step(
     use_asof_freeze: bool = False,
     wechat_auto_retry: bool = True,
     stop_wechat_retry: Optional[Callable[[], bool]] = None,
+    capital_flow_auto_retry: bool = True,
+    stop_capital_flow_retry: Optional[Callable[[], bool]] = None,
     sleep_between: float = 0.0,
 ) -> StepRunResult:
     """执行单步。use_asof_freeze=True 时对依赖「今天」的脚本冻结日历。"""
@@ -267,15 +269,27 @@ def run_step(
         return _run_plain(root, script, args)
 
     try:
-        if step_id == "daily_cache":
-            # 手动 asof：只做一次就绪检查，不长时间轮询
-            if use_asof_freeze:
-                from utils.post_market_completeness import check_daily_cache
+        if step_id == "qmt_quote":
+            rc = run(
+                "tools/export_qmt_hsj_quote.py",
+                ("--date", d, "--click"),
+            )
+            if rc != 0:
+                detail = "请登录国金 QMT客户端，并保证行情页的窗口要停在「沪深京A股」。"
+            else:
+                detail = "QMT行情页右键导出沪深京A股，写入股票池"
+            return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
 
-                ok, detail = check_daily_cache(day)
-                return StepRunResult(ok=ok, exit_code=0 if ok else 1, detail=detail)
-            rc = run("wait_daily_cache_ready.py")
-            return StepRunResult(ok=rc == 0, exit_code=rc)
+        if step_id == "daily_cache":
+            from utils.trading_day import previous_tradeday
+
+            prev = previous_tradeday(day).strftime("%Y-%m-%d")
+            rc = run(
+                "tools/append_daily_cache_external.py",
+                ("--date", d, "--prev", prev),
+            )
+            detail = "东财日线，腾讯、同花顺兜底"
+            return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
 
         if step_id == "limit_up":
             from utils.limit_up_day_path import ensure_limit_up_day_data_dir
@@ -299,11 +313,15 @@ def run_step(
             return _ok_after_run(step_id, day, rc)
 
         if step_id == "capital_flow":
-            # 始终按目标交易日保存。非交易日补跑不要冻日历，否则缺 freezegun 时
-            # 脚本还没开始抓取就退出，界面只能看到文件缺失。
-            # 东财 push2 偶发整段掐线：脚本内已有同花顺兜底；此处再做整步重试。
+            # 仅东财 push2（脚本默认不允许同花顺/静默 Selenium）。
+            # 失败则 Server酱通知，并每 CAPITAL_FLOW_RETRY_SEC 秒重试，成功前不进入后续步骤。
+            from utils.server_chan_notify import notify_alert
+
+            attempt = 0
+            alerted = False
             last: Optional[StepRunResult] = None
-            for attempt in range(1, 4):
+            while True:
+                attempt += 1
                 rc = run(
                     "get_capital_flow_selenium.py",
                     (f"--save-date={d8}",),
@@ -318,14 +336,45 @@ def run_step(
                             detail=(last.detail or "") + f"（第{attempt}次成功）",
                         )
                     return last
-                if attempt < 3:
-                    wait_s = 30 * attempt
-                    print(
-                        f"[重试] 主力资金流第 {attempt} 次失败"
-                        f"（{last.detail or f'exit={rc}'}），{wait_s}s 后重试…"
+                if not capital_flow_auto_retry:
+                    return last
+                if stop_capital_flow_retry and stop_capital_flow_retry():
+                    return StepRunResult(
+                        ok=False,
+                        exit_code=rc,
+                        detail="已停止资金流自动重试",
                     )
-                    time.sleep(wait_s)
-            return last or StepRunResult(ok=False, exit_code=1, detail="capital_flow failed")
+                detail = last.detail or f"exit={rc}"
+                if not alerted:
+                    alerted = True
+                    notify_alert(
+                        title=f"盘后批跑暂停 {d} · 主力资金流(东财)",
+                        content=(
+                            f"**日期**：{d}\n"
+                            f"**详情**：{detail}\n"
+                            f"**说明**：东财 push2 失败。批跑已停在本步骤，"
+                            f"每 {CAPITAL_FLOW_RETRY_SEC} 秒自动重试；"
+                            f"成功前不跑后续步骤。请检查网络/代理。\n"
+                            f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        ),
+                        alert_key=f"capital_flow_em_{d8}",
+                        cooldown_sec=0,
+                    )
+                elif attempt % 10 == 0:
+                    notify_alert(
+                        title=f"盘后批跑仍暂停 {d} · 主力资金流(东财)",
+                        content=(
+                            f"已重试 {attempt} 次仍失败：{detail}。"
+                            f"继续每 {CAPITAL_FLOW_RETRY_SEC}s 重试。"
+                        ),
+                        alert_key=f"capital_flow_em_remind_{d8}",
+                        cooldown_sec=0,
+                    )
+                print(
+                    f"[资金流] 东财失败（{detail}），"
+                    f"{CAPITAL_FLOW_RETRY_SEC}s 后重试（第 {attempt} 次）…"
+                )
+                time.sleep(CAPITAL_FLOW_RETRY_SEC)
 
         if step_id == "board_snapshot":
             extra = ("--with-fund-flow", "--date", d)
@@ -391,17 +440,13 @@ def run_step(
             return StepRunResult(ok=not errors, exit_code=1 if errors else 0, detail=detail)
 
         if step_id == "after_hours_wait":
-            if use_asof_freeze:
-                from utils.post_market_completeness import check_after_hours
-
-                ok, detail = check_after_hours(day)
-                return StepRunResult(ok=ok, exit_code=0 if ok else 1, detail=detail)
-            rc = run("wait_after_hours_rank_ready.py")
-            return StepRunResult(ok=rc == 0, exit_code=rc)
+            return StepRunResult(ok=True, exit_code=0, detail="盘后量能已停用")
 
         if step_id == "after_hours_export":
-            rc = run("tools/export_after_hours_top_to_jsonl.py", freeze=True)
-            return _ok_after_run(step_id, day, rc)
+            return StepRunResult(ok=True, exit_code=0, detail="盘后量能已停用")
+
+        if step_id == "final_notify":
+            return StepRunResult(ok=True, exit_code=0, detail="由 GUI/CLI 在批末调用")
 
         if step_id == "cos_upload":
             rc = run("tools/upload_cos_data.py", ("--with-zip",))
@@ -449,9 +494,6 @@ def run_step(
         if step_id == "market_regime":
             rc = run("tools/export_market_regime_to_csv.py", ("--incremental",), freeze=True)
             return _ok_after_run(step_id, day, rc)
-
-        if step_id == "final_notify":
-            return StepRunResult(ok=True, exit_code=0, detail="由 GUI/CLI 在批末调用")
 
         return StepRunResult(ok=False, exit_code=1, detail=f"未知步骤: {step_id}")
     except Exception as e:

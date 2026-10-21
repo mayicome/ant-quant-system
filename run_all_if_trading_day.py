@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from utils.history_data_archive import archive_history_before
 
@@ -26,10 +26,11 @@ JobStep = Tuple[str, Sequence[str], str]
 # 公众号 IP 白名单专用退出码（与 tools/upload_cos_wechat_draft.py 一致）
 EXIT_WECHAT_IP_WHITELIST = 64
 WECHAT_RETRY_SEC = 60
+CAPITAL_FLOW_RETRY_SEC = 60
 
 # 实盘机需要：资金流 / 东财板块 / 选股 / F10 标签（涨停抓取在 main 里单独跑，两边都保留）
 LIVE_JOBS: List[JobStep] = [
-    ("get_capital_flow_selenium.py", (), "主力资金流"),
+    # 主力资金流改由 _run_capital_flow_with_retry 在 jobs 循环前单独阻塞执行
     ("tools/snapshot_eastmoney_board_rank.py", ("--with-fund-flow",), "东财板块日快照"),
     ("sector_stock_filter.py", ("--auto-run",), "选股"),
     (
@@ -265,6 +266,75 @@ def _record_fail(
         )
 
 
+
+def _run_capital_flow_with_retry(
+    script_dir: str,
+    today,
+    *,
+    live_only: bool = False,
+    stop_retry: Optional[Callable[[], bool]] = None,
+) -> Tuple[int, str]:
+    """仅东财主力资金流；失败则 Server酱并每分钟重试，成功前不进入后续步骤。"""
+    d8 = today.strftime("%Y%m%d") if hasattr(today, "strftime") else str(today).replace("-", "")[:8]
+    today_str = today.strftime("%Y-%m-%d") if hasattr(today, "strftime") else str(today)
+    args = (f"--save-date={d8}",)
+    label = _job_label("get_capital_flow_selenium.py", args)
+    attempt = 0
+    alerted = False
+    while True:
+        attempt += 1
+        print(f"[步骤] 主力资金流（仅东财 push2，第 {attempt} 次）…")
+        rc = _run_job(script_dir, "get_capital_flow_selenium.py", args)
+        if rc == 0:
+            status = "成功" if attempt == 1 else f"成功（重试 {attempt} 次后）"
+            if attempt > 1:
+                _send_server_chan(
+                    f"{_mode_title_prefix(live_only)} 主力资金流已恢复 {today_str}",
+                    (
+                        f"{_mode_body_line(live_only)}\n"
+                        f"**日期**：{today_str}\n"
+                        f"**结果**：{status}\n"
+                        f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    ),
+                )
+            return 0, status
+        if stop_retry and stop_retry():
+            _alert_step_fail(
+                today,
+                step="主力资金流·已停止重试",
+                detail=f"{label} exit={rc}；用户停止自动重试，后续步骤未跑。",
+                alert_key=f"capital_flow_stop_{d8}",
+                live_only=live_only,
+            )
+            return rc, f"已停止重试 exit={rc}"
+        if not alerted:
+            alerted = True
+            _alert_step_fail(
+                today,
+                step="主力资金流(东财)·批跑已暂停",
+                detail=(
+                    f"{label} exit={rc}。东财 push2 失败。"
+                    f"批跑已停在本步骤，每 {CAPITAL_FLOW_RETRY_SEC} 秒自动重试；"
+                    f"成功前不执行后续步骤。请检查网络/代理。"
+                ),
+                alert_key=f"capital_flow_em_{d8}",
+                live_only=live_only,
+            )
+        elif attempt % 10 == 0:
+            _alert_step_fail(
+                today,
+                step="主力资金流(东财)·仍暂停",
+                detail=f"已重试 {attempt} 次仍失败 exit={rc}，继续每分钟重试。",
+                alert_key=f"capital_flow_em_remind_{d8}",
+                live_only=live_only,
+            )
+        print(
+            f"[资金流] 东财失败 exit={rc}，"
+            f"{CAPITAL_FLOW_RETRY_SEC}s 后重试（已尝试 {attempt} 次）…"
+        )
+        time.sleep(CAPITAL_FLOW_RETRY_SEC)
+
+
 def _upload_wechat_draft_with_retry(
     script_dir: str,
     today,
@@ -407,10 +477,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 live_only=live_only,
             )
 
-    # 3) 其余程序（顺序）— 失败步骤名用于报警标题
+    # 3) 主力资金流（仅东财）：失败则暂停批跑并重试，成功后再跑后续
+    print("[步骤] 主力资金流（仅东财 push2；失败将暂停并重试）…")
+    cf_rc, cf_status = _run_capital_flow_with_retry(
+        script_dir, today, live_only=live_only
+    )
+    if cf_rc != 0:
+        print(f"[中止] 主力资金流未完成：{cf_status}")
+        _notify_daily_batch(
+            today,
+            status="aborted",
+            failed=["get_capital_flow_selenium.py"],
+            note=f"主力资金流中止：{cf_status}；后续全部未跑",
+            live_only=live_only,
+        )
+        return 1
+
+    # 4) 其余程序（顺序）— 失败步骤名用于报警标题
     jobs = _select_jobs(live_only)
     print(
-        f"[执行] 共 {len(jobs)} 个后续程序（涨停抓取与 LU 排名导出已单独执行；模式={mode_s}）。"
+        f"[执行] 共 {len(jobs)} 个后续程序（涨停抓取/LU/资金流已单独执行；模式={mode_s}）。"
     )
     for script_name, extra_args, step_name in jobs:
         time.sleep(2)
@@ -425,7 +511,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 live_only=live_only,
             )
 
-    # 4) 批跑结束后归档旧文件（无论中间是否有失败，都执行；选股结果不归档）
+    # 5) 批跑结束后归档旧文件（无论中间是否有失败，都执行；选股结果不归档）
     try:
         _archive_old_history(script_dir, today)
     except Exception as e:
