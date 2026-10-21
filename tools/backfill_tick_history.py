@@ -3,9 +3,8 @@
 
 【大 QMT ContextInfo 桥】
 外挂 Python 没有策略 ContextInfo，不能直接 get_market_data_ex(subscribe=True)。
-默认路径：把待补日期写入 data/tick_full_sync/manual_request.json，
-由已运行的「蚂蚁量化规则」策略在 periodic_sync 里用真实 ContextInfo 执行
-（见 ant_tick_full_sync_runner.process_manual_request）。
+QMT 策略已不再加载分笔同步，manual_request 不会被执行。
+本脚本仍可读仓库里的 ant_tick_cache_io.py 查看本地分笔缓存。
 
 勿默认开 miniQMT / xtdata.download；仅调试可加 --allow-xtdata-download。
 
@@ -51,19 +50,20 @@ def _parse_ymd(s: str) -> date:
 
 
 def _import_runner():
-    try:
-        import ant_tick_full_sync_runner as runner  # type: ignore
-    except ImportError:
-        import qmt_builtin.ant_tick_full_sync_runner as runner  # type: ignore
-    return runner
+    raise RuntimeError("QMT 已不再加载分笔同步，manual_request 不会被策略执行。")
 
 
 def _import_tick_io():
-    try:
-        import ant_tick_cache_io as tick_io  # type: ignore
-    except ImportError:
-        import qmt_builtin.ant_tick_cache_io as tick_io  # type: ignore
-    return tick_io
+    """分笔缓存读写留在仓库源码。QMT 策略目录不再部署这份文件。"""
+    import importlib.util
+
+    path = os.path.join(_ROOT, "qmt_builtin", "src", "ant_tick_cache_io.py")
+    spec = importlib.util.spec_from_file_location("ant_tick_cache_io", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("缺少 %s" % path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _trading_days(xtdata, runner, start: date, end: date) -> List[date]:

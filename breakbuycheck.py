@@ -526,39 +526,22 @@ def _limit_ratio_for_board(code_6: str) -> float:
     return 0.10
 
 
-def _load_all_a_stocks(csv_path: str) -> Dict[str, str]:
+def _load_all_a_stocks(json_path: str) -> Dict[str, str]:
     """
-    加载 data/all_a_stocks.csv：
+    加载 data/all_a_stock_info.json：
     返回 code -> name
     只保留主A股 code 前缀：0/3/4/6/8/9
     """
-    encodings = ["utf-8-sig", "utf-8", "gbk", "gb2312", "gb18030"]
-    last_err: Optional[Exception] = None
+    from utils.stock_info_manager import load_info_name_map
 
-    for enc in encodings:
-        try:
-            with open(csv_path, "r", encoding=enc, newline="") as f:
-                reader = csv.DictReader(f)
-                code_col = "证券代码" if "证券代码" in (reader.fieldnames or []) else (reader.fieldnames or [None])[0]
-                name_col = "证券简称" if "证券简称" in (reader.fieldnames or []) else None
-                out: Dict[str, str] = {}
-                for row in reader:
-                    raw_code = row.get(code_col) if code_col else ""
-                    code = _zfill_6(raw_code)
-                    if not code:
-                        continue
-                    if not code.startswith(("0", "3", "4", "6", "8", "9")):
-                        continue
-                    name = ""
-                    if name_col:
-                        name = (row.get(name_col) or "").strip()
-                    out[code] = name
-                return out
-        except Exception as e:
-            last_err = e
-            continue
-
-    raise RuntimeError(f"加载 all_a_stocks.csv 失败: {csv_path}; {type(last_err).__name__}: {last_err}")
+    raw = load_info_name_map(json_path)
+    if not raw:
+        raise RuntimeError(f"加载 all_a_stock_info.json 失败: {json_path}")
+    return {
+        code: name
+        for code, name in raw.items()
+        if code.startswith(("0", "3", "4", "6", "8", "9"))
+    }
 
 
 def _find_latest_limitup_file(history_dir: str, today_yyyymmdd: str) -> Tuple[str, str]:
@@ -5210,7 +5193,7 @@ class LimitUpGeneAnalysisDialog(QDialog):
         """校验输入并返回线程构造参数；失败返回 None。"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
         history_dir = os.path.join(script_dir, "history_data")
-        all_a_csv = os.path.join(script_dir, "data", "all_a_stocks.csv")
+        all_a_csv = os.path.join(script_dir, "data", "all_a_stock_info.json")
 
         stock_list_filepath = self.file_edit.text().strip()
         if stock_list_filepath == "未选择文件" or not os.path.exists(stock_list_filepath):

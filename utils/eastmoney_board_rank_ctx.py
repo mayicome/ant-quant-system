@@ -682,18 +682,14 @@ def _resolve_members_for_tag(
     *,
     kind: str,
     info_tag_to_codes: Dict[str, Set[str]],
-    qmt_tag_to_codes: Dict[str, Set[str]],
 ) -> Set[str]:
-    """优先 all_a_stock_info；再用预建的 QMT 反查索引（避免逐板块打 xtdata）。"""
+    """用 all_a_stock_info 的东财行业/概念标签反查成分。"""
+    del kind
     keys = _theme_match_keys(tag_name)
     members: Set[str] = set()
     for k in keys:
         members |= set(info_tag_to_codes.get(k) or [])
     members |= set(info_tag_to_codes.get(tag_name) or [])
-
-    for k in keys:
-        members |= set(qmt_tag_to_codes.get(k) or [])
-    members |= set(qmt_tag_to_codes.get(tag_name) or [])
     return {_norm_code6(c) for c in members if _norm_code6(c)}
 
 
@@ -710,7 +706,7 @@ def build_code_owned_board_rank_maps(
       - \"chg\"（默认）：涨跌幅全榜 industry_rank_ / concept_rank_
       - \"lu\"：涨停家数榜 industry_lu_rank_ / concept_lu_rank_
 
-    与选股规则里「标签名精确撞榜」不同：这里用 all_a_stock_info / QMT 成分反查，
+    与选股规则里「标签名精确撞榜」不同：这里用 all_a_stock_info 的东财标签反查，
     因此「食品加工」等个股标签也能挂到东财行业板（如畜禽饲料）上。
 
     Returns:
@@ -763,14 +759,6 @@ def build_code_owned_board_rank_maps(
         pass
 
     info_tag_to_codes, _code_to_tags = _load_stock_info_tag_index(info_path)
-    store = None
-    try:
-        from utils.qmt_sector_store import get_qmt_sector_store
-
-        store = get_qmt_sector_store()
-    except Exception:
-        store = None
-    qmt_tag_to_codes = _build_qmt_tag_to_codes(store)
 
     def _fill(
         rank_map: Dict[str, int],
@@ -797,7 +785,6 @@ def build_code_owned_board_rank_maps(
                 nm,
                 kind=kind,
                 info_tag_to_codes=info_tag_to_codes,
-                qmt_tag_to_codes=qmt_tag_to_codes,
             )
             if not members:
                 continue
@@ -849,37 +836,6 @@ def build_code_owned_board_rank_maps(
         best_key="code_best_concept",
         hits_key="code_concept_hits",
     )
-    return out
-
-
-def _build_qmt_tag_to_codes(store) -> Dict[str, Set[str]]:
-    """从 QMT 反查索引构建 bare-name → codes（SW/GN 前缀已剥离，并含原文键）。"""
-    out: Dict[str, Set[str]] = {}
-    if store is None:
-        return out
-    try:
-        store.ensure_inverted_index()
-    except Exception:
-        return out
-    code_sectors = getattr(store, "_code_sectors", None) or {}
-    if not isinstance(code_sectors, dict):
-        return out
-    for code, tags in code_sectors.items():
-        c6 = _norm_code6(code)
-        if not c6 or not isinstance(tags, (list, tuple, set)):
-            continue
-        for tag in tags:
-            t = str(tag or "").strip()
-            if not t:
-                continue
-            bare = _strip_qmt_prefix(t) or t
-            agg = _aggregate_tag_name(bare) or bare
-            for key in (bare, agg, t):
-                if key:
-                    out.setdefault(key, set()).add(c6)
-            # 概念别名：裸名 ↔ 「裸名概念」
-            if bare and not bare.endswith("概念"):
-                out.setdefault(f"{bare}概念", set()).add(c6)
     return out
 
 
@@ -1064,16 +1020,8 @@ def load_em_board_hot_map(
         except ValueError:
             pass
 
-    # 成分归属先建好，供合格 TopN 过滤（QMT / all_a_stock_info）
+    # 成分归属先建好，供合格 TopN 过滤（all_a_stock_info 东财标签）
     info_tag_to_codes, _code_to_tags = _load_stock_info_tag_index(info_path)
-    store = None
-    try:
-        from utils.qmt_sector_store import get_qmt_sector_store
-
-        store = get_qmt_sector_store()
-    except Exception:
-        store = None
-    qmt_tag_to_codes = _build_qmt_tag_to_codes(store)
 
     _member_cache: Dict[str, int] = {}
 
@@ -1085,7 +1033,6 @@ def load_em_board_hot_map(
             tag_name,
             kind=kind,
             info_tag_to_codes=info_tag_to_codes,
-            qmt_tag_to_codes=qmt_tag_to_codes,
         )
         cnt = len(members)
         _member_cache[key] = cnt
@@ -1219,7 +1166,6 @@ def load_em_board_hot_map(
                 name,
                 kind=kind,
                 info_tag_to_codes=info_tag_to_codes,
-                qmt_tag_to_codes=qmt_tag_to_codes,
             )
             rs_map: Dict[str, float] = {}
             for c6 in members:

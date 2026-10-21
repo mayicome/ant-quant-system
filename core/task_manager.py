@@ -67,6 +67,7 @@ class TaskManager(QObject):
         
         # 初始化QMT适配器
         self.qmt_adapter = None
+        self._ui_boot_pending = False
         
         # 设置任务文件路径 - 使用日期后缀
         current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1249,15 +1250,67 @@ class TaskManager(QObject):
             return []
     
     def _sync_rules_armed_if_builtin(self) -> None:
-        """builtin/standalone 模式下，将任务与持仓同步到 rules_armed.json。"""
+        """builtin/standalone 模式下，将任务与持仓同步到 rules_armed.json。
+
+        任务有变化时，再把同一份写成 QMT 的会话文件。策略约 1 秒内自行重载。
+        """
         try:
             from utils.qmt_execution_config import use_builtin_price_feed
             if not use_builtin_price_feed():
                 return
             from utils.rules_armed_sync import sync_rules_armed
-            sync_rules_armed(self, self.qmt_adapter, logger=self.logger)
+            changed = sync_rules_armed(self, self.qmt_adapter, logger=self.logger)
+            if self._ui_boot_pending and self.tasks:
+                self._publish_qmt_session(ui_boot=True)
+                self._ui_boot_pending = False
+                return
+            if changed:
+                self._publish_qmt_session()
         except Exception as e:
-            self.logger.debug(f"sync rules_armed skipped: {e}")
+            self.logger.debug("sync rules_armed skipped: %s" % e)
+
+    def publish_ui_boot_session(self) -> None:
+        """交易程序刚启动时写一次带启动标志的会话。任务还没载入就先记着。"""
+        self._ui_boot_pending = True
+        if not self.tasks:
+            return
+        try:
+            from utils.qmt_execution_config import use_builtin_price_feed
+            if not use_builtin_price_feed():
+                self._ui_boot_pending = False
+                return
+            from utils.rules_armed_sync import sync_rules_armed
+            sync_rules_armed(self, self.qmt_adapter, logger=self.logger)
+            self._publish_qmt_session(ui_boot=True)
+            self._ui_boot_pending = False
+        except Exception as e:
+            self.logger.debug("启动会话写入跳过: %s" % e)
+
+    def _publish_qmt_session(self, ui_boot=False) -> None:
+        """把刚写好的 rules_armed 整份打进 QMT 会话文件。"""
+        try:
+            from tools.export_qmt_session import deploy_session_file, export_enabled
+
+            session = export_enabled(ui_boot=ui_boot)
+            target = deploy_session_file()
+        except SystemExit as e:
+            self.logger.info("跳过自动写入 QMT 会话: %s" % e)
+            return
+        except Exception as e:
+            self.logger.warning("自动写入 QMT 会话失败: %s" % e)
+            return
+        tasks = session.get("tasks") or []
+        enabled = sum(1 for t in tasks if isinstance(t, dict) and t.get("enabled", True))
+        if ui_boot:
+            self.logger.info(
+                "交易程序启动已写入 QMT 会话 tasks=%d enabled=%d -> %s"
+                % (len(tasks), enabled, target)
+            )
+        else:
+            self.logger.info(
+                "任务变化已写入 QMT 会话 tasks=%d enabled=%d -> %s"
+                % (len(tasks), enabled, target)
+            )
     
     @staticmethod
     def _normalize_stock_code(sc):

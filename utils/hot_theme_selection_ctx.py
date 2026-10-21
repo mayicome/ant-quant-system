@@ -104,7 +104,7 @@ def _tag_matches_hot(tag: str, hot_keys: Set[str]) -> bool:
     return bool(agg) and agg in hot_keys
 
 
-def _expand_affiliation_from_qmt_index(
+def _expand_affiliation_from_stock_info(
     hot_sectors: List[str],
     hot_concepts: List[str],
     *,
@@ -113,22 +113,18 @@ def _expand_affiliation_from_qmt_index(
     code_hits: Dict[str, Dict[str, Any]],
     hit_fn,
 ) -> None:
-    """用 QMT 板块反查索引，把「归属」热门板块/概念的股票并入成员集合。
-
-    当日涨停名单仅覆盖涨停股；归属扩展覆盖同题材非涨停股（配合「近10日有涨停」）。
-    """
+    """用 all_a_stock_info 的东财标签，把归属热门行业/概念的股票并入成员集合。"""
     try:
-        from utils.qmt_sector_store import get_qmt_sector_store
+        from utils.eastmoney_board_rank_ctx import _load_stock_info_tag_index
     except Exception:
         return
     try:
-        store = get_qmt_sector_store()
-        store.ensure_inverted_index()
-        code_sectors = getattr(store, "_code_sectors", None) or {}
+        _tag_to_codes, code_to_tags = _load_stock_info_tag_index()
     except Exception:
         return
-    if not isinstance(code_sectors, dict) or not code_sectors:
+    if not isinstance(code_to_tags, dict) or not code_to_tags:
         return
+    code_sectors = code_to_tags
 
     sector_keys: Set[str] = set()
     for n in hot_sectors:
@@ -315,8 +311,8 @@ def load_hot_theme_map(
             if name and name not in h["concepts"]:
                 h["concepts"].append(name)
 
-    # 归属扩展：QMT 反查索引中标签命中十大热门板块/概念的全部成分
-    _expand_affiliation_from_qmt_index(
+    # 归属扩展：东财股票标签命中十大热门行业/概念的股票
+    _expand_affiliation_from_stock_info(
         hot_sectors,
         hot_concepts,
         sector_codes=sector_codes,

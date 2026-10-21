@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """生成/更新 data/all_a_stock_info.json（代码→概念/板块标签）。
 
-默认模式 f10：逐只请求东财 F10「核心题材」接口（稳定；push2 易被掐断）。
+默认模式 f10：按 data/a_share_universe.json 逐只请求东财 F10「核心题材」。
+名称优先用同一次行情导出 data/qmt_hsj_quote.txt。
 可选模式 boards：概念/行业板块→成分股反转（akshare push2，易 ConnectionError）。
 
 写入：若目标文件已存在，按股票合并（concepts/plates 去重并集追加，不删旧标签）。
@@ -14,7 +15,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import sys
@@ -29,7 +29,7 @@ if ROOT not in sys.path:
 DATA_DIR = os.path.join(ROOT, "data")
 DEFAULT_OUT = os.path.join(DATA_DIR, "all_a_stock_info.json")
 DEFAULT_PROGRESS = os.path.join(DATA_DIR, "all_a_stock_info.em_boards.progress.json")
-STOCK_LIST_CSV = os.path.join(DATA_DIR, "all_a_stocks.csv")
+UNIVERSE_JSON = os.path.join(DATA_DIR, "a_share_universe.json")
 F10_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax"
 
 from utils.em_board_exclude import is_excluded_em_board as _is_dynamic_market_board
@@ -55,42 +55,69 @@ def _code6(v: Any) -> str:
     return digits.zfill(6)[-6:]
 
 
-def _em_secid(code6: str) -> str:
+def _em_secid(code6: str, market: str = "") -> str:
     c = _code6(code6)
+    mkt = str(market or "").strip().upper()
+    if mkt in ("SH", "SZ", "BJ"):
+        return f"{mkt}{c}"
+    if c.startswith(("92", "83", "87", "43", "82", "88")) or c.startswith(("4", "8")):
+        return f"BJ{c}"
     if c.startswith(("5", "6", "9")):
         return f"SH{c}"
     return f"SZ{c}"
 
 
-def _load_name_map(csv_path: str = STOCK_LIST_CSV) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    if not os.path.isfile(csv_path):
-        return out
-    rows: List[dict] = []
-    for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
-        try:
-            with open(csv_path, "r", encoding=enc, newline="") as f:
-                rows = list(csv.DictReader(f))
-            break
-        except Exception:
-            rows = []
-    for row in rows:
-        code = ""
-        name = ""
-        for k, v in row.items():
-            ks = str(k or "")
-            if "代码" in ks or ks.lower() in ("code", "symbol"):
-                code = _code6(v)
-            if "简称" in ks or "名称" in ks or ks.lower() in ("name",):
-                name = str(v or "").strip()
-        if code:
-            out[code] = name or out.get(code, "")
+def _load_share_universe(path: str = UNIVERSE_JSON) -> List[Tuple[str, str]]:
+    """返回 (6位代码, SH/SZ/BJ)，来自当天股票池。"""
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f) or {}
+    except Exception as e:
+        print(f"[warn] 读取股票池失败: {e}")
+        return []
+    out: List[Tuple[str, str]] = []
+    seen: Set[str] = set()
+    for raw in payload.get("codes") or []:
+        text = str(raw or "").strip().upper()
+        market = ""
+        if "." in text:
+            left, market = text.split(".", 1)
+        else:
+            left = text
+        code = _code6(left)
+        market = market.strip().upper()
+        if market not in ("SH", "SZ", "BJ"):
+            market = _em_secid(code)[:2]
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append((code, market))
+    out.sort()
     return out
 
 
-def _load_universe_codes(csv_path: str = STOCK_LIST_CSV) -> List[str]:
-    mp = _load_name_map(csv_path)
-    return sorted(mp.keys())
+def _load_quote_name_map() -> Dict[str, str]:
+    """行情导出里的代码→名称。没有该文件时返回空表，名称留给 F10 应答。"""
+    try:
+        from utils.qmt_hsj_quote import QUOTE_PATH, _cell, read_table
+    except Exception:
+        return {}
+    if not os.path.isfile(QUOTE_PATH):
+        return {}
+    out: Dict[str, str] = {}
+    try:
+        rows = read_table(QUOTE_PATH)
+    except Exception as e:
+        print(f"[warn] 读取行情导出名称失败: {e}")
+        return {}
+    for row in rows:
+        code = _code6(_cell(row, "代码"))
+        name = str(_cell(row, "名称") or "").strip()
+        if code and name:
+            out[code] = name
+    return out
 
 
 def _save_json(path: str, payload: dict) -> None:
@@ -302,11 +329,15 @@ def build_f10(
     save_every: int,
 ) -> dict:
     _clear_proxy_env()
-    name_map = _load_name_map()
-    codes = _load_universe_codes()
+    pairs = _load_share_universe()
+    if len(pairs) < 1000:
+        raise RuntimeError(
+            "a_share_universe.json 缺失或股票过少（%d），F10 不请求" % len(pairs)
+        )
+    name_map = _load_quote_name_map()
     if limit_stocks is not None:
-        codes = codes[: max(0, int(limit_stocks))]
-    print(f"[info] mode=f10 universe={len(codes)} name_map={len(name_map)}")
+        pairs = pairs[: max(0, int(limit_stocks))]
+    print(f"[info] mode=f10 universe={len(pairs)} quote_names={len(name_map)}")
 
     progress = _load_progress(progress_path) if resume else {}
     if progress.get("mode") not in (None, "f10"):
@@ -359,14 +390,14 @@ def build_f10(
             payload.update(extra)
         _save_json(progress_path, payload)
 
-    pending = [c for c in codes if c not in done_codes]
+    pending = [pair for pair in pairs if pair[0] not in done_codes]
     print(f"[info] pending={len(pending)} already_done={len(done_codes)}")
-    for i, code in enumerate(pending, 1):
+    for i, (code, market) in enumerate(pending, 1):
         try:
             resp = _retry_get(
                 session,
                 F10_URL,
-                params={"code": _em_secid(code)},
+                params={"code": _em_secid(code, market)},
                 retries=retries,
                 label=f"f10:{code}",
             )
@@ -467,8 +498,8 @@ def build_boards(
     _clear_proxy_env()
     import akshare as ak
 
-    name_map = _load_name_map()
-    print(f"[info] mode=boards name_map={len(name_map)}")
+    name_map = _load_quote_name_map()
+    print(f"[info] mode=boards quote_names={len(name_map)}")
     progress = _load_progress(progress_path) if resume else {}
     if progress.get("mode") not in (None, "boards"):
         print("[info] 进度文件模式不匹配，忽略旧进度")

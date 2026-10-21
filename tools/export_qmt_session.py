@@ -61,8 +61,8 @@ def export_enabled(ui_boot=False) -> dict:
     if not isinstance(raw, dict):
         raise SystemExit("rules_armed.json 不是对象")
     tasks = raw.get("tasks")
-    if not isinstance(tasks, list) or not tasks:
-        raise SystemExit("rules_armed.json 没有 tasks，拒绝导出空会话")
+    if not isinstance(tasks, list):
+        raise SystemExit("rules_armed.json 没有 tasks 列表，拒绝导出")
     session = {k: raw[k] for k in _KEEP if k in raw}
     session["exported_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     session["source"] = "rules_armed.json"
@@ -101,6 +101,9 @@ def deploy_session_file() -> Path:
         raise SystemExit("qmt_python_dir 不存在: %s" % dst_dir)
     target = dst_dir / OUT.name
     target.write_bytes(encoded)
+    sim = Path(r"D:\国金QMT交易端模拟\python")
+    if sim.is_dir() and sim.resolve() != dst_dir.resolve():
+        (sim / OUT.name).write_bytes(encoded)
     return target
 
 

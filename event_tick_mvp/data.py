@@ -89,17 +89,18 @@ def load_universe_codes() -> List[str]:
 
 
 def load_name_map() -> Dict[str, str]:
+    """名称以资料文件为准。CSV 只补资料文件里还没有的代码。"""
+    out = _names_from_info_json()
     path = os.path.join(project_root(), "data", "all_a_stocks.csv")
-    out: Dict[str, str] = {}
     if not os.path.isfile(path):
-        return _names_from_info_json()
+        return out
     try:
         df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
     except Exception:
         try:
             df = pd.read_csv(path, dtype=str, encoding="gbk")
         except Exception:
-            return _names_from_info_json()
+            return out
     code_col = None
     name_col = None
     for c in df.columns:
@@ -109,13 +110,15 @@ def load_name_map() -> Dict[str, str]:
         if name_col is None and ("名称" in cs or "名字" in cs or cs.lower() == "name"):
             name_col = c
     if code_col is None:
-        return _names_from_info_json()
+        return out
     for _, row in df.iterrows():
         c6 = str(row.get(code_col) or "").split(".")[0].zfill(6)[-6:]
-        if len(c6) != 6:
+        if len(c6) != 6 or out.get(c6):
             continue
-        out[c6] = str(row.get(name_col) or "") if name_col else ""
-    return out if out else _names_from_info_json()
+        name = str(row.get(name_col) or "").strip() if name_col else ""
+        if name:
+            out[c6] = name
+    return out
 
 
 def _names_from_info_json() -> Dict[str, str]:

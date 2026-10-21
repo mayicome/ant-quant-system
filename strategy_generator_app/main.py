@@ -6613,10 +6613,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         else:
             self._append_run_log(f"股票池 {len(codes)} 只")
         self._append_run_log(
-            "正在拉取行情与关键价格…（builtin：等待 results.json + daily_cache；进度会刷在下方，请勿强杀进程）"
+            "正在拉取行情与关键价格…（东财现价 + daily_cache；进度会刷在下方，请勿强杀进程）"
         )
 
-        # 拉行情会写入 strategy_pool_watch；整次运行无论成功/失败都必须释放。
+        # 现价直接问东财。若本次曾写过 strategy_pool_watch，运行结束时释放。
         price_map: Dict[str, Any] = {}
         try:
             # 拉行情并计算关键价格点（当前价、昨收、涨跌停、均线重合点、前高前低、布林带、今开最高最低等）

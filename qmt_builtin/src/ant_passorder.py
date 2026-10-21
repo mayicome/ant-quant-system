@@ -5,12 +5,45 @@ import os
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-try:
-    from ant_qmt_paths import PROJECT_ROOT
-except Exception:
-    PROJECT_ROOT = ""
+PASSORDER_VERSION = "20261017.2"
+_SIBLING_MODS = {}
 
-PASSORDER_VERSION = "20260803.01"
+
+def _sibling_mod(filename):
+    """按 mtime 加载同目录模块。QMT 不卸载已导入的旧模块。"""
+    import importlib.util
+    import sys
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    try:
+        mtime = int(os.path.getmtime(path)) if os.path.isfile(path) else 0
+    except OSError:
+        mtime = 0
+    cached = _SIBLING_MODS.get(filename)
+    if cached is not None and cached[0] == mtime and mtime:
+        return cached[1]
+    if not mtime:
+        return None
+    stem = filename[:-3] if filename.endswith(".py") else filename
+    name = "%s_%d" % (stem, mtime)
+    mod = sys.modules.get(name)
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    _SIBLING_MODS[filename] = (mtime, mod)
+    return mod
+
+
+def _position_entry_mod():
+    return _sibling_mod("ant_position_entry_dates.py")
+
+
+def _filled_legs_mod():
+    return _sibling_mod("ant_filled_legs.py")
 
 # QMT 注入的 passorder（由入口文件 bind_runtime_globals 绑定）
 _PASSORDER = None
@@ -19,7 +52,6 @@ OP_STOCK_BUY = 23
 OP_STOCK_SELL = 24
 ORDER_TYPE_SHARES = 1101  # 单股单账号按股数
 PR_LIMIT = 11  # 指定价
-PR_MARKET = 12  # 市价（price 无效）
 
 
 _CANCEL = None
@@ -180,19 +212,7 @@ def _resolve_account_id(ContextInfo) -> str:
 
         return str(resolve_account_id(ContextInfo) or "").strip()
     except Exception:
-        pass
-    try:
-        import configparser
-
-        ini_path = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data", "config.ini")
-        if PROJECT_ROOT and os.path.isfile(ini_path):
-            cfg = configparser.ConfigParser()
-            cfg.read(ini_path, encoding="utf-8")
-            if cfg.has_option("Account", "account_id"):
-                return str(cfg.get("Account", "account_id") or "").strip()
-    except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _norm_volume(volume: int) -> int:
@@ -370,86 +390,6 @@ def place_limit_sell(
         return False, record["msg"], record
 
 
-def place_market_order(
-    ContextInfo,
-    stock_code: str,
-    volume: int,
-    *,
-    side: str = "buy",
-    strategy_name: str = "测速市价",
-    user_order_id: str = "",
-    quick_trade: int = 2,
-) -> Tuple[bool, str, Dict[str, Any]]:
-    """市价买卖。prType=12，不需要行情价。返回 (ok, reason, record)。"""
-    code = str(stock_code or "").strip().upper()
-    vol = _norm_volume(int(volume or 0))
-    is_sell = str(side or "").strip().lower() == "sell"
-    record: Dict[str, Any] = {
-        "side": "sell" if is_sell else "buy",
-        "price_type": "market",
-        "stock_code": code,
-        "price": 0,
-        "volume": vol,
-        "strategy_name": str(strategy_name or "测速市价"),
-        "user_order_id": str(user_order_id or ""),
-        "at": _now_iso(),
-        "status": "error",
-        "msg": "",
-    }
-    if not code or vol <= 0:
-        record["msg"] = "bad_params"
-        return False, record["msg"], record
-    if ContextInfo is None:
-        record["msg"] = "no_context"
-        return False, record["msg"], record
-    fn = _PASSORDER
-    if not callable(fn):
-        try:
-            import builtins
-
-            fn = getattr(builtins, "passorder", None)
-        except Exception:
-            fn = None
-    if not callable(fn):
-        record["msg"] = "passorder_unbound"
-        return False, record["msg"], record
-    aid = _resolve_account_id(ContextInfo)
-    if not aid:
-        record["msg"] = "no_account_id"
-        return False, record["msg"], record
-    record["account_id"] = aid
-    raw_uid = str(user_order_id or "")
-    pass_uid = raw_uid[-32:] if len(raw_uid) > 32 else raw_uid
-    record["user_order_id"] = raw_uid
-    record["pass_uid"] = pass_uid
-    op = OP_STOCK_SELL if is_sell else OP_STOCK_BUY
-    try:
-        fn(
-            op,
-            ORDER_TYPE_SHARES,
-            aid,
-            code,
-            PR_MARKET,
-            -1,
-            int(vol),
-            str(strategy_name or "测速市价"),
-            int(quick_trade),
-            pass_uid,
-            ContextInfo,
-        )
-        record["status"] = "submitted"
-        record["msg"] = "passorder_called"
-        print(
-            "[下单] 市价%s %s vol=%s account=%s uid=%s"
-            % ("卖出" if is_sell else "买入", code, vol, aid, user_order_id)
-        )
-        return True, "ok", record
-    except Exception as e:
-        record["msg"] = "%s: %s" % (type(e).__name__, e)
-        print("[下单] 市价失败 %s: %s" % (code, record["msg"]))
-        return False, record["msg"], record
-
-
 def cancel_order_sysid(
     ContextInfo,
     order_sysid: str,
@@ -510,27 +450,17 @@ def append_order_record(results: Dict[str, Any], record: Dict[str, Any]) -> None
     if len(orders) > 200:
         results["orders"] = orders[-200:]
     results["updated_at"] = _now_iso()
-    # 买入成交记建仓日（QMT 内完成，不依赖主程序）
+    # 买入成交记建仓日：只打日志，不读写 json
     try:
-        import ant_position_entry_dates as _ped
-
-        _ped.note_from_order_record(record)
-    except Exception:
-        try:
-            from qmt_builtin.src import ant_position_entry_dates as _ped
-
+        _ped = _position_entry_mod()
+        if _ped is not None:
             _ped.note_from_order_record(record)
-        except Exception:
-            pass
-    # 成交写入已执行分支（买/卖腿）
-    try:
-        import ant_filled_legs as _fl
-
-        _fl.note_from_order_record(record)
     except Exception:
-        try:
-            from qmt_builtin.src import ant_filled_legs as _fl
-
+        pass
+    # 成交打腿日志。腿名用订单上已有的，不读 json。
+    try:
+        _fl = _filled_legs_mod()
+        if _fl is not None:
             _fl.note_from_order_record(record)
-        except Exception:
-            pass
+    except Exception:
+        pass

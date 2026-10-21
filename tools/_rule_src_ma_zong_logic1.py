@@ -1,10 +1,10 @@
 # 马总选股逻辑1
-# 入选：全市场当日涨停（含 ST / 各板块）
+# 入选：全市场当日收盘涨停（含 ST / 各板块）。收盘低于最高价的触板回落不算。
 # 输出：东财热门-besttest 全字段 + 满足条件 + 前十个交易日最高涨幅
 # 硬过滤（不进结果表）：
 #   - 非当日涨停
-#   - 近 EX_DIV_LOOKBACK 个交易日（不含当日）出现疑似除权开盘缺口
-#     （开盘/昨收-1 < -(涨跌停幅度+EX_DIV_EPS)；不复权下会扭曲 MA）
+# 疑似除权不挡进表：近 EX_DIV_LOOKBACK 个交易日（不含当日）出现疑似除权开盘缺口
+#   （开盘/昨收-1 < -(涨跌停幅度+EX_DIV_EPS)）时仍保留该涨停股，满足条件为 False
 # 满足条件（全部为真才 True；前10日窗口不含当日）：
 #   1) 当日涨停
 #   2) 所属行业东财涨幅原始排名前 BOARD_TOP_N_INDUSTRY，或概念前 BOARD_TOP_N_CONCEPT（任一即可）
@@ -13,6 +13,7 @@
 #   4) 前10个交易日：主板无「最高价相对前收」涨幅>=5%；创业/科创/北交所无>=10%
 #      （涨幅=(当日最高-前收)/前收；缺最高价时回退收盘价）
 #   5) 当日收盘价 > MA5 且 > MA20
+#   6) 近 EX_DIV_LOOKBACK 个交易日（不含当日）没有疑似除权开盘缺口
 # 依赖引擎 ctx["em_board_hot"]（填 besttest 热门字段；不作为入选门槛）
 # 近5/10/20日RS：用选股日线绝对涨幅 (close_D-close_{D-N})/close_{D-N}，对每只进表票都算；
 #   与是否命中今日热门标签无关；标签内 RS 排名仍仅热门池有值（仍用近10日）
@@ -184,13 +185,43 @@ def _closes_through(daily_data, as_of_date):
     return rows
 
 
-def _is_limit_up_on_row(prev_close, close_price, limit_ratio):
+def _row_high(row):
+    try:
+        high_price = float(row.get("high"))
+    except (TypeError, ValueError):
+        return None
+    if high_price != high_price or high_price <= 0:
+        return None
+    return high_price
+
+
+def _is_limit_up_on_row(prev_close, close_price, limit_ratio, high_price=None):
+    """收盘封在涨停价才算。收盘低于当日最高价是触板回落，不算涨停。"""
     if prev_close is None or prev_close <= 0:
         return False, 0.0
-    limit_up_price = round(float(prev_close) * (1.0 + limit_ratio), 2)
-    price_diff = abs(float(close_price) - limit_up_price)
-    inc = (float(close_price) - float(prev_close)) / float(prev_close)
-    ok = (price_diff < 0.02) or (inc >= limit_ratio * 0.99)
+    try:
+        close_price = float(close_price)
+        prev_close = float(prev_close)
+    except (TypeError, ValueError):
+        return False, 0.0
+    if close_price != close_price or close_price <= 0:
+        return False, 0.0
+    limit_up_price = round(prev_close * (1.0 + float(limit_ratio)), 2)
+    if high_price is not None:
+        try:
+            high_price = float(high_price)
+        except (TypeError, ValueError):
+            high_price = None
+        if (
+            high_price is not None
+            and high_price == high_price
+            and high_price > 0
+            and round(close_price, 2) < round(high_price, 2)
+        ):
+            return False, limit_up_price
+    price_diff = abs(close_price - limit_up_price)
+    inc = (close_price - prev_close) / prev_close
+    ok = (price_diff < 0.02) or (inc >= float(limit_ratio) * 0.99)
     return ok, limit_up_price
 
 
@@ -256,7 +287,9 @@ def _recent_lu_stats(stock_code, stock_name, daily_data, as_of_date, lookback):
         prev_close = float(prev.iloc[-1]["close"])
         close_price = float(sub.iloc[-1]["close"])
         limit_ratio = _limit_ratio(stock_code, stock_name, trade_date)
-        ok, _ = _is_limit_up_on_row(prev_close, close_price, limit_ratio)
+        ok, _ = _is_limit_up_on_row(
+            prev_close, close_price, limit_ratio, _row_high(sub.iloc[-1])
+        )
         if ok:
             # 窗口末日=上一交易日 → offset 1
             lu_offsets.append(len(window) - i)
@@ -276,16 +309,15 @@ def _today_limit_up(stock_code, stock_name, daily_data, as_of_date):
             if _as_date(r.get("_d") or r.get("date")) == as_d:
                 row = r
                 break
-    if row is None:
-        row = dd.iloc[-1]
-        as_d = _as_date(row.get("_d") or row.get("date"))
-    prev = dd[(dd["_d"] if "_d" in dd.columns else dd["date"].map(_as_date)) < _as_date(row.get("_d") or row.get("date"))]
+    if row is None or as_d is None:
+        return False, None, None
+    prev = dd[(dd["_d"] if "_d" in dd.columns else dd["date"].map(_as_date)) < as_d]
     if prev.empty:
         return False, None, None
     prev_close = float(prev.iloc[-1]["close"])
     close_price = float(row["close"])
     lr = _limit_ratio(stock_code, stock_name, as_d)
-    ok, _ = _is_limit_up_on_row(prev_close, close_price, lr)
+    ok, _ = _is_limit_up_on_row(prev_close, close_price, lr, _row_high(row))
     return bool(ok), close_price, prev_close
 
 
@@ -1039,6 +1071,7 @@ def _fail_reasons_logic1(
     cond_inflow,
     cond_prior,
     cond_ma,
+    cond_ex_div,
     owned_board,
     inflow_wan,
     max_prior,
@@ -1049,6 +1082,8 @@ def _fail_reasons_logic1(
     ma20,
     board_err,
     inflow_err,
+    ex_div_date_text,
+    ex_div_gap_pct,
 ):
     reasons = []
     if not cond_board:
@@ -1096,6 +1131,13 @@ def _fail_reasons_logic1(
             "收盘站上MA5且MA20不满足，要求收盘>MA5且>MA20，实际收盘=%s MA5=%s MA20=%s"
             % (_fmt_num(close_price, 4), _fmt_num(ma5, 4), _fmt_num(ma20, 4))
         )
+    if not cond_ex_div:
+        detail = "近%d个交易日有疑似除权缺口" % int(EX_DIV_LOOKBACK)
+        if ex_div_date_text:
+            detail += "，缺口日=%s" % ex_div_date_text
+        if ex_div_gap_pct not in ("", None):
+            detail += "，开盘缺口=%s%%" % _fmt_num(ex_div_gap_pct, 2)
+        reasons.append(detail)
     return "；".join(reasons)
 
 
@@ -1109,24 +1151,17 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
     if not is_lu:
         return False, {"热门模式": HOT_MODE, "_skip": "非当日涨停"}
 
-    # 疑似除权：不进结果表（整表回测/因子筛选都不应带上）
+    # 疑似除权仍进表。有缺口时满足条件为 False，理由写明近 N 日有疑似除权缺口。
     no_ex_div, ex_div_gap, ex_div_date = _prior_ex_div_gap(
         stock_code, stock_name, daily_data, as_of_date, EX_DIV_LOOKBACK
     )
-    if not no_ex_div:
-        ds = ""
-        if ex_div_date is not None:
-            try:
-                ds = ex_div_date.strftime("%Y-%m-%d")
-            except Exception:
-                ds = str(ex_div_date)
-        gap_pct = "" if ex_div_gap is None else round(float(ex_div_gap) * 100.0, 2)
-        return False, {
-            "热门模式": HOT_MODE,
-            "_skip": "近%d日疑似除权" % int(EX_DIV_LOOKBACK),
-            "疑似除权缺口日": ds,
-            "疑似除权开盘缺口%": gap_pct,
-        }
+    ex_div_date_text = ""
+    if ex_div_date is not None:
+        try:
+            ex_div_date_text = ex_div_date.strftime("%Y-%m-%d")
+        except Exception:
+            ex_div_date_text = str(ex_div_date)
+    ex_div_gap_pct = "" if ex_div_gap is None else round(float(ex_div_gap) * 100.0, 2)
 
     closes = _closes_through(daily_data, as_of_date)
     ma5 = _ma(closes, 5)
@@ -1177,14 +1212,21 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
     cond_inflow = bool(inflow_ok)
     cond_prior = bool(no_big_move)
     cond_ma = bool(above_ma)
+    cond_ex_div = bool(no_ex_div)
     meet_all = (
-        cond_lu and cond_board and cond_inflow and cond_prior and cond_ma
+        cond_lu
+        and cond_board
+        and cond_inflow
+        and cond_prior
+        and cond_ma
+        and cond_ex_div
     )
     fail_reasons = _fail_reasons_logic1(
         cond_board=cond_board,
         cond_inflow=cond_inflow,
         cond_prior=cond_prior,
         cond_ma=cond_ma,
+        cond_ex_div=cond_ex_div,
         owned_board=owned_board,
         inflow_wan=inflow_wan,
         max_prior=max_prior,
@@ -1195,6 +1237,8 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         ma20=ma20,
         board_err=board_err,
         inflow_err=bundle.get("inflow_err") or "",
+        ex_div_date_text=ex_div_date_text,
+        ex_div_gap_pct=ex_div_gap_pct,
     )
 
     extra = {
@@ -1210,6 +1254,9 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "条件_主力净流入>=3000万": bool(cond_inflow),
         "条件_前10日无大涨": bool(cond_prior),
         "条件_收盘站上MA5且MA20": bool(cond_ma),
+        "条件_近20日无疑似除权": bool(cond_ex_div),
+        "疑似除权缺口日": ex_div_date_text,
+        "疑似除权开盘缺口%": ex_div_gap_pct,
         "除权排查天数": int(EX_DIV_LOOKBACK),
         "除权缺口阈值加EPS": round(float(EX_DIV_EPS) * 100.0, 2),
         "前10日大涨阈值": round(float(thr) * 100.0, 2),

@@ -1,82 +1,107 @@
 # -*- coding: utf-8 -*-
-"""QMT 侧处理 data/cancel_requests.json（主程序 UI 撤单）。"""
+"""QMT 侧处理撤单。
+
+待撤列表在同目录 ant_cancel_local.py，交易系统覆盖后按 mtime 热加载。
+不读写 cancel_requests.json。处理结果打进策略日志，由交易系统落盘。
+"""
 import json
 import os
-import time
+import sys
 from datetime import datetime
-from typing import Any, Dict, List, Optional
 
-try:
-    from ant_qmt_paths import PROJECT_ROOT
-except ImportError:
-    from qmt_builtin.ant_qmt_paths import PROJECT_ROOT
-
-REQUESTS_PATH = os.path.join(PROJECT_ROOT.rstrip("\\/"), "data", "cancel_requests.json")
+_CANCEL_MTIME = 0.0
+_CANCEL_MOD = None
+_DONE = {}
 
 
-def _now_iso() -> str:
+def _now_iso():
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
-    folder = os.path.dirname(path) or "."
-    if not os.path.isdir(folder):
-        os.makedirs(folder)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    for attempt in range(8):
-        try:
-            os.replace(tmp, path)
-            return
-        except OSError:
-            if attempt >= 7:
-                raise
-            time.sleep(0.05 * (attempt + 1))
+def _local_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "ant_cancel_local.py")
 
 
-def _empty() -> Dict[str, Any]:
-    return {"version": 1, "items": []}
-
-
-def load_requests() -> Dict[str, Any]:
-    if not os.path.isfile(REQUESTS_PATH):
-        return _empty()
+def _load_local():
+    """同一 mtime 复用模块。QMT 不卸载 sys.modules。"""
+    global _CANCEL_MTIME, _CANCEL_MOD
+    path = _local_path()
+    if not os.path.isfile(path):
+        return None
     try:
-        with open(REQUESTS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return _empty()
-        if not isinstance(data.get("items"), list):
-            data["items"] = []
-        data.setdefault("version", 1)
-        return data
+        mtime = float(os.path.getmtime(path))
+    except OSError:
+        return None
+    if _CANCEL_MOD is not None and mtime == _CANCEL_MTIME:
+        return _CANCEL_MOD
+    import importlib.util
+
+    mod_name = "ant_cancel_local_%d" % int(mtime)
+    existing = sys.modules.get(mod_name)
+    if existing is not None:
+        _CANCEL_MOD = existing
+        _CANCEL_MTIME = mtime
+        return existing
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    _CANCEL_MOD = mod
+    _CANCEL_MTIME = mtime
+    return mod
+
+
+def _pending_rows():
+    mod = _load_local()
+    if mod is None:
+        return []
+    raw = getattr(mod, "CANCELS", None)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for it in raw:
+        if isinstance(it, dict):
+            out.append(it)
+    return out
+
+
+def _emit(req_id, sysid, code, status, msg, at):
+    try:
+        import ant_result_log as rl
+    except ImportError:
+        try:
+            import qmt_builtin.ant_result_log as rl
+        except ImportError:
+            rl = None
+    if rl is not None and hasattr(rl, "emit_cancel"):
+        try:
+            rl.emit_cancel(req_id, sysid, code=code, status=status, msg=msg, at=at)
+            return
+        except Exception:
+            pass
+    row = {"id": str(req_id or "")[:16], "sys": str(sysid or "")[:32], "st": status, "at": at}
+    if code:
+        row["c"] = str(code)[:12]
+    if msg:
+        row["msg"] = str(msg)[:80]
+    try:
+        print("ANTRES cx " + json.dumps(row, ensure_ascii=False, separators=(",", ":")))
     except Exception:
-        return _empty()
+        pass
 
 
-def save_requests(data: Dict[str, Any]) -> None:
-    _atomic_write_json(REQUESTS_PATH, data)
-
-
-def process_pending_cancels(ContextInfo, po_module=None) -> int:
-    """
-    处理 pending 撤单。返回成功发出 cancel 的条数。
-    po_module: ant_passorder 模块（可选，缺省动态 import）。
-    """
-    data = load_requests()
-    items = data.get("items") or []
-    if not isinstance(items, list) or not items:
+def process_pending_cancels(ContextInfo, po_module=None):
+    """处理热加载列表里的待撤单。返回成功发出 cancel 的条数。"""
+    rows = _pending_rows()
+    if not rows:
         return 0
-
-    pending = [
-        it
-        for it in items
-        if isinstance(it, dict) and str(it.get("status") or "") == "pending"
-    ]
-    if not pending:
-        return 0
-
     if po_module is None:
         try:
             import ant_passorder as po_module
@@ -86,45 +111,40 @@ def process_pending_cancels(ContextInfo, po_module=None) -> int:
             except ImportError:
                 print("[撤单请求] ant_passorder 导入失败")
                 return 0
-
     cancel_fn = getattr(po_module, "cancel_order_sysid", None)
     if not callable(cancel_fn):
         print("[撤单请求] 缺少 cancel_order_sysid")
         return 0
 
     sent = 0
-    changed = False
-    for it in pending:
+    for it in rows:
+        rid = str(it.get("id") or "").strip()
         sysid = str(it.get("order_sysid") or "").strip()
         code = str(it.get("stock_code") or "").strip()
         acct = str(it.get("account_type") or "STOCK").strip() or "STOCK"
-        if not sysid:
-            it["status"] = "error"
-            it["msg"] = "bad_sysid"
-            it["processed_at"] = _now_iso()
-            changed = True
+        if not rid:
+            rid = sysid
+        if rid and _DONE.get(rid):
             continue
-        ok, reason, crec = cancel_fn(ContextInfo, sysid, account_type=acct)
-        it["processed_at"] = _now_iso()
-        it["msg"] = str(reason or (crec or {}).get("msg") or "")
+        at = _now_iso()
+        if not sysid:
+            _DONE[rid] = "error"
+            _emit(rid, sysid, code, "error", "bad_sysid", at)
+            continue
+        try:
+            ok, reason, crec = cancel_fn(ContextInfo, sysid, account_type=acct)
+        except Exception as exc:
+            ok = False
+            reason = "%s: %s" % (type(exc).__name__, exc)
+            crec = None
+        msg = str(reason or (crec or {}).get("msg") or "")
         if ok:
-            it["status"] = "sent"
+            status = "sent"
             sent += 1
-            print(
-                "[撤单请求] 撤单已发 sysid=%s code=%s"
-                % (sysid, code or "-")
-            )
+            print("[撤单请求] 撤单已发 sysid=%s code=%s" % (sysid, code or "-"))
         else:
-            it["status"] = "error"
-            print(
-                "[撤单请求] 撤单失败 sysid=%s code=%s msg=%s"
-                % (sysid, code or "-", it["msg"])
-            )
-        changed = True
-
-    if changed:
-        # 保留最近 100 条
-        if len(items) > 100:
-            data["items"] = items[-100:]
-        save_requests(data)
+            status = "error"
+            print("[撤单请求] 撤单失败 sysid=%s code=%s msg=%s" % (sysid, code or "-", msg))
+        _DONE[rid] = status
+        _emit(rid, sysid, code, status, msg, at)
     return sent

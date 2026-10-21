@@ -71,7 +71,7 @@ def startup_status_lines() -> list[str]:
         lines.append("[配置] 回测 tick：仅 data/ticks 本地文件")
     if mode in ("builtin", "standalone"):
         lines.append(
-            "[配置] 实盘生成：results.json 现价/今开 + daily_cache 昨收/均线；超时失败不回退"
+            "[配置] 实盘生成：东财现价/今开 + daily_cache 昨收/均线；不再等 results.json"
         )
         lines.extend(backtest_preflight_hint_lines())
     else:

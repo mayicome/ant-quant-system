@@ -535,7 +535,7 @@ def _fetch_daily_price_rows(
         else:
             logger.warning(
                 "%s prices %s: daily_cache=%d miss=%d (of %d)；"
-                "缺数据已/将提交大 QMT 同步（data/data_sync_requests.json）",
+                "缺日线不从 QMT 补",
                 label,
                 through_date.isoformat(),
                 cache_n,
