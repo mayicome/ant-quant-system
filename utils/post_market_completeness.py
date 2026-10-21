@@ -316,8 +316,6 @@ COMPLETENESS_CHECKERS: Dict[str, Checker] = {
     "lhb_premium": check_lhb_premium,
     "inst_net_rank": check_inst_rank,
     "stock_info_f10": check_stock_info_f10,
-    "after_hours_wait": check_after_hours,
-    "after_hours_export": check_after_hours_export,
     "cos_upload": check_cos_shards,
     "wechat_draft": check_wechat_draft,
     "market_regime": check_market_regime,
@@ -383,10 +381,6 @@ def _artifact_paths(asof: date, step_id: str) -> List[Path]:
         "lhb_premium": [hd / f"龙虎榜溢价验证日报_{d8}.xlsx"],
         "inst_net_rank": [hd / f"机构四榜连排_{d8}.xlsx"],
         "stock_info_f10": [ROOT / "data" / "all_a_stock_info.meta.json"],
-        "after_hours_wait": [ROOT / "data" / "after_hours_rank" / d8 / "top10.csv"],
-        "after_hours_export": [
-            ROOT / "data" / "cos" / "after_hours" / "after_hours_top_export_meta.json"
-        ],
         "cos_upload": [
             ROOT / "data" / "cos" / "board_rank" / f"{d8}.board_industry.jsonl",
             ROOT / "data" / "cos" / "main_flow" / f"{d8}.main_flow.jsonl",

@@ -424,48 +424,27 @@ class BreakUpperBandNoNewHighDialog(QDialog):
             return []
     
     def _load_stock_list(self) -> List[Tuple[str, str]]:
-        """从CSV文件加载股票列表"""
-        csv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'all_a_stocks.csv')
-        if not os.path.exists(csv_path):
-            QMessageBox.warning(self, "错误", f"找不到股票列表文件: {csv_path}")
-            return []
-        
-        # 尝试多种编码方式
-        encodings = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'utf-8-sig']
-        df = None
-        last_error = None
-        
-        for encoding in encodings:
-            try:
-                df = pd.read_csv(csv_path, encoding=encoding)
-                break  # 成功读取，跳出循环
-            except (UnicodeDecodeError, UnicodeError) as e:
-                last_error = e
-                continue  # 尝试下一个编码
-            except Exception as e:
-                last_error = e
-                continue
-        
-        if df is None:
-            QMessageBox.warning(self, "错误", f"加载股票列表失败: 无法使用常见编码（utf-8, gbk, gb2312, gb18030）读取文件\n最后错误: {str(last_error)}")
-            return []
-        
+        """从资料文件加载股票代码和名称。"""
+        info_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "data",
+            "all_a_stock_info.json",
+        )
         try:
-            stock_list = []
-            
-            for _, row in df.iterrows():
-                stock_code = str(row['证券代码']).zfill(6)  # 确保是6位数字
-                # 剔除5开头的股票代码
-                if stock_code.startswith('5'):
-                    continue
-                stock_name = str(row['证券简称'])
-                stock_list.append((stock_code, stock_name))
-            
-            return stock_list
-            
+            from utils.stock_info_manager import load_info_name_map
+
+            names = load_info_name_map(info_path)
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"解析股票列表失败: {str(e)}")
+            QMessageBox.warning(self, "错误", f"加载股票名称失败: {e}")
             return []
+        if not names:
+            QMessageBox.warning(self, "错误", f"找不到股票资料或其中没有名称: {info_path}")
+            return []
+        return [
+            (code, name)
+            for code, name in names.items()
+            if not str(code).startswith("5")
+        ]
     
     def start_filter(self):
         """开始筛选"""

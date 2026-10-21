@@ -3,7 +3,7 @@
 
 """
 板块股票筛选程序
-指定一个或多个板块（QMT 申万行业 / 概念等），从这些板块中筛选符合条件的股票
+指定一个或多个东财行业，从这些行业的成分股里筛选符合条件的股票
 筛选条件：前50个交易日到前10个交易日前有且只有一个涨停，近10个交易日内没有涨停
 输出：股票代码、股票名称、所属板块
 选股基准日：默认同原逻辑（与“今天”一致时按 15:00 规则）；可指定起止日期，区间内每个交易日各选一次股，每只股票日线只下载一次。
@@ -153,10 +153,10 @@ except ImportError as e:
 
 from utils.daily_cache_reader import get_cache_dir, get_sync_trade_date, load_daily_dataframe
 from utils.limit_ratio import is_st_stock, normalize_stock_code
-from utils.qmt_sector_store import (
-    get_qmt_sector_store,
+from utils.em_sector_store import (
+    UNCLASSIFIED_INDUSTRY,
+    get_em_sector_store,
     load_all_sectors,
-    split_sector_tags,
 )
 from utils.trading_day import (
     get_trading_dates,
@@ -1087,11 +1087,11 @@ def save_xls_with_text_code(xls_file_path: str, df: pd.DataFrame):
 
 
 def add_stock_info_columns(file_path: str) -> bool:
-    """为 CSV 添加 QMT 概念/行业/细分板块列（基于 qmt_sector_index 缓存）。"""
+    """为 CSV 添加东财概念、行业、板块列（来自 all_a_stock_info）。"""
     try:
-        store = get_qmt_sector_store()
+        store = get_em_sector_store()
         store.ensure_inverted_index()
-        logger.info("已加载 QMT 板块反查索引，共 %d 只股票", store.indexed_stock_count())
+        logger.info("已加载东财行业标签")
         
         # 检测文件编码
         encodings = ['utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'gb18030']
@@ -1151,11 +1151,13 @@ def add_stock_info_columns(file_path: str) -> bool:
         for row in rows:
             code = normalize_code_for_lookup(row.get('code', ''))
             if code:
-                tags = split_sector_tags(store.sectors_for_stock(code))
-                row['概念'] = ';'.join(tags['concepts'])
-                row['行业'] = ';'.join(tags['industries'])
-                row['板块'] = ';'.join(tags['sub_sectors'])
-                if tags['concepts'] or tags['industries'] or tags['sub_sectors']:
+                tags_ind = store.sectors_for_stock(code)
+                tags_con = store.concepts_for_stock(code)
+                tags_plate = store.plates_for_stock(code)
+                row['概念'] = ';'.join(tags_con)
+                row['行业'] = ';'.join(tags_ind)
+                row['板块'] = ';'.join(tags_plate)
+                if tags_con or tags_ind or tags_plate:
                     filled_count += 1
                 else:
                     empty_count += 1
@@ -3151,10 +3153,10 @@ class SectorStockFilterDialog(QDialog):
         self.countdown_seconds = 30  # 倒计时秒数
         
         # 存储所有板块数据（需要在setup_ui之前初始化，因为load_sectors_to_list会使用）
-        self.all_sectors_list = []  # QMT 申万/概念等板块列表
+        self.all_sectors_list = []  # 东财行业榜
         self.sector_checkboxes = {}  # {sector_name: QCheckBox}
         
-        self._sector_store = get_qmt_sector_store()
+        self._sector_store = get_em_sector_store()
         
         # 存储股票列表的板块信息 {stock_code: [sector1, sector2, ...]}
         self._stock_sectors_map = {}
@@ -3208,11 +3210,12 @@ class SectorStockFilterDialog(QDialog):
         deselect_all_btn = QPushButton("取消全选")
         deselect_all_btn.clicked.connect(self.deselect_all_sectors)
         search_layout.addWidget(deselect_all_btn)
-        
         search_layout.addStretch()
-        
-        # 筛选模式选择（并集/交集）
-        search_layout.addWidget(QLabel("筛选模式："))
+        sector_layout.addLayout(search_layout)
+
+        # 筛选模式单独一行，避免和搜索挤在半宽里
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("筛选模式："))
         from PyQt5.QtWidgets import QRadioButton, QButtonGroup
         self.sector_mode_group = QButtonGroup()
         self.union_mode_radio = QRadioButton("并集（属于任意一个板块）")
@@ -3220,18 +3223,17 @@ class SectorStockFilterDialog(QDialog):
         self.union_mode_radio.setChecked(True)  # 默认并集
         self.sector_mode_group.addButton(self.union_mode_radio, 0)
         self.sector_mode_group.addButton(self.intersection_mode_radio, 1)
-        search_layout.addWidget(self.union_mode_radio)
-        search_layout.addWidget(self.intersection_mode_radio)
-        # 当筛选模式改变时，重新更新股票列表
+        mode_layout.addWidget(self.union_mode_radio)
+        mode_layout.addWidget(self.intersection_mode_radio)
+        mode_layout.addStretch()
         self.union_mode_radio.toggled.connect(self.on_sector_mode_changed)
         self.intersection_mode_radio.toggled.connect(self.on_sector_mode_changed)
+        sector_layout.addLayout(mode_layout)
         
-        sector_layout.addLayout(search_layout)
-        
-        # 板块列表（使用QScrollArea + QGridLayout，一行显示多个）
+        # 板块列表（使用QScrollArea + QGridLayout）。高度跟右侧股票表一起拉满。
         self.sector_scroll = QScrollArea()
         self.sector_scroll.setWidgetResizable(True)
-        self.sector_scroll.setMaximumHeight(300)
+        self.sector_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.sector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
         # 创建容器widget和网格布局
@@ -3248,7 +3250,7 @@ class SectorStockFilterDialog(QDialog):
         sector_layout.addWidget(self.sector_count_label)
         
         self.sector_group.setLayout(sector_layout)
-        layout.addWidget(self.sector_group)
+        self.sector_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         # 选中板块对应的股票列表
         self.stock_list_group = QGroupBox("选中板块对应的股票列表 (0 只)")
@@ -3281,7 +3283,10 @@ class SectorStockFilterDialog(QDialog):
         stock_export_btn = QPushButton("导出到文件")
         stock_export_btn.clicked.connect(self.export_stock_list_to_file)
         stock_search_layout.addWidget(stock_export_btn)
+        stock_search_layout.addStretch()
+        stock_list_layout.addLayout(stock_search_layout)
 
+        exclude_layout = QHBoxLayout()
         self.exclude_st_checkbox = QCheckBox("排除ST股")
         self.exclude_st_checkbox.setToolTip(
             "开关：开启时备选池不含 ST/*ST；关闭后自动加回。状态会保存，下次启动恢复。"
@@ -3294,10 +3299,10 @@ class SectorStockFilterDialog(QDialog):
         self._load_stock_exclude_prefs()
         self.exclude_st_checkbox.stateChanged.connect(self._on_stock_exclude_filter_changed)
         self.exclude_star_bj_checkbox.stateChanged.connect(self._on_stock_exclude_filter_changed)
-        stock_search_layout.addWidget(self.exclude_st_checkbox)
-        stock_search_layout.addWidget(self.exclude_star_bj_checkbox)
-        
-        stock_list_layout.addLayout(stock_search_layout)
+        exclude_layout.addWidget(self.exclude_st_checkbox)
+        exclude_layout.addWidget(self.exclude_star_bj_checkbox)
+        exclude_layout.addStretch()
+        stock_list_layout.addLayout(exclude_layout)
         
         self.stock_list_table = QTableWidget()
         self.stock_list_table.setColumnCount(4)
@@ -3310,8 +3315,8 @@ class SectorStockFilterDialog(QDialog):
         stock_list_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         stock_list_header.setSectionResizeMode(3, QHeaderView.Stretch)
         
-        self.stock_list_table.setMaximumHeight(200)
-        stock_list_layout.addWidget(self.stock_list_table)
+        self.stock_list_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        stock_list_layout.addWidget(self.stock_list_table, 1)
         
         # 已选择股票数量标签
         self.stock_selected_count_label = QLabel("已选择: 0 只股票")
@@ -3321,43 +3326,39 @@ class SectorStockFilterDialog(QDialog):
         self.stock_checkboxes = {}
         
         self.stock_list_group.setLayout(stock_list_layout)
-        layout.addWidget(self.stock_list_group)
+        self.stock_list_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        picker = QSplitter(Qt.Horizontal)
+        picker.setChildrenCollapsible(False)
+        picker.addWidget(self.sector_group)
+        picker.addWidget(self.stock_list_group)
+        picker.setStretchFactor(0, 1)
+        picker.setStretchFactor(1, 1)
+        picker.setMinimumHeight(420)
+        layout.addWidget(picker, 1)
 
         # 仅板块/股票放入外层 QScrollArea。规则代码编辑框若放在同一 QScrollArea 内会与外层滚动嵌套，
         # QPlainTextEdit 被文档高度撑满，内部无法用自己的滚动条滚动代码。
         self._main_scroll.setWidget(inner)
-        outer_layout.addWidget(self._main_scroll, 0)
+        self._main_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        outer_layout.addWidget(self._main_scroll, 1)
         
         # 选股规则区域（替代固定的三种模式）
         rules_group = QGroupBox("选股规则（可增删改、导入导出；每条规则一个 JSON 文件，名称不可重复）")
         rules_layout = QVBoxLayout()
 
-        # 内置模式窗口参数：单行节省纵向空间，完整说明放在悬停提示里（避免规则区总高度过小把左侧按钮挤出可视区）
-        params_layout = QHBoxLayout()
-        _hint_full = (
+        _rule_code_hint_full = (
+            "规则代码须定义 select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx)"
+            " → (bool, extra_dict)。\n"
             "规则参数与逻辑均写在规则代码内（自包含，不调用 ctx['builtin_check'] 等引擎函数）。"
             "可在代码顶部用常量定义 N、M、L 及 REQUIRE_* 开关（True/False/None）；"
             "True/False 为互斥条件，None 表示忽略该条件；"
-            "REQUIRE_LOWER_SHADOW、REQUIRE_BOLL_BREAK、REQUIRE_MA_SUPPORT_AFTER 等为可反相开关；"
+            "REQUIRE_LOWER_SHADOW、REQUIRE_BOLL_BREAK、REQUIRE_MA_SUPPORT_AFTER 等为可反相开关。\n"
             "select(...) 接收 daily_data（截至选股日的日线）、as_of_date；"
             "ctx 含 params（引擎读取 N/M 用于日历预取）、inflow_rank"
             "（当日净流入占流通% 排名 {code6:{rank,pct,name}}，供主力净流入 A/B 档）、"
             "hot_theme（十大热门题材）、em_board_hot（东财连续2日热门+组内RS）。"
         )
-        _hint_label = QLabel("规则逻辑全部写在代码内；顶部定义 N、M 等参数（悬停查看说明）")
-        _hint_label.setToolTip(_hint_full)
-        params_layout.addWidget(_hint_label)
-        params_layout.addStretch()
-        rules_layout.addLayout(params_layout)
-
-        # 规则代码书写说明（整行），避免压在右侧栏内把「列表 vs 代码框」撑成不同高度
-        _rule_code_hint_full = (
-            "规则代码须定义 select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx)"
-            " → (bool, extra_dict)；全部选股逻辑写在本文件内，勿调用规则代码外的引擎函数。"
-        )
-        _rule_code_top = QLabel("须定义 select(...)→(bool,extra)；逻辑自包含；详情见悬停说明")
-        _rule_code_top.setToolTip(_rule_code_hint_full)
-        rules_layout.addWidget(_rule_code_top)
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -3394,7 +3395,7 @@ class SectorStockFilterDialog(QDialog):
         right_widget = QWidget()
         right_layout = QVBoxLayout()
 
-        _lbl_rule_code = QLabel("规则代码：")
+        _lbl_rule_code = QLabel("规则代码：（悬停查看说明）")
         _lbl_rule_code.setToolTip(_rule_code_hint_full)
         right_layout.addWidget(_lbl_rule_code)
         self.rule_code_unsaved_hint = QLabel(
@@ -4027,25 +4028,16 @@ class SectorStockFilterDialog(QDialog):
         )
     
     def load_sectors_to_list(self):
-        """加载 QMT 板块到列表（申万行业 / 概念等）"""
+        """加载东财行业榜到列表。"""
         try:
             self.all_sectors_list = load_all_sectors()
             if not self.all_sectors_list:
-                from utils.qmt_execution_config import get_qmt_mode
-
-                mode = get_qmt_mode()
-                if mode in ("builtin", "standalone"):
-                    tip = (
-                        "未读到板块列表（builtin 模式使用 data/qmt_sector_index.json）。\n"
-                        "请先打开启动器补齐云端底稿；或待交易日 15:35 后"
-                        "大 QMT「蚂蚁量化规则」盘后流水线写完该文件。"
-                    )
-                else:
-                    tip = (
-                        "未从 QMT 获取到板块列表。\n"
-                        "请确认 MiniQMT/行情服务已启动，并在 QMT 下载中心勾选「全部板块」。"
-                    )
-                QMessageBox.warning(self, "板块数据为空", tip)
+                QMessageBox.warning(
+                    self,
+                    "板块数据为空",
+                    "未读到东财行业榜。\n"
+                    "请先跑盘后批跑里的涨停家数排名，生成 data/eastmoney_board_rank/industry_rank_日期.csv。",
+                )
             
             # 清空网格布局
             while self.sector_grid_layout.count():
@@ -4056,14 +4048,16 @@ class SectorStockFilterDialog(QDialog):
             self.sector_checkboxes.clear()
             
             # 每行显示的列数（可以根据需要调整）
-            columns_per_row = 5
+            columns_per_row = 3
             current_row = 0
             col = 0
             
-            # 添加所有 QMT 板块
-            for sector in self.all_sectors_list:
+            # 不属于任何行业与东财行业并列，默认勾选
+            for sector in self._sector_names_for_grid():
                 checkbox = QCheckBox(sector)
                 checkbox.stateChanged.connect(self.update_sector_count)
+                if sector == UNCLASSIFIED_INDUSTRY:
+                    checkbox.setToolTip("股票列表里、这些东财行业都没有归进去的股票。")
                 # 启动时默认全选，避免每次都需要手动点“全选”
                 checkbox.blockSignals(True)
                 checkbox.setChecked(True)
@@ -4077,7 +4071,9 @@ class SectorStockFilterDialog(QDialog):
             
             self.update_sector_count()
             # 更新板块选择标题，显示数量
-            self.sector_group.setTitle(f"板块选择（可多选） {len(self.all_sectors_list)} 个")
+            self.sector_group.setTitle(
+                f"东财行业（可多选） {len(self.all_sectors_list)} 个 + {UNCLASSIFIED_INDUSTRY}"
+            )
             
         except Exception as e:
             logger.error(f"加载板块列表失败: {str(e)}", exc_info=True)
@@ -4110,14 +4106,14 @@ class SectorStockFilterDialog(QDialog):
                 pass
         
         # 每行显示的列数
-        columns_per_row = 5
+        columns_per_row = 3
         current_row = 0
         col = 0
         
         matched_sectors_result: Optional[List[str]] = None
         if not search_text:
             # 如果搜索文本为空，显示所有综合板块
-            for sector in self.all_sectors_list:
+            for sector in self._sector_names_for_grid():
                 if sector in self.sector_checkboxes:
                     self.sector_grid_layout.addWidget(self.sector_checkboxes[sector], current_row, col)
                     self.sector_checkboxes[sector].show()
@@ -4128,7 +4124,7 @@ class SectorStockFilterDialog(QDialog):
         else:
             # 有搜索文本，只显示匹配的综合板块
             matched_sectors = []
-            for sector in self.all_sectors_list:
+            for sector in self._sector_names_for_grid():
                 if search_text in sector.lower():
                     matched_sectors.append(sector)
             
@@ -4262,8 +4258,13 @@ class SectorStockFilterDialog(QDialog):
         # 延迟更新股票列表，避免卡顿（单个复选框变化时也延迟更新）
         QTimer.singleShot(300, self.update_stock_list)
     
+    def _sector_names_for_grid(self) -> List[str]:
+        """行业勾选列表。不属于任何行业排在第一项，不计入东财行业榜。"""
+        names = [s for s in (self.all_sectors_list or []) if s != UNCLASSIFIED_INDUSTRY]
+        return [UNCLASSIFIED_INDUSTRY] + names
+
     def get_selected_sectors(self) -> List[str]:
-        """获取选中的板块列表"""
+        """获取选中的板块列表。"""
         selected = []
         for sector_name, checkbox in self.sector_checkboxes.items():
             if checkbox.isChecked():
@@ -4271,7 +4272,7 @@ class SectorStockFilterDialog(QDialog):
         return selected
     
     def update_stock_list(self):
-        """更新选中板块对应的股票列表（QMT 板块成分股）"""
+        """更新选中东财行业对应的股票列表。"""
         try:
             selected_sectors = self.get_selected_sectors()
 
@@ -4296,7 +4297,7 @@ class SectorStockFilterDialog(QDialog):
                 self.stock_checkboxes.clear()
                 self.stock_list_group.setTitle("选中板块对应的股票列表 (0 只)")
                 self.update_stock_selected_count()
-                self._schedule_auto_run_after_stock_list(ready=False, reason="QMT 板块数据不可用")
+                self._schedule_auto_run_after_stock_list(ready=False, reason="东财行业成分不可用")
                 return
 
             QApplication.processEvents()
@@ -4779,7 +4780,7 @@ class SectorStockFilterDialog(QDialog):
         return get_trading_dates(count, as_of_date)
     
     def _load_stocks_by_sectors(self, sector_names: List[str]) -> List[Tuple[str, str, str]]:
-        """按 QMT 板块筛选股票，返回 (代码, 名称, 所属板块) 列表。"""
+        """按东财行业筛选股票，返回 (代码, 名称, 所属行业) 列表。"""
         try:
             stock_dict = self._sector_store.stocks_for_sectors(sector_names, mode="union")
             stock_list: List[Tuple[str, str, str]] = []
@@ -4788,7 +4789,7 @@ class SectorStockFilterDialog(QDialog):
                 sectors = info.get("all_sectors") or []
                 for sector in sectors:
                     stock_list.append((code, name, sector))
-            logger.info("QMT 板块筛选: %d 条记录", len(stock_list))
+            logger.info("东财行业筛选: %d 条记录", len(stock_list))
             return stock_list
         except Exception as e:
             logger.error(f"加载股票信息失败: {str(e)}", exc_info=True)

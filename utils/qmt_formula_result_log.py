@@ -3,6 +3,8 @@
 
 策略只 print，不写文件。本模块在交易界面进程里跟着当天的
 XtClient_FormulaOutput_YYYYMMDD.log 往下读，只认 ANTRES 开头的短行。
+leg / legx / ent / lbu / posx 会合并进 filled_legs 和两个建仓日文件。
+cx 会把撤单结果写回 cancel_requests.json。
 """
 from __future__ import annotations
 
@@ -155,8 +157,30 @@ def _accept_line(line: str) -> None:
     if kind == "ord":
         _add_order(payload)
         return
+    if kind == "px":
+        # 策略已不再打 px；保留解析以兼容旧日志
+        return
     if kind == "snap":
         _take_snap(payload)
+        return
+    if kind == "leg":
+        _apply_filled_leg(payload)
+        return
+    if kind == "legx":
+        _apply_leg_clear(payload)
+        return
+    if kind == "ent":
+        _apply_entry(payload)
+        return
+    if kind == "lbu":
+        _apply_last_buy(payload)
+        return
+    if kind == "posx":
+        _apply_pos_clear(payload)
+        return
+    if kind == "cx":
+        _apply_cancel(payload)
+        return
 
 
 def _set_asset(payload: dict) -> None:
@@ -251,6 +275,38 @@ def _add_event(payload: dict) -> None:
     _DIRTY = True
 
 
+def _set_price(payload: dict) -> None:
+    global _DIRTY
+    code = str(payload.get("c") or "").strip().upper()
+    try:
+        price = float(payload.get("p") or 0)
+    except (TypeError, ValueError):
+        return
+    if not code or price <= 0:
+        return
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    stocks = _RESULTS.setdefault("stocks", {})
+    bucket = stocks.setdefault(code, {"events": []})
+    bucket["last_price"] = price
+    if payload.get("t"):
+        bucket["last_tick_time"] = str(payload.get("t"))
+    bucket["quote_recv_at"] = now
+    for src, dest in (
+        ("o", "today_open"),
+        ("h", "today_high"),
+        ("l", "today_low"),
+        ("lc", "last_close"),
+    ):
+        if not payload.get(src):
+            continue
+        try:
+            bucket[dest] = float(payload.get(src))
+        except (TypeError, ValueError):
+            pass
+    _RESULTS["quotes_recv_at"] = now
+    _DIRTY = True
+
+
 def _add_order(payload: dict) -> None:
     global _DIRTY
     orders = _RESULTS.setdefault("orders", [])
@@ -321,6 +377,7 @@ def _take_snap(payload: dict) -> None:
                 "traded_price": float(row.get("tp") or 0),
                 "order_sysid": str(row.get("id") or ""),
                 "order_time": str(row.get("tm") or ""),
+                "order_at": str(row.get("at") or ""),
             }
         )
     _RESULTS["positions"] = positions
@@ -332,6 +389,95 @@ def _take_snap(payload: dict) -> None:
     _OPEN_SNAP = {}
     global _DIRTY
     _DIRTY = True
+
+
+def _apply_filled_leg(payload: dict) -> None:
+    code = str(payload.get("c") or "").strip()
+    lid = str(payload.get("id") or "").strip()
+    if not code or not lid:
+        return
+    try:
+        from utils.filled_legs import note_leg
+
+        note_leg(
+            code,
+            name=payload.get("n") or "",
+            leg_key="%s:%s" % (code, lid),
+            side=payload.get("sd") or "",
+            volume=payload.get("v") or 0,
+            task_id=payload.get("task") or "",
+            filled_at=payload.get("at") or "",
+        )
+    except Exception:
+        pass
+
+
+def _apply_leg_clear(payload: dict) -> None:
+    code = str(payload.get("c") or "").strip()
+    if not code:
+        return
+    try:
+        from utils.filled_legs import clear_code
+
+        clear_code(code)
+    except Exception:
+        pass
+
+
+def _apply_entry(payload: dict) -> None:
+    code = str(payload.get("c") or "").strip()
+    day = str(payload.get("d") or "")[:10]
+    if not code or len(day) < 10:
+        return
+    try:
+        from utils.position_entry_dates import set_entry_date
+
+        set_entry_date(code, day, overwrite=False)
+    except Exception:
+        pass
+
+
+def _apply_last_buy(payload: dict) -> None:
+    code = str(payload.get("c") or "").strip()
+    day = str(payload.get("d") or "")[:10]
+    if not code or len(day) < 10:
+        return
+    try:
+        from utils.position_entry_dates import set_last_buy_date
+
+        set_last_buy_date(code, day)
+    except Exception:
+        pass
+
+
+def _apply_pos_clear(payload: dict) -> None:
+    code = str(payload.get("c") or "").strip()
+    if not code:
+        return
+    try:
+        from utils.position_entry_dates import clear_entry_date
+
+        clear_entry_date(code)
+    except Exception:
+        pass
+
+
+def _apply_cancel(payload: dict) -> None:
+    rid = str(payload.get("id") or "").strip()
+    status = str(payload.get("st") or "").strip()
+    if not rid or not status:
+        return
+    try:
+        from utils.cancel_request import mark_processed
+
+        mark_processed(
+            rid,
+            status,
+            msg=str(payload.get("msg") or ""),
+            processed_at=str(payload.get("at") or ""),
+        )
+    except Exception:
+        pass
 
 
 def fills_for_ui() -> list:

@@ -5381,7 +5381,7 @@ class MainWindowExt(Ui_mainWindow):
             # 1. 使用 trade_record_manager 创建操作控件
             try:
                 #self.logger.info(f"创建操作控件 - row: {row}")
-                operation_container = self.trade_record_manager.create_operation_widget(order_status)
+                operation_container = self.trade_record_manager.create_operation_widget(order_status, order_id)
                 if not operation_container:
                     self.logger.error(f"创建操作控件失败 - row: {row}")
                     return
@@ -5451,12 +5451,15 @@ class MainWindowExt(Ui_mainWindow):
                     _STYLE_ENDED,
                     _STYLE_MONITOR,
                     _STYLE_MONITORING,
+                    order_cancel_inflight,
                 )
 
                 if order_status in ['已成', '已撤', '废单']:
                     monitor_button.setEnabled(False)
                     monitor_button.setText("已结束")
                     monitor_button.setStyleSheet(_STYLE_ENDED)
+                elif order_cancel_inflight(order_id, order_status):
+                    pass
                 elif is_monitoring:
                     monitor_button.setText("监控中")
                     monitor_button.setStyleSheet(_STYLE_MONITORING)
@@ -5476,12 +5479,14 @@ class MainWindowExt(Ui_mainWindow):
         try:
             from ui.trade_record_manager import (
                 _STYLE_CANCEL,
+                _STYLE_CANCELING,
                 _STYLE_ENDED,
                 _STYLE_MONITOR,
                 _STYLE_MONITORING,
             )
             styles = {
                 "cancel": _STYLE_CANCEL,
+                "canceling": _STYLE_CANCELING,
                 "monitor": _STYLE_MONITOR,
                 "monitoring": _STYLE_MONITORING,
                 "ended": _STYLE_ENDED,
@@ -6236,7 +6241,7 @@ class MainWindowExt(Ui_mainWindow):
                 except Exception as e:
                     self.logger.debug(f"[订单列表撤单] 提前单人工撤单收尾失败: {e}")
                 
-                # 撤单成功后，更新按钮状态为"已结束"
+                # 入队成功只说明撤单已交给柜台，委托仍可能是已报。保持撤单中，等状态变成已撤。
                 if operation_container:
                     # 直接从布局中获取按钮
                     layout = operation_container.layout()
@@ -6250,16 +6255,16 @@ class MainWindowExt(Ui_mainWindow):
                     if cancel_button:
                         try:
                             cancel_button.setEnabled(False)
-                            cancel_button.setText("已结束")
-                            self._apply_order_op_btn_style(cancel_button, "ended")
+                            cancel_button.setText("撤单中")
+                            self._apply_order_op_btn_style(cancel_button, "canceling")
                         except RuntimeError:
                             self.logger.warning("撤单成功后，撤单按钮已被删除，无法更新状态")
                     
                     if monitor_button:
                         try:
                             monitor_button.setEnabled(False)
-                            monitor_button.setText("已结束")
-                            self._apply_order_op_btn_style(monitor_button, "ended")
+                            monitor_button.setText("撤单中")
+                            self._apply_order_op_btn_style(monitor_button, "canceling")
                         except RuntimeError:
                             self.logger.warning("撤单成功后，监控按钮已被删除，无法更新状态")
                 
@@ -6589,15 +6594,21 @@ class MainWindowExt(Ui_mainWindow):
                 return
             
             # 使用 trade_record_manager 更新基本按钮状态
-            self.trade_record_manager.update_operation_widget(operation_container, order_status)
+            self.trade_record_manager.update_operation_widget(
+                operation_container, order_status, order_id
+            )
             
             # 获取监控按钮并更新监控状态
             monitor_button = operation_container.findChild(QPushButton, "monitor_button")
             if monitor_button:
+                from ui.trade_record_manager import order_cancel_inflight
+
                 if any(status in order_status for status in ['已成', '已撤', '废单']):
                     monitor_button.setEnabled(False)
                     monitor_button.setText("已结束")
                     self._apply_order_op_btn_style(monitor_button, "ended")
+                elif order_cancel_inflight(order_id, order_status):
+                    pass
                 else:
                     monitor_button.setEnabled(True)
                     if is_monitoring:

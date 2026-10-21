@@ -72,6 +72,22 @@ def _op_btn_style(bg: str, hover: str = "", pressed: str = "") -> str:
 
 
 _STYLE_CANCEL = _op_btn_style("#FF5722", "#E64A19", "#D84315")
+_STYLE_CANCELING = _op_btn_style("#FFA726")
+
+
+def order_cancel_inflight(order_id, order_status) -> bool:
+    """撤单已提交、或柜台已是待撤时，按钮保持不可点。"""
+    status = str(order_status or "")
+    if any(flag in status for flag in ("已成", "已撤", "废单")):
+        return False
+    if "待撤" in status:
+        return True
+    try:
+        from utils.cancel_request import cancel_inflight
+
+        return bool(cancel_inflight(order_id))
+    except Exception:
+        return False
 _STYLE_MONITOR = _op_btn_style("#4CAF50", "#45A049", "#3D8B40")
 _STYLE_MONITORING = _op_btn_style("#FF9800", "#F57C00", "#E65100")
 _STYLE_ENDED = _op_btn_style("#9E9E9E")
@@ -594,7 +610,7 @@ class TradeRecordManager:
             item = self.create_table_item(value, status_text=status_text)
             table.setItem(new_row, col, item)
 
-    def create_operation_widget(self, order_status):
+    def create_operation_widget(self, order_status, order_id=""):
         """创建操作按钮控件，只返回 QWidget，不做 setCellWidget 和信号连接"""
         try:
             operation_container = QWidget()
@@ -627,6 +643,13 @@ class TradeRecordManager:
                 monitor_button.setEnabled(False)
                 monitor_button.setText("已结束")
                 monitor_button.setStyleSheet(_STYLE_ENDED)
+            elif order_cancel_inflight(order_id, order_status):
+                cancel_button.setEnabled(False)
+                cancel_button.setText("撤单中")
+                cancel_button.setStyleSheet(_STYLE_CANCELING)
+                monitor_button.setEnabled(False)
+                monitor_button.setText("撤单中")
+                monitor_button.setStyleSheet(_STYLE_CANCELING)
 
             operation_layout.addWidget(cancel_button)
             operation_layout.addWidget(monitor_button)
@@ -643,7 +666,7 @@ class TradeRecordManager:
     def add_cancel_button(self, table, row, order_status, order_id, callback=None):
         """添加撤单按钮（保留兼容性，但建议使用 create_operation_widget）"""
         try:
-            operation_container = self.create_operation_widget(order_status)
+            operation_container = self.create_operation_widget(order_status, order_id)
             if operation_container:
                 table.setCellWidget(row, 8, operation_container)
                 
@@ -684,7 +707,7 @@ class TradeRecordManager:
         except Exception as e:
             self.logger.error(f"添加撤单按钮失败: {e}")
 
-    def update_operation_widget(self, operation_container, order_status):
+    def update_operation_widget(self, operation_container, order_status, order_id=""):
         """更新操作按钮状态"""
         try:
             if not operation_container:
@@ -696,7 +719,7 @@ class TradeRecordManager:
             if not cancel_button or not monitor_button:
                 return
             
-            # 根据订单状态更新按钮
+            # 根据订单状态更新按钮。撤单已提交时柜台仍是已报，不要把按钮刷回可点。
             if order_status in ['已成', '已撤', '废单']:
                 cancel_button.setEnabled(False)
                 cancel_button.setText("已结束")
@@ -704,6 +727,13 @@ class TradeRecordManager:
                 monitor_button.setEnabled(False)
                 monitor_button.setText("已结束")
                 monitor_button.setStyleSheet(_STYLE_ENDED)
+            elif order_cancel_inflight(order_id, order_status):
+                cancel_button.setEnabled(False)
+                cancel_button.setText("撤单中")
+                cancel_button.setStyleSheet(_STYLE_CANCELING)
+                monitor_button.setEnabled(False)
+                monitor_button.setText("撤单中")
+                monitor_button.setStyleSheet(_STYLE_CANCELING)
             else:
                 cancel_button.setEnabled(True)
                 cancel_button.setText("撤单")
@@ -720,7 +750,7 @@ class TradeRecordManager:
         try:
             operation_container = table.cellWidget(row, 8)
             if operation_container:
-                self.update_operation_widget(operation_container, order_status)
+                self.update_operation_widget(operation_container, order_status, order_id)
         except Exception as e:
             self.logger.error(f"更新撤单按钮失败: {e}")
 

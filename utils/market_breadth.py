@@ -51,7 +51,25 @@ def is_hs_a_cache_file(path: Path) -> bool:
 
 
 def load_name_map() -> Dict[str, str]:
+    """名称以资料文件为准。CSV 只补资料文件里还没有的代码。"""
     out: Dict[str, str] = {}
+    if STOCK_INFO_JSON.is_file():
+        try:
+            raw = json.loads(STOCK_INFO_JSON.read_text(encoding="utf-8"))
+            wrapped = raw.get("stocks") if isinstance(raw, dict) else None
+            stocks = wrapped if isinstance(wrapped, dict) else raw
+            if isinstance(stocks, dict):
+                for k, v in stocks.items():
+                    if str(k).startswith("_") or not isinstance(v, dict):
+                        continue
+                    digits = "".join(ch for ch in str(v.get("stock_code") or k) if ch.isdigit())
+                    if len(digits) < 6:
+                        continue
+                    nm = str(v.get("name") or "").strip()
+                    if nm:
+                        out[digits[-6:]] = nm
+        except Exception:
+            pass
     if STOCKS_CSV.is_file():
         try:
             with STOCKS_CSV.open("r", encoding="utf-8-sig", newline="") as f:
@@ -60,26 +78,15 @@ def load_name_map() -> Dict[str, str]:
                 code_k = fields[0] if fields else None
                 name_k = fields[1] if len(fields) > 1 else None
                 for row in reader:
-                    code6 = "".join(ch for ch in str(row.get(code_k) or "") if ch.isdigit())[-6:].zfill(6)
-                    if len(code6) != 6:
+                    digits = "".join(ch for ch in str(row.get(code_k) or "") if ch.isdigit())
+                    if len(digits) < 6:
                         continue
-                    out[code6] = str(row.get(name_k) or "").strip()
-        except Exception:
-            pass
-    if STOCK_INFO_JSON.is_file():
-        try:
-            raw = json.loads(STOCK_INFO_JSON.read_text(encoding="utf-8"))
-            stocks = raw.get("stocks") if isinstance(raw, dict) else raw
-            if isinstance(stocks, dict):
-                for k, v in stocks.items():
-                    if not isinstance(v, dict):
+                    code6 = digits[-6:]
+                    if out.get(code6):
                         continue
-                    code6 = "".join(ch for ch in str(v.get("stock_code") or k) if ch.isdigit())[-6:].zfill(6)
-                    if len(code6) != 6:
-                        continue
-                    nm = str(v.get("name") or "").strip()
-                    if nm:
-                        out[code6] = nm
+                    name = str(row.get(name_k) or "").strip()
+                    if name:
+                        out[code6] = name
         except Exception:
             pass
     return out

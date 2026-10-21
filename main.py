@@ -347,24 +347,36 @@ class TradingApp(QMainWindow):
                 "QMT 内置策略有更新（%d 个文件）：%s。请在模型交易中重启「蚂蚁量化规则」。"
                 % (len(changed), names)
             )
-            from PyQt5.QtWidgets import QMessageBox
-
-            QMessageBox.information(
-                self,
-                "请重启蚂蚁量化规则",
-                "检测到 QMT 内置策略有更新，已写入大 QMT（%d 个文件）。\n"
-                "请在模型交易里重启「蚂蚁量化规则」后才会生效。\n\n%s"
-                % (len(changed), "\n".join(changed)),
-            )
+            self._qmt_restart_files = list(changed)
         except Exception as e:
             self.logger.warning(
                 "自动 deploy_to_qmt 失败，交易系统继续启动: %s" % e
             )
         
+    def _show_qmt_restart_notice(self, changed) -> None:
+        files = list(changed or [])
+        if not files:
+            return
+        from PyQt5.QtWidgets import QMessageBox
+
+        QMessageBox.information(
+            self,
+            "请重启蚂蚁量化规则",
+            "检测到 QMT 内置策略有更新，已写入大 QMT（%d 个文件）。\n"
+            "请在模型交易里重启「蚂蚁量化规则」后才会生效。\n\n%s"
+            % (len(files), "\n".join(files)),
+        )
+
     def showEvent(self, event):
         """窗口显示时触发"""
         try:
             super().showEvent(event)
+            pending = getattr(self, "_qmt_restart_files", None)
+            if pending:
+                self._qmt_restart_files = None
+                from PyQt5.QtCore import QTimer
+
+                QTimer.singleShot(0, lambda files=list(pending): self._show_qmt_restart_notice(files))
             from utils.qmt_execution_config import requires_path_qmt
             if not self.account_id:
                 self.logger.info("请先在配置文件中设置 account_id")
@@ -502,7 +514,7 @@ class TradingApp(QMainWindow):
             try:
                 from utils.qmt_execution_config import use_builtin_price_feed
                 if use_builtin_price_feed():
-                    self.task_manager._sync_rules_armed_if_builtin()
+                    self.task_manager.publish_ui_boot_session()
             except Exception:
                 pass
                 

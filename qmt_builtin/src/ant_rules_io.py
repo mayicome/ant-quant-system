@@ -263,6 +263,8 @@ def collect_subscribe_codes(
         codes.add(code)
     for code in normalize_watch_codes(strategy_pool_watch):
         codes.add(code)
+    # 任务、自选、策略池都空时仍订一只大盘股，保证至少有行情回调和心跳。
+    codes.add("000001.SZ")
     return sorted(codes)
 
 

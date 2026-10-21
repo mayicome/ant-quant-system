@@ -222,11 +222,25 @@ def overlay_intraday_on_key_points(
     *,
     root: str | None = None,
 ) -> bool:
-    """用 results.json 覆盖/补全 今开盘、今日最高、今日最低（主程序图表初始加载）。"""
-    _, results_path = default_paths(root or _project_root())
-    snap = load_results_prices(results_path)
+    """用东财（或旧 results.json）补全今开盘、今日最高、今日最低。"""
     norm = str(stock_code or "").strip().upper()
-    bucket = snap.get(norm) or {}
+    bucket: Dict[str, Any] = {}
+    try:
+        from utils.eastmoney_spot import fetch_spot_quotes
+
+        q = fetch_spot_quotes([norm], timeout=3.0).get(norm) or {}
+        if isinstance(q, dict) and float(q.get("price") or 0) > 0:
+            bucket = {
+                "today_open": float(q.get("open") or 0),
+                "today_high": float(q.get("high") or 0),
+                "today_low": float(q.get("low") or 0),
+            }
+    except Exception:
+        bucket = {}
+    if not bucket:
+        _, results_path = default_paths(root or _project_root())
+        snap = load_results_prices(results_path)
+        bucket = snap.get(norm) or {}
     fields = (
         ("今开盘", "today_open"),
         ("今日最高", "today_high"),

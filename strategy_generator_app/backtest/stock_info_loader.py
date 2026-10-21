@@ -38,7 +38,7 @@ def get_stock_name_callable() -> Callable[[str], str]:
             "缺少股票信息模块：\n"
             f"  期望路径: {mod_path}\n"
             f"  （仓库根 = strategy_generator_app 的上一级: {root}）\n"
-            "请将 utils/stock_info_manager.py 与 data/all_a_stocks.csv 放在仓库根下。"
+            "请将 utils/stock_info_manager.py 与 data/all_a_stock_info.json 放在仓库根下。"
         )
 
     if root in sys.path:

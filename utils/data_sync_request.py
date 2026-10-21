@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-回测/选股缺本地缓存时，向大 QMT 内置策略提交拉取请求（日线 CSV / 日 tick parquet）。
-外部进程只读写 data/data_sync_requests.json 与落盘文件，不直连 xtdata。
+回测/选股读本地日线、分笔缓存。
+不再向大 QMT 提交 data/data_sync_requests.json。
 """
 from __future__ import annotations
 
@@ -69,8 +69,8 @@ except ImportError:
 
 
 def use_on_demand_qmt_sync() -> bool:
-    """builtin/standalone：缺缓存时走 QMT 按需同步，不用外部 xtdata。"""
-    return get_qmt_mode() in ("builtin", "standalone")
+    """不再向大 QMT 按需要日线或分笔。本地缓存照常读，缺口走外部渠道。"""
+    return False
 
 
 _SOFT_MISS_REASONS = frozenset(
@@ -508,7 +508,8 @@ def submit_daily_requests(
     *,
     through_date: Optional[date] = None,
 ) -> List[str]:
-    """提交日线同步请求；返回本次新提交的完整代码列表。"""
+    """提交日线同步请求；按需 QMT 下载已停用。"""
+    return []
     prune_stale_daily_failures()
     end_d = _clamp_through_date(through_date)
     end_s = end_d.isoformat()
@@ -577,10 +578,8 @@ def submit_full_daily_requests(
     from_date: Optional[date] = None,
     force: bool = False,
 ) -> List[str]:
-    """提交「上市以来全量日线」请求 → 大 QMT 内置 download，写入 data/daily_full/。
-
-    与 rolling daily_cache（约从 2025-01-01）分离；供岳教授新建票建档。
-    """
+    """提交「上市以来全量日线」请求。按需 QMT 下载已停用。"""
+    return []
     prune_stale_daily_failures()
     end_d = _clamp_through_date(through_date)
     start_d = from_date or FULL_HISTORY_FROM_DATE
@@ -648,7 +647,7 @@ def ensure_full_daily(
     end_d = _clamp_through_date(through_date)
     if _full_daily_ready(full, end_d):
         return True
-    submit_full_daily_requests([full], through_date=end_d)
+    return False
     deadline = time.time() + max(30.0, float(timeout_sec))
     while time.time() < deadline:
         if _full_daily_ready(full, end_d):
@@ -705,7 +704,8 @@ def submit_tick_requests(
     codes_6: Iterable[str],
     trade_date: date,
 ) -> List[str]:
-    """提交单日 tick 同步请求。"""
+    """提交单日 tick 同步请求。按需 QMT 下载已停用。"""
+    return []
     ymd = trade_date.strftime("%Y%m%d")
     data = load_requests()
     tick_root: Dict[str, Any] = data.setdefault("tick", {})
@@ -851,9 +851,7 @@ def wait_daily_cache(
     through_date = _clamp_through_date(through_date)
     if _daily_cache_ready(full, through_date):
         return True
-    if _daily_unavailable_today(full, through_date):
-        return False
-    submit_daily_requests([full], through_date=through_date)
+    return False
     deadline = time.time() + max(1.0, float(timeout_sec))
     while time.time() < deadline:
         if _daily_cache_ready(full, through_date):
@@ -887,10 +885,8 @@ def wait_daily_cache_pool(
         return [], []
 
     need = [f for f in fulls if not _daily_cache_ready(f, end_d)]
-    if not need:
-        return fulls, []
-    if need:
-        submit_daily_requests(need, through_date=end_d)
+    ready = [f for f in fulls if f not in set(need)]
+    return ready, need
 
     wait_sec = (
         pool_daily_wait_timeout_sec(len(need))
@@ -955,17 +951,9 @@ def wait_tick_cache_pool(
     if not c6_list:
         return [], []
 
-    need = [
-        c
-        for c in c6_list
-        if not _tick_cache_ready(c, trade_date) and not tick_sync_unavailable(c, trade_date)
-    ]
-    if not need:
-        ready = [c for c in c6_list if _tick_cache_ready(c, trade_date)]
-        skip = sorted(set(c6_list) - set(ready))
-        return ready, skip
-
-    submit_tick_requests(need, trade_date)
+    ready = [c for c in c6_list if _tick_cache_ready(c, trade_date)]
+    missing = sorted(set(c6_list) - set(ready))
+    return ready, missing
     wait_sec = (
         tick_pool_wait_timeout_sec(len(need))
         if timeout_sec is None

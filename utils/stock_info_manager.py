@@ -2,13 +2,46 @@
 # -*- coding: utf-8 -*-
 """
 全局股票信息管理器
-在程序启动时加载一次all_a_stocks.csv，然后全局共享使用
+名称以 data/all_a_stock_info.json 为准；上市日期仍可读 all_a_stocks.csv。
 """
 
+import json
 import os
 import pandas as pd
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+
+
+def load_info_name_map(path: str = "") -> Dict[str, str]:
+    """从 all_a_stock_info.json 读取 code6 -> 名称。"""
+    if not path:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "data", "all_a_stock_info.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    wrapped = raw.get("stocks")
+    stocks = wrapped if isinstance(wrapped, dict) else raw
+    out: Dict[str, str] = {}
+    for key, row in stocks.items():
+        if str(key).startswith("_") or not isinstance(row, dict):
+            continue
+        digits = "".join(
+            ch for ch in str(row.get("stock_code") or key) if ch.isdigit()
+        )
+        if len(digits) < 6:
+            continue
+        code = digits[-6:]
+        name = str(row.get("name") or "").strip()
+        if name:
+            out[code] = name
+    return out
 
 
 def _code_6_from_qmt_symbol(symbol: str) -> Optional[str]:
@@ -109,10 +142,9 @@ def _fetch_instrument_details_batched(xtdata, symbols: List[str], chunk_size: in
 
 class StockInfoManager:
     """全局股票信息管理器（单例模式）
-    
-    名称体系统一以 QMT InstrumentName 为准：
-    - 批量缓存来自 QMT 板块（A股 + ETF/基金）写入 all_a_stocks.csv
-    - 单次查询缓存未命中时实时调 get_instrument_detail，并写入内存缓存
+
+    名称以 all_a_stock_info.json 为准。CSV 只补上市日期，以及资料文件里还没有的代码。
+    单次查询仍可在两边都没有时再问 QMT InstrumentName。
     """
     
     _instance = None
@@ -318,6 +350,21 @@ class StockInfoManager:
             if "无法连接" in msg or "xtquant" in msg.lower():
                 self._qmt_lookup_disabled = True
         return ""
+
+    def _overlay_info_json_names(self) -> int:
+        """资料文件里的名称覆盖缓存。返回写入的名称条数。"""
+        names = load_info_name_map()
+        if not names:
+            return 0
+        if self._stock_info_cache is None:
+            self._stock_info_cache = {}
+        for code, name in names.items():
+            row = self._stock_info_cache.get(code)
+            if row is None:
+                self._stock_info_cache[code] = {"证券简称": name, "上市日期": ""}
+            else:
+                row["证券简称"] = name
+        return len(names)
     
     def _load_stock_info(self):
         """加载股票信息。
@@ -366,7 +413,13 @@ class StockInfoManager:
                 if not os.path.exists(stocks_file):
                     self._stock_info_cache = {}
                     self._cache_time = current_time
-                    print("[!] all_a_stocks.csv 不存在且重建失败")
+                    n_json = self._overlay_info_json_names()
+                    if n_json:
+                        print(
+                            f"[OK] 股票名称已从资料文件加载，共 {len(self._stock_info_cache)} 只"
+                        )
+                    else:
+                        print("[!] all_a_stocks.csv 不存在，资料文件也没有名称")
                     return
 
                 # 尝试多种编码方式读取CSV文件
@@ -388,6 +441,11 @@ class StockInfoManager:
                     print(f"[!] 无法读取股票信息文件，最后错误: {str(last_error)}")
                     self._stock_info_cache = {}
                     self._cache_time = current_time
+                    n_json = self._overlay_info_json_names()
+                    if n_json:
+                        print(
+                            f"[OK] 股票名称已从资料文件加载，共 {len(self._stock_info_cache)} 只"
+                        )
                     return
 
                 # 标准化股票代码格式
@@ -442,7 +500,11 @@ class StockInfoManager:
                                 )
                         except Exception as e:
                             print(f"[!] ETF 补全重建失败: {e}")
-                print(f"[OK] 全局股票信息管理器已加载，共 {len(self._stock_info_cache)} 只股票")
+                n_json = self._overlay_info_json_names()
+                print(
+                    f"[OK] 全局股票信息管理器已加载，共 {len(self._stock_info_cache)} 只"
+                    f"（资料文件名称 {n_json} 只）"
+                )
                     
         except Exception as e:
             print(f"加载股票信息失败: {e}")
@@ -450,7 +512,7 @@ class StockInfoManager:
             self._cache_time = current_time
     
     def get_stock_name(self, stock_code: str) -> str:
-        """获取股票名称（优先 CSV/内存缓存，未命中则实时查 QMT InstrumentName）。"""
+        """获取股票名称（优先资料文件，未命中再看 CSV，最后实时查 QMT）。"""
         try:
             self._load_stock_info()
             code_6 = self._code_6(stock_code)
