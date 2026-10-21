@@ -6,7 +6,7 @@
 
 网络：先直连；若被对端掐断，再试本机代理（EM_FUND_FLOW_PROXY / EM_HIST_PROXY /
 环境变量 HTTPS_PROXY，以及常见本地端口 7078/7890）。
-push2 全挂时由 fetch_individual_fund_flow_df_resilient 改走同花顺兜底。
+盘后默认仅东财 push2；仅显式 allow_ths=True 时才允许同花顺兜底。
 """
 from __future__ import annotations
 
@@ -344,9 +344,9 @@ def fetch_individual_fund_flow_df_resilient(
     page_size: int = 100,
     pause_s: float = 0.08,
     as_of: Optional[date] = None,
-    allow_ths: bool = True,
+    allow_ths: bool = False,
 ) -> Tuple[pd.DataFrame, dict]:
-    """东财 push2 优先；失败则同花顺全市场兜底。"""
+    """东财 push2 优先；仅 allow_ths=True 时同花顺兜底（盘后默认关闭）。"""
     errors: List[str] = []
     try:
         df, meta = fetch_individual_fund_flow_df(page_size=page_size, pause_s=pause_s)

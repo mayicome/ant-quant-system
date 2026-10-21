@@ -163,17 +163,21 @@ class Worker(QThread):
         self.use_asof_freeze = use_asof_freeze
         self.stop_on_gate_fail = stop_on_gate_fail
         self._stop_wechat = False
+        self._stop_capital_flow = False
         self._abort = False
 
     def request_stop_wechat_retry(self) -> None:
         self._stop_wechat = True
+
+    def request_stop_capital_flow_retry(self) -> None:
+        self._stop_capital_flow = True
 
     def request_abort(self) -> None:
         self._abort = True
 
     def run(self) -> None:
         root = project_root()
-        gate_ids = {"daily_cache"}
+        gate_ids = {"daily_cache", "capital_flow"}
         for sid in self.step_ids:
             if self._abort:
                 break
@@ -188,6 +192,8 @@ class Worker(QThread):
                     use_asof_freeze=self.use_asof_freeze,
                     wechat_auto_retry=True,
                     stop_wechat_retry=lambda: self._stop_wechat,
+                    capital_flow_auto_retry=True,
+                    stop_capital_flow_retry=lambda: self._stop_capital_flow,
                     sleep_between=1.0,
                 )
                 self.step_finished.emit(
@@ -280,6 +286,9 @@ class PostMarketWindow(QMainWindow):
         self.btn_stop_wechat = QPushButton("停止公众号自动重试")
         self.btn_stop_wechat.clicked.connect(self._on_stop_wechat)
         self.btn_stop_wechat.setEnabled(False)
+        self.btn_stop_capital = QPushButton("停止资金流自动重试")
+        self.btn_stop_capital.clicked.connect(self._on_stop_capital_flow)
+        self.btn_stop_capital.setEnabled(False)
         self.btn_retry_fail = QPushButton("重跑当前失败行")
         self.btn_retry_fail.clicked.connect(self._on_retry_failed_row)
         btn_row.addWidget(self.btn_rerun_all)
@@ -288,6 +297,7 @@ class PostMarketWindow(QMainWindow):
         btn_row.addWidget(self.btn_continue)
         btn_row.addWidget(self.btn_retry_fail)
         btn_row.addWidget(self.btn_stop_wechat)
+        btn_row.addWidget(self.btn_stop_capital)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
@@ -463,6 +473,7 @@ class PostMarketWindow(QMainWindow):
         self.btn_refresh.setEnabled(not busy)
         self.btn_retry_fail.setEnabled(not busy)
         self.btn_stop_wechat.setEnabled(busy)
+        self.btn_stop_capital.setEnabled(busy)
 
     def _start_worker(
         self,
@@ -488,6 +499,9 @@ class PostMarketWindow(QMainWindow):
             stop_on_gate_fail=stop_on_gate_fail,
             parent=self,
         )
+        # 新一轮任务重置停止标志
+        self.worker._stop_wechat = False
+        self.worker._stop_capital_flow = False
         self.worker.step_started.connect(self._on_step_started)
         self.worker.step_finished.connect(self._on_step_finished)
         self.worker.log_line.connect(self._append_log)
@@ -497,6 +511,8 @@ class PostMarketWindow(QMainWindow):
     def _on_step_started(self, sid: str) -> None:
         if sid == "wechat_draft":
             self._set_status(sid, STATUS_RETRY, "执行中（白名单失败会自动重试）")
+        elif sid == "capital_flow":
+            self._set_status(sid, STATUS_RETRY, "执行中（东财失败会每60s自动重试）")
         else:
             self._set_status(sid, STATUS_RUNNING)
 
@@ -596,6 +612,11 @@ class PostMarketWindow(QMainWindow):
         if self.worker:
             self.worker.request_stop_wechat_retry()
             self._append_log("已请求停止公众号自动重试。")
+
+    def _on_stop_capital_flow(self) -> None:
+        if self.worker:
+            self.worker.request_stop_capital_flow_retry()
+            self._append_log("已请求停止资金流自动重试。")
 
     def _start_scheduled(self) -> None:
         from utils.trading_day import is_tradeday

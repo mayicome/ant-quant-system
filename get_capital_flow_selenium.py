@@ -1920,7 +1920,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--selenium",
         action="store_true",
-        help="改用旧版 Selenium 翻页（默认走 push2 JSON 全量接口）",
+        help="改用旧版 Selenium 翻页（仅手工；盘后批跑勿用）",
+    )
+    parser.add_argument(
+        "--allow-ths",
+        action="store_true",
+        help="东财失败时允许同花顺兜底（盘后批跑请勿开启）",
     )
     parser.add_argument(
         "--page-size",
@@ -1968,7 +1973,7 @@ if __name__ == "__main__":
         df = get_capital_flow_selenium(min_amount_threshold=thr)
         fetch_source = "selenium"
     else:
-        print("正在拉取全量个股主力净流入（东财 push2 → 同花顺兜底）...")
+        print("正在拉取全量个股主力净流入（仅东财 push2；同花顺兜底默认关闭）...")
         print("-" * 60)
         try:
             from utils.eastmoney_fund_flow import (
@@ -1979,9 +1984,12 @@ if __name__ == "__main__":
             df, meta = fetch_individual_fund_flow_df_resilient(
                 page_size=args.page_size,
                 as_of=as_of_day,
-                allow_ths=True,
+                allow_ths=bool(args.allow_ths),
             )
             fetch_source = str(meta.get("source") or "api")
+            if fetch_source == "ths" and not args.allow_ths:
+                print("[拒绝] 未授权同花顺数据源（未传 --allow-ths），退出 1")
+                sys.exit(1)
             via = (
                 "代理 " + str(meta.get("proxy") or "")
                 if meta.get("via_proxy")
@@ -1995,19 +2003,13 @@ if __name__ == "__main__":
             if meta.get("fallback_errors"):
                 print(f"[warn] 前置数据源失败: {meta.get('fallback_errors')}")
         except Exception as e:
-            print(f"接口/同花顺抓取失败: {e}")
+            print(f"东财资金流接口失败: {e}")
             import traceback
 
             traceback.print_exc()
-            print("自动回退 Selenium 翻页（可能仍依赖东财 push2，成功率较低）…")
-            try:
-                thr = args.min_amount if args.min_amount > 0 else 3000
-                df = get_capital_flow_selenium(min_amount_threshold=thr)
-                fetch_source = "selenium"
-            except Exception as e2:
-                print(f"Selenium 回退也失败: {e2}")
-                traceback.print_exc()
-                sys.exit(1)
+            # 批跑路径禁止静默 Selenium/同花顺；由上层每 60s 阻塞重试
+            print("[退出] 东财失败且未启用 --selenium/--allow-ths，exit=1（供批跑重试）")
+            sys.exit(1)
 
     if df is not None and not df.empty:
         print(f"\n获取成功！共 {len(df)} 条数据：")

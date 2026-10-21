@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""从 QMT 内置策略写入的 results.json 轮询现价，驱动状态栏与图表竖线。"""
+"""读 QMT 策略日志写 results.json；界面现价走东财，驱动状态栏与图表。"""
 from __future__ import annotations
 
 import os
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import QObject, QTimer
 
@@ -22,7 +22,7 @@ from utils.qmt_execution_config import use_builtin_price_feed
 
 
 class BuiltinPricePoller(QObject):
-    """每 1 秒读取 results.json，更新 latest_prices / price_displays 并发射 tick_data_signal。"""
+    """每 1 秒读策略日志写 results.json；界面现价走东财，更新 latest_prices / price_displays。"""
 
     def __init__(self, task_manager, qmt_adapter=None, main_window=None, parent=None):
         super().__init__(parent)
@@ -52,6 +52,15 @@ class BuiltinPricePoller(QObject):
         self._health_last_check_ts = 0.0
         self._health_alert_since_ts = 0.0
         self._health_sct_sustain_sec = 120.0  # 持续异常这么久才推 Server酱，避免闪断刷屏
+        self._hb_stale = False
+        self._hb_notified = False
+        # 客户端 wholeMarket 统计：开市后仍是 No Data Push 才通知
+        self._nodata_stat_checked_ts = 0.0
+        self._nodata_stat_kind = ""
+        self._nodata_stat_age: Optional[float] = None
+        self._em_display_prices: Dict[str, Dict[str, Any]] = {}
+        self._last_em_fetch_ts = 0.0
+        self._em_fetch_interval_sec = 2.0
 
     def start(self) -> None:
         if not use_builtin_price_feed():
@@ -68,21 +77,178 @@ class BuiltinPricePoller(QObject):
         if not self.task_manager:
             return
         try:
+            self._poll_formula_log()
             if not os.path.isfile(self._results_path):
                 self._set_health_alert("大QMT无results.json（策略可能未运行）")
                 return
             mtime = os.path.getmtime(self._results_path)
-            prices = load_results_prices(self._results_path)
-            if prices or mtime != self._last_file_mtime:
+            qmt_quote_snap = load_results_prices(self._results_path)
+            display_prices = self._get_display_prices_eastmoney()
+            if display_prices:
+                self._apply_prices(display_prices)
+            elif qmt_quote_snap:
+                self._apply_prices(qmt_quote_snap)
+            if mtime != self._last_file_mtime:
                 self._last_file_mtime = mtime
-                self._apply_prices(prices)
             self._apply_account_snapshot()
             self._apply_orders_snapshot()
             self._apply_elastic_states_snapshot()
-            self._check_qmt_health(prices, mtime)
+            self._check_qmt_health(qmt_quote_snap, mtime)
+            self._note_formula_heartbeat()
         except Exception as e:
             if self.logger:
                 self.logger.debug(f"[builtin_price] 轮询失败: {e}")
+
+    def _poll_formula_log(self) -> None:
+        """读 QMT 策略日志，有变化时写回 results.json。"""
+        try:
+            from utils.qmt_formula_result_log import poll as poll_formula
+        except Exception:
+            return
+        try:
+            poll_formula(self._results_path)
+        except Exception as exc:
+            if self.logger:
+                self.logger.debug("[builtin_price] 策略日志读取失败: %s" % exc)
+
+    def _note_formula_heartbeat(self) -> None:
+        """早盘见过心跳后再停 90 秒才报。午后从 13:00 起算，30 秒没有推送就报。"""
+        try:
+            from utils.qmt_formula_result_log import (
+                current,
+                heartbeat_at,
+                heartbeat_seen,
+                heartbeat_subscribe,
+            )
+        except Exception:
+            return
+        now = datetime.now()
+        if self._in_afternoon_push_watch(now):
+            self._note_afternoon_push(now, current, heartbeat_at, heartbeat_subscribe)
+            return
+        if not heartbeat_seen():
+            return
+        if not self._in_health_watch_window(now):
+            self._hb_stale = False
+            self._hb_notified = False
+            return
+        from datetime import time as dt_time
+
+        start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        hb = float(heartbeat_at() or 0)
+        if hb < start.timestamp():
+            return
+        self._raise_heartbeat_stop(now, hb, heartbeat_subscribe, limit_sec=90.0)
+
+    def _in_afternoon_push_watch(self, now: Optional[datetime] = None) -> bool:
+        now = now or datetime.now()
+        try:
+            from utils.trading_day import is_tradeday
+        except Exception:
+            return False
+        if not is_tradeday(now.date()):
+            return False
+        from datetime import time as dt_time
+
+        t = now.time()
+        return dt_time(13, 0) <= t <= dt_time(15, 0)
+
+    @staticmethod
+    def _tick_clock(text: str):
+        parts = str(text or "").strip().split(":")
+        if len(parts) < 2:
+            return None
+        try:
+            from datetime import time as dt_time
+
+            sec = int(parts[2]) if len(parts) > 2 else 0
+            return dt_time(int(parts[0]), int(parts[1]), sec)
+        except (TypeError, ValueError):
+            return None
+
+    def _note_afternoon_push(self, now, current, heartbeat_at, heartbeat_subscribe) -> None:
+        from datetime import time as dt_time
+
+        if now.time() < dt_time(13, 0, 30):
+            return
+        row = {}
+        try:
+            data = current() or {}
+            got = data.get("heartbeat") if isinstance(data, dict) else None
+            if isinstance(got, dict):
+                row = got
+        except Exception:
+            row = {}
+        tick = self._tick_clock(row.get("t"))
+        seen_afternoon = tick is not None and dt_time(13, 0) <= tick <= dt_time(15, 0)
+        session_start = now.replace(hour=13, minute=0, second=0, microsecond=0)
+        if seen_afternoon:
+            hb = float(heartbeat_at() or 0)
+            limit = 90.0
+        else:
+            hb = session_start.timestamp()
+            limit = 30.0
+        self._raise_heartbeat_stop(now, hb, heartbeat_subscribe, limit_sec=limit)
+
+    def _raise_heartbeat_stop(self, now, hb, heartbeat_subscribe, limit_sec: float) -> None:
+        if heartbeat_subscribe is not None and heartbeat_subscribe() == 0:
+            if self._hb_stale:
+                self._hb_stale = False
+                self._hb_notified = False
+                self._set_health_alert("")
+            return
+        if self._in_auction_match_quiet(now):
+            if self._hb_stale:
+                self._hb_stale = False
+                self._set_health_alert("")
+            return
+        age = time.time() - float(hb or 0)
+        from datetime import time as dt_time
+
+        if dt_time(9, 30) <= now.time() < dt_time(11, 30):
+            quiet_end = now.replace(hour=9, minute=30, second=0, microsecond=0)
+            if float(hb or 0) < quiet_end.timestamp():
+                age = time.time() - quiet_end.timestamp()
+        if age < float(limit_sec):
+            if self._hb_stale:
+                self._hb_stale = False
+                self._hb_notified = False
+                self._set_health_alert("")
+            return
+        waited = int(limit_sec)
+        msg = "⚠ QMT策略心跳停了（超过%d秒没有日志心跳）" % waited
+        self._hb_stale = True
+        self._health_alert = msg
+        for holder in (self.qmt_adapter, self.task_manager, self.main_window):
+            if holder is not None:
+                try:
+                    setattr(holder, "builtin_health_alert", msg)
+                except Exception:
+                    pass
+        try:
+            if self.main_window is not None and hasattr(self.main_window, "update_status_bar"):
+                self.main_window.update_status_bar()
+        except Exception:
+            pass
+        if self._hb_notified:
+            return
+        self._hb_notified = True
+        try:
+            from utils.server_chan_notify import notify_alert
+
+            result = notify_alert(
+                "QMT策略心跳停止",
+                "交易时段里，蚂蚁量化规则超过 %d 秒没有打出日志心跳。\n\n请看一下 QMT 里的蚂蚁量化规则是否还在运行。"
+                % waited,
+                alert_key="qmt_hb_%s" % now.strftime("%Y%m%d"),
+                cooldown_sec=0,
+            )
+            if self.logger and result.get("success"):
+                self.logger.warning("[大QMT健康] 策略心跳停止已通过 Server酱 推送")
+        except Exception as exc:
+            self._hb_notified = False
+            if self.logger:
+                self.logger.debug("[大QMT健康] 策略心跳推送失败: %s" % exc)
 
     def _set_health_alert(self, msg: str) -> None:
         """更新健康告警；变化时刷新状态栏，并节流打日志/音效/Server酱。"""
@@ -142,11 +308,25 @@ class BuiltinPricePoller(QObject):
             from utils.server_chan_notify import notify_alert
 
             day = datetime.now().strftime("%Y%m%d")
+            nodata = "行情没有数据" in msg
+            if nodata:
+                title = "QMT行情没有数据"
+                body = (
+                    "开市后行情一直没有推送，客户端日志仍是 No Data Push。\n\n"
+                    "点一下重连没有用，需要重启 QMT 客户端。蚂蚁量化规则不用先停。"
+                )
+                alert_key = "qmt_quote_nodata_%s" % day
+            else:
+                title = "大QMT交易时段异常"
+                body = (
+                    "持续约%d秒：%s\n\n请检查大QMT交易/行情连接与「蚂蚁量化规则」是否在跑。"
+                    % (int(now - since), msg)
+                )
+                alert_key = "qmt_health_intraday_%s" % day
             r = notify_alert(
-                "大QMT交易时段异常",
-                "持续约%d秒：%s\n\n请检查大QMT交易/行情连接与「蚂蚁量化规则」是否在跑。"
-                % (int(now - since), msg),
-                alert_key="qmt_health_intraday_%s" % day,
+                title,
+                body,
+                alert_key=alert_key,
                 cooldown_sec=3600,
             )
             if r.get("success") and self.logger:
@@ -240,6 +420,84 @@ class BuiltinPricePoller(QObject):
         t = now.time()
         return dt_time(9, 25) <= t < dt_time(9, 30)
 
+    def _in_quote_nodata_watch(self, now: Optional[datetime] = None) -> bool:
+        """行情统计应已离开 No Data Push 的时段。
+
+        正常交易日 9:15 起变为有字节；午后这条统计要到约 13:39 才恢复，
+        13:40 之前的 No Data Push 不当成故障。
+        """
+        now = now or datetime.now()
+        try:
+            from utils.trading_day import is_tradeday
+        except Exception:
+            return False
+        if not is_tradeday(now.date()):
+            return False
+        from datetime import time as dt_time
+
+        t = now.time()
+        if dt_time(9, 16, 30) <= t <= dt_time(11, 30):
+            return True
+        if dt_time(13, 40) <= t <= dt_time(15, 0):
+            return True
+        return False
+
+    def _latest_whole_quote_stat(self, now: datetime) -> tuple:
+        """客户端日志里最近一条全市场行情统计。返回 (nodata|push, 距现在秒数)。"""
+        now_ts = time.time()
+        if now_ts - float(self._nodata_stat_checked_ts or 0) < 15.0:
+            return self._nodata_stat_kind, self._nodata_stat_age
+        self._nodata_stat_checked_ts = now_ts
+        self._nodata_stat_kind = ""
+        self._nodata_stat_age = None
+        try:
+            from utils.qmt_formula_result_log import _install_root
+
+            path = os.path.join(
+                _install_root(),
+                "userdata",
+                "log",
+                "XtClient_%s.log" % now.strftime("%Y%m%d"),
+            )
+            if not os.path.isfile(path):
+                return "", None
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                if size > 2 * 1024 * 1024:
+                    f.seek(size - 2 * 1024 * 1024)
+                raw = f.read()
+            text = raw.decode("gbk", "replace")
+            last_kind = ""
+            last_at = None
+            for ln in text.splitlines():
+                if "wholeMarketQuoterStatistics" not in ln:
+                    continue
+                if "No Data Push" in ln:
+                    kind = "nodata"
+                elif "countResponse" in ln:
+                    kind = "push"
+                else:
+                    continue
+                try:
+                    last_at = datetime.strptime(ln[:19], "%Y-%m-%d %H:%M:%S")
+                    last_kind = kind
+                except ValueError:
+                    continue
+            if last_at is not None and last_kind:
+                self._nodata_stat_kind = last_kind
+                self._nodata_stat_age = max(0.0, (now - last_at).total_seconds())
+        except Exception as exc:
+            if self.logger:
+                self.logger.debug("[大QMT健康] 行情统计读取失败: %s" % exc)
+        return self._nodata_stat_kind, self._nodata_stat_age
+
+    def _quote_feed_stuck(self, now: datetime) -> bool:
+        if not self._in_quote_nodata_watch(now):
+            return False
+        kind, age = self._latest_whole_quote_stat(now)
+        # 统计大约每分钟一行；超过 3 分钟没新行说明客户端日志停了，交给心跳告警
+        return kind == "nodata" and age is not None and age <= 180.0
+
     def _check_qmt_health(self, prices: Dict[str, Dict[str, Any]], file_mtime: float) -> None:
         """根据 results.json 的 tick/账户时间尽早发现大 QMT 卡顿或断连。"""
         now = datetime.now()
@@ -251,6 +509,14 @@ class BuiltinPricePoller(QObject):
 
         if not self._in_health_watch_window(now):
             self._set_health_alert("")
+            return
+
+        # 右下角行情停在红色：点重连无效，只有重启客户端才恢复推送
+        if self._quote_feed_stuck(now):
+            self._set_health_alert(
+                "⚠ QMT行情没有数据：开市后右下角仍是红色，点重连没用。"
+                "请重启 QMT 客户端（蚂蚁量化规则不用先停）"
+            )
             return
 
         in_auction = self._in_call_auction(now)
@@ -269,12 +535,23 @@ class BuiltinPricePoller(QObject):
             results_age = file_age
 
         # 2) 行情推送墙钟：quotes_recv_at（任一 tick/补种刷新），不看 sticky timetag / 价格是否变动
-        # 9:25–9:30 撮合静默段：回调可能停；有价则不报推送停（仍报无行情）
+        # 9:25–9:30 撮合静默段：回调可能停；不报推送停 / 无行情 / 策略心跳停
         quote_alert = ""
         quote_recv_age: Optional[float] = None
         if not prices:
-            # 集合竞价就要有价，否则策略生成会空窗
-            quote_alert = "无行情数据"
+            # 9:25–9:30 撮合静默：连续 tick 本就少/空，空 prices 不报「无行情」
+            if not in_match_quiet:
+                # 只有探针、没有任务股票时，日志心跳仍在，不当成无行情。
+                fresh_hb = False
+                try:
+                    from utils.qmt_formula_result_log import heartbeat_at, heartbeat_seen
+
+                    if heartbeat_seen() and time.time() - float(heartbeat_at() or 0) < 90.0:
+                        fresh_hb = True
+                except Exception:
+                    fresh_hb = False
+                if not fresh_hb:
+                    quote_alert = "无行情数据"
         elif not in_match_quiet:
             quotes_recv = ""
             for snap in (prices or {}).values():
@@ -339,20 +616,267 @@ class BuiltinPricePoller(QObject):
             # 无账户块且结果文件也旧
             account_alert = "账户快照缺失"
 
-        # 4) 策略整体停写
+        # 4) 策略日志心跳（ANTRES hb，约 60s）；不以 results.json 刷新间隔判定（snap/东财减负后文件会很久才变）
         writer_alert = ""
-        # 竞价阶段策略也必须持续 flush，否则生成任务取不到价
-        writer_thr = 12.0 if in_auction else 15.0
-        if results_age is not None and results_age >= writer_thr and file_age >= writer_thr:
-            writer_alert = "策略心跳停约%d秒" % int(max(results_age, file_age))
-            if in_auction:
-                writer_alert = "集合竞价" + writer_alert
+        hb_limit = 90.0
+        hb_seen = False
+        hb_age: Optional[float] = None
+        try:
+            from utils.qmt_formula_result_log import heartbeat_at, heartbeat_seen
+
+            hb_seen = bool(heartbeat_seen())
+            if hb_seen:
+                hb_age = max(0.0, now_ts - float(heartbeat_at() or 0))
+        except Exception:
+            hb_seen = False
+            hb_age = None
+
+        # 9:25–9:30：tick 回调常停，心跳节流必然超时；不报策略心跳停（仍保留 No Data Push 红灯）
+        if not in_match_quiet:
+            if hb_seen and hb_age is not None:
+                if hb_age >= hb_limit:
+                    writer_alert = "策略心跳停约%d秒" % int(hb_age)
+                    if in_auction:
+                        writer_alert = "集合竞价" + writer_alert
+            elif not hb_seen:
+                # 尚未见过 hb（策略未跑或日志未读到）：仅作弱兜底，阈值放宽避免误报
+                fallback_thr = 120.0
+                stale = max(
+                    results_age if results_age is not None else 0.0,
+                    file_age,
+                )
+                if stale >= fallback_thr:
+                    writer_alert = "策略日志无心跳约%d秒" % int(stale)
+                    if in_auction:
+                        writer_alert = "集合竞价" + writer_alert
 
         parts = [p for p in (writer_alert, quote_alert, tick_time_alert, account_alert) if p]
         if not parts:
             self._set_health_alert("")
             return
         self._set_health_alert("⚠ 大QMT " + "；".join(parts) + "（请检查交易/行情连接）")
+
+    @staticmethod
+    def _code6(stock_code: str) -> str:
+        text = str(stock_code or "").strip().upper()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        return digits[-6:] if len(digits) >= 6 else digits
+
+    def _in_open_gain_halt_window(self, now: Optional[datetime] = None) -> bool:
+        """交易日 9:15–15:00。开盘已经超过阈值也在这个窗口里停。"""
+        now = now or datetime.now()
+        try:
+            from utils.trading_day import is_tradeday
+        except Exception:
+            return False
+        if not is_tradeday(now.date()):
+            return False
+        from datetime import time as dt_time
+
+        return dt_time(9, 15) <= now.time() <= dt_time(15, 0)
+
+    def _charts_view(self):
+        mw = self.main_window
+        if mw is None:
+            return None
+        view = getattr(mw, "tasks_charts_view", None)
+        if view is not None:
+            return view
+        window = getattr(mw, "window", None)
+        return getattr(window, "tasks_charts_view", None)
+
+    def _chart_for_code(self, stock_code: str):
+        view = self._charts_view()
+        if view is None:
+            return None
+        code = str(stock_code or "").strip().upper()
+        code6 = self._code6(code)
+        keys = [code]
+        if code6:
+            keys.extend(["%s.SH" % code6, "%s.SZ" % code6, code6])
+        cache = getattr(view, "_chart_cache", None) or {}
+        widgets = getattr(view, "chart_widgets", None) or {}
+        for key in keys:
+            data = cache.get(key) or widgets.get(key)
+            if isinstance(data, dict) and data.get("chart") is not None:
+                return data.get("chart")
+        return None
+
+    def _collect_display_codes(self) -> List[str]:
+        codes: set = set()
+        tm = self.task_manager
+        if tm is not None and getattr(tm, "tasks", None):
+            norm = getattr(tm, "_normalize_stock_code", None)
+            for task in (tm.tasks or {}).values():
+                if not isinstance(task, dict):
+                    continue
+                c6 = norm(task.get("stock_code")) if callable(norm) else ""
+                if not c6 or c6 == "000000":
+                    continue
+                try:
+                    from utils.strategy_pool_watch import code_6_to_full
+
+                    full = code_6_to_full(c6)
+                except Exception:
+                    full = ""
+                if full:
+                    codes.add(str(full).strip().upper())
+        try:
+            _, positions = load_account_positions_snapshot(self._results_path)
+            for code in (positions or {}):
+                norm = str(code or "").strip().upper()
+                if norm:
+                    codes.add(norm)
+        except Exception:
+            pass
+        return sorted(codes)
+
+    def _fetch_display_prices_from_eastmoney(self) -> Dict[str, Dict[str, Any]]:
+        codes = self._collect_display_codes()
+        if not codes:
+            return {}
+        try:
+            from utils.eastmoney_spot import fetch_spot_quotes
+        except Exception:
+            return {}
+        quotes: Dict[str, Dict[str, float]] = {}
+        for i in range(0, len(codes), 80):
+            try:
+                quotes.update(fetch_spot_quotes(codes[i : i + 80], timeout=4.0))
+            except Exception:
+                continue
+        if not quotes:
+            return {}
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        wall_tick = datetime.now().strftime("%H:%M:%S")
+        out: Dict[str, Dict[str, Any]] = {}
+        for full, row in quotes.items():
+            if not isinstance(row, dict):
+                continue
+            price = float(row.get("price") or 0)
+            if price <= 0:
+                continue
+            norm = str(full or "").strip().upper()
+            out[norm] = {
+                "last_price": price,
+                "last_tick_time": wall_tick,
+                "quote_recv_at": now,
+                "quotes_recv_at": now,
+                "last_close": float(row.get("pre_close") or 0),
+                "today_open": float(row.get("open") or 0),
+                "today_high": float(row.get("high") or 0),
+                "today_low": float(row.get("low") or 0),
+                "updated_at": now,
+            }
+        return out
+
+    def _get_display_prices_eastmoney(self) -> Dict[str, Dict[str, Any]]:
+        now = time.time()
+        if (
+            self._em_display_prices
+            and now - float(self._last_em_fetch_ts or 0) < self._em_fetch_interval_sec
+        ):
+            return self._em_display_prices
+        self._last_em_fetch_ts = now
+        fresh = self._fetch_display_prices_from_eastmoney()
+        if fresh:
+            self._em_display_prices = fresh
+        return self._em_display_prices
+
+    def _apply_open_gain_halts(self, prices: Dict[str, Dict[str, Any]]) -> None:
+        """按昨收涨幅停买入。不看图是否在当前页，也不等价变了才查。"""
+        if not prices or not self._in_open_gain_halt_window():
+            return
+        tm = self.task_manager
+        tasks = getattr(tm, "tasks", None) or {}
+        if not tasks:
+            return
+        try:
+            from core.open_gain_halt import apply_open_gain_halt, should_halt_on_open_gain
+        except Exception:
+            return
+
+        by_code6: Dict[str, Dict[str, Any]] = {}
+        for code, snap in prices.items():
+            if isinstance(snap, dict):
+                by_code6[self._code6(code)] = snap
+
+        halted = []
+        for task in list(tasks.values()):
+            if not isinstance(task, dict):
+                continue
+            code = str(task.get("stock_code") or "").strip().upper()
+            snap = prices.get(code) or by_code6.get(self._code6(code))
+            if not isinstance(snap, dict):
+                continue
+            recv = str(snap.get("quote_recv_at") or snap.get("quotes_recv_at") or "")
+            if recv and recv[:10] != datetime.now().strftime("%Y-%m-%d"):
+                continue
+            params = task.get("params")
+            if not isinstance(params, dict):
+                continue
+            rules = params.get("rules")
+            if not isinstance(rules, list):
+                continue
+            name = str(task.get("stock_name") or "")
+            last_px = float(snap.get("last_price") or 0)
+            high_px = float(snap.get("today_high") or 0)
+            prev_px = float(snap.get("last_close") or 0)
+            if last_px <= 0 and high_px <= 0:
+                continue
+            chart = self._chart_for_code(code)
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                hit, detail = should_halt_on_open_gain(
+                    rule,
+                    stock_code=code,
+                    stock_name=name,
+                    prev_close=prev_px,
+                    last_price=last_px,
+                    high_price=high_px,
+                )
+                if not hit or not apply_open_gain_halt(rule, detail):
+                    continue
+                halted.append((code, rule, detail, chart))
+
+        if not halted:
+            return
+
+        for code, rule, detail, _chart in halted:
+            if self.logger:
+                self.logger.info(
+                    "[%s] 昨收涨幅熔断停止买入规则 %s: %s"
+                    % (code, rule.get("name") or "", detail)
+                )
+
+        # 规则对象已经写在任务 params 里。图若拿着同一批字典，重画即可。
+        for chart in {c for _c, _r, _d, c in halted if c is not None}:
+            try:
+                params = (getattr(chart, "task", None) or {}).get("params") or {}
+                rules = params.get("rules")
+                if isinstance(rules, list):
+                    chart.rules = rules
+            except Exception:
+                pass
+            for code, rule, _detail, owner in halted:
+                if owner is not chart:
+                    continue
+                try:
+                    if rule.get("early_order") and not rule.get("executed"):
+                        chart._cancel_single_early_order(rule)
+                except Exception:
+                    pass
+            try:
+                chart.update_chart()
+            except Exception:
+                pass
+
+        try:
+            tm.save_tasks(list(tasks.values()), merge_external=False)
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning("[builtin_price] 昨收涨幅熔断保存失败: %s" % exc)
 
     def _apply_prices(self, prices: Dict[str, Dict[str, Any]]) -> None:
         tm = self.task_manager
@@ -422,6 +946,8 @@ class BuiltinPricePoller(QObject):
                     self.qmt_adapter.tick_data_signal.emit(tick_data)
                 except Exception:
                     pass
+
+        self._apply_open_gain_halts(prices)
 
         # last_tick_time 粘滞时，状态栏改用 quotes_recv 墙钟，避免「实时」假死
         if quotes_recv_for_bar:
@@ -561,8 +1087,10 @@ class BuiltinPricePoller(QObject):
         try:
             from utils.order_session import filter_order_records
 
-            broker_orders = filter_order_records(broker_orders)
-            local_orders = filter_order_records(local_orders)
+            # 策略日志里的柜台单已经按会话筛过。tm 往往只有时分秒，不能再当成跨日残留丢掉。
+            # 本地下单记录经常没有日期。图表要靠它把「已报」收成淡节点，不能滤掉。
+            broker_orders = filter_order_records(broker_orders, allow_undated=True)
+            local_orders = filter_order_records(local_orders, allow_undated=True)
         except Exception:
             pass
 

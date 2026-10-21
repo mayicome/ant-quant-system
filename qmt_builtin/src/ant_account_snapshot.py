@@ -4,27 +4,57 @@ import os
 import time
 from datetime import datetime, timedelta, date, time as dt_time
 
-try:
-    from ant_qmt_paths import PROJECT_ROOT
-except Exception:
-    PROJECT_ROOT = ""
-
-ACCOUNT_SNAPSHOT_VERSION = "20260811.04"
+ACCOUNT_SNAPSHOT_VERSION = "20261017.2"
 
 _CACHED_ACCOUNT = None
 _CACHED_POSITIONS = {}
 _CACHED_ORDERS = {}  # order_sysid -> parsed
 _BOUND_ACCOUNT_ID = ""
 _DIAG_DONE = False
-_BJ_SECTOR_PROBE_DONE = False
 
 # 持仓空但股票市值明显偏高 → 可疑（真空仓：市值≈0，不告警）
 _POSITION_ALERT_MV_THRESHOLD = 5000.0
 _POSITION_ALERT_LOG_INTERVAL_SEC = 300.0  # 日志节流：约每 5 分钟
-_POSITION_ALERT_NOTIFY_COOLDOWN_SEC = 3600.0  # 交易时段 Server酱：约 1 小时一次
-_POSITION_ALERT_NOTIFY_COOLDOWN_OFFHOURS_SEC = 28800.0  # 非交易时段：约 8 小时一次（夜间/周末不刷屏）
 _LAST_POSITION_ALERT_LOG_TS = 0.0
 _POSITION_ALERT_ACTIVE = False
+_SIBLING_MODS = {}
+
+
+def _sibling_mod(filename):
+    """按 mtime 加载同目录模块。QMT 不卸载已导入的旧模块。"""
+    import importlib.util
+    import sys
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    try:
+        mtime = int(os.path.getmtime(path)) if os.path.isfile(path) else 0
+    except OSError:
+        mtime = 0
+    cached = _SIBLING_MODS.get(filename)
+    if cached is not None and cached[0] == mtime and mtime:
+        return cached[1]
+    if not mtime:
+        return None
+    stem = filename[:-3] if filename.endswith(".py") else filename
+    name = "%s_%d" % (stem, mtime)
+    mod = sys.modules.get(name)
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    _SIBLING_MODS[filename] = (mtime, mod)
+    return mod
+
+
+def _position_entry_mod():
+    return _sibling_mod("ant_position_entry_dates.py")
+
+
+def _filled_legs_mod():
+    return _sibling_mod("ant_filled_legs.py")
 
 # 与 XtQuant / 大 QMT 委托状态码一致（86=柜台「已确认」，常见于模型交易）
 # 注意：委托类型 IPO_SUBSCRIBE 也是 86，两套枚举同值，勿混用字段。
@@ -366,32 +396,109 @@ def _norm_code(raw):
     return code
 
 
-def _resolve_account_id(ContextInfo, explicit=""):
-    """账号优先：显式参数 → config.ini → ContextInfo。
+def _as_account_text(val):
+    if val is None or callable(val):
+        return ""
+    if isinstance(val, (bool, dict, list, tuple)):
+        return ""
+    text = str(val).strip()
+    if not text or text.lower() in ("none", "null", "stock", "credit"):
+        return ""
+    if any(ch in text for ch in "\\/ \t\r\n"):
+        return ""
+    if len(text) > 32:
+        return ""
+    return text
 
-    换账号后若只改 config.ini，仍跑着的策略 ContextInfo 可能还是旧号；
-    以配置为准，避免 results.json 继续写旧持仓。
-    """
-    if explicit:
-        return str(explicit).strip()
+
+def _account_from_mapping(mapping):
+    if not isinstance(mapping, dict):
+        return ""
+    for key in ("account", "accountID", "accountid", "account_id", "accid", "m_strAccountID"):
+        if key not in mapping:
+            continue
+        text = _as_account_text(mapping.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _platform_bound_account():
+    """模型交易绑在策略上的账号。QMT 把它放进策略全局变量 account。"""
     try:
-        import configparser
+        import sys
 
-        ini_path = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data", "config.ini")
-        if PROJECT_ROOT and os.path.isfile(ini_path):
-            cfg = configparser.ConfigParser()
-            cfg.read(ini_path, encoding="utf-8")
-            if cfg.has_option("Account", "account_id"):
-                aid = str(cfg.get("Account", "account_id") or "").strip()
-                if aid:
-                    return aid
+        frame = sys._getframe()
+        seen = set()
+        while frame is not None and id(frame) not in seen:
+            seen.add(id(frame))
+            g = frame.f_globals
+            modname = str(g.get("__name__") or "") if isinstance(g, dict) else ""
+            if not modname.startswith("ant_"):
+                text = _account_from_mapping(g)
+                if text:
+                    return text
+                text = _account_from_mapping(frame.f_locals)
+                if text:
+                    return text
+            frame = frame.f_back
     except Exception:
         pass
+    try:
+        import builtins
+
+        return _as_account_text(getattr(builtins, "account", None))
+    except Exception:
+        return ""
+
+
+def _as_account_type(val):
+    if val is None or callable(val) or isinstance(val, (bool, dict, list, tuple)):
+        return ""
+    text = str(val).strip().upper()
+    if text in ("STOCK", "CREDIT", "FUTURE", "FUTURES", "HUGANGTONG", "SHENGANGTONG"):
+        return text
+    return ""
+
+
+def _platform_account_type():
+    keys = ("accountType", "account_type", "acc_type")
+    try:
+        import sys
+
+        frame = sys._getframe()
+        seen = set()
+        while frame is not None and id(frame) not in seen:
+            seen.add(id(frame))
+            g = frame.f_globals if isinstance(frame.f_globals, dict) else {}
+            loc = frame.f_locals if isinstance(frame.f_locals, dict) else {}
+            modname = str(g.get("__name__") or "")
+            if not modname.startswith("ant_"):
+                for key in keys:
+                    raw = g.get(key) if key in g else loc.get(key)
+                    text = _as_account_type(raw)
+                    if text:
+                        return text
+            frame = frame.f_back
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_account_id(ContextInfo, explicit=""):
+    """账号来自模型绑定：显式参数、策略全局 account、ContextInfo。不读文件。"""
+    if explicit:
+        text = _as_account_text(explicit)
+        if text:
+            return text
+    text = _platform_bound_account()
+    if text:
+        return text
     if ContextInfo is not None:
-        for attr in ("accountID", "account_id", "account", "accid"):
-            val = getattr(ContextInfo, attr, None)
-            if val is not None and str(val).strip():
-                return str(val).strip()
+        for attr in ("account", "accountID", "accountid", "account_id", "accid", "m_strAccountID"):
+            text = _as_account_text(getattr(ContextInfo, attr, None))
+            if text:
+                return text
     return ""
 
 
@@ -459,13 +566,13 @@ def bind_trading_account(ContextInfo, account_id=""):
     aid = _resolve_account_id(ContextInfo, account_id)
     if not aid:
         return False, "no_account_id"
-    # 教程要求同时设置 account_type；缺省按普通股票账户
-    acct_type = ""
-    for attr in ("account_type", "accountType", "acc_type"):
-        val = getattr(ContextInfo, attr, None)
-        if val is not None and str(val).strip():
-            acct_type = str(val).strip()
-            break
+    acct_type = _platform_account_type()
+    if not acct_type and ContextInfo is not None:
+        for attr in ("account_type", "accountType", "acc_type"):
+            text = _as_account_type(getattr(ContextInfo, attr, None))
+            if text:
+                acct_type = text
+                break
     if not acct_type:
         acct_type = "STOCK"
     try:
@@ -486,7 +593,7 @@ def bind_trading_account(ContextInfo, account_id=""):
         setattr(ContextInfo, "accid", aid)
     except Exception:
         pass
-    return True, "%s/%s" % (aid, acct_type)
+    return True, acct_type
 
 
 def _fetch_trade_detail(ContextInfo, account_id, data_type, strategy_names=None):
@@ -923,11 +1030,7 @@ def _prune_cached_orders():
 
 
 def _prefer_richer_order(old, new):
-    """合并两笔同合同号委托：保留日期/时间等字段，状态取更新的。
-
-    DEAL 行常缺 m_strInsertDate，若直接覆盖 ORDER 会导致 order_at 丢失，
-    随后被会话过滤丢掉，UI 在「全日单」与「仅未成单」之间闪烁。
-    """
+    """Merge same-sysid order snapshots; keep declared volume."""
     if not isinstance(new, dict):
         return old if isinstance(old, dict) else {}
     if not isinstance(old, dict):
@@ -938,8 +1041,9 @@ def _prefer_richer_order(old, new):
             continue
         if isinstance(v, str) and not v.strip():
             continue
+        if k in ("volume", "traded_volume"):
+            continue
         out[k] = v
-    # 显式保住日期时间
     for k in ("order_at", "at", "order_time", "order_date"):
         nv = new.get(k)
         ov = old.get(k)
@@ -949,15 +1053,31 @@ def _prefer_richer_order(old, new):
         ns = int(new.get("broker_status") or 0)
         os_ = int(old.get("broker_status") or 0)
         if ns >= os_:
-            for k in ("broker_status", "broker_status_text", "traded_volume", "traded_price", "volume"):
+            for k in ("broker_status", "broker_status_text", "traded_price"):
                 if new.get(k) is not None and new.get(k) != "":
                     out[k] = new[k]
         else:
-            for k in ("broker_status", "broker_status_text", "traded_volume", "traded_price"):
+            for k in ("broker_status", "broker_status_text", "traded_price"):
                 if old.get(k) is not None and old.get(k) != "":
                     out[k] = old[k]
     except (TypeError, ValueError):
         pass
+
+    def _pos_int(v):
+        try:
+            n = int(float(v or 0))
+        except (TypeError, ValueError):
+            return 0
+        return n if n > 0 else 0
+
+    ov, nv = _pos_int(old.get("volume")), _pos_int(new.get("volume"))
+    if ov or nv:
+        out["volume"] = max(ov, nv)
+
+    ot, nt = _pos_int(old.get("traded_volume")), _pos_int(new.get("traded_volume"))
+    if ot or nt:
+        out["traded_volume"] = max(ot, nt)
+
     return out
 
 
@@ -1332,41 +1452,21 @@ def _match_broker_order(local, broker_orders):
 
 
 def _note_filled_leg_from_local_order(loc):
-    """柜台回填为已成时，把腿写入 filled_legs.json。"""
+    """柜台回填为已成时打腿日志。腿名用订单上已有的，不再读 rules_armed.json。"""
     if not isinstance(loc, dict):
         return
-    # 补全 leg_key / rule_name（下单时可能只有 task_id）
-    if not loc.get("leg_key") or not loc.get("rule_name"):
-        try:
-            import ant_filled_legs as _fl
-
-            info = _fl.lookup_leg_from_armed(loc.get("task_id"))
-            if info.get("leg_key") and not loc.get("leg_key"):
-                loc["leg_key"] = info["leg_key"]
-            if info.get("rule_name") and not loc.get("rule_name"):
-                loc["rule_name"] = info["rule_name"]
-        except Exception:
-            try:
-                from qmt_builtin.src import ant_filled_legs as _fl
-
-                info = _fl.lookup_leg_from_armed(loc.get("task_id"))
-                if info.get("leg_key") and not loc.get("leg_key"):
-                    loc["leg_key"] = info["leg_key"]
-                if info.get("rule_name") and not loc.get("rule_name"):
-                    loc["rule_name"] = info["rule_name"]
-            except Exception:
-                pass
     try:
-        import ant_filled_legs as _fl
-
-        _fl.note_from_order_record(loc)
+        _ped = _position_entry_mod()
+        if _ped is not None:
+            _ped.note_from_order_record(loc)
     except Exception:
-        try:
-            from qmt_builtin.src import ant_filled_legs as _fl
-
+        pass
+    try:
+        _fl = _filled_legs_mod()
+        if _fl is not None:
             _fl.note_from_order_record(loc)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 def merge_broker_orders_into_results(results, broker_orders):
@@ -1513,7 +1613,7 @@ def merge_broker_orders_into_results(results, broker_orders):
 
 
 def apply_deals_to_results(results, deal_raw, account_id=""):
-    """成交明细兜底：把能匹配到的本地单标为已成。"""
+    """Apply DEAL rows into broker_orders; do not let fill legs set order volume."""
     if not isinstance(results, dict):
         return False
     deal_rows = _rows(deal_raw)
@@ -1527,8 +1627,7 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
             parsed["traded_volume"] = int(float(tv or 0))
         except (TypeError, ValueError):
             parsed["traded_volume"] = int(parsed.get("traded_volume") or 0)
-        if not parsed.get("volume"):
-            parsed["volume"] = parsed.get("traded_volume") or 0
+        parsed.pop("volume", None)
         tp = _pick(row, "traded_price", "m_dPrice", "m_dTradePrice", "price", default=0)
         try:
             parsed["traded_price"] = float(tp or 0)
@@ -1539,16 +1638,53 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
         parsed["broker_status"] = 56
         parsed["broker_status_text"] = "已成"
         like_orders.append(parsed)
-    # merge with existing broker_orders（保留 ORDER 上的 order_at，避免 DEAL 缺日期把单刷没）
     existing = list(results.get("broker_orders") or [])
     by_sys = {}
-    for bo in existing + like_orders:
+
+    def _bo_key(bo):
+        sid = str(bo.get("order_sysid") or "").strip()
+        if sid:
+            return sid
+        return "tmp|%s|%s|%s" % (bo.get("stock_code"), bo.get("price"), bo.get("volume"))
+
+    existing_map = {}
+    for bo in existing:
         if not isinstance(bo, dict):
             continue
-        sid = str(bo.get("order_sysid") or "").strip()
-        key = sid or ("tmp|%s|%s|%s" % (bo.get("stock_code"), bo.get("price"), bo.get("volume")))
-        by_sys[key] = _prefer_richer_order(by_sys.get(key), bo)
-    # 同步回内存缓存，防止下一轮 ORDER 漏返回时丢已成单
+        key = _bo_key(bo)
+        existing_map[key] = dict(bo)
+        by_sys[key] = dict(bo)
+
+    batch_tv = {}
+    for leg in like_orders:
+        if not isinstance(leg, dict):
+            continue
+        key = _bo_key(leg)
+        try:
+            fill = int(float(leg.get("traded_volume") or 0))
+        except (TypeError, ValueError):
+            fill = 0
+        if fill > 0:
+            batch_tv[key] = int(batch_tv.get(key) or 0) + fill
+        by_sys[key] = _prefer_richer_order(by_sys.get(key), leg)
+
+    for key, add in batch_tv.items():
+        row = by_sys.get(key)
+        if not isinstance(row, dict):
+            continue
+        try:
+            base = int(float((existing_map.get(key) or {}).get("traded_volume") or 0))
+        except (TypeError, ValueError):
+            base = 0
+        if len(like_orders) <= 1:
+            merged_tv = base + add
+        else:
+            merged_tv = max(base, add)
+        try:
+            cur = int(float(row.get("traded_volume") or 0))
+        except (TypeError, ValueError):
+            cur = 0
+        row["traded_volume"] = max(merged_tv, cur)
     try:
         _upsert_cached_orders(list(by_sys.values()))
     except Exception:
@@ -1656,15 +1792,15 @@ def on_position_callback(ContextInfo, positionInfo):
             rec["market_value"] = 0.0
         _CACHED_POSITIONS[code] = rec
         try:
-            import ant_position_entry_dates as _ped
-
-            _ped.sync_from_positions(_CACHED_POSITIONS)
+            _ped = _position_entry_mod()
+            if _ped is not None:
+                _ped.sync_from_positions(_CACHED_POSITIONS)
         except Exception:
             pass
         try:
-            import ant_filled_legs as _fl
-
-            _fl.sync_clear_from_positions(_CACHED_POSITIONS)
+            _fl = _filled_legs_mod()
+            if _fl is not None:
+                _fl.sync_clear_from_positions(_CACHED_POSITIONS)
         except Exception:
             pass
     except Exception as e:
@@ -1685,30 +1821,20 @@ def _apply_parsed_positions(results, positions):
     _CACHED_POSITIONS.clear()
     if pos:
         _CACHED_POSITIONS.update(pos)
-    # 建仓日：随持仓快照维护，不依赖外部主程序
+    # 建仓日：只打日志。本进程见过的仓位消失才打清除。
     try:
-        import ant_position_entry_dates as _ped
-
-        _ped.sync_from_positions(pos)
-    except Exception:
-        try:
-            from qmt_builtin.src import ant_position_entry_dates as _ped
-
+        _ped = _position_entry_mod()
+        if _ped is not None:
             _ped.sync_from_positions(pos)
-        except Exception:
-            pass
-    # 持仓归零时清除已执行腿，便于下次再买再卖
-    try:
-        import ant_filled_legs as _fl
-
-        _fl.sync_clear_from_positions(pos)
     except Exception:
-        try:
-            from qmt_builtin.src import ant_filled_legs as _fl
-
+        pass
+    # 本进程打过的腿，持仓归零时打清除
+    try:
+        _fl = _filled_legs_mod()
+        if _fl is not None:
             _fl.sync_clear_from_positions(pos)
-        except Exception:
-            pass
+    except Exception:
+        pass
     return True
 
 
@@ -1767,118 +1893,31 @@ def _is_suspicious_empty_positions(account, positions_parsed):
     return True, "empty_pos_high_mv_low_cash"
 
 
-def _in_cn_equity_session(now=None):
-    """A 股常规交易时段：交易日 09:00–15:30（含午休；法定休市/夜盘不算）。
-
-    必须用 utils.trading_day.is_tradeday，不能只看周一到周五——否则国庆等
-    工作日假日会按盘中 1 小时冷却刷 Server酱。
-    """
-    now = now or datetime.now()
-    try:
-        from utils.trading_day import is_tradeday
-
-        if not is_tradeday(now.date()):
-            return False
-    except Exception:
-        # QMT 内偶发无 utils：退回周末判断（仍可能误判法定假日）
-        if now.weekday() >= 5:
-            return False
-    t = now.time()
-    return dt_time(9, 0) <= t <= dt_time(15, 30)
-
-
-def _position_alert_notify_cooldown_sec(now=None):
-    if _in_cn_equity_session(now):
-        return float(_POSITION_ALERT_NOTIFY_COOLDOWN_SEC)
-    return float(_POSITION_ALERT_NOTIFY_COOLDOWN_OFFHOURS_SEC)
-
-
-def _parse_iso_ts(raw):
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    try:
-        if "T" in s:
-            return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
-        if " " in s:
-            return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
-        return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
-    except Exception:
-        return None
-
-
-def _prev_notify_sent_at(results):
-    """从 results.position_alert 取上次成功推送时间（进程重载后仍可节流）。"""
-    if not isinstance(results, dict):
-        return None
-    prev = results.get("position_alert")
-    if not isinstance(prev, dict):
-        return None
-    return _parse_iso_ts(prev.get("notify_sent_at"))
-
-
 def _clear_position_alert(results):
     global _POSITION_ALERT_ACTIVE
     _POSITION_ALERT_ACTIVE = False
     if not isinstance(results, dict):
         return
     prev = results.get("position_alert")
-    keep_sent = None
-    if isinstance(prev, dict):
-        keep_sent = prev.get("notify_sent_at")
     if isinstance(prev, dict) and prev.get("active"):
-        cleared = {
+        results["position_alert"] = {
             "active": False,
             "cleared_at": _now_iso(),
             "reason": "positions_ok_or_flat",
         }
-        if keep_sent:
-            cleared["notify_sent_at"] = keep_sent
-        results["position_alert"] = cleared
     elif "position_alert" in results and not (
         isinstance(prev, dict) and prev.get("active") is False
     ):
-        cleared = {
+        results["position_alert"] = {
             "active": False,
             "cleared_at": _now_iso(),
             "reason": "positions_ok_or_flat",
         }
-        if keep_sent:
-            cleared["notify_sent_at"] = keep_sent
-        results["position_alert"] = cleared
-
-
-def _notify_position_alert_once(title, body, results=None):
-    cool = _position_alert_notify_cooldown_sec()
-    # results 落盘戳：策略重载会清空 ant_server_chan 内存冷却，夜间勿因此连发
-    last_dt = _prev_notify_sent_at(results)
-    if last_dt is not None and cool > 0:
-        age = (datetime.now() - last_dt).total_seconds()
-        if age < cool:
-            return "cooldown"
-    try:
-        try:
-            import ant_server_chan as sct
-        except ImportError:
-            import qmt_builtin.ant_server_chan as sct
-        r = sct.notify_alert(
-            title,
-            body,
-            alert_key="qmt_position_empty_high_mv",
-            cooldown_sec=cool,
-        )
-        if r.get("skipped"):
-            return "cooldown"
-        if r.get("success"):
-            return "sent"
-        return "fail:%s" % (r.get("message") or "")
-    except Exception as e:
-        return "err:%s" % e
 
 
 def _update_position_alert(results, positions_parsed, extra=None):
     """
-    写入 results.position_alert；可疑时空仓告警（日志节流 + 可选 Server酱）。
+    写入 results.position_alert；可疑时空仓只打日志。
     持仓恢复或真空仓时清除 active。
     """
     global _LAST_POSITION_ALERT_LOG_TS, _POSITION_ALERT_ACTIVE
@@ -1941,123 +1980,8 @@ def _update_position_alert(results, positions_parsed, extra=None):
             "total=%.2f parsed=%d — 请检查 QMT 持仓/重启 (%s)"
             % (mv, cash, total, pos_n, reason)
         )
-        notify_r = _notify_position_alert_once(
-            "大QMT持仓查询异常",
-            "持仓为空但股票市值=%.2f（阈值>=%.0f）\n现金=%.2f 总资产=%.2f\n"
-            "请检查 QMT 持仓面板或重启模型交易。\n原因=%s"
-            % (mv, _POSITION_ALERT_MV_THRESHOLD, cash, total, reason),
-            results=results,
-        )
-        alert["notify"] = notify_r
-        if notify_r == "sent":
-            alert["notify_sent_at"] = _now_iso()
         results["position_alert"] = alert
 
-
-
-def _probe_bj_sectors_once(ContextInfo):
-    """一次性探测本机 QMT 北交所板块是否可用，写入 data/bj_sector_probe.json。"""
-    global _BJ_SECTOR_PROBE_DONE
-    if _BJ_SECTOR_PROBE_DONE:
-        return
-    _BJ_SECTOR_PROBE_DONE = True
-    try:
-        import json
-
-        data_dir = ""
-        try:
-            from ant_qmt_paths import DATA_DIR
-
-            data_dir = str(DATA_DIR or "")
-        except Exception:
-            pass
-        if not data_dir and PROJECT_ROOT:
-            data_dir = os.path.join(str(PROJECT_ROOT).rstrip("\\/"), "data")
-        if not data_dir:
-            data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-
-        owners = []
-        if ContextInfo is not None:
-            owners.append(("ctx", ContextInfo))
-        try:
-            import builtins
-
-            owners.append(("builtins", builtins))
-        except Exception:
-            pass
-
-        sector_candidates = (
-            "\u4eac\u5e02A\u80a1",  # 京市A股
-            "\u6caa\u6df1\u4eacA\u80a1",  # 沪深京A股
-            "\u5317\u4ea4\u6240",  # 北交所
-            "\u5317\u4ea4\u6240A\u80a1",  # 北交所A股
-            "BJ",
-            "\u4eacA\u80a1",  # 京A股
-            "\u6caa\u6df1A\u80a1",  # 沪深A股（对照）
-        )
-        sector_counts = {}
-        samples = {}
-        for sec in sector_candidates:
-            best_n = -1
-            best_sample = []
-            src = ""
-            for label, owner in owners:
-                fn = getattr(owner, "get_stock_list_in_sector", None)
-                if not callable(fn):
-                    continue
-                try:
-                    raw = fn(sec) or []
-                except Exception:
-                    continue
-                try:
-                    n = len(raw)
-                except Exception:
-                    n = 0
-                if n > best_n:
-                    best_n = n
-                    src = label
-                    try:
-                        best_sample = [str(x) for x in list(raw)[:8]]
-                    except Exception:
-                        best_sample = []
-            sector_counts[sec] = {"n": max(0, best_n), "source": src}
-            samples[sec] = best_sample
-
-        matched_names = []
-        for label, owner in owners:
-            fn = getattr(owner, "get_sector_list", None)
-            if not callable(fn):
-                continue
-            try:
-                sl = fn() or []
-            except Exception:
-                continue
-            for s in sl:
-                t = str(s)
-                if any(k in t for k in ("\u4eac", "\u5317\u4ea4", "BJ", "bj")):
-                    if t not in matched_names:
-                        matched_names.append(t)
-            if matched_names:
-                break
-
-        payload = {
-            "probed_at": _now_iso(),
-            "snapshot_version": ACCOUNT_SNAPSHOT_VERSION,
-            "matched_sector_names": matched_names,
-            "sector_counts": sector_counts,
-            "samples": samples,
-        }
-        out_path = os.path.join(data_dir, "bj_sector_probe.json")
-        parent = os.path.dirname(out_path)
-        if parent and not os.path.isdir(parent):
-            os.makedirs(parent)
-        tmp = out_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, out_path)
-        # 探测结果已写入 bj_sector_probe.json，不再刷启动日志
-    except Exception:
-        pass
 
 
 def _positions_match_account(positions, account_id: str) -> dict:
@@ -2079,10 +2003,6 @@ def _positions_match_account(positions, account_id: str) -> dict:
 def apply_trade_detail_raw(ContextInfo, results, acc_raw, pos_raw, account_id="", order_raw=None, deal_raw=None):
     """入口文件已调用 get_trade_detail_data，此处仅解析写入 results。"""
     global _CACHED_ACCOUNT, _CACHED_ORDERS, _CACHED_POSITIONS
-    try:
-        _probe_bj_sectors_once(ContextInfo)
-    except Exception:
-        pass
     if not isinstance(results, dict):
         return False, "results_not_dict"
     aid = str(account_id or _resolve_account_id(ContextInfo)).strip()
