@@ -225,6 +225,14 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                 continue
             if rule.get("enabled") is False:
                 continue
+            # 延迟激活 / 清仓T点分支未决议：不武装，避免 QMT 侧提前触发
+            try:
+                from core.rule_activation import rule_activation_allows_trigger
+
+                if not rule_activation_allows_trigger(rule):
+                    continue
+            except Exception:
+                pass
             # 突破买入始终武装；是否判真突破由规则快照 require_true_breakthrough 决定
             rule_id = str(rule.get("id") or rule.get("name") or idx)
             if rule_type in ("night_buy", "night_sell"):
@@ -620,6 +628,24 @@ def _read_min_buy_amount() -> float:
         return 5000.0
 
 
+
+def _read_buy_shrink_min_ratio_pct() -> float:
+    """买入缩量最低比例(%)：能买股数/计划股数低于此值则整笔 no_cash。缺省 0=与现在一样。"""
+    try:
+        import configparser
+
+        ini_path = os.path.join(project_root(), "data", "config.ini")
+        if not os.path.isfile(ini_path):
+            return 0.0
+        cfg = configparser.ConfigParser()
+        cfg.read(ini_path, encoding="utf-8")
+        if cfg.has_option("Trading", "buy_shrink_min_ratio_pct"):
+            return max(0.0, min(100.0, float(cfg.get("Trading", "buy_shrink_min_ratio_pct") or 0)))
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def _read_buy_block_window() -> Dict[str, Any]:
     """开盘禁买时间窗：enabled + start/end (HH:MM:SS)。"""
     out = {
@@ -689,6 +715,7 @@ def sync_rules_armed(
     subscribe_codes = collect_subscribe_codes(tasks, watch_codes, pool_watch)
     early_order_enabled = _read_early_order_enabled()
     min_buy_amount = _read_min_buy_amount()
+    buy_shrink_min_ratio_pct = _read_buy_shrink_min_ratio_pct()
     buy_block = _read_buy_block_window()
 
     payload: Dict[str, Any] = {
@@ -702,6 +729,7 @@ def sync_rules_armed(
         "orders_enabled": orders_enabled,
         "early_order_enabled": early_order_enabled,
         "min_buy_amount": min_buy_amount,
+        "buy_shrink_min_ratio_pct": buy_shrink_min_ratio_pct,
         "buy_block_window_enabled": bool(buy_block.get("buy_block_window_enabled")),
         "buy_block_start": str(buy_block.get("buy_block_start") or "09:30:00"),
         "buy_block_end": str(buy_block.get("buy_block_end") or "09:31:30"),
@@ -717,6 +745,7 @@ def sync_rules_armed(
                     "watch_codes": old.get("watch_codes"),
                     "early_order_enabled": bool(old.get("early_order_enabled")),
                     "min_buy_amount": float(old.get("min_buy_amount") or 0),
+                    "buy_shrink_min_ratio_pct": float(old.get("buy_shrink_min_ratio_pct") or 0),
                     "buy_block_window_enabled": bool(old.get("buy_block_window_enabled")),
                     "buy_block_start": str(old.get("buy_block_start") or ""),
                     "buy_block_end": str(old.get("buy_block_end") or ""),
@@ -730,6 +759,7 @@ def sync_rules_armed(
                     "watch_codes": watch_codes,
                     "early_order_enabled": early_order_enabled,
                     "min_buy_amount": float(min_buy_amount or 0),
+                    "buy_shrink_min_ratio_pct": float(buy_shrink_min_ratio_pct or 0),
                     "buy_block_window_enabled": bool(
                         buy_block.get("buy_block_window_enabled")
                     ),
@@ -768,6 +798,7 @@ def sync_rules_armed(
                 f"[rules_armed] 已同步 tasks={len(tasks)} watch={len(watch_codes)} "
                 f"pool={len(pool_watch)} early={early_order_enabled} "
                 f"min_buy={min_buy_amount} "
+                f"shrink_ratio={buy_shrink_min_ratio_pct} "
                 f"buy_block={buy_block.get('buy_block_window_enabled')} "
                 f"{buy_block.get('buy_block_start')}-{buy_block.get('buy_block_end')} "
                 f"-> {rules_path}"

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """从 QMT 行情页导出沪深京A股，写成当天股票池和日线用的行情表。
 
+产物：data/qmt_hsj_quote.txt、data/qmt_hsj_quote.meta.json、data/a_share_universe.json。
 不点买入、卖出、撤单、清仓。只在行情表的右键菜单里点「导出数据」。
 用法：
   python tools/export_qmt_hsj_quote.py
@@ -23,7 +24,7 @@ from utils.qmt_hsj_quote import QUOTE_PATH, install_table, read_table  # noqa: E
 
 _INCOMING = QUOTE_PATH.with_name("qmt_hsj_quote.incoming.txt")
 _FORBIDDEN = ("买入", "卖出", "撤单", "清仓", "闪电买", "闪电卖")
-_LOGIN_HINT = "请登录国金 QMT客户端，并保证行情页的窗口要停在「沪深京A股」。"
+_LOGIN_HINT = "请先打开并登录国金 QMT 客户端（保持运行即可；脚本会自动切到「行情 → 沪深京A股」）。"
 
 
 def _find_live_qmt():
@@ -165,16 +166,48 @@ def _click_hwnd(hwnd) -> None:
 def _set_save_path(dialog, path: Path) -> bool:
     import win32gui
 
-    edit = []
-
-    def child(hwnd, _):
+    # 现代「另存为」对话框里 Enum 到的 Edit 往往有两个：文件名框 + 地址栏。
+    # 旧逻辑用 edit[-1]，会把路径写进地址栏，文件名仍为空，点保存后对话框不关、文件不落盘。
+    target = None
+    for ctrl_id in (0x047C, 0x0480):  # cmb13 文件名组合框 / edt1
+        try:
+            hwnd = win32gui.GetDlgItem(dialog, ctrl_id)
+        except Exception:
+            hwnd = 0
+        if not hwnd:
+            continue
         if win32gui.GetClassName(hwnd) == "Edit":
-            edit.append(hwnd)
+            target = hwnd
+            break
+        # ComboBox：取其内部 Edit
+        inner = []
 
-    win32gui.EnumChildWindows(dialog, child, None)
-    if not edit:
-        return False
-    win32gui.SendMessage(edit[-1], 0x000C, 0, str(path))  # WM_SETTEXT
+        def combo_child(ch, _):
+            if win32gui.GetClassName(ch) == "Edit":
+                inner.append(ch)
+
+        try:
+            win32gui.EnumChildWindows(hwnd, combo_child, None)
+        except Exception:
+            pass
+        if inner:
+            target = inner[0]
+            break
+
+    if target is None:
+        edit = []
+
+        def child(hwnd, _):
+            if win32gui.GetClassName(hwnd) == "Edit":
+                edit.append(hwnd)
+
+        win32gui.EnumChildWindows(dialog, child, None)
+        if not edit:
+            return False
+        # 回退：取第一个 Edit（文件名），不要最后一个（地址栏）
+        target = edit[0]
+
+    win32gui.SendMessage(target, 0x000C, 0, str(path))  # WM_SETTEXT
     buttons = []
 
     def buttons_of(hwnd, _):
@@ -183,7 +216,7 @@ def _set_save_path(dialog, path: Path) -> bool:
 
     win32gui.EnumChildWindows(dialog, buttons_of, None)
     for text, hwnd in buttons:
-        if text.startswith("保存") or text.startswith("保存(&S)"):
+        if text.startswith("保存"):
             _click_hwnd(hwnd)
             return True
     return False
@@ -219,13 +252,91 @@ def _confirm_overwrite() -> None:
         time.sleep(0.15)
 
 
-def export_via_ui(dest: Path) -> None:
+
+def _send_unicode(text: str) -> None:
+    """向当前焦点控件输入 Unicode 文本（用于板块搜索框）。"""
+    import ctypes
+
+    PUL = ctypes.POINTER(ctypes.c_ulong)
+
+    class KeyBdInput(ctypes.Structure):
+        _fields_ = [
+            ("wVk", ctypes.c_ushort),
+            ("wScan", ctypes.c_ushort),
+            ("dwFlags", ctypes.c_ulong),
+            ("time", ctypes.c_ulong),
+            ("dwExtraInfo", PUL),
+        ]
+
+    class HardwareInput(ctypes.Structure):
+        _fields_ = [
+            ("uMsg", ctypes.c_ulong),
+            ("wParamL", ctypes.c_short),
+            ("wParamH", ctypes.c_ushort),
+        ]
+
+    class MouseInput(ctypes.Structure):
+        _fields_ = [
+            ("dx", ctypes.c_long),
+            ("dy", ctypes.c_long),
+            ("mouseData", ctypes.c_ulong),
+            ("dwFlags", ctypes.c_ulong),
+            ("time", ctypes.c_ulong),
+            ("dwExtraInfo", PUL),
+        ]
+
+    class Input_I(ctypes.Union):
+        _fields_ = [("ki", KeyBdInput), ("mi", MouseInput), ("hi", HardwareInput)]
+
+    class Input(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_ulong), ("ii", Input_I)]
+
+    extra = ctypes.c_ulong(0)
+    KEYEVENTF_UNICODE = 0x0004
+    KEYEVENTF_KEYUP = 0x0002
+    for ch in text:
+        down = Input(
+            type=1,
+            ii=Input_I(
+                ki=KeyBdInput(0, ord(ch), KEYEVENTF_UNICODE, 0, ctypes.pointer(extra))
+            ),
+        )
+        up = Input(
+            type=1,
+            ii=Input_I(
+                ki=KeyBdInput(
+                    0, ord(ch), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, ctypes.pointer(extra)
+                )
+            ),
+        )
+        ctypes.windll.user32.SendInput(1, ctypes.byref(down), ctypes.sizeof(down))
+        ctypes.windll.user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(up))
+        time.sleep(0.015)
+
+
+def _ctrl_a() -> None:
+    import win32api
+    import win32con
+
+    win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+    win32api.keybd_event(ord("A"), 0, 0, 0)
+    win32api.keybd_event(ord("A"), 0, win32con.KEYEVENTF_KEYUP, 0)
+    win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+
+def _press_enter() -> None:
+    import win32api
+    import win32con
+
+    win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
+    win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+
+def _ensure_qmt_foreground(main) -> tuple:
+    """恢复并前置主窗，返回 (left, top, right, bottom)。"""
     import win32con
     import win32gui
 
-    main = _find_live_qmt()
-    if not main:
-        raise RuntimeError("没有找到国金证券 QMT 交易端")
     if win32gui.IsIconic(main):
         win32gui.ShowWindow(main, win32con.SW_RESTORE)
         time.sleep(0.4)
@@ -233,7 +344,143 @@ def export_via_ui(dest: Path) -> None:
         win32gui.SetForegroundWindow(main)
     except Exception:
         pass
-    time.sleep(0.2)
+    time.sleep(0.25)
+    return win32gui.GetWindowRect(main)
+
+
+def _navigate_to_hsj_a_shares(main) -> None:
+    """切到「行情」并用板块搜索定位「沪深京A股」。
+
+    QMT 为 Qt 自绘，无可靠 UIA 子控件；用左侧图标栏相对坐标 + 搜索框输入。
+    用户只需保证客户端已打开登录。
+    """
+    left, top, right, bottom = _ensure_qmt_foreground(main)
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+
+    # 左侧竖条第二项「行情」（经验坐标：图标中心约 x=30, y=170，相对客户区）
+    quote_x = left + max(24, min(40, width // 55))
+    quote_y = top + max(140, min(200, int(height * 0.22)))
+    _left_click(quote_x, quote_y)
+    time.sleep(0.9)
+
+    # 「搜索板块」在板块树顶部（rail 右侧）
+    search_x = left + max(120, min(200, int(width * 0.10)))
+    search_y = top + max(48, min(70, int(height * 0.07)))
+    _left_click(search_x, search_y)
+    time.sleep(0.35)
+    _ctrl_a()
+    time.sleep(0.08)
+    _send_unicode("沪深京A股")
+    time.sleep(0.35)
+    _press_enter()
+    time.sleep(1.0)
+
+
+
+def _popup_screenshot(hwnd):
+    """截右键弹出菜单，供找「导出数据」行。"""
+    import ctypes
+    import win32gui
+    import win32ui
+    from PIL import Image
+
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    width, height = right - left, bottom - top
+    if width < 40 or height < 40:
+        return None
+    dc = win32gui.GetWindowDC(hwnd)
+    mfc = win32ui.CreateDCFromHandle(dc)
+    save = mfc.CreateCompatibleDC()
+    bmp = win32ui.CreateBitmap()
+    try:
+        bmp.CreateCompatibleBitmap(mfc, width, height)
+        save.SelectObject(bmp)
+        ctypes.windll.user32.PrintWindow(hwnd, save.GetSafeHdc(), 2)
+        info = bmp.GetInfo()
+        bits = bmp.GetBitmapBits(True)
+        return Image.frombuffer(
+            "RGB", (info["bmWidth"], info["bmHeight"]), bits, "raw", "BGRX", 0, 1
+        )
+    finally:
+        win32gui.DeleteObject(bmp.GetHandle())
+        save.DeleteDC()
+        mfc.DeleteDC()
+        win32gui.ReleaseDC(hwnd, dc)
+
+
+def _match_label_y(img, label: str):
+    """在菜单截图里模板匹配中文标签，返回相对菜单顶的 y 中心。"""
+    from pathlib import Path as _Path
+
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+
+    font_paths = [
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+    ]
+    font_path = next((p for p in font_paths if _Path(p).exists()), None)
+    if font_path is None or img is None:
+        return None
+
+    H = np.asarray(img.convert("RGB")).astype(np.float32)
+    best = (-1.0, None)
+    for size in (11, 12, 13, 14):
+        font = ImageFont.truetype(font_path, size)
+        tmp = Image.new("RGB", (1, 1))
+        bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font)
+        tw, th = bbox[2] - bbox[0] + 6, bbox[3] - bbox[1] + 6
+        needle = Image.new("RGB", (tw, th), (30, 30, 30))
+        ImageDraw.Draw(needle).text((3, 3), label, font=font, fill=(230, 230, 230))
+        N = np.asarray(needle).astype(np.float32)
+        nh, nw = N.shape[:2]
+        if nh >= H.shape[0] or nw >= H.shape[1]:
+            continue
+        n = (N.reshape(-1, 3) - N.reshape(-1, 3).mean(0)) / (N.std() + 1e-6)
+        for y in range(0, H.shape[0] - nh, 2):
+            for x in range(0, min(80, H.shape[1] - nw), 2):
+                patch = H[y : y + nh, x : x + nw].reshape(-1, 3)
+                p = (patch - patch.mean(0)) / (patch.std() + 1e-6)
+                score = float((n * p).mean())
+                if score > best[0]:
+                    best = (score, y + nh // 2)
+    if best[0] >= 0.55 and best[1] is not None:
+        return int(best[1])
+    return None
+
+
+def _click_export_menu_item(popup) -> bool:
+    """点右键菜单里的「导出数据」。先模板匹配，失败再按亮行启发式。"""
+    import win32gui
+
+    img = _popup_screenshot(popup)
+    y_rel = _match_label_y(img, "导出数据")
+    left, top, right, bottom = win32gui.GetWindowRect(popup)
+    if y_rel is None:
+        # 回退：行情表完整菜单里「导出数据」通常靠近顶部第 3 个亮行
+        bands = _menu_bands(popup)
+        if len(bands) >= 3:
+            y_rel = bands[2]
+        elif bands:
+            y_rel = bands[min(5, len(bands) - 1)]
+        else:
+            return False
+    _left_click((left + right) // 2, top + y_rel)
+    return True
+
+
+def export_via_ui(dest: Path) -> None:
+    import win32gui
+
+    main = _find_live_qmt()
+    if not main:
+        raise RuntimeError(
+            "未检测到国金证券 QMT 交易端窗口。请先打开并登录 QMT 客户端，然后再跑本导出。"
+        )
+    # 自动：行情 → 搜索「沪深京A股」（用户只需保证客户端开着）
+    _navigate_to_hsj_a_shares(main)
     left, top, right, bottom = win32gui.GetWindowRect(main)
     # 点行情表中部，避开左侧板块树和上下工具条
     x = left + int((right - left) * 0.55)
@@ -253,14 +500,10 @@ def export_via_ui(dest: Path) -> None:
     if not popup:
         _press_escape()
         raise RuntimeError("行情表没有弹出右键菜单")
-    bands = _menu_bands(popup)
-    # 当前菜单固定 7 行，第 6 行是「导出数据」。行数变了就停，避免点到别的项。
-    if len(bands) != 7:
-        _press_escape()
-        raise RuntimeError(f"右键菜单行数是 {len(bands)}，不是导出那一版")
-    left, top, right, bottom = win32gui.GetWindowRect(popup)
     before_save = _visible_windows()
-    _left_click((left + right) // 2, top + bands[5])
+    if not _click_export_menu_item(popup):
+        _press_escape()
+        raise RuntimeError("右键菜单里找不到「导出数据」")
     dialog = None
     deadline = time.time() + 4.0
     while time.time() < deadline and dialog is None:
@@ -295,7 +538,7 @@ def export_via_ui(dest: Path) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="导出 QMT 沪深京A股行情表")
     ap.add_argument("--from-file", default="", help="用已经导出的表格，不再去点 QMT")
-    ap.add_argument("--click", action="store_true", help="在行情页上右键导出。窗口必须停在沪深京A股")
+    ap.add_argument("--click", action="store_true", help="自动切到行情页「沪深京A股」后右键导出（只需 QMT 已打开登录）")
     ap.add_argument("--date", default="", help="交易日 YYYY-MM-DD，默认按收盘时间")
     args = ap.parse_args()
     if args.date:
@@ -314,7 +557,7 @@ def main() -> int:
 
             if not file_covers_day(day_s):
                 raise RuntimeError(
-                    "还没有当天的沪深京行情表。请在 QMT 行情页打开沪深京A股后右键导出"
+                    "还没有当天的沪深京行情表。请打开 QMT 后运行: python tools/export_qmt_hsj_quote.py --click"
                 )
             count = len(universe_codes(read_table(QUOTE_PATH)))
     except Exception as exc:

@@ -7,6 +7,7 @@ from typing import Iterator, Tuple
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from core.rule_activation import process_activation_for_task
+from core.clear_branch import process_clear_branch_for_task
 from utils.logger import Logger
 
 
@@ -64,24 +65,42 @@ class RuleActivationManager(QObject):
             params = task.get("params") if isinstance(task.get("params"), dict) else {}
             if params.get("task_paused", False):
                 continue
+            changed = False
             if process_activation_for_task(task, tick_data):
+                changed = True
+            if process_clear_branch_for_task(task, tick_data):
+                changed = True
+            if changed:
                 self._persist_task(task)
                 sc = str(task.get("stock_code") or stock_code)
                 for r in (task.get("params") or {}).get("rules") or []:
                     if not isinstance(r, dict):
                         continue
                     act = r.get("activation")
-                    if not isinstance(act, dict) or not act.get("resolved"):
-                        continue
-                    rname = r.get("name", "未命名")
-                    if act.get("activated"):
+                    if isinstance(act, dict) and act.get("resolved"):
+                        rname = r.get("name", "未命名")
+                        if act.get("activated"):
+                            self.logger.info(
+                                f"[{sc}] 延迟激活：规则「{rname}」已激活 "
+                                f"(activate_at={act.get('activate_at')}, reached={act.get('reached')})"
+                            )
+                        else:
+                            self.logger.info(
+                                f"[{sc}] 延迟激活：规则「{rname}」已跳过 "
+                                f"(activate_at={act.get('activate_at')}, reached={act.get('reached')})"
+                            )
+                    cb = r.get("clear_branch")
+                    if isinstance(cb, dict) and cb.get("resolved"):
+                        rname = r.get("name", "未命名")
                         self.logger.info(
-                            f"[{sc}] 延迟激活：规则「{rname}」已激活 "
-                            f"(activate_at={act.get('activate_at')}, reached={act.get('reached')})"
+                            f"[{sc}] 清仓T点分支：规则「{rname}」"
+                            f"choice={cb.get('choice')} sealed={cb.get('sealed_at_T')} "
+                            f"at={r.get('clear_branch_at')}"
                         )
-                    else:
-                        self.logger.info(
-                            f"[{sc}] 延迟激活：规则「{rname}」已跳过 "
-                            f"(activate_at={act.get('activate_at')}, reached={act.get('reached')})"
-                        )
+                try:
+                    sync = getattr(self.task_manager, "_sync_rules_armed_if_builtin", None)
+                    if callable(sync):
+                        sync()
+                except Exception as e:
+                    self.logger.debug(f"清仓分支后同步武装失败: {e}")
                 self.rules_updated.emit(sc)

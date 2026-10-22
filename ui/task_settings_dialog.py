@@ -6,7 +6,7 @@
 """
 
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-                             QCheckBox, QGroupBox, QMessageBox, QLabel, QTimeEdit, QDoubleSpinBox)
+                             QCheckBox, QGroupBox, QMessageBox, QLabel, QTimeEdit, QDoubleSpinBox, QSpinBox)
 from PyQt5.QtCore import Qt, QTime
 import configparser
 import os
@@ -77,6 +77,23 @@ class TaskSettingsDialog(QDialog):
         min_buy_layout.addWidget(self.min_buy_amount_spin)
         min_buy_layout.addStretch()
         settings_layout.addLayout(min_buy_layout)
+
+        # 买入缩量最低比例：低于该比例整笔按资金不足结束（可右键等资金）
+        shrink_ratio_layout = QHBoxLayout()
+        shrink_ratio_layout.addWidget(QLabel("买入缩量最低比例(%):"))
+        self.buy_shrink_min_ratio_spin = QSpinBox()
+        self.buy_shrink_min_ratio_spin.setRange(0, 100)
+        self.buy_shrink_min_ratio_spin.setSingleStep(5)
+        self.buy_shrink_min_ratio_spin.setSuffix(" %")
+        self.buy_shrink_min_ratio_spin.setToolTip(
+            "资金不够买全量时：能买股数 / 计划股数 ×100 低于该比例，整笔按资金不足结束，"
+            "可用右键「再次执行（等资金）」继续等；\n"
+            "高于或等于该比例则按能买数量缩量下单并结束腿。\n"
+            "0 = 与现在一样（能买≥1手就缩量）。仅对 QMT builtin 生效。"
+        )
+        shrink_ratio_layout.addWidget(self.buy_shrink_min_ratio_spin)
+        shrink_ratio_layout.addStretch()
+        settings_layout.addLayout(shrink_ratio_layout)
 
         self.breakthrough_true_break_cb = QCheckBox("突破买入是否判断真突破")
         self.breakthrough_true_break_cb.setToolTip(
@@ -182,6 +199,7 @@ class TaskSettingsDialog(QDialog):
         )
         self._sync_breakthrough_probe_for_qmt_mode()
         self.min_buy_amount_spin.setValue(self._load_min_buy_amount())
+        self.buy_shrink_min_ratio_spin.setValue(self._load_buy_shrink_min_ratio_pct())
         enabled, start_s, end_s = self._load_buy_block_window_config()
         self.buy_block_window_checkbox.setChecked(enabled)
         self.buy_block_start_time.setTime(self._to_qtime(start_s, QTime(9, 30, 0)))
@@ -476,6 +494,47 @@ class TaskSettingsDialog(QDialog):
             QMessageBox.warning(self, "警告", f"保存配置失败: {str(e)}")
             return False
 
+
+    def _load_buy_shrink_min_ratio_pct(self):
+        """从 config.ini 读取买入缩量最低比例(%)，默认 0。"""
+        try:
+            current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            config_path = os.path.join(current_dir, 'data', 'config.ini')
+            if os.path.exists(config_path):
+                config = configparser.ConfigParser()
+                config.read(config_path, encoding='utf-8')
+                if 'Trading' in config:
+                    value = float(config.get('Trading', 'buy_shrink_min_ratio_pct', fallback='0'))
+                    return int(max(0, min(100, value)))
+            return 0
+        except Exception:
+            return 0
+
+    def _save_buy_shrink_min_ratio_pct(self, value):
+        """保存买入缩量最低比例(%)到 config.ini。"""
+        try:
+            current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            config_path = os.path.join(current_dir, 'data', 'config.ini')
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+
+            config = configparser.ConfigParser()
+            if os.path.exists(config_path):
+                config.read(config_path, encoding='utf-8')
+            if 'Trading' not in config:
+                config.add_section('Trading')
+            config.set(
+                'Trading',
+                'buy_shrink_min_ratio_pct',
+                str(int(max(0, min(100, float(value))))),
+            )
+
+            with open(config_path, 'w', encoding='utf-8') as f:
+                config.write(f)
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"保存设置失败: {str(e)}")
+            return False
+
     def _to_qtime(self, s, default_time):
         try:
             if not s:
@@ -554,6 +613,7 @@ class TaskSettingsDialog(QDialog):
             self.breakthrough_break_below_cb.isChecked()
         )
         self._save_min_buy_amount(self.min_buy_amount_spin.value())
+        self._save_buy_shrink_min_ratio_pct(self.buy_shrink_min_ratio_spin.value())
         self._save_buy_block_window_config(
             self.buy_block_window_checkbox.isChecked(),
             self.buy_block_start_time.time().toString("HH:mm:ss"),

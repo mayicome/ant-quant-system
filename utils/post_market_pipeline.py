@@ -14,6 +14,23 @@ from typing import Callable, List, Optional, Sequence, Tuple
 EXIT_WECHAT_IP_WHITELIST = 64
 WECHAT_RETRY_SEC = 60
 CAPITAL_FLOW_RETRY_SEC = 60
+# 东财风控拖动验证页（与 eastmoney_fund_flow Referer 一致）
+EASTMONEY_ZJLX_URL = "https://data.eastmoney.com/zjlx/detail.html"
+# 同一次资金流阻塞重试里默认只弹一次浏览器；距上次打开超过该秒数才允许再弹（防每 60s 刷屏）
+CAPITAL_FLOW_BROWSER_REOPEN_SEC = 30 * 60
+
+
+
+def _open_eastmoney_zjlx_for_captcha(reason: str = "") -> None:
+    """打开东财个股资金流页，便于用户拖动真人验证条解风控。失败只打日志，不抛。"""
+    try:
+        import webbrowser
+
+        ok = webbrowser.open(EASTMONEY_ZJLX_URL)
+        tip = f"（{reason}）" if reason else ""
+        print(f"[资金流] 已打开东财资金流页供拖动验证{tip}: {EASTMONEY_ZJLX_URL} (ok={ok})")
+    except Exception as exc:
+        print(f"[资金流] 打开东财网页失败（不影响重试）: {exc}")
 
 
 @dataclass
@@ -68,7 +85,7 @@ def resolve_asof_day(now: Optional[datetime] = None) -> date:
 
 def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
     steps: List[PipelineStep] = [
-        PipelineStep("qmt_quote", "导出沪深京行情", selectable=True),
+        PipelineStep("qmt_quote", "导出沪深京行情（data/qmt_hsj_quote.txt）", selectable=True),
         PipelineStep("daily_cache", "下载日线缓存", is_gate=True, selectable=True),
         PipelineStep("limit_up", "涨停日抓取", selectable=True),
         PipelineStep("lu_board_rank", "涨停家数排名导出", selectable=True),
@@ -275,9 +292,9 @@ def run_step(
                 ("--date", d, "--click"),
             )
             if rc != 0:
-                detail = "请登录国金 QMT客户端，并保证行情页的窗口要停在「沪深京A股」。"
+                detail = "请先打开并登录国金 QMT 客户端（保持运行即可；脚本会自动切到「行情 → 沪深京A股」）。产物：data/qmt_hsj_quote.txt"
             else:
-                detail = "QMT行情页右键导出沪深京A股，写入股票池"
+                detail = "写出 data/qmt_hsj_quote.txt（及 .meta.json、a_share_universe.json）"
             return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
 
         if step_id == "daily_cache":
@@ -313,12 +330,14 @@ def run_step(
             return _ok_after_run(step_id, day, rc)
 
         if step_id == "capital_flow":
-            # 仅东财 push2（脚本默认不允许同花顺/静默 Selenium）。
-            # 失败则 Server酱通知，并每 CAPITAL_FLOW_RETRY_SEC 秒重试，成功前不进入后续步骤。
+            # 走东财 push2（脚本默认不走同花顺/可见 Selenium）。
+            # 失败发 Server酱，并打开东财 zjlx 页供拖动验证（同 episode 节流，见 CAPITAL_FLOW_BROWSER_REOPEN_SEC）；
+            # 每 CAPITAL_FLOW_RETRY_SEC 秒重试，成功前不跑后续步骤。
             from utils.server_chan_notify import notify_alert
 
             attempt = 0
             alerted = False
+            last_browser_open_at = 0.0  # 节流：同 episode 不每分钟弹窗
             last: Optional[StepRunResult] = None
             while True:
                 attempt += 1
@@ -347,14 +366,18 @@ def run_step(
                 detail = last.detail or f"exit={rc}"
                 if not alerted:
                     alerted = True
+                    # 首次失败：Server酱 + 打开东财页（同 episode 后续 60s 重试不再弹窗）
+                    _open_eastmoney_zjlx_for_captcha("首次失败")
+                    last_browser_open_at = time.time()
                     notify_alert(
                         title=f"盘后批跑暂停 {d} · 主力资金流(东财)",
                         content=(
                             f"**日期**：{d}\n"
-                            f"**详情**：{detail}\n"
-                            f"**说明**：东财 push2 失败。批跑已停在本步骤，"
-                            f"每 {CAPITAL_FLOW_RETRY_SEC} 秒自动重试；"
-                            f"成功前不跑后续步骤。请检查网络/代理。\n"
+                            f"**原因**：{detail}\n"
+                            f"**说明**：东财 push2 失败，常为风控/真人拖动验证。"
+                            f"已尝试打开 {EASTMONEY_ZJLX_URL}，请在页面拖动验证条解锁。"
+                            f"批跑停在本步骤，每 {CAPITAL_FLOW_RETRY_SEC} 秒自动重试；"
+                            f"成功前不会跑后续步骤。\n"
                             f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                         ),
                         alert_key=f"capital_flow_em_{d8}",
@@ -364,12 +387,18 @@ def run_step(
                     notify_alert(
                         title=f"盘后批跑仍暂停 {d} · 主力资金流(东财)",
                         content=(
-                            f"已重试 {attempt} 次仍失败：{detail}。"
-                            f"继续每 {CAPITAL_FLOW_RETRY_SEC}s 重试。"
+                            f"已连续 {attempt} 次仍失败（{detail}）。"
+                            f"将继续每 {CAPITAL_FLOW_RETRY_SEC}s 重试。"
+                            f"若仍见拖动验证，请打开 {EASTMONEY_ZJLX_URL} 拖一下。"
                         ),
                         alert_key=f"capital_flow_em_remind_{d8}",
                         cooldown_sec=0,
                     )
+                    # 长间隔再弹一次浏览器提醒（默认 30 分钟），避免每分钟刷屏
+                    if (time.time() - last_browser_open_at) >= CAPITAL_FLOW_BROWSER_REOPEN_SEC:
+                        _open_eastmoney_zjlx_for_captcha(f"已重试{attempt}次")
+                        last_browser_open_at = time.time()
+
                 print(
                     f"[资金流] 东财失败（{detail}），"
                     f"{CAPITAL_FLOW_RETRY_SEC}s 后重试（第 {attempt} 次）…"

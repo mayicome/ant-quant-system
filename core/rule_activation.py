@@ -148,6 +148,14 @@ def normalize_activation(rule: dict) -> None:
 
 def rule_activation_allows_trigger(rule: dict) -> bool:
     """是否已过激活决策且允许参与触发检查。"""
+    # 清仓 T 点分支：未决议前一律不允许触发（含 best_sell）
+    try:
+        from core.clear_branch import clear_branch_allows_trigger
+
+        if not clear_branch_allows_trigger(rule):
+            return False
+    except Exception:
+        pass
     if _rule_type_of(rule) not in ACTIVATION_ELIGIBLE_TYPES:
         return True
     if not rule.get("enabled", True):
@@ -199,17 +207,27 @@ def rule_activation_detail_text(rule: dict) -> str:
 
 
 def rule_activation_chart_suffix(rule: dict) -> str:
-    """图表节点第二行：激活时刻与条件（含已决状态）。"""
-    if not has_activation_config(rule):
-        return ""
-    act = rule.get("activation") or {}
-    at = str(act.get("activate_at") or "").strip()
-    cond = rule_activation_condition_label(act.get("mode"), act.get("check"))
-    if not act.get("resolved", False):
-        return f"\n{at}激活·{cond}"
-    if act.get("activated", False):
-        return f"\n{at}激活·{cond}·已激活"
-    return f"\n{at}激活·{cond}·已跳过"
+    """图表节点第二行：激活时刻与条件（含已决状态）；附清仓 T 点分支后缀。"""
+    parts = []
+    try:
+        from core.clear_branch import clear_branch_chart_suffix
+
+        cb_sfx = clear_branch_chart_suffix(rule)
+        if cb_sfx:
+            parts.append(cb_sfx)
+    except Exception:
+        pass
+    if has_activation_config(rule):
+        act = rule.get("activation") or {}
+        at = str(act.get("activate_at") or "").strip()
+        cond = rule_activation_condition_label(act.get("mode"), act.get("check"))
+        if not act.get("resolved", False):
+            parts.append(f"\n{at}激活·{cond}")
+        elif act.get("activated", False):
+            parts.append(f"\n{at}激活·{cond}·已激活")
+        else:
+            parts.append(f"\n{at}激活·{cond}·已跳过")
+    return "".join(parts)
 
 
 def _resolve_level(rule: dict, tick_data: dict, stock_code: str, stock_name: str) -> float:

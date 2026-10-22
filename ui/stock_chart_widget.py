@@ -86,6 +86,13 @@ class StockChartWidget(QWidget):
         self.task_running = False  # 任务是否正在运行
         self.task_paused = False   # 任务是否暂停
         
+        # clear-branch pending blink: 1s on / 1s off (marker artists only; no full redraw)
+        self._clear_branch_blink_visible = True
+        self._clear_branch_blink_artists = []
+        self._clear_branch_blink_timer = QTimer(self)
+        self._clear_branch_blink_timer.setInterval(1000)
+        self._clear_branch_blink_timer.timeout.connect(self._on_clear_branch_blink_tick)
+
         # 已移除闪烁逻辑，改用固定红色显示以提升性能
         
         # 标签点击相关
@@ -187,6 +194,20 @@ class StockChartWidget(QWidget):
     def closeEvent(self, event):
         """窗口关闭时清理资源"""
         try:
+            # stop clear-branch blink timer
+            t = getattr(self, "_clear_branch_blink_timer", None)
+            if t is not None:
+                try:
+                    if t.isActive():
+                        t.stop()
+                    try:
+                        t.timeout.disconnect()
+                    except (RuntimeError, TypeError):
+                        pass
+                except Exception:
+                    pass
+                self._clear_branch_blink_timer = None
+
             # 停止定时清仓定时器
             if hasattr(self, 'scheduled_clear_timer') and self.scheduled_clear_timer is not None:
                 try:
@@ -1435,6 +1456,8 @@ class StockChartWidget(QWidget):
             self._sync_scheduled_clear_toolbar_from_rules(scheduled_clear_rules)
         else:
             self._clear_scheduled_clear_toolbar_indicator()
+
+        self._sync_clear_branch_blink_timer()
         
         # 规则变化后重绘（批量切列时可关闭，避免一页多图同步卡死）
         if redraw and hasattr(self, 'price_position_ax'):
@@ -1445,6 +1468,7 @@ class StockChartWidget(QWidget):
         self.task_running = task_running
         self.task_paused = task_paused
         self._refresh_toggle_btn_ui()
+        self._sync_clear_branch_blink_timer()
 
     def _refresh_toggle_btn_ui(self):
         """仅刷新启停按钮文案/样式（不落盘、不重绘图表）。"""
@@ -6916,9 +6940,95 @@ class StockChartWidget(QWidget):
                 )
     
     def _toggle_blink(self):
-        """已移除闪烁逻辑，改用固定红色显示以提升性能"""
-        # 此方法已不再使用，保留仅为了兼容性（如果有其他地方调用）
+        """Deprecated global blink; pending clear-branch uses _on_clear_branch_blink_tick."""
         pass
+
+    def _has_pending_clear_branch_rules(self) -> bool:
+        """True if any rule has clear_branch_at and is not yet resolved."""
+        try:
+            from core.clear_branch import has_clear_branch, clear_branch_is_resolved
+        except Exception:
+            return False
+        for rule in (self.rules or []):
+            if not isinstance(rule, dict):
+                continue
+            if has_clear_branch(rule) and not clear_branch_is_resolved(rule):
+                return True
+        return False
+
+    def _is_pending_clear_branch_rule(self, rule) -> bool:
+        """True if rule has unresolved clear_branch_at (candidate for marker blink)."""
+        try:
+            from core.clear_branch import has_clear_branch, clear_branch_is_resolved
+        except Exception:
+            return False
+        if not isinstance(rule, dict):
+            return False
+        return has_clear_branch(rule) and not clear_branch_is_resolved(rule)
+
+    def _should_hide_clear_branch_point(self, rule) -> bool:
+        """Deprecated alias: prefer marker artist visibility, not skip-draw."""
+        if getattr(self, "_clear_branch_blink_visible", True):
+            return False
+        return self._is_pending_clear_branch_rule(rule)
+
+    def _apply_clear_branch_blink_visibility(self):
+        """Toggle stored pending markers only; labels stay put (no full redraw)."""
+        vis = bool(getattr(self, "_clear_branch_blink_visible", True))
+        artists = getattr(self, "_clear_branch_blink_artists", None) or []
+        changed = False
+        alive = []
+        for art in artists:
+            try:
+                art.set_visible(vis)
+                alive.append(art)
+                changed = True
+            except Exception:
+                pass
+        self._clear_branch_blink_artists = alive
+        if changed:
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+
+    def _sync_clear_branch_blink_timer(self):
+        """Start 1s timer when pending+visible; else stop and show markers."""
+        timer = getattr(self, "_clear_branch_blink_timer", None)
+        if timer is None:
+            return
+        want = False
+        try:
+            want = bool(self.isVisible()) and self._has_pending_clear_branch_rules()
+        except Exception:
+            want = False
+        if want:
+            if not timer.isActive():
+                self._clear_branch_blink_visible = True
+                timer.start()
+            self._apply_clear_branch_blink_visibility()
+        else:
+            if timer.isActive():
+                timer.stop()
+            self._clear_branch_blink_visible = True
+            self._apply_clear_branch_blink_visibility()
+
+    def _on_clear_branch_blink_tick(self):
+        """Flip pending marker visibility each second; do not redraw whole chart."""
+        if not self._has_pending_clear_branch_rules():
+            self._sync_clear_branch_blink_timer()
+            return
+        try:
+            if hasattr(self, "isVisible") and not self.isVisible():
+                self._sync_clear_branch_blink_timer()
+                return
+        except Exception:
+            self._sync_clear_branch_blink_timer()
+            return
+        self._clear_branch_blink_visible = not bool(
+            getattr(self, "_clear_branch_blink_visible", True)
+        )
+        self._apply_clear_branch_blink_visibility()
 
     def _sync_rules_from_task_manager(self):
         """从 TaskManager 同步最新 rules（延迟激活等集中调度会更新任务文件）。"""
@@ -6935,6 +7045,7 @@ class StockChartWidget(QWidget):
         if isinstance(fresh_rules, list):
             self.rules = fresh_rules
             self.task["params"] = fresh.get("params", self.task.get("params"))
+            self._sync_clear_branch_blink_timer()
 
     def _redraw_price_chart_throttled(self, force: bool = False):
         """非当前页不画；同屏多图时节流，避免 40+ 任务把主线程打满。"""
@@ -10471,7 +10582,12 @@ class StockChartWidget(QWidget):
                     and not self.task_paused
                 ):
                     state = "triggered"
-        return get_rule_node_state_style(state)
+        style = get_rule_node_state_style(state)
+        # tag unresolved clear-branch so draw can blink marker via set_visible
+        if self._is_pending_clear_branch_rule(rule):
+            style = dict(style) if isinstance(style, dict) else {}
+            style["clear_branch_pending"] = True
+        return style
 
     def _cage_pair_tradeable(self, price_low, price_high) -> bool:
         """笼子上下沿均须在 [跌停, 涨停] 内；否则不可撮合，不绘制。"""
@@ -10869,11 +10985,13 @@ class StockChartWidget(QWidget):
                         grid_lines.append((rule_name, grid_coords, color))
         
         # 返回网格连接线信息
+        self._sync_clear_branch_blink_timer()
         return grid_lines
     
     def draw_price_position_chart(self):
         """绘制二维坐标图（X轴：价格，Y轴：交易量）"""
         self.price_position_ax.clear()
+        self._clear_branch_blink_artists = []
         
         # 关键价格点应该在数据加载时已经计算完成（load_realtime_data中）
         # 如果数据没有加载，不绘制，避免错误提示（因为此时数据可能还在加载中）
@@ -11793,7 +11911,7 @@ class StockChartWidget(QWidget):
                     # 不可拖动的点：如果该价格下还没有其他不可拖动点被绘制，就绘制
                     should_draw_circle = True
                     non_draggable_drawn = True  # 标记已绘制
-                
+
                 if should_draw_circle:
                     if draggable:
                         # 可拖动的买卖点，绘制大圆点；状态样式覆盖描边/透明度/标记
@@ -11834,13 +11952,32 @@ class StockChartWidget(QWidget):
                         alpha=alpha, marker=marker, edgecolors=edgecolors, linewidths=linewidth,
                         zorder=circle_zorder,
                     )
+                    # pending clear-branch: blink via set_visible (labels never touched)
+                    if isinstance(node_style, dict) and node_style.get("clear_branch_pending"):
+                        try:
+                            line.set_visible(
+                                bool(getattr(self, "_clear_branch_blink_visible", True))
+                            )
+                        except Exception:
+                            pass
+                        if not hasattr(self, "_clear_branch_blink_artists"):
+                            self._clear_branch_blink_artists = []
+                        self._clear_branch_blink_artists.append(line)
                     # 禁用：圆形上叠黑叉（形状与其它节点一致）
                     if overlay_x:
-                        self.price_position_ax.scatter(
+                        x_art = self.price_position_ax.scatter(
                             raw_price, volume, c='#000000', s=marker_size * 0.55,
                             alpha=min(1.0, alpha + 0.15), marker='x', linewidths=1.8,
                             zorder=circle_zorder + 1,
                         )
+                        if isinstance(node_style, dict) and node_style.get("clear_branch_pending"):
+                            try:
+                                x_art.set_visible(
+                                    bool(getattr(self, "_clear_branch_blink_visible", True))
+                                )
+                            except Exception:
+                                pass
+                            self._clear_branch_blink_artists.append(x_art)
                     
                     # 如果是可拖动的买点或卖点，保存引用
                     if draggable:

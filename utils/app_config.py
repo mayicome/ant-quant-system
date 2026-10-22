@@ -53,6 +53,7 @@ DEFAULT_SECTIONS: "OrderedDict[str, OrderedDict[str, str]]" = OrderedDict(
                     ("buy_block_start", "09:30:00"),
                     ("buy_block_end", "14:30:59"),
                     ("min_buy_amount", "5000"),
+                    ("buy_shrink_min_ratio_pct", "0"),
                     ("breakthrough_buy_require_true_breakthrough", "0"),
                     ("breakthrough_buy_require_break_below_trigger", "0"),
                     ("non_early_order_sell_smart_sell", "0"),

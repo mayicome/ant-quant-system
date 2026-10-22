@@ -25,6 +25,7 @@ _TRADE_DATES_ASKED_HI = None
 _TRADE_DATES_FAIL_ON = None
 _ORDERS_ENABLED = True
 _MIN_BUY_AMOUNT = 0.0
+_BUY_SHRINK_MIN_RATIO_PCT = 0.0
 _BUY_BLOCK_ENABLED = False
 _BUY_BLOCK_START = "09:30:00"
 _BUY_BLOCK_END = "09:31:30"
@@ -727,6 +728,7 @@ def _refresh_orders_enabled(rules: Optional[dict] = None) -> None:
     else:
         _ORDERS_ENABLED = True
     _refresh_min_buy_amount(data if isinstance(data, dict) else rules)
+    _refresh_buy_shrink_min_ratio_pct(data if isinstance(data, dict) else rules)
     _refresh_buy_block_window(data if isinstance(data, dict) else rules)
 
 
@@ -745,6 +747,26 @@ def _refresh_min_buy_amount(rules: Optional[dict] = None) -> None:
         _MIN_BUY_AMOUNT = 0.0
     if _MIN_BUY_AMOUNT > 0:
         print("[交易核心] 最低买入金额=%.2f" % _MIN_BUY_AMOUNT)
+
+
+
+def _refresh_buy_shrink_min_ratio_pct(rules: Optional[dict] = None) -> None:
+    """从 rules_armed 刷新买入缩量最低比例(%)。"""
+    global _BUY_SHRINK_MIN_RATIO_PCT
+    data = rules
+    if data is None and _RULES_PATH and os.path.isfile(_RULES_PATH):
+        try:
+            data = load_rules_armed(_RULES_PATH)
+        except Exception:
+            data = None
+    try:
+        _BUY_SHRINK_MIN_RATIO_PCT = max(
+            0.0, min(100.0, float((data or {}).get("buy_shrink_min_ratio_pct") or 0))
+        )
+    except (TypeError, ValueError):
+        _BUY_SHRINK_MIN_RATIO_PCT = 0.0
+    if _BUY_SHRINK_MIN_RATIO_PCT > 0:
+        print("[交易护栏] 买入缩量最低比例=%.0f%%" % _BUY_SHRINK_MIN_RATIO_PCT)
 
 
 def _parse_hms_to_seconds(raw: str) -> int:
@@ -1274,6 +1296,18 @@ def _assess_buy_volume(price: float, volume: int):
                 "现金不足且缩量后低于最小买入，暂不下单（约%.2f元 < 最小%.2f元，避免小单）"
                 % (adj_amt, min_buy),
             )
+        # 缩量比例门控：能买股数/计划股数 低于设定比例 → 等同 no_cash
+        shrink_min_pct = float(_BUY_SHRINK_MIN_RATIO_PCT or 0)
+        if shrink_min_pct > 0 and vol > 0:
+            ratio_pct = (float(max_vol) / float(vol)) * 100.0
+            if ratio_pct < shrink_min_pct:
+                return (
+                    False,
+                    0,
+                    "no_cash",
+                    "现金可买比例过低未下单（可买%d股/计划%d股=%.0f%% < 最低%.0f%%，需约%.2f元，可用%.2f元）"
+                    % (max_vol, vol, ratio_pct, shrink_min_pct, required, cash),
+                )
         return True, max_vol, "shrunk", "现金不足，缩量至%d股" % max_vol
     return True, vol, "ok", ""
 

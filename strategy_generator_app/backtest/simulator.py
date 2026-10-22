@@ -269,12 +269,19 @@ except Exception:
 
 try:
     from core.rule_activation import has_activation_config, process_activation_tick
+    from core.clear_branch import has_clear_branch, process_clear_branch_tick
 except Exception:
     def has_activation_config(_intent):  # type: ignore
         return False
 
     def process_activation_tick(*_a, **_k):  # type: ignore
         return None
+
+    def has_clear_branch(_intent):  # type: ignore
+        return False
+
+    def process_clear_branch_tick(*_a, **_k):  # type: ignore
+        return False
 
 try:
     from core.smart_sell import tick_row_to_dict as _smart_tick_row_to_dict
@@ -867,23 +874,55 @@ def _update_backtest_rule_activations(
     tick_dt: Any,
     row_raw: Any,
 ) -> None:
-    """每 tick 更新延迟激活观察状态（与实盘 RuleActivationManager 一致）。"""
+    """每 tick 更新延迟激活 / 清仓T点分支（与实盘 RuleActivationManager 一致）。"""
     for idx, intent in code_intents:
         if idx in removed_indices:
             continue
-        rule_type = (intent.get("rule_type") or "").strip()
+        rule_type = (intent.get("rule_type") or intent.get("type") or "").strip()
+        tick_sim = _build_activation_tick_data(last_price, tick_dt, row_raw, intent)
+        stock_name = str(intent.get("stock_name") or "").strip()
+
+        # 清仓 T 点分支（single_sell / best_sell / 分支后的 breakthrough_sell）
+        if has_clear_branch(intent):
+            sim_rule = dict(intent)
+            sim_rule["type"] = rule_type or str(intent.get("type") or "")
+            if process_clear_branch_tick(
+                sim_rule,
+                tick_sim,
+                stock_code=code_6,
+                stock_name=stock_name,
+            ):
+                # 回写可能被改写的类型与价格
+                for k in (
+                    "type",
+                    "rule_type",
+                    "price",
+                    "name",
+                    "limit_up",
+                    "clear_branch",
+                    "trigger_price",
+                    "drop_percent",
+                ):
+                    if k in sim_rule:
+                        intent[k] = sim_rule[k]
+                    elif k in ("trigger_price", "drop_percent") and k not in sim_rule:
+                        intent.pop(k, None)
+                if sim_rule.get("type"):
+                    intent["rule_type"] = sim_rule["type"]
+                    intent["type"] = sim_rule["type"]
+            rule_type = (intent.get("rule_type") or intent.get("type") or "").strip()
+
         if rule_type not in ("single_sell", "breakthrough_sell"):
             continue
         if not has_activation_config(intent):
             continue
         sim_rule = dict(intent)
         sim_rule["type"] = rule_type
-        tick_sim = _build_activation_tick_data(last_price, tick_dt, row_raw, intent)
         process_activation_tick(
             sim_rule,
             tick_sim,
             stock_code=code_6,
-            stock_name=str(intent.get("stock_name") or "").strip(),
+            stock_name=stock_name,
         )
         if isinstance(sim_rule.get("activation"), dict):
             intent["activation"] = dict(sim_rule["activation"])
@@ -1171,6 +1210,8 @@ def simulate_fills_with_ticks(
         inv["_sim_has_band"] = bool(has_band)
         rt = (inv.get("rule_type") or "").strip()
         if rt in ("single_sell", "breakthrough_sell") and has_activation_config(inv):
+            need_activation_update = True
+        if has_clear_branch(inv):
             need_activation_update = True
         unfilled_by_code[c6].append((idx, inv))
     n_unfilled = len(unfilled)
@@ -1960,7 +2001,7 @@ def simulate_fills_with_ticks(
                 if sell_vol <= 0:
                     to_remove.append(idx)
                     continue
-                if rule_type in ("single_sell", "breakthrough_sell"):
+                if rule_type in ("single_sell", "breakthrough_sell", "best_sell"):
                     from core.rule_activation import rule_activation_allows_trigger
 
                     sim_rule = dict(intent)

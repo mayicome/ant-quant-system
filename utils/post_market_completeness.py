@@ -278,6 +278,24 @@ def check_wechat_draft(asof: date) -> CheckResult:
     return False, "无本地完成记录（生成草稿成功后会写入）"
 
 
+
+def check_qmt_quote(asof: date) -> CheckResult:
+    """盘后批跑第一步：QMT 沪深京行情表是否覆盖 asof。"""
+    from utils.qmt_hsj_quote import META_PATH, QUOTE_PATH, file_covers_day
+
+    day = asof.strftime("%Y-%m-%d")
+    if not file_covers_day(day):
+        meta = _read_json(META_PATH) or {}
+        got = str(meta.get("trade_date") or "").strip() or "-"
+        return False, f"缺当日行情表 trade_date={got} 期望={day}"
+    meta = _read_json(META_PATH) or {}
+    count = int(meta.get("count") or 0)
+    if count < 1000 and not _exists_nonempty(QUOTE_PATH, 1000):
+        return False, f"行情表过小 count={count}"
+    src = str(meta.get("source") or "").strip() or "-"
+    return True, f"trade_date={day} count={count or '-'} source={src}"
+
+
 def check_market_regime(asof: date) -> CheckResult:
     d = asof.strftime("%Y-%m-%d")
     d8 = asof.strftime("%Y%m%d")
@@ -300,6 +318,7 @@ def check_market_regime(asof: date) -> CheckResult:
 
 # step_id -> checker（与流水线 id 对齐）
 COMPLETENESS_CHECKERS: Dict[str, Checker] = {
+    "qmt_quote": check_qmt_quote,
     "daily_cache": check_daily_cache,
     "limit_up": check_limit_up,
     "lu_board_rank": check_lu_board_rank,
@@ -358,6 +377,10 @@ def _artifact_paths(asof: date, step_id: str) -> List[Path]:
     hd = ROOT / "history_data"
     em = ROOT / "data" / "eastmoney_board_rank"
     mapping: Dict[str, List[Path]] = {
+        "qmt_quote": [
+            ROOT / "data" / "qmt_hsj_quote.txt",
+            ROOT / "data" / "qmt_hsj_quote.meta.json",
+        ],
         "daily_cache": [ROOT / "data" / "daily_cache" / "manifest.json"],
         "limit_up": [hd / "涨停日数据" / f"{d}.json"],
         "lu_board_rank": [

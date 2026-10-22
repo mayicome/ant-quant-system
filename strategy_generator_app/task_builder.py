@@ -416,6 +416,41 @@ def _make_rule_dict(
                 "grid_buy",
             ):
                 out["halt_on_open_gain"] = True
+        # 清仓腿 T 点封板分支：透传时刻与涨停价，初始化待分支状态
+        cba = str(intent.get("clear_branch_at") or "").strip()
+        if cba:
+            out["clear_branch_at"] = cba
+            try:
+                lu = float(intent.get("limit_up") or out.get("limit_up") or 0)
+            except (TypeError, ValueError):
+                lu = 0.0
+            if lu > 0:
+                out["limit_up"] = round(lu, 4)
+            if not isinstance(out.get("clear_branch"), dict):
+                try:
+                    opx = float(out.get("price") or out.get("trigger_price") or 0)
+                except (TypeError, ValueError):
+                    opx = 0.0
+                out["clear_branch"] = {
+                    "resolved": False,
+                    "choice": None,
+                    "sealed_at_T": None,
+                    "orig_type": str(out.get("type") or ""),
+                    "orig_name": str(out.get("name") or ""),
+                    "orig_price": opx,
+                }
+                if lu > 0:
+                    out["clear_branch"]["limit_up"] = round(lu, 4)
+        elif intent.get("limit_up") is not None and str(intent.get("limit_up")).strip() != "":
+            # 无分支时也允许透传 limit_up（开盘买入等已有路径之外的卖出腿）
+            rtype = str(out.get("type") or "").strip()
+            if rtype in ("single_sell", "best_sell", "breakthrough_sell"):
+                try:
+                    lu = float(intent.get("limit_up") or 0)
+                    if lu > 0:
+                        out["limit_up"] = round(lu, 4)
+                except (TypeError, ValueError):
+                    pass
         return out
 
     if rule_type == "breakthrough_buy":

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """QMT 行情页「沪深京A股」右键导出。
 
+落盘：data/qmt_hsj_quote.txt、data/qmt_hsj_quote.meta.json、data/a_share_universe.json。
 今开、最高、最低、最新是当天开高低收。
 成交额用「总额」。表里没有成交量，能折算才写；折不出来的留给东财、腾讯、同花顺。
 """
