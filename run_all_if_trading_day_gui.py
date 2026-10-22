@@ -154,6 +154,7 @@ class Worker(QThread):
         live_only: bool,
         use_asof_freeze: bool,
         stop_on_gate_fail: bool = True,
+        capital_flow_selenium_fallback: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -162,6 +163,7 @@ class Worker(QThread):
         self.live_only = live_only
         self.use_asof_freeze = use_asof_freeze
         self.stop_on_gate_fail = stop_on_gate_fail
+        self.capital_flow_selenium_fallback = bool(capital_flow_selenium_fallback)
         self._stop_wechat = False
         self._stop_capital_flow = False
         self._abort = False
@@ -194,6 +196,7 @@ class Worker(QThread):
                     stop_wechat_retry=lambda: self._stop_wechat,
                     capital_flow_auto_retry=True,
                     stop_capital_flow_retry=lambda: self._stop_capital_flow,
+                    capital_flow_selenium_fallback=self.capital_flow_selenium_fallback,
                     sleep_between=1.0,
                 )
                 self.step_finished.emit(
@@ -497,6 +500,7 @@ class PostMarketWindow(QMainWindow):
             live_only=self.live_only,
             use_asof_freeze=use_asof_freeze,
             stop_on_gate_fail=stop_on_gate_fail,
+            capital_flow_selenium_fallback=not self.scheduled,
             parent=self,
         )
         # 新一轮任务重置停止标志
@@ -512,7 +516,11 @@ class PostMarketWindow(QMainWindow):
         if sid == "wechat_draft":
             self._set_status(sid, STATUS_RETRY, "执行中（白名单失败会自动重试）")
         elif sid == "capital_flow":
-            self._set_status(sid, STATUS_RETRY, "执行中（东财失败会每60s自动重试）")
+            if self.scheduled:
+                tip = "执行中（东财失败会每60s自动重试）"
+            else:
+                tip = "执行中（东财失败后改用网页Selenium翻页，不同花顺）"
+            self._set_status(sid, STATUS_RETRY, tip)
         else:
             self._set_status(sid, STATUS_RUNNING)
 

@@ -1915,7 +1915,7 @@ if __name__ == "__main__":
         "--min-amount",
         type=float,
         default=0,
-        help="落盘后可选过滤：净流入低于该值（万元）的行丢弃；默认 0=全量保留",
+        help="落盘过滤阈值（万元）；Selenium 时：>0 页末低于此值停翻，<0 翻到末页全量，0 兼容旧默认 3000",
     )
     parser.add_argument(
         "--selenium",
@@ -1969,7 +1969,13 @@ if __name__ == "__main__":
         print("正在使用 Selenium 获取个股主力净流入数据...")
         print("提取策略：翻页直到页末净额 < 阈值（--min-amount，默认已改 0 时请自行设门槛）")
         print("-" * 60)
-        thr = args.min_amount if args.min_amount > 0 else 3000
+        # min_amount<0：翻到无下一页（盘后全量兜底）；>0 按阈值停；==0 兼容旧默认 3000
+        if args.min_amount < 0:
+            thr = float("-inf")
+        elif args.min_amount > 0:
+            thr = float(args.min_amount)
+        else:
+            thr = 3000
         df = get_capital_flow_selenium(min_amount_threshold=thr)
         fetch_source = "selenium"
     else:

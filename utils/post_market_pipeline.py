@@ -270,6 +270,7 @@ def run_step(
     stop_wechat_retry: Optional[Callable[[], bool]] = None,
     capital_flow_auto_retry: bool = True,
     stop_capital_flow_retry: Optional[Callable[[], bool]] = None,
+    capital_flow_selenium_fallback: bool = False,
     sleep_between: float = 0.0,
 ) -> StepRunResult:
     """执行单步。use_asof_freeze=True 时对依赖「今天」的脚本冻结日历。"""
@@ -330,43 +331,126 @@ def run_step(
             return _ok_after_run(step_id, day, rc)
 
         if step_id == "capital_flow":
-            # 走东财 push2（脚本默认不走同花顺/可见 Selenium）。
-            # 失败发 Server酱，并打开东财 zjlx 页供拖动验证（同 episode 节流，见 CAPITAL_FLOW_BROWSER_REOPEN_SEC）；
-            # 每 CAPITAL_FLOW_RETRY_SEC 秒重试，成功前不跑后续步骤。
+            # 默认仅东财 push2（不同花顺）。
+            # 定时/自动：失败 Server酱 + 打开 zjlx 拖验证，每 CAPITAL_FLOW_RETRY_SEC 重试 push2。
+            # 手动版（capital_flow_selenium_fallback=True）：push2 失败后改走 --selenium 网页翻页全量；
+            # 仍不同花顺；Selenium 失败则返回，不再 60s 死循环。
             from utils.server_chan_notify import notify_alert
 
-            attempt = 0
-            alerted = False
-            last_browser_open_at = 0.0  # 节流：同 episode 不每分钟弹窗
-            last: Optional[StepRunResult] = None
-            while True:
-                attempt += 1
+            def _run_flow(extra_args: tuple = ()) -> StepRunResult:
+                args = (f"--save-date={d8}",) + tuple(extra_args)
                 rc = run(
                     "get_capital_flow_selenium.py",
-                    (f"--save-date={d8}",),
+                    args,
                     freeze=False,
                 )
-                last = _ok_after_run(step_id, day, rc)
-                if last.ok:
-                    if attempt > 1:
-                        last = StepRunResult(
-                            ok=True,
-                            exit_code=0,
-                            detail=(last.detail or "") + f"（第{attempt}次成功）",
-                        )
-                    return last
-                if not capital_flow_auto_retry:
-                    return last
+                return _ok_after_run(step_id, day, rc)
+
+            # 1) push2
+            last = _run_flow()
+            if last.ok:
+                return last
+
+            detail = last.detail or f"exit={last.exit_code}"
+
+            # 手动：push2 失败 → 网页 Selenium 全量翻页（--min-amount=-1）
+            if capital_flow_selenium_fallback:
                 if stop_capital_flow_retry and stop_capital_flow_retry():
                     return StepRunResult(
                         ok=False,
-                        exit_code=rc,
+                        exit_code=last.exit_code,
+                        detail="已停止资金流（push2 失败，未跑 Selenium）",
+                    )
+                _open_eastmoney_zjlx_for_captcha("push2失败，改用Selenium")
+                notify_alert(
+                    title=f"盘后手动 · 主力资金流改用网页 {d}",
+                    content=(
+                        f"**日期**：{d}\n"
+                        f"**原因**：东财 push2 失败：{detail}\n"
+                        f"**动作**：改用 Chrome Selenium 打开 {EASTMONEY_ZJLX_URL} "
+                        f"自动翻页全量抓取（不同花顺）。\n"
+                        f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    ),
+                    alert_key=f"capital_flow_selenium_{d8}",
+                    cooldown_sec=0,
+                )
+                print(f"[资金流] push2 失败（{detail}），改用 --selenium 网页翻页全量…")
+                sel = _run_flow(("--selenium", "--min-amount=-1"))
+                if sel.ok:
+                    return StepRunResult(
+                        ok=True,
+                        exit_code=0,
+                        detail=(sel.detail or "") + "（Selenium网页翻页）",
+                    )
+                return StepRunResult(
+                    ok=False,
+                    exit_code=sel.exit_code,
+                    detail=(
+                        f"push2失败后 Selenium 仍失败：{sel.detail or sel.exit_code}"
+                        f"；先前 push2：{detail}"
+                    ),
+                )
+            # 定时等：push2 失败后每 CAPITAL_FLOW_RETRY_SEC 重试；
+            # 等待期间若本地 CSV 已通过齐全校验（手动/其它进程写入），直接放行，不再空转 push2。
+            if not capital_flow_auto_retry:
+                return last
+
+            def _local_capital_flow_ready() -> Optional[StepRunResult]:
+                """本地产物有效才放行：非空 + 有数据行（走 check_capital_flow）。"""
+                try:
+                    from utils.post_market_completeness import check_capital_flow
+
+                    ok, det = check_capital_flow(day)
+                except Exception as e:
+                    print(f"[资金流] 本地产物有效性检查异常（忽略，继续 push2 重试）: {e}")
+                    return None
+                if not ok:
+                    return None
+                return StepRunResult(
+                    ok=True,
+                    exit_code=0,
+                    detail=f"{det}（本地产物已有效，跳过 push2 重试）",
+                )
+
+            def _wait_retry_or_local(seconds: float) -> Optional[StepRunResult]:
+                """分段等待；期间发现有效本地 CSV 则立即返回成功。"""
+                deadline = time.time() + float(seconds)
+                poll = 5.0
+                while True:
+                    if stop_capital_flow_retry and stop_capital_flow_retry():
+                        return StepRunResult(
+                            ok=False,
+                            exit_code=last.exit_code,
+                            detail="已停止资金流自动重试",
+                        )
+                    ready = _local_capital_flow_ready()
+                    if ready is not None:
+                        print(f"[资金流] {ready.detail}")
+                        return ready
+                    now = time.time()
+                    if now >= deadline:
+                        return None
+                    time.sleep(min(poll, deadline - now))
+
+            attempt = 1
+            alerted = False
+            last_browser_open_at = 0.0
+            while True:
+                if stop_capital_flow_retry and stop_capital_flow_retry():
+                    return StepRunResult(
+                        ok=False,
+                        exit_code=last.exit_code,
                         detail="已停止资金流自动重试",
                     )
-                detail = last.detail or f"exit={rc}"
+                # 每次重试前先看本地是否已有有效产物（手动补齐）
+                ready = _local_capital_flow_ready()
+                if ready is not None:
+                    print(f"[资金流] {ready.detail}")
+                    return ready
+
+                detail = last.detail or f"exit={last.exit_code}"
                 if not alerted:
                     alerted = True
-                    # 首次失败：Server酱 + 打开东财页（同 episode 后续 60s 重试不再弹窗）
                     _open_eastmoney_zjlx_for_captcha("首次失败")
                     last_browser_open_at = time.time()
                     notify_alert(
@@ -374,9 +458,10 @@ def run_step(
                         content=(
                             f"**日期**：{d}\n"
                             f"**原因**：{detail}\n"
-                            f"**说明**：东财 push2 失败，常为风控/真人拖动验证。"
-                            f"已尝试打开 {EASTMONEY_ZJLX_URL}，请在页面拖动验证条解锁。"
+                            f"**说明**：接口 push2 失败，多为限流/需滑块验证。"
+                            f"已尝试打开 {EASTMONEY_ZJLX_URL}，请在网页完成滑块验证后关闭。"
                             f"批跑停在本步骤，每 {CAPITAL_FLOW_RETRY_SEC} 秒自动重试；"
+                            f"若手动补齐且本地 CSV 校验通过，将自动继续后续步骤。"
                             f"成功前不会跑后续步骤。\n"
                             f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                         ),
@@ -388,22 +473,33 @@ def run_step(
                         title=f"盘后批跑仍暂停 {d} · 主力资金流(东财)",
                         content=(
                             f"已连续 {attempt} 次仍失败（{detail}）。"
-                            f"将继续每 {CAPITAL_FLOW_RETRY_SEC}s 重试。"
-                            f"若仍见拖动验证，请打开 {EASTMONEY_ZJLX_URL} 拖一下。"
+                            f"仍按每 {CAPITAL_FLOW_RETRY_SEC}s 重试。"
+                            f"可自检滑块验证或打开 {EASTMONEY_ZJLX_URL} 再试一次；"
+                            f"或手动补齐资金流，定时检测到有效 CSV 后会自动继续。"
                         ),
                         alert_key=f"capital_flow_em_remind_{d8}",
                         cooldown_sec=0,
                     )
-                    # 长间隔再弹一次浏览器提醒（默认 30 分钟），避免每分钟刷屏
                     if (time.time() - last_browser_open_at) >= CAPITAL_FLOW_BROWSER_REOPEN_SEC:
-                        _open_eastmoney_zjlx_for_captcha(f"已重试{attempt}次")
+                        _open_eastmoney_zjlx_for_captcha(f"提醒第{attempt}次")
                         last_browser_open_at = time.time()
 
                 print(
-                    f"[资金流] 东财失败（{detail}），"
-                    f"{CAPITAL_FLOW_RETRY_SEC}s 后重试（第 {attempt} 次）…"
+                    f"[资金流] 接口失败（{detail}），"
+                    f"{CAPITAL_FLOW_RETRY_SEC}s 内轮询本地有效产物，否则重试 push2"
+                    f"（第 {attempt} 次）…"
                 )
-                time.sleep(CAPITAL_FLOW_RETRY_SEC)
+                waited = _wait_retry_or_local(CAPITAL_FLOW_RETRY_SEC)
+                if waited is not None:
+                    return waited
+                attempt += 1
+                last = _run_flow()
+                if last.ok:
+                    return StepRunResult(
+                        ok=True,
+                        exit_code=0,
+                        detail=(last.detail or "") + f"（第{attempt}次成功）",
+                    )
 
         if step_id == "board_snapshot":
             extra = ("--with-fund-flow", "--date", d)
