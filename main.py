@@ -942,6 +942,13 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
 
 def main():
     try:
+        # 券商/办公网常黑洞 IPv6；进程级强制 IPv4，避免东财等 HTTPS 卡在 SYN_SENT
+        try:
+            from utils.http_ipv4 import install_prefer_ipv4
+
+            install_prefer_ipv4()
+        except Exception:
+            pass
         # Windows multiprocessing 保护
         if sys.platform.startswith('win'):
             import multiprocessing

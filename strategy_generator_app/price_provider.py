@@ -241,9 +241,12 @@ def _fetch_tencent_spots(fulls: List[str]) -> Dict[str, Dict[str, float]]:
         chunk = fulls[i : i + 40]
         url = "https://qt.gtimg.cn/q=" + ",".join(_tencent_symbol(c) for c in chunk)
         try:
-            resp = sess.get(url, timeout=5.0)
-            resp.raise_for_status()
-            text = resp.content.decode("gbk", errors="replace")
+            from utils.http_ipv4 import as_timeout, prefer_ipv4
+
+            with prefer_ipv4():
+                resp = sess.get(url, timeout=as_timeout(5.0))
+                resp.raise_for_status()
+                text = resp.content.decode("gbk", errors="replace")
         except Exception:
             continue
         for line in text.split(";"):
@@ -288,21 +291,26 @@ def _load_public_live_prices(codes: List[str]) -> Dict[str, Dict[str, float]]:
         if full:
             fulls.append(full)
     quotes: Dict[str, Dict[str, float]] = {}
-    for _attempt in range(2):
-        for i in range(0, len(fulls), 80):
+    from utils.http_ipv4 import prefer_ipv4
+
+    # 券商/办公网常黑洞 IPv6：整段取价强制走 IPv4，避免 SYN_SENT 挂死
+    with prefer_ipv4():
+        for _attempt in range(2):
+            for i in range(0, len(fulls), 80):
+                try:
+                    # connect 短、read 适中；外联被拦时尽快失败并回退腾讯
+                    quotes.update(fetch_spot_quotes(fulls[i : i + 80], timeout=3.0))
+                except Exception:
+                    continue
+            if len(quotes) >= len(fulls):
+                break
+            time.sleep(0.2)
+        missing_fulls = [c for c in fulls if c not in quotes]
+        if missing_fulls:
             try:
-                quotes.update(fetch_spot_quotes(fulls[i : i + 80], timeout=5.0))
+                quotes.update(_fetch_tencent_spots(missing_fulls))
             except Exception:
-                continue
-        if len(quotes) >= len(fulls):
-            break
-        time.sleep(0.4)
-    missing_fulls = [c for c in fulls if c not in quotes]
-    if missing_fulls:
-        try:
-            quotes.update(_fetch_tencent_spots(missing_fulls))
-        except Exception:
-            pass
+                pass
     out: Dict[str, Dict[str, float]] = {}
     for c6 in codes:
         q = quotes.get(code_6_to_full(c6)) or {}

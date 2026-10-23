@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 import pandas as pd
 import requests
 
+from utils.http_ipv4 import as_timeout, prefer_ipv4
+
 from utils.main_force_inflow_rank import yuan_to_display
 
 # akshare stock_individual_fund_flow_rank 同源筛选
@@ -145,15 +147,16 @@ def _get_json(
             for host in hosts:
                 attempt += 1
                 try:
-                    r = session.get(
-                        host,
-                        params=params,
-                        headers=_HEADERS,
-                        timeout=25,
-                        proxies=proxies or {},
-                    )
-                    r.raise_for_status()
-                    data = r.json()
+                    with prefer_ipv4():
+                        r = session.get(
+                            host,
+                            params=params,
+                            headers=_HEADERS,
+                            timeout=as_timeout(25),
+                            proxies=proxies or {},
+                        )
+                        r.raise_for_status()
+                        data = r.json()
                     if isinstance(data, dict) and data.get("data") is not None:
                         _WORKING_PROXIES = proxies
                         _WORKING_PROXIES_RESOLVED = True

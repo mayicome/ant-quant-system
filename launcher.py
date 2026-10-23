@@ -1471,6 +1471,13 @@ class AntLauncherWindow(QMainWindow):
 
 
 def main() -> None:
+    # 券商/办公网常黑洞 IPv6；进程级强制 IPv4，避免东财等 HTTPS 卡在 SYN_SENT
+    try:
+        from utils.http_ipv4 import install_prefer_ipv4
+
+        install_prefer_ipv4()
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     window = AntLauncherWindow()
     window.show()

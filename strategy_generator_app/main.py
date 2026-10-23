@@ -4268,6 +4268,23 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 self._load_strategies_into_list(reselect_id=sid)
         except Exception as e:
             self._append_run_log(f"[定时生成] 异常 id={sid}: {type(e).__name__}: {e}\n")
+            # 外联失败/行情超时等：清掉预约，避免每秒 timer 死循环重试把界面再次卡死
+            try:
+                cfg_fail = self._find_strategy_by_id(sid)
+                if cfg_fail and (cfg_fail.scheduled_generate_at or "").strip():
+                    cfg_fail.scheduled_generate_at = None
+                    save_strategy(cfg_fail)
+                    self._append_run_log(
+                        f"[定时生成] 已取消预约 id={sid}（失败后不再自动重试；网络恢复后请手动生成或重新预约）\n"
+                    )
+                    try:
+                        self._load_strategies_into_list(reselect_id=sid)
+                    except Exception:
+                        pass
+            except Exception as clear_err:
+                self._append_run_log(
+                    f"[定时生成] 取消预约失败 id={sid}: {type(clear_err).__name__}: {clear_err}\n"
+                )
         finally:
             self._append_run_log(
                 f"======== [定时生成] 结束 id={sid}  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ========\n"
@@ -9331,6 +9348,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
 
 def main():
+    # 券商/办公网常黑洞 IPv6；进程级强制 IPv4，避免东财 HTTPS 卡在 SYN_SENT
+    try:
+        from utils.http_ipv4 import install_prefer_ipv4
+
+        install_prefer_ipv4()
+    except Exception:
+        pass
     """程序入口"""
     # Windows 控制台编码保持与主程序一致，避免中文乱码
     if sys.platform.startswith("win"):

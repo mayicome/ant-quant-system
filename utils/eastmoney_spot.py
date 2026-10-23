@@ -72,15 +72,19 @@ def fetch_spot_quotes(codes: Iterable[str], timeout: float = 3.0) -> Dict[str, D
         "ut": _UT,
     }
     payload = None
+    from utils.http_ipv4 import as_timeout, prefer_ipv4
+
+    to = as_timeout(timeout)
     sess = _session()
-    for url in _URLS:
-        try:
-            resp = sess.get(url, params=params, timeout=timeout)
-            resp.raise_for_status()
-            payload = resp.json()
-            break
-        except (OSError, ValueError, requests.RequestException):
-            payload = None
+    with prefer_ipv4():
+        for url in _URLS:
+            try:
+                resp = sess.get(url, params=params, timeout=to)
+                resp.raise_for_status()
+                payload = resp.json()
+                break
+            except (OSError, ValueError, requests.RequestException):
+                payload = None
     if not isinstance(payload, dict):
         return {}
     data = payload.get("data") or {}

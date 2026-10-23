@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import requests
 
+from utils.http_ipv4 import as_timeout, prefer_ipv4
+
 from utils.daily_cache_reader import to_full_stock_code
 
 OUT_COLS = ("date", "open", "high", "low", "close", "volume", "amount")
@@ -109,21 +111,22 @@ def fetch_eastmoney(
     num, mkt = _split_code(stock_code)
     secid = f"1.{num}" if mkt == "SH" else f"0.{num}"
     sess = session or _session()
-    resp = sess.get(
-        _EM_URL,
-        params={
-            "fields1": "f1,f2,f3,f4,f5,f6",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-            "ut": _EM_UT,
-            "klt": "101",
-            "fqt": "0",
-            "secid": secid,
-            "beg": _ymd(start) or "19900101",
-            "end": _ymd(end) or datetime.now().strftime("%Y%m%d"),
-        },
-        headers={"Referer": "https://quote.eastmoney.com/"},
-        timeout=timeout,
-    )
+    with prefer_ipv4():
+        resp = sess.get(
+            _EM_URL,
+            params={
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                "ut": _EM_UT,
+                "klt": "101",
+                "fqt": "0",
+                "secid": secid,
+                "beg": _ymd(start) or "19900101",
+                "end": _ymd(end) or datetime.now().strftime("%Y%m%d"),
+            },
+            headers={"Referer": "https://quote.eastmoney.com/"},
+            timeout=as_timeout(timeout),
+        )
     resp.raise_for_status()
     klines = ((resp.json() or {}).get("data") or {}).get("klines") or []
     out: List[Dict[str, Any]] = []
@@ -150,11 +153,12 @@ def fetch_tencent(
     symbol = prefix + num
     # 接口按根数返回，多取一些再按日期裁。
     sess = session or _session()
-    resp = sess.get(
-        _TX_URL,
-        params={"param": f"{symbol},day,,,320,"},
-        timeout=timeout,
-    )
+    with prefer_ipv4():
+        resp = sess.get(
+            _TX_URL,
+            params={"param": f"{symbol},day,,,320,"},
+            timeout=as_timeout(timeout),
+        )
     resp.raise_for_status()
     node = ((resp.json() or {}).get("data") or {}).get(symbol) or {}
     rows = node.get("day") or []
@@ -192,11 +196,12 @@ def fetch_ths(
     num, mkt = _split_code(stock_code)
     key = f"bj_{num}" if mkt == "BJ" else f"hs_{num}"
     sess = session or _session()
-    resp = sess.get(
-        _THS_URL.format(key=key),
-        headers={"Referer": "https://q.10jqka.com.cn/"},
-        timeout=timeout,
-    )
+    with prefer_ipv4():
+        resp = sess.get(
+            _THS_URL.format(key=key),
+            headers={"Referer": "https://q.10jqka.com.cn/"},
+            timeout=as_timeout(timeout),
+        )
     resp.raise_for_status()
     text = resp.text
     payload = json.loads(text[text.find("(") + 1 : text.rfind(")")])
