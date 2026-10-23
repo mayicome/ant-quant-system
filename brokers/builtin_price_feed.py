@@ -1241,10 +1241,11 @@ class BuiltinPricePoller(QObject):
                 bst = int(loc.get("broker_status")) if loc.get("broker_status") is not None else -1
             except (TypeError, ValueError):
                 bst = -1
+            # 与执行记录对齐：含 error/57（柜台废单）。夜市/定时清仓见下方例外，57 不回写以便重试。
             ordered = (
                 msg == "passorder_called"
-                or status in ("submitted", "filled", "passorder_called", "skipped")
-                or bst in (50, 51, 52, 55, 56)
+                or status in ("submitted", "filled", "passorder_called", "error", "skipped")
+                or bst in (50, 51, 52, 55, 56, 57)
             )
             if not ordered:
                 continue

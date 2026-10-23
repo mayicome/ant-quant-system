@@ -144,6 +144,12 @@ _KNOWN_DETAIL_ATTRS = (
     "m_nOffsetFlag",
     "m_nDirection",
     "m_strOptName",
+    "m_strStatusMsg",
+    "m_strCancelInfo",
+    "m_strErrorMsg",
+    "status_msg",
+    "CancelInfo",
+    "error_msg",
     "m_nOrderType",
     "m_nEntrustType",
     "m_eEntrustType",
@@ -244,6 +250,12 @@ def _object_row(item):
         ("m_nOffsetFlag", "offset_flag"),
         ("m_nDirection", "direction"),
         ("m_strOptName", "opt_name"),
+        ("m_strStatusMsg", "status_msg"),
+        ("status_msg", "status_msg"),
+        ("m_strCancelInfo", "cancel_info"),
+        ("CancelInfo", "cancel_info"),
+        ("m_strErrorMsg", "error_msg"),
+        ("error_msg", "error_msg"),
         ("m_nOrderType", "order_type"),
         ("m_nEntrustType", "order_type"),
         ("m_eEntrustType", "order_type"),
@@ -1186,6 +1198,37 @@ def _resolve_order_side(row):
     return "buy", order_type, offset_flag, direction, opt, price_type
 
 
+def _extract_broker_reject_msg(row) -> str:
+    """柜台废单/驳回说明。优先 XtOrder.status_msg / 大 QMT m_strStatusMsg 等字段。
+
+    已确认字段名（xtquant.xttype.XtOrder）：status_msg = 委托状态解释/废单原因。
+    大 QMT get_trade_detail_data 常见别名一并尝试；字段缺失时返回空串。
+    """
+    raw = _pick(
+        row,
+        "broker_reject_msg",
+        "status_msg",
+        "m_strStatusMsg",
+        "StatusMsg",
+        "cancel_info",
+        "m_strCancelInfo",
+        "CancelInfo",
+        "error_msg",
+        "m_strErrorMsg",
+        "ErrorMsg",
+        "strMsg",
+        "m_strMsg",
+        default="",
+    )
+    msg = str(raw or "").strip()
+    if not msg:
+        return ""
+    # 过滤无信息量占位
+    if msg in ("None", "none", "null", "NULL", "-", "--"):
+        return ""
+    return msg[:500]
+
+
 def _diag_order_fields_once(parsed):
     """首次解析委托时可选诊断；默认静默（启动刷一笔已成单无信息量）。"""
     global _ORDER_FIELD_DIAG_DONE
@@ -1322,6 +1365,7 @@ def _parse_order_row(row, account_id=""):
         "traded_price": traded_px,
         "broker_status": status,
         "broker_status_text": _status_text(status, traded_vol, vol),
+        "broker_reject_msg": _extract_broker_reject_msg(row),
         "remark": remark,
         "strategy_name": strategy_name,
         "order_time": order_time,
@@ -1513,6 +1557,7 @@ def merge_broker_orders_into_results(results, broker_orders):
                 for k in (
                     "broker_status",
                     "broker_status_text",
+                    "broker_reject_msg",
                     "traded_volume",
                     "traded_price",
                     "order_time",
@@ -1522,6 +1567,8 @@ def merge_broker_orders_into_results(results, broker_orders):
                     if val is None:
                         continue
                     if k == "order_time" and not str(val).strip():
+                        continue
+                    if k == "broker_reject_msg" and not str(val).strip():
                         continue
                     if loc.get(k) != val:
                         loc[k] = val
@@ -1560,6 +1607,7 @@ def merge_broker_orders_into_results(results, broker_orders):
             "order_sysid",
             "broker_status",
             "broker_status_text",
+            "broker_reject_msg",
             "traded_volume",
             "traded_price",
             "order_time",
@@ -1569,6 +1617,8 @@ def merge_broker_orders_into_results(results, broker_orders):
             if val is None:
                 continue
             if k == "order_time" and not str(val).strip():
+                continue
+            if k == "broker_reject_msg" and not str(val).strip():
                 continue
             if loc.get(k) != val:
                 loc[k] = val

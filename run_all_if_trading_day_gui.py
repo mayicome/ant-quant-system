@@ -25,6 +25,14 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
+# 券商/办公网常黑洞 IPv6；进程级强制 IPv4（子进程另由 pipeline 注入）
+try:
+    from utils.http_ipv4 import install_prefer_ipv4
+
+    install_prefer_ipv4()
+except Exception:
+    pass
+
 # 须在 PyQt / 打日志前关闭 Quick Edit，否则误点黑窗会冻住整批跑
 try:
     from utils.win_console import disable_quick_edit
@@ -219,13 +227,30 @@ class Worker(QThread):
         self.all_done.emit()
 
 
+
+class AsofResolveWorker(QThread):
+    """后台解析手动模式目标交易日，避免卡在日历网络请求上。"""
+
+    done = pyqtSignal(object)  # date
+    failed = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            self.done.emit(resolve_asof_day())
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 class PostMarketWindow(QMainWindow):
     def __init__(self, *, scheduled: bool = False, live_only: bool = False):
         super().__init__()
         self.scheduled = scheduled
         self.live_only = live_only
         self.today = date.today()
-        self.asof = self.today if scheduled else resolve_asof_day()
+        # 手动模式先出窗，目标日在后台解析（避免卡在交易日历网络）
+        self.asof = self.today
+        self._asof_ready = bool(scheduled)
+        self._asof_worker: Optional[AsofResolveWorker] = None
         self.steps: List[PipelineStep] = build_step_catalog(live_only=live_only)
         self.step_by_id: Dict[str, PipelineStep] = {s.id: s for s in self.steps}
         self.row_by_id: Dict[str, int] = {}
@@ -238,10 +263,10 @@ class PostMarketWindow(QMainWindow):
 
         mode = "定时" if scheduled else "手动"
         tag = "仅实盘" if live_only else "全量"
-        self.setWindowTitle(f"盘后批跑 · {mode} · {tag} · 目标日 {self.asof}")
+        asof_title = str(self.asof) if self._asof_ready else "解析中…"
+        self.setWindowTitle(f"盘后批跑 · {mode} · {tag} · 目标日 {asof_title}")
         self.resize(980, 720)
         self._build_ui()
-        self._refresh_completeness()
 
         self._close_timer = QTimer(self)
         self._close_timer.setInterval(30_000)
@@ -250,9 +275,11 @@ class PostMarketWindow(QMainWindow):
         self._tick_auto_close()
 
         if scheduled:
+            self._refresh_completeness()
             QTimer.singleShot(400, self._start_scheduled)
         else:
-            self._set_phase_manual_select()
+            self._set_phase_waiting_asof()
+            QTimer.singleShot(0, self._start_asof_resolve)
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -281,6 +308,10 @@ class PostMarketWindow(QMainWindow):
         self.btn_rerun_all.clicked.connect(self._on_rerun_all)
         self.btn_rerun_sel = QPushButton("仅重新获取勾选项")
         self.btn_rerun_sel.clicked.connect(self._on_rerun_selected)
+        self.btn_clear_checks = QPushButton("清空勾选")
+        self.btn_clear_checks.setToolTip("取消表格中所有步骤勾选，便于逐项勾选测试")
+        self.btn_clear_checks.clicked.connect(self._on_clear_checks)
+        self.btn_clear_checks.setEnabled(False)
         self.btn_refresh = QPushButton("刷新齐全状态")
         self.btn_refresh.clicked.connect(self._refresh_completeness)
         self.btn_continue = QPushButton("从失败门禁后继续")
@@ -296,6 +327,7 @@ class PostMarketWindow(QMainWindow):
         self.btn_retry_fail.clicked.connect(self._on_retry_failed_row)
         btn_row.addWidget(self.btn_rerun_all)
         btn_row.addWidget(self.btn_rerun_sel)
+        btn_row.addWidget(self.btn_clear_checks)
         btn_row.addWidget(self.btn_refresh)
         btn_row.addWidget(self.btn_continue)
         btn_row.addWidget(self.btn_retry_fail)
@@ -385,9 +417,10 @@ class PostMarketWindow(QMainWindow):
         live_src = ""
         if self.live_only:
             live_src = " · 已检测到实盘标记（data/qmt_live_only.flag / 环境变量）"
+        asof_show = str(self.asof) if self._asof_ready else f"{self.asof}（解析中…）"
         self.hdr.setText(
             f"<b>{mode}</b>　今天 {self.today}　"
-            f"<b>目标交易日 {self.asof}</b>{asof_hint}　"
+            f"<b>目标交易日 {asof_show}</b>{asof_hint}　"
             f"<b>{'仅实盘' if self.live_only else '全量'}</b>{live_src}<br>"
             f"未手动关闭时将于 <b>{self._close_at.strftime('%Y-%m-%d %H:%M')}</b> 自动退出。"
         )
@@ -419,9 +452,60 @@ class PostMarketWindow(QMainWindow):
             self.table.setItem(i, COL_STATUS, QTableWidgetItem(STATUS_PENDING))
             self.table.setItem(i, COL_DETAIL, QTableWidgetItem(""))
 
+
+    def _set_phase_waiting_asof(self) -> None:
+        self.btn_rerun_all.setEnabled(False)
+        self.btn_rerun_sel.setEnabled(False)
+        self.btn_clear_checks.setEnabled(False)
+        self.btn_refresh.setEnabled(False)
+        self.btn_retry_fail.setEnabled(False)
+        self._update_header()
+        self._append_log("正在解析目标交易日（优先本地日历，新浪短超时）…")
+        self.statusBar().showMessage("正在解析目标交易日…")
+
+    def _start_asof_resolve(self) -> None:
+        if self._asof_ready or self.scheduled:
+            return
+        if self._asof_worker is not None and self._asof_worker.isRunning():
+            return
+        worker = AsofResolveWorker(parent=self)
+        self._asof_worker = worker
+        worker.done.connect(self._on_asof_resolved)
+        worker.failed.connect(self._on_asof_resolve_failed)
+        worker.start()
+
+    def _on_asof_resolved(self, day) -> None:
+        self._asof_worker = None
+        try:
+            self.asof = day if isinstance(day, date) else date.fromisoformat(str(day))
+        except Exception:
+            self.asof = self.today
+        self._asof_ready = True
+        mode = "定时" if self.scheduled else "手动"
+        tag = "仅实盘" if self.live_only else "全量"
+        self.setWindowTitle(f"盘后批跑 · {mode} · {tag} · 目标日 {self.asof}")
+        self._update_header()
+        self._refresh_completeness()
+        self._set_phase_manual_select()
+        self.statusBar().showMessage(f"目标交易日已确定：{self.asof}", 5000)
+
+    def _on_asof_resolve_failed(self, err: str) -> None:
+        self._asof_worker = None
+        # 失败时仍用今天作占位，并开放手动操作
+        self._asof_ready = True
+        self._append_log(f"目标交易日解析失败，暂用 {self.asof}：{err}")
+        mode = "定时" if self.scheduled else "手动"
+        tag = "仅实盘" if self.live_only else "全量"
+        self.setWindowTitle(f"盘后批跑 · {mode} · {tag} · 目标日 {self.asof}")
+        self._update_header()
+        self._refresh_completeness()
+        self._set_phase_manual_select()
+        self.statusBar().showMessage("目标交易日解析失败，已用占位日期", 8000)
+
     def _set_phase_manual_select(self) -> None:
         self.btn_rerun_all.setEnabled(True)
         self.btn_rerun_sel.setEnabled(True)
+        self.btn_clear_checks.setEnabled(True)
         self.btn_refresh.setEnabled(True)
         self._append_log(
             f"手动模式：目标日={self.asof}（最近交易日）。"
@@ -473,6 +557,7 @@ class PostMarketWindow(QMainWindow):
         self._pipeline_busy = busy
         self.btn_rerun_all.setEnabled(not busy and not self.scheduled)
         self.btn_rerun_sel.setEnabled(not busy and not self.scheduled)
+        self.btn_clear_checks.setEnabled(not busy and not self.scheduled)
         self.btn_refresh.setEnabled(not busy)
         self.btn_retry_fail.setEnabled(not busy)
         self.btn_stop_wechat.setEnabled(busy)
@@ -485,6 +570,9 @@ class PostMarketWindow(QMainWindow):
         use_asof_freeze: bool,
         stop_on_gate_fail: bool,
     ) -> None:
+        if not self._asof_ready:
+            QMessageBox.information(self, "批跑", "目标交易日仍在解析，请稍候。")
+            return
         if self._pipeline_busy:
             QMessageBox.information(self, "批跑", "已有任务在执行。")
             return
@@ -558,6 +646,22 @@ class PostMarketWindow(QMainWindow):
 
     def _ordered_ids(self, wanted: Set[str]) -> List[str]:
         return [s.id for s in self.steps if s.id in wanted and s.id in self.row_by_id]
+
+    def _on_clear_checks(self) -> None:
+        """手动模式：清空表格步骤勾选，方便逐项勾选测试。"""
+        if self.scheduled:
+            return
+        n = 0
+        for sid, row in self.row_by_id.items():
+            item = self.table.item(row, COL_CHECK)
+            step = self.step_by_id.get(sid)
+            if not item or not step or not step.selectable:
+                continue
+            if item.checkState() == Qt.Checked:
+                n += 1
+            item.setCheckState(Qt.Unchecked)
+        self._append_log(f"已清空勾选（此前已勾 {n} 项）")
+        self.statusBar().showMessage("已清空勾选", 3000)
 
     def _on_rerun_all(self) -> None:
         ids = self._ordered_ids(set(self.row_by_id.keys()))

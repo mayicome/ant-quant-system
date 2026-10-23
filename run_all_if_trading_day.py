@@ -115,13 +115,35 @@ def _job_label(script_name: str, extra_args: Sequence[str] = ()) -> str:
 
 
 def _run_job(script_dir: str, script_name: str, extra_args: Sequence[str] = ()) -> int:
+    """遗留入口：与 post_market_pipeline 一样，子进程先装 prefer_ipv4。"""
+    try:
+        from utils.post_market_pipeline import _run_plain
+
+        return _run_plain(script_dir, script_name, extra_args)
+    except Exception:
+        pass
     target = os.path.join(script_dir, script_name)
     if not os.path.exists(target):
         print(f"[失败] 未找到脚本: {target}")
         return 1
-    cmd = [sys.executable, target, *list(extra_args)]
+    code = "\n".join(
+        [
+            "import os, runpy, sys",
+            f"sys.path.insert(0, {script_dir!r})",
+            f"os.chdir({script_dir!r})",
+            "try:",
+            "    from utils.http_ipv4 import install_prefer_ipv4",
+            "    install_prefer_ipv4()",
+            "except Exception:",
+            "    pass",
+            f"sys.argv = [{target!r}] + {list(extra_args)!r}",
+            f"runpy.run_path({target!r}, run_name='__main__')",
+        ]
+    )
     print(f"[开始] {script_name} {' '.join(extra_args)}".rstrip())
-    result = subprocess.run(cmd, cwd=script_dir)
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8", "-c", code], cwd=script_dir
+    )
     print(f"[结束] {script_name} 退出码: {result.returncode}")
     return int(result.returncode or 0)
 
@@ -421,6 +443,12 @@ def _select_jobs(live_only: bool) -> List[JobStep]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    try:
+        from utils.http_ipv4 import install_prefer_ipv4
+
+        install_prefer_ipv4()
+    except Exception:
+        pass
     args = _parse_args(argv)
     live_only = bool(args.live_only)
 

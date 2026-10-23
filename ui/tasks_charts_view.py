@@ -522,6 +522,38 @@ class TasksChartsView(QWidget):
                     hit["order_id"] = str(order_id or tid or "PO_BUILTIN")
                 hit.pop("executed_reason", None)
             elif rtype in ("grid_buy", "grid_sell"):
+                try:
+                    from ui.stock_chart_widget import StockChartWidget
+
+                    _grid_skip = StockChartWidget._builtin_order_skip_reason(
+                        order_rec, order_id
+                    )
+                except Exception:
+                    _grid_skip = ""
+                if _grid_skip == "order_failed":
+                    hit["executed"] = True
+                    hit["executed_time"] = exec_time.strftime("%Y-%m-%d %H:%M:%S")
+                    hit["executed_price"] = px
+                    hit["executed_volume"] = 0
+                    hit["executed_reason"] = "order_failed"
+                    oid_s = str(order_id or tid or "").strip()
+                    if not oid_s or oid_s in ("PO_BUILTIN", "PO", "0", "-1"):
+                        hit["order_id"] = "ORDER_FAILED"
+                    else:
+                        hit["order_id"] = oid_s
+                    reject = str(
+                        order_rec.get("broker_reject_msg")
+                        or order_rec.get("status_msg")
+                        or ""
+                    ).strip()
+                    hit["executed_detail"] = reject or "废单"
+                    if isinstance(params, dict):
+                        task["params"] = params
+                    try:
+                        tm.save_tasks(list(tm.tasks.values()))
+                    except Exception:
+                        pass
+                    return True
                 gi = order_rec.get("grid_index")
                 try:
                     gi = int(gi) if gi is not None else None
@@ -640,6 +672,17 @@ class TasksChartsView(QWidget):
                     elif skip_reason == "no_cash":
                         hit["order_id"] = "NO_CASH"
                         hit["executed_volume"] = 0
+                    elif skip_reason == "order_failed":
+                        hit["executed_volume"] = 0
+                        oid_s = str(hit.get("order_id") or order_id or "").strip()
+                        if not oid_s or oid_s in ("PO_BUILTIN", "PO", "0", "-1"):
+                            hit["order_id"] = "ORDER_FAILED"
+                        reject = str(
+                            order_rec.get("broker_reject_msg")
+                            or order_rec.get("status_msg")
+                            or ""
+                        ).strip()
+                        hit["executed_detail"] = reject or "废单"
                 else:
                     hit.pop("executed_reason", None)
                     if bool(hit.get("cash_wait_active")):

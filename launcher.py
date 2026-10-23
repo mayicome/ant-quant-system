@@ -736,7 +736,7 @@ class AntLauncherWindow(QMainWindow):
             btn.setStyleSheet(tool_btn_style)
             btn.setToolTip(f"{name}\n{desc}\n{script_rel}")
             btn.setEnabled(os.path.isfile(script_path))
-            btn.clicked.connect(lambda checked=False, s=script_rel: self._on_tool_clicked(s))
+            btn.clicked.connect(lambda checked=False, s=script_rel, b=btn: self._on_tool_clicked(s, b))
 
             if single_row:
                 row = 0
@@ -1335,8 +1335,45 @@ class AntLauncherWindow(QMainWindow):
 
     # --- 启动三个子系统 ---
 
-    def _on_tool_clicked(self, script_rel_path: str) -> None:
-        self._launch_python(script_rel_path)
+    def _on_tool_clicked(self, script_rel_path: str, btn=None) -> None:
+        """启动小工具；点击后立刻禁用按钮防连点（不做单实例锁）。"""
+        if btn is not None and not btn.isEnabled():
+            return
+        restore_text = None
+        if btn is not None:
+            restore_text = btn.text()
+            btn.setEnabled(False)
+            btn.setText("正在启动…")
+            try:
+                self._set_update_status(f"正在启动：{script_rel_path}")
+            except Exception:
+                pass
+        try:
+            self._launch_python(script_rel_path)
+        finally:
+            if btn is not None:
+                # 约 2.5s 后恢复，允许再次手动启动；不做单实例拦截
+                QTimer.singleShot(
+                    2500,
+                    lambda b=btn, t=restore_text: self._restore_tool_button(b, t),
+                )
+
+    def _restore_tool_button(self, btn, text) -> None:
+        try:
+            if btn is None:
+                return
+            if text:
+                btn.setText(text)
+            btn.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            # 仅清掉「正在启动」类短提示
+            lbl = getattr(self, "update_status", None)
+            if lbl is not None and "正在启动" in str(lbl.text() or ""):
+                self._set_update_status("")
+        except Exception:
+            pass
 
     def _run_longhubang_and_show_result(self, script_rel_path: str) -> None:
         """执行机构净买净卖排行脚本，并弹窗提示导出文件。"""

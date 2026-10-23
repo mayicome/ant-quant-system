@@ -3312,6 +3312,19 @@ class StockChartWidget(QWidget):
             )
         ):
             return "no_cash"
+        # 柜台废单 / 下单失败（broker_status=57 或 status=error）
+        try:
+            bst = int(rec.get("broker_status")) if rec.get("broker_status") is not None else -1
+        except (TypeError, ValueError):
+            bst = -1
+        if (
+            status == "error"
+            or bst == 57
+            or oid == "ORDER_FAILED"
+            or sysid == "ORDER_FAILED"
+            or str(rec.get("msg") or "").strip().lower() in ("order_failed", "废单")
+        ):
+            return "order_failed"
         return ""
 
     @staticmethod
@@ -3620,6 +3633,45 @@ class StockChartWidget(QWidget):
 
         # 网格：只标记当前点位，全部点位完成才 rule.executed=True
         if rtype in ("grid_buy", "grid_sell"):
+            # 柜台废单：整腿结束（量=0），不记为网格成交点
+            _grid_skip = self._builtin_order_skip_reason(order_rec, order_id)
+            if _grid_skip == "order_failed":
+                rule["executed"] = True
+                rule["executed_time"] = exec_time.strftime("%Y-%m-%d %H:%M:%S")
+                rule["executed_price"] = px
+                rule["executed_volume"] = 0
+                rule["executed_reason"] = "order_failed"
+                if not oid or oid in ("PO_BUILTIN", "PO", "0", "-1"):
+                    rule["order_id"] = "ORDER_FAILED"
+                else:
+                    rule["order_id"] = oid
+                reject = str(
+                    order_rec.get("broker_reject_msg")
+                    or order_rec.get("status_msg")
+                    or ""
+                ).strip()
+                rule["executed_detail"] = reject or "废单"
+                try:
+                    from core.execution_record_manager import ExecutionRecordManager
+
+                    ExecutionRecordManager().record_from_builtin_order(
+                        order_rec,
+                        order_id=rule["order_id"],
+                        stock_name=str(getattr(self, "stock_name", "") or ""),
+                        rule=rule,
+                    )
+                except Exception:
+                    pass
+                self._save_rules()
+                self.update_chart()
+                if self.logger:
+                    self.logger.info(
+                        f"[{self.stock_code}] [builtin] 网格废单已回写: "
+                        f"{rule.get('name')} oid={rule.get('order_id')} "
+                        f"reason={rule.get('executed_detail')}"
+                    )
+                self._log_builtin_remaining_after_feedback(rule_id)
+                return True
             gi = order_rec.get("grid_index")
             try:
                 gi = int(gi) if gi is not None else None
@@ -3805,6 +3857,18 @@ class StockChartWidget(QWidget):
             elif skip_reason == "no_cash":
                 rule["order_id"] = "NO_CASH"
                 rule["executed_volume"] = 0
+            elif skip_reason == "order_failed":
+                # 废单：已执行但成交量必须为 0；保留真实合同号便于对照，无合同时用哨兵
+                rule["executed_volume"] = 0
+                if not oid or oid in ("PO_BUILTIN", "PO", "0", "-1"):
+                    rule["order_id"] = "ORDER_FAILED"
+                reject = str(
+                    order_rec.get("broker_reject_msg")
+                    or order_rec.get("status_msg")
+                    or order_rec.get("executed_detail")
+                    or ""
+                ).strip()
+                rule["executed_detail"] = reject or "废单"
             elif skip_reason == "band_hard_pass":
                 rule["order_id"] = "BAND_HARD_PASS"
                 rule["executed_volume"] = 0
@@ -5012,8 +5076,12 @@ class StockChartWidget(QWidget):
                     detail_action = menu.addAction(f"  详情: {probe_detail}")
                     detail_action.setEnabled(False)
             elif executed_reason == 'order_failed':
-                detail_action = menu.addAction("  执行结果: 下单失败，规则已结束")
+                detail_action = menu.addAction("  执行结果: 废单/下单失败，规则已结束")
                 detail_action.setEnabled(False)
+                fail_detail = str(rule.get('executed_detail', '') or '').strip()
+                if fail_detail:
+                    detail_action = menu.addAction(f"  废单原因: {fail_detail}")
+                    detail_action.setEnabled(False)
             elif (
                 executed_reason == 'no_cash'
                 or executed_order_id in ('NO_CASH', 'MIN_BUY_AMOUNT', 'SKIPPED_NO_CASH')

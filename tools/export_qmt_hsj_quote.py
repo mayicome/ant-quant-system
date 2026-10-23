@@ -358,15 +358,16 @@ def _navigate_to_hsj_a_shares(main) -> None:
     width = max(1, right - left)
     height = max(1, bottom - top)
 
-    # 左侧竖条第二项「行情」（经验坐标：图标中心约 x=30, y=170，相对客户区）
+    # 左侧竖条自上而下：我的 / 行情 / 交易 / 模型研究 / 模型交易
+    # 行情图标中心约相对 y=150~160。旧式 height*0.22 在 1080p 会钳到 200，正好点到「交易」。
     quote_x = left + max(24, min(40, width // 55))
-    quote_y = top + max(140, min(200, int(height * 0.22)))
+    quote_y = top + max(148, min(162, int(height * 0.15)))
     _left_click(quote_x, quote_y)
     time.sleep(0.9)
 
-    # 「搜索板块」在板块树顶部（rail 右侧）
+    # 「搜索板块」在行情页板块树顶部（rail 右侧）；略下移避免点到上方工具栏
     search_x = left + max(120, min(200, int(width * 0.10)))
-    search_y = top + max(48, min(70, int(height * 0.07)))
+    search_y = top + max(68, min(95, int(height * 0.08)))
     _left_click(search_x, search_y)
     time.sleep(0.35)
     _ctrl_a()

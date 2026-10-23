@@ -381,10 +381,21 @@ class ExecutionRecordManager:
         tb_passed = rec.get("true_breakthrough_passed")
 
         if failed:
-            detail = "%s | 废单/下单失败" % detail
-            skip_reason = "废单/下单失败"
+            reject = str(
+                rec.get("broker_reject_msg")
+                or rec.get("status_msg")
+                or rec.get("error_msg")
+                or ""
+            ).strip()
+            if reject:
+                detail = "%s | 废单/下单失败 | %s" % (detail, reject)
+                skip_reason = "废单/下单失败: %s" % reject
+            else:
+                detail = "%s | 废单/下单失败" % detail
+                skip_reason = "废单/下单失败"
             approval_result = "order_failed"
             execution_outcome = "order_failed"
+            vol = 0
         elif is_band_hp:
             skip_reason = str(
                 rec.get("detail")

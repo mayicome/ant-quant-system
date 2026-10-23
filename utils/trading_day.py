@@ -127,25 +127,52 @@ def _save_disk_trade_dates(dates: Set[date]) -> None:
         pass
 
 
-def _fetch_sina_trade_dates() -> Set[date]:
-    """经当前环境代理拉新浪交易日历（akshare）。"""
-    import akshare as ak
+def _fetch_sina_trade_dates_blocking() -> Set[date]:
+    """经当前环境代理拉新浪交易日历（akshare）；调用方负责超时。"""
+    try:
+        from utils.http_ipv4 import prefer_ipv4
+    except Exception:
+        prefer_ipv4 = None  # type: ignore
 
-    if hasattr(ak, "tool_trade_date_hist_sina"):
-        trade_date_df = ak.tool_trade_date_hist_sina()
-    elif hasattr(ak, "tool") and hasattr(ak.tool, "trade_date_hist_sina"):
-        trade_date_df = ak.tool.trade_date_hist_sina()
-    else:
-        raise RuntimeError("akshare 没有新浪交易日历接口")
-    if trade_date_df is None or getattr(trade_date_df, "empty", True):
-        raise RuntimeError("akshare 返回的交易日历为空")
-    if "trade_date" not in trade_date_df.columns:
-        if "date" in trade_date_df.columns:
-            trade_date_df = trade_date_df.rename(columns={"date": "trade_date"})
+    def _do() -> Set[date]:
+        import akshare as ak
+
+        if hasattr(ak, "tool_trade_date_hist_sina"):
+            trade_date_df = ak.tool_trade_date_hist_sina()
+        elif hasattr(ak, "tool") and hasattr(ak.tool, "trade_date_hist_sina"):
+            trade_date_df = ak.tool.trade_date_hist_sina()
         else:
-            trade_date_df = trade_date_df.rename(columns={trade_date_df.columns[0]: "trade_date"})
-    parsed = pd.to_datetime(trade_date_df["trade_date"], errors="coerce").dt.date
-    return {d for d in parsed.tolist() if isinstance(d, date)}
+            raise RuntimeError("akshare 没有新浪交易日历接口")
+        if trade_date_df is None or getattr(trade_date_df, "empty", True):
+            raise RuntimeError("akshare 返回的交易日历为空")
+        if "trade_date" not in trade_date_df.columns:
+            if "date" in trade_date_df.columns:
+                trade_date_df = trade_date_df.rename(columns={"date": "trade_date"})
+            else:
+                trade_date_df = trade_date_df.rename(
+                    columns={trade_date_df.columns[0]: "trade_date"}
+                )
+        parsed = pd.to_datetime(trade_date_df["trade_date"], errors="coerce").dt.date
+        return {d for d in parsed.tolist() if isinstance(d, date)}
+
+    if prefer_ipv4 is None:
+        return _do()
+    with prefer_ipv4():
+        return _do()
+
+
+def _fetch_sina_trade_dates(timeout_sec: float = 5.0) -> Set[date]:
+    """拉新浪交易日历；默认短超时，避免盘后 GUI 卡死数分钟。"""
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(_fetch_sina_trade_dates_blocking)
+        try:
+            return fut.result(timeout=float(timeout_sec))
+        except concurrent.futures.TimeoutError as exc:
+            raise TimeoutError(
+                f"新浪交易日历超时（>{timeout_sec}s）"
+            ) from exc
 
 
 def _apply_trade_dates(
@@ -172,39 +199,48 @@ def _apply_trade_dates(
 
 
 def _build_trade_date_cache(cache_start: date, cache_end: date, today: date) -> bool:
-    """从新浪 / 本地 trade_calendar.json 构建交易日历缓存，成功返回 True。
+    """从本地 trade_calendar.json / 新浪构建交易日历缓存，成功返回 True。
 
+    优先本地（秒级），再短超时刷新新浪；避免盘后 GUI 卡在 akshare 数分钟。
     不再使用 xtdata.get_trading_dates（大 QMT 侧不可靠）。
     """
     global _trade_date_cache, _cache_date_range, _cache_built_on, _warning_printed, _success_printed
 
-    # 1) 新浪交易日历（成功则写回磁盘）
+    # 1) 本地磁盘缓存（快路径）
+    local_ok = False
+    disk_dates = _load_disk_trade_dates()
+    if disk_dates and _apply_trade_dates(
+        disk_dates, cache_start, cache_end, today, "本地交易日历缓存"
+    ):
+        local_ok = True
+
+    # 2) 新浪短超时刷新（成功则写回磁盘）
+    e_ak: Optional[BaseException] = None
     try:
-        sina_dates = _fetch_sina_trade_dates()
+        sina_dates = _fetch_sina_trade_dates(timeout_sec=5.0)
         if _apply_trade_dates(sina_dates, cache_start, cache_end, today, "新浪交易日历"):
             _save_disk_trade_dates(sina_dates)
             return True
-        raise RuntimeError("新浪交易日历筛选后为空")
-    except Exception as e_ak:
-        # 2) 本地磁盘缓存
-        disk_dates = _load_disk_trade_dates()
-        if disk_dates and _apply_trade_dates(
-            disk_dates, cache_start, cache_end, today, "本地交易日历缓存"
-        ):
-            return True
-        if _trade_date_cache and (
-            today in _trade_date_cache or _cache_covers_today(today)
-        ):
-            _cache_date_range = (cache_start, cache_end)
-            _cache_built_on = today
-            return True
-        if not _warning_printed:
-            _warning_printed = True
-            _safe_print(
-                f"警告: 交易日历获取失败（新浪失败且无可用本地缓存），"
-                f"按非交易日处理（{type(e_ak).__name__}）"
-            )
-        return False
+        e_ak = RuntimeError("新浪交易日历筛选后为空")
+    except Exception as exc:
+        e_ak = exc
+
+    if local_ok:
+        return True
+    if _trade_date_cache and (
+        today in _trade_date_cache or _cache_covers_today(today)
+    ):
+        _cache_date_range = (cache_start, cache_end)
+        _cache_built_on = today
+        return True
+    if not _warning_printed:
+        _warning_printed = True
+        why = type(e_ak).__name__ if e_ak is not None else "unknown"
+        _safe_print(
+            f"警告: 交易日历获取失败（本地不可用且新浪失败/超时），"
+            f"按非交易日处理（{why}）"
+        )
+    return False
 
 
 def _today_weekday_fallback(check_date: date) -> bool:
@@ -250,8 +286,8 @@ def is_tradeday(check_date: Optional[date] = None) -> bool:
     判断指定日期是否为交易日。
 
     优先策略：
-    1) 新浪交易日历（akshare），成功则写回 data/trade_calendar.json
-    2) 本地 trade_calendar.json
+    1) 本地 trade_calendar.json（快路径）
+    2) 新浪交易日历（akshare，短超时），成功则写回 data/trade_calendar.json
     3) 仍失败则按非交易日（失败闭合，不用 weekday）
     """
     global _trade_date_cache, _cache_date_range, _cache_built_on, _same_day_missing_today_refresh_on

@@ -142,12 +142,52 @@ def _safe_console_print(text: str) -> None:
             pass
 
 
+
+def _subprocess_with_ipv4_cmd(
+    script_dir: str,
+    target: str,
+    extra_args: Sequence[str] = (),
+    *,
+    asof: Optional[date] = None,
+) -> List[str]:
+    """Build ``python -c`` that installs prefer_ipv4 then runs the target script.
+
+    Subprocess does not inherit the parent process socket monkeypatch, so each
+    child must install IPv4 preference itself.
+    """
+    code_lines = [
+        "import os, runpy, sys",
+        f"sys.path.insert(0, {script_dir!r})",
+        f"os.chdir({script_dir!r})",
+        "try:",
+        "    from utils.http_ipv4 import install_prefer_ipv4",
+        "    install_prefer_ipv4()",
+        "except Exception:",
+        "    pass",
+    ]
+    if asof is not None:
+        code_lines.extend(
+            [
+                "import pandas as _pd  # noqa: F401",
+                "import tools.rerun_post_market_asof as _r",
+                f"_r._patch_clock(_r._parse_asof({asof.isoformat()!r}))",
+            ]
+        )
+    code_lines.extend(
+        [
+            f"sys.argv = [{target!r}] + {list(extra_args)!r}",
+            f"runpy.run_path({target!r}, run_name='__main__')",
+        ]
+    )
+    return [sys.executable, "-X", "utf8", "-c", "\n".join(code_lines)]
+
+
 def _run_plain(script_dir: str, script_name: str, extra_args: Sequence[str] = ()) -> int:
     target = os.path.join(script_dir, script_name)
     if not os.path.exists(target):
         print(f"[失败] 未找到脚本: {target}")
         return 1
-    cmd = [sys.executable, target, *list(extra_args)]
+    cmd = _subprocess_with_ipv4_cmd(script_dir, target, extra_args)
     print(f"[开始] {script_name} {' '.join(map(str, extra_args))}".rstrip())
     result = subprocess.run(cmd, cwd=script_dir)
     print(f"[结束] {script_name} 退出码: {result.returncode}")
@@ -162,7 +202,7 @@ def _run_plain_capture(
     if not os.path.exists(target):
         print(f"[失败] 未找到脚本: {target}")
         return 1, ""
-    cmd = [sys.executable, target, *list(extra_args)]
+    cmd = _subprocess_with_ipv4_cmd(script_dir, target, extra_args)
     print(f"[开始] {script_name} {' '.join(map(str, extra_args))}".rstrip())
     result = subprocess.run(
         cmd,
@@ -204,22 +244,9 @@ def _run_asof(
     if not os.path.exists(target):
         print(f"[失败] 未找到脚本: {target}")
         return 1
-    code = "\n".join(
-        [
-            "import os, runpy, sys",
-            f"sys.path.insert(0, {script_dir!r})",
-            f"os.chdir({script_dir!r})",
-            "import pandas as _pd  # noqa: F401",
-            "import tools.rerun_post_market_asof as _r",
-            f"_r._patch_clock(_r._parse_asof({asof.isoformat()!r}))",
-            f"sys.argv = [{target!r}] + {list(extra_args)!r}",
-            f"runpy.run_path({target!r}, run_name='__main__')",
-        ]
-    )
+    cmd = _subprocess_with_ipv4_cmd(script_dir, target, extra_args, asof=asof)
     print(f"[开始][asof={asof}] {script_name} {' '.join(map(str, extra_args))}".rstrip())
-    result = subprocess.run(
-        [sys.executable, "-X", "utf8", "-c", code], cwd=script_dir
-    )
+    result = subprocess.run(cmd, cwd=script_dir)
     print(f"[结束] {script_name} 退出码: {result.returncode}")
     return int(result.returncode or 0)
 
