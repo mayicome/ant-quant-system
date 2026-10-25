@@ -366,10 +366,26 @@ def scan_logic2_meet_candidates(
         min_inflow_wan=float(min_inflow_wan),
     )
     quotes = bundle.get("quotes") or {}
+    _asof_val = bundle.get("as_of") or as_d
+    if hasattr(_asof_val, "isoformat"):
+        as_d = _asof_val
+    _asof_s = as_d.isoformat() if hasattr(as_d, "isoformat") else str(as_d)
+    _log(
+        "[盘中扫描] mode=%s as_of=%s reason=%s in_session=%s quotes=%d"
+        % (
+            bundle.get("mode"),
+            _asof_s,
+            bundle.get("mode_reason") or "",
+            bundle.get("in_session"),
+            len(quotes),
+        )
+    )
     if not quotes:
         err = str(bundle.get("error") or bundle.get("quote_err") or "无行情")
+        if bundle.get("mode") == "live" and bundle.get("in_session"):
+            err = "盘中live拉取失败（不回退CSV）: " + err
         return {
-            "as_of": as_d.isoformat(),
+            "as_of": _asof_s,
             "mode": bundle.get("mode"),
             "fetched_at": bundle.get("fetched_at"),
             "error": err,

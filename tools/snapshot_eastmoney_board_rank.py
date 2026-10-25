@@ -45,6 +45,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import pandas as pd
 import requests
 
+from utils.http_ipv4 import as_timeout, prefer_ipv4
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -57,8 +59,11 @@ _UT_FUND = "b2884a393a59ad64002292a3e90d46a5"
 # 本机常见：主站 push2 / 数字子域会被 RST；push2delay 仍可用，放最前。
 _HOSTS = (
     "https://push2delay.eastmoney.com/api/qt/clist/get",
-    "https://push2.eastmoney.com/api/qt/clist/get",
     "https://82.push2.eastmoney.com/api/qt/clist/get",
+    "https://push2.eastmoney.com/api/qt/clist/get",
+    "https://7.push2.eastmoney.com/api/qt/clist/get",
+    "https://55.push2.eastmoney.com/api/qt/clist/get",
+    "https://94.push2.eastmoney.com/api/qt/clist/get",
     "https://79.push2.eastmoney.com/api/qt/clist/get",
     "https://17.push2.eastmoney.com/api/qt/clist/get",
 )
@@ -95,6 +100,66 @@ _BOARD_FIELDS = (
 )
 
 
+
+from urllib.parse import urlparse
+import socket
+
+_WORKING_PROXIES: Optional[Dict[str, str]] = None
+_WORKING_PROXIES_RESOLVED = False
+_DEAD_PROXIES: set = set()
+
+
+def _proxy_candidates() -> List[Optional[Dict[str, str]]]:
+    """Direct first, then explicit/env/local proxies (align eastmoney_fund_flow)."""
+    out: List[Optional[Dict[str, str]]] = [None]
+    seen = {""}
+
+    def _add(url: str) -> None:
+        u = (url or "").strip()
+        if not u or u in seen or u in _DEAD_PROXIES:
+            return
+        seen.add(u)
+        out.append({"http": u, "https": u})
+
+    for key in (
+        "EM_FUND_FLOW_PROXY",
+        "EM_HIST_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+    ):
+        _add(os.environ.get(key, ""))
+    for port in (7078, 7890, 7897, 10809, 10808, 1080):
+        _add(f"http://127.0.0.1:{port}")
+    return out
+
+
+def _proxy_key(proxies: Optional[Dict[str, str]]) -> str:
+    if not proxies:
+        return ""
+    return str(proxies.get("https") or proxies.get("http") or "")
+
+
+def _proxy_tcp_alive(proxies: Optional[Dict[str, str]], *, timeout: float = 0.6) -> bool:
+    if not proxies:
+        return True
+    url = _proxy_key(proxies)
+    if not url:
+        return True
+    try:
+        u = urlparse(url)
+        host = u.hostname or "127.0.0.1"
+        port = int(u.port or (443 if u.scheme == "https" else 80))
+    except Exception:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        _DEAD_PROXIES.add(url)
+        return False
+
+
 def _clear_proxy_env() -> None:
     """与 build_stock_info_from_em_boards 一致：清代理，避免请求被系统代理干扰。"""
     for k in list(os.environ.keys()):
@@ -128,36 +193,57 @@ def _get_json(
     params: Dict[str, Any],
     *,
     hosts: Sequence[str] = _HOSTS,
-    retries: int = 6,
-    timeout: int = 30,
+    rounds: int = 3,
+    timeout: int = 25,
 ) -> dict:
+    """Multi-round x multi-host x proxies; prefer_ipv4 (align eastmoney_fund_flow)."""
+    global _WORKING_PROXIES, _WORKING_PROXIES_RESOLVED
     last_err: Optional[BaseException] = None
     host_list = list(hosts) or list(_HOSTS)
-    # 第一轮：每个 host 快速试一次（主站常秒断，勿长时间卡在坏 host）
-    quick_timeout = min(12, int(timeout))
-    for host in host_list:
-        try:
-            r = session.get(host, params=params, headers=_HEADERS, timeout=quick_timeout)
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, dict) and data.get("data") is not None:
-                return data
-            last_err = RuntimeError(f"empty payload from {host}")
-        except Exception as e:
-            last_err = e
-    # 第二轮：按 retries 轮询，略退避
-    for attempt in range(max(1, retries)):
-        host = host_list[attempt % len(host_list)]
-        try:
-            r = session.get(host, params=params, headers=_HEADERS, timeout=timeout)
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, dict) and data.get("data") is not None:
-                return data
-            last_err = RuntimeError(f"empty payload from {host}")
-        except Exception as e:
-            last_err = e
-            time.sleep(0.35 * (attempt + 1) + random.random() * 0.2)
+
+    for round_i in range(max(1, rounds)):
+        proxy_list = _proxy_candidates()
+        if _WORKING_PROXIES_RESOLVED:
+            preferred = _WORKING_PROXIES
+            rest = [p for p in proxy_list if p != preferred]
+            proxy_list = [preferred] + rest
+
+        attempt = 0
+        for proxies in proxy_list:
+            if not _proxy_tcp_alive(proxies):
+                continue
+            for host in host_list:
+                attempt += 1
+                try:
+                    with prefer_ipv4():
+                        r = session.get(
+                            host,
+                            params=params,
+                            headers=_HEADERS,
+                            timeout=as_timeout(timeout),
+                            proxies=proxies or {},
+                        )
+                        r.raise_for_status()
+                        data = r.json()
+                    if isinstance(data, dict) and data.get("data") is not None:
+                        _WORKING_PROXIES = proxies
+                        _WORKING_PROXIES_RESOLVED = True
+                        return data
+                    last_err = RuntimeError(f"empty payload from {host}")
+                except Exception as e:
+                    last_err = e
+                    msg = str(e).lower()
+                    if proxies and (
+                        "10061" in msg
+                        or "refused" in msg
+                        or "unable to connect to proxy" in msg
+                    ):
+                        _DEAD_PROXIES.add(_proxy_key(proxies))
+                        break
+                    time.sleep(0.25 * attempt + random.random() * 0.25)
+        if round_i + 1 < rounds:
+            time.sleep(1.5 * (round_i + 1) + random.random())
+
     raise RuntimeError(f"东财 clist 请求失败: {last_err}")
 
 
@@ -319,14 +405,15 @@ def _fetch_bkzj_rows(code: str, key: str) -> List[dict]:
     last_err: Optional[BaseException] = None
     for attempt in range(3):
         try:
-            r = session.get(
-                _BKZJ_URL,
-                params={"key": key, "code": code},
-                headers=_bkzj_headers(),
-                timeout=30,
-            )
-            r.raise_for_status()
-            diff = ((r.json() or {}).get("data") or {}).get("diff") or []
+            with prefer_ipv4():
+                r = session.get(
+                    _BKZJ_URL,
+                    params={"key": key, "code": code},
+                    headers=_bkzj_headers(),
+                    timeout=as_timeout(30),
+                )
+                r.raise_for_status()
+                diff = ((r.json() or {}).get("data") or {}).get("diff") or []
             if isinstance(diff, dict):
                 diff = list(diff.values())
             rows = [x for x in diff if isinstance(x, dict)]

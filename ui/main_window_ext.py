@@ -1,4 +1,4 @@
-from PyQt5.QtCore import pyqtSlot, Qt, QTimer, QMetaObject, Q_ARG, QObject, QDateTime, QDate, QTime
+from PyQt5.QtCore import pyqtSlot, Qt, QTimer, QMetaObject, Q_ARG, QObject, QDateTime, QDate, QTime, QEvent
 from PyQt5.QtWidgets import (QProgressBar, QWidget, QHBoxLayout, QTableWidgetItem, 
                            QComboBox, QPushButton, QMenu, QDialog, QVBoxLayout, 
                            QLabel, QSpinBox, QDoubleSpinBox, QDialogButtonBox, 
@@ -16,6 +16,12 @@ from datetime import datetime, timedelta, timezone, time as datetime_time
 import logging
 from core.task_manager import TaskManager
 from utils.trading_day import is_tradeday
+from utils.schedule_datetime_guard import (
+    apply_schedule_datetime_bounds,
+    install_schedule_no_wheel,
+    schedule_date_in_bounds,
+    SCHEDULE_BOUNDS_HINT,
+)
 from PyQt5.QtWidgets import QApplication
 from ui.custom_text_edit import AutoScrollTextEdit
 from core.utils.security_type import SecurityTypeUtil
@@ -81,6 +87,7 @@ def _default_schedule_reload_qdatetime() -> QDateTime:
                 return QDateTime(QDate(dd.year, dd.month, dd.day), QTime(9, 28, 0))
         dd = dd + timedelta(days=1)
     return QDateTime.currentDateTime().addSecs(3600)
+
 
 
 class MainWindowExt(Ui_mainWindow):
@@ -394,6 +401,13 @@ class MainWindowExt(Ui_mainWindow):
             "若当日任务表仍为空则每 5 秒重试，直到有任务或手动清除预约"
         )
         self.schedule_reload_dt_edit.setFixedWidth(170)
+        try:
+            apply_schedule_datetime_bounds(self.schedule_reload_dt_edit)
+            self._schedule_reload_no_wheel_filter = install_schedule_no_wheel(
+                self.schedule_reload_dt_edit, parent=self.schedule_reload_dt_edit
+            )
+        except Exception:
+            pass
         self.schedule_reload_save_btn = QPushButton("预约")
         self.schedule_reload_save_btn.setFixedSize(48, 28)
         self.schedule_reload_save_btn.clicked.connect(self._on_save_scheduled_reload)
@@ -4235,6 +4249,11 @@ class MainWindowExt(Ui_mainWindow):
     def _reapply_schedule_reload_default_display(self):
         """启动后再刷一次缺省时间，避免首帧时交易日历未就绪仍显示旧回退值。"""
         try:
+            try:
+                apply_schedule_datetime_bounds(self.schedule_reload_dt_edit)
+            except Exception:
+                pass
+
             ra = getattr(self, "_scheduled_reload_run_at", None)
             if ra is not None:
                 self.schedule_reload_dt_edit.setDateTime(
@@ -4337,6 +4356,19 @@ class MainWindowExt(Ui_mainWindow):
             if run_at <= datetime.now():
                 QMessageBox.warning(self.window, "提示", "预约时间必须晚于当前时间。")
                 return
+            try:
+                apply_schedule_datetime_bounds(self.schedule_reload_dt_edit)
+                ok, _min_qd, _max_qd = schedule_date_in_bounds(run_at)
+                if not ok:
+                    QMessageBox.warning(
+                        self.window,
+                        "提示",
+                        SCHEDULE_BOUNDS_HINT,
+                    )
+                    return
+            except Exception:
+                # 边界计算失败时不拦预约，仍保留「须晚于当前时间」校验
+                pass
             self._scheduled_reload_run_at = run_at
             self._persist_scheduled_reload(run_at)
             self.schedule_reload_status.setText(f"已预约 {run_at.strftime('%Y-%m-%d %H:%M:%S')}")

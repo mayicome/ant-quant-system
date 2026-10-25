@@ -617,6 +617,14 @@ def _parse_schedule_at_storage(s: str) -> datetime:
     return _normalize_schedule_dt(dt)
 
 
+from utils.schedule_datetime_guard import (
+    apply_schedule_datetime_bounds,
+    apply_schedule_datetime_guard,
+    schedule_date_in_bounds,
+    SCHEDULE_BOUNDS_HINT,
+)
+
+
 def _default_schedule_gen_datetime(from_dt: datetime | None = None) -> datetime:
     """未预约策略的默认定时：尚未到来的最近一个交易日 09:25:10（本地时间）。"""
     try:
@@ -2327,6 +2335,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.schedule_gen_datetime.setCalendarPopup(True)
         self.schedule_gen_datetime.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.schedule_gen_datetime.setDateTime(_default_schedule_gen_qdatetime())
+        try:
+            self._schedule_gen_no_wheel_filter = apply_schedule_datetime_guard(
+                self.schedule_gen_datetime, parent=self.schedule_gen_datetime
+            )
+        except Exception:
+            pass
         _sched_row1.addWidget(self.schedule_gen_datetime, 1)
         _sched_layout.addLayout(_sched_row1)
         _sched_row2 = QHBoxLayout()
@@ -4132,6 +4146,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.schedule_save_btn.setEnabled(True)
         self.schedule_clear_btn.setEnabled(True)
         self.schedule_gen_datetime.setEnabled(True)
+        try:
+            apply_schedule_datetime_bounds(self.schedule_gen_datetime)
+        except Exception:
+            pass
         s = (cfg.scheduled_generate_at or "").strip()
         if s:
             try:
@@ -4172,6 +4190,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if dt_py <= now_s:
             QMessageBox.warning(self, "提示", "预约时间必须晚于当前时间。")
             return
+        try:
+            apply_schedule_datetime_bounds(self.schedule_gen_datetime)
+            ok, _min_qd, _max_qd = schedule_date_in_bounds(dt_py)
+            if not ok:
+                QMessageBox.warning(self, "提示", SCHEDULE_BOUNDS_HINT)
+                return
+        except Exception:
+            # 边界计算失败时不拦预约，仍保留「须晚于当前时间」校验
+            pass
         cfg.scheduled_generate_at = _schedule_at_storage_str(dt_py)
         # 只改预约时刻并落盘；勿整表重载（会重建股票池/读任务表，大池会卡十几秒）
         save_strategy(cfg)
@@ -6555,14 +6582,62 @@ class StrategyGeneratorMainWindow(QMainWindow):
             self._last_saved_snapshot = self._take_snapshot()
         QMessageBox.information(self, "完成", "策略代码已保存。")
 
+
+    def _run_log_tee_dir(self) -> str:
+        root = self._project_root() if hasattr(self, "_project_root") else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        d = os.path.join(root, "logs", "strategy_generator_runs")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        return d
+
+    def _open_run_log_tee(self, strategy_id: str, run_start_str: str) -> None:
+        """Also write this run's log under logs/strategy_generator_runs/ for audit."""
+        self._close_run_log_tee()
+        try:
+            safe_sid = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(strategy_id or "unknown"))[:64]
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(self._run_log_tee_dir(), f"{stamp}_{safe_sid}.log")
+            fp = open(path, "a", encoding="utf-8", newline="\n")
+            fp.write(f"===== strategy run {run_start_str} id={strategy_id} =====\n")
+            fp.flush()
+            self._run_log_tee_fp = fp
+            self._run_log_tee_path = path
+            self._append_run_log(f"运行日志已写入: {path}")
+        except Exception as e:
+            self._run_log_tee_fp = None
+            self._run_log_tee_path = ""
+            try:
+                self._append_run_log(f"运行日志落盘失败: {e}")
+            except Exception:
+                pass
+
+    def _close_run_log_tee(self) -> None:
+        fp = getattr(self, "_run_log_tee_fp", None)
+        if fp is not None:
+            try:
+                fp.flush()
+                fp.close()
+            except Exception:
+                pass
+        self._run_log_tee_fp = None
+
     def _append_run_log(self, text):
         """向运行日志框追加一行或多行文本，并滚动到底部；内容超出一页时自动出现滚动条。"""
+        if text and not text.endswith("\n"):
+            text = text + "\n"
+        tee = getattr(self, "_run_log_tee_fp", None)
+        if tee is not None and text:
+            try:
+                tee.write(text)
+                tee.flush()
+            except Exception:
+                pass
         if not hasattr(self, "run_output_edit") or self.run_output_edit is None:
             return
         edit = self.run_output_edit
         edit.moveCursor(QTextCursor.End)
-        if text and not text.endswith("\n"):
-            text = text + "\n"
         edit.insertPlainText(text)
         edit.moveCursor(QTextCursor.End)
         sb = edit.verticalScrollBar()
@@ -6621,6 +6696,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
         run_start_time = time.time()
         run_start_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self._open_run_log_tee(sid, run_start_str)
+        except Exception:
+            pass
         self._append_run_log(f"开始运行  {run_start_str}")
         self._append_run_log(f"诊断用时钟（北京时间）：{_beijing_now_diag_str()}")
         if top_n > 0 and top_n < pool_n:
@@ -6941,6 +7020,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     QMessageBox.information(self, "运行完成", msg_empty)
         finally:
             self._release_strategy_pool_watch_after_run()
+            try:
+                self._close_run_log_tee()
+            except Exception:
+                pass
             self._preview_run_busy = False
             if hasattr(self, "preview_btn") and self.preview_btn is not None:
                 self.preview_btn.setEnabled(True)

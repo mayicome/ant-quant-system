@@ -4,7 +4,7 @@ import warnings
 import sys
 import subprocess
 import re
-from datetime import datetime, date, time as dt_time
+from datetime import datetime, date, time as dt_time, timedelta
 
 # 避免 PyQt/SIP 的弃用警告刷屏（不影响功能）
 warnings.filterwarnings(
@@ -347,6 +347,7 @@ class AntLauncherWindow(QMainWindow):
         self._setup_icon()
         self._setup_ui()
         self._arm_post_market_watch()
+        self._arm_ma_zong_dump_watch()
         self._ensure_app_config_ini()
         head = _git_head_short(self._project_root())
         self._append_launcher_log(
@@ -445,6 +446,15 @@ class AntLauncherWindow(QMainWindow):
                 "category": "tool",
                 "description": "本地分时/Tick 缓存只读查看",
                 "order": 50,
+                "enabled": True,
+            },
+            {
+                "id": "ma_zong_intraday_dump",
+                "name": "马总盘中落候选",
+                "script": "tools/dump_ma_zong_intraday_candidates.py",
+                "category": "tool",
+                "description": "可配置多时钟（dump_times）落硬门槛候选+软门槛诊断；启动器按槽位自动跑。盘外手动请加 --allow-file",
+                "order": 65,
                 "enabled": True,
             },
             {
@@ -1209,6 +1219,10 @@ class AntLauncherWindow(QMainWindow):
                 self._watch_timer.stop()
                 self._watch_timer.deleteLater()
                 self._watch_timer = None
+            if getattr(self, "_mz_dump_timer", None) is not None:
+                self._mz_dump_timer.stop()
+                self._mz_dump_timer.deleteLater()
+                self._mz_dump_timer = None
         except Exception:
             pass
         for attr in ("_bootstrap_worker", "_update_worker"):
@@ -1246,6 +1260,151 @@ class AntLauncherWindow(QMainWindow):
         except Exception:
             pass
         return str(self._post_market_settings.get("post_market_bat") or "").strip()
+
+
+    def _arm_ma_zong_dump_watch(self) -> None:
+        """交易日按 config dump_times 列表逐槽位自动落马总盘中硬门槛候选。"""
+        self._mz_dump_timer = QTimer(self)
+        self._mz_dump_timer.setInterval(30_000)
+        self._mz_dump_timer.timeout.connect(self._maybe_run_ma_zong_intraday_dump)
+        self._mz_dump_timer.start()
+        QTimer.singleShot(5000, self._maybe_run_ma_zong_intraday_dump)
+
+    def _mz_dump_slot_key(self, day, clock_hm: str) -> str:
+        return "%s_%s" % (day.isoformat() if hasattr(day, "isoformat") else str(day), clock_hm)
+
+    def _mz_dump_done_slots(self):
+        raw = self._post_market_settings.get("ma_zong_dump_done_slots") or []
+        if isinstance(raw, str):
+            raw = [raw] if raw.strip() else []
+        try:
+            return set(str(x) for x in raw)
+        except Exception:
+            return set()
+
+    def _mz_dump_slot_done(self, day, clock_hm: str) -> bool:
+        return self._mz_dump_slot_key(day, clock_hm) in self._mz_dump_done_slots()
+
+    def _mark_mz_dump_slot_done(self, day, clock_hm: str) -> None:
+        try:
+            self._post_market_settings = self._load_post_market_settings()
+        except Exception:
+            pass
+        key = self._mz_dump_slot_key(day, clock_hm)
+        slots = self._post_market_settings.get("ma_zong_dump_done_slots") or []
+        if isinstance(slots, str):
+            slots = [slots] if slots.strip() else []
+        slots = [str(x) for x in slots]
+        if key not in slots:
+            slots.append(key)
+        # 只保留近 60 条，避免无限膨胀
+        if len(slots) > 60:
+            slots = slots[-60:]
+        self._post_market_settings["ma_zong_dump_done_slots"] = slots
+        # 旧单日标记不再使用，清掉以免误拦
+        self._post_market_settings.pop("ma_zong_dump_watch_date", None)
+        try:
+            self._save_post_market_settings()
+        except Exception as exc:
+            self._append_launcher_log("ma_zong_dump: save settings failed %s" % exc)
+
+    def _load_mz_dump_schedule(self):
+        """返回 (enabled, [(HH:MM, time), ...], grace_minutes)。"""
+        enabled = True
+        slots = [("14:40", dt_time(14, 40))]
+        grace = 15
+        try:
+            from pathlib import Path as _Path
+            from utils.ma_zong_candidate_dump import load_dump_config
+
+            cfg = load_dump_config(_Path(self._project_root()))
+            enabled = bool(cfg.get("enabled", True))
+            times = list(cfg.get("dump_times") or [])
+            objs = list(cfg.get("dump_time_objs") or [])
+            if times and objs and len(times) == len(objs):
+                slots = list(zip(times, objs))
+            elif times:
+                slots = [(hm, dt_time(*map(int, (hm + ":0").split(":")[:2]))) for hm in times]
+            grace = int(cfg.get("grace_minutes") or 15)
+        except Exception as exc:
+            self._append_launcher_log("ma_zong_dump: load config failed %s" % exc)
+        return enabled, slots, grace
+
+    def _mz_dump_already_running(self) -> bool:
+        try:
+            import psutil
+        except Exception:
+            return False
+        marker = "dump_ma_zong_intraday_candidates.py"
+        for proc in psutil.process_iter(["cmdline"]):
+            try:
+                cmd = " ".join(proc.info.get("cmdline") or [])
+            except Exception:
+                continue
+            if marker.lower() in cmd.lower():
+                return True
+        return False
+
+    def _maybe_run_ma_zong_intraday_dump(self) -> None:
+        now = datetime.now()
+        try:
+            self._post_market_settings = self._load_post_market_settings()
+        except Exception:
+            pass
+        enabled, slots, grace = self._load_mz_dump_schedule()
+        if not enabled or not slots:
+            return
+        try:
+            from utils.trading_day import is_tradeday
+
+            if not is_tradeday(now.date()):
+                return
+        except Exception:
+            if now.weekday() >= 5:
+                return
+
+        for hm, dump_at in slots:
+            if self._mz_dump_slot_done(now.date(), hm):
+                continue
+            end_dt = datetime.combine(now.date(), dump_at) + timedelta(minutes=max(0, int(grace)))
+            if now.time() < dump_at:
+                # 尚未到该槽，后面更晚的也不用看
+                break
+            if now > end_dt:
+                self._append_launcher_log(
+                    "ma_zong_dump: missed window %s(+%s min), mark done"
+                    % (hm, grace)
+                )
+                self._mark_mz_dump_slot_done(now.date(), hm)
+                continue
+            # 落在 [dump_at, dump_at+grace]
+            if self._mz_dump_already_running():
+                self._append_launcher_log(
+                    "ma_zong_dump: already running, wait (pending slot %s)" % hm
+                )
+                return
+            script = "tools/dump_ma_zong_intraday_candidates.py"
+            self._append_launcher_log(
+                "ma_zong_dump: launching scheduled at %s (slot %s, grace %s)"
+                % (now.strftime("%H:%M:%S"), hm, grace)
+            )
+            try:
+                self._launch_python(
+                    script, extra_args=["--scheduled", "--clock", hm]
+                )
+            except Exception as exc:
+                self._append_launcher_log("ma_zong_dump: launch failed %s" % exc)
+                return
+            self._mark_mz_dump_slot_done(now.date(), hm)
+            try:
+                self._set_update_status(
+                    "已触发马总盘中落候选（%s）" % hm,
+                    auto_clear_ms=8000,
+                )
+            except Exception:
+                pass
+            return
+
 
     def _arm_post_market_watch(self) -> None:
         self._watch_timer = QTimer(self)
@@ -1455,7 +1614,7 @@ class AntLauncherWindow(QMainWindow):
                 f"脚本运行失败，返回码：{cp.returncode}\n\n最近输出：\n{tail}",
             )
 
-    def _launch_python(self, script_rel_path: str) -> None:
+    def _launch_python(self, script_rel_path: str, extra_args=None) -> None:
         """用当前 Python 解释器启动一个独立子进程运行脚本。打包成 exe 时以 exe 所在目录为项目根，并用本机 Python 运行脚本。"""
         if getattr(sys, "frozen", False):
             # PyInstaller 打包后：项目根 = exe 所在目录
@@ -1490,7 +1649,9 @@ class AntLauncherWindow(QMainWindow):
                 f.write(f"\n=== Launch {script_rel_path} with {python_exe} ===\n")
                 popen_kwargs["stdout"] = f
                 popen_kwargs["stderr"] = f
-                subprocess.Popen([python_exe, script_path], **popen_kwargs)
+                cmd = [python_exe, script_path] + list(extra_args or [])
+                f.write(f"args={cmd!r}\n")
+                subprocess.Popen(cmd, **popen_kwargs)
         except Exception as exc:
             QMessageBox.warning(self, "启动失败", f"{script_rel_path}\n\n{exc}")
 

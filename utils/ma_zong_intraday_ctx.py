@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date, datetime
-from typing import Any, Dict, Optional, Tuple, Union
+from datetime import date, datetime, time as dt_time, timedelta
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -472,6 +472,98 @@ def _load_quotes_file(as_of: date) -> Tuple[Dict[str, Dict[str, Any]], str]:
     return out, ""
 
 
+
+def is_a_share_intraday_session(now: Optional[datetime] = None) -> bool:
+    """A-share intraday session: trading day and 09:30-15:00 Beijing (incl. lunch).
+
+    Live eastmoney data is meaningful only in this window; lunch still counts
+    as in-session so we do NOT fall back to stale CSV.
+    """
+    now = now or datetime.now()
+    try:
+        from utils.trading_day import is_tradeday
+    except Exception:
+        if now.weekday() >= 5:
+            return False
+        t = now.time()
+        return dt_time(9, 30) <= t <= dt_time(15, 0)
+    if not is_tradeday(now.date()):
+        return False
+    t = now.time()
+    return dt_time(9, 30) <= t <= dt_time(15, 0)
+
+
+def resolve_ma_zong_data_mode(
+    as_of: DateLike = None,
+    *,
+    force_live: Optional[bool] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Decide as_of / whether live / reason.
+
+    Rules:
+      - live only when as_of==today AND currently in intraday session
+      - otherwise use previous trading day's local files
+      - force_live=True outside session is demoted (avoid hang)
+    """
+    now = now or datetime.now()
+    today = now.date()
+    as_d = _as_date(as_of) or today
+    in_session = is_a_share_intraday_session(now)
+
+    requested = force_live
+    if force_live is None:
+        want_live = (as_d == today) and in_session
+    else:
+        want_live = bool(force_live)
+
+    use_live = bool(want_live) and (as_d == today) and in_session
+    reason = "live_session" if use_live else "file"
+    effective_asof = as_d
+
+    if use_live:
+        return {
+            "as_of": effective_asof,
+            "use_live": True,
+            "in_session": in_session,
+            "reason": reason,
+            "requested_force_live": requested,
+        }
+
+    if as_d == today or (not use_live and as_d >= today):
+        try:
+            from utils.trading_day import previous_tradeday, last_tradeday_on_or_before
+
+            if as_d == today:
+                effective_asof = previous_tradeday(today)
+            else:
+                effective_asof = last_tradeday_on_or_before(as_d) or as_d
+        except Exception:
+            d = as_d - timedelta(days=1) if as_d == today else as_d
+            for _ in range(10):
+                if d.weekday() < 5:
+                    effective_asof = d
+                    break
+                d -= timedelta(days=1)
+
+    if requested is True and not use_live:
+        reason = "demote_force_live_outside_session"
+    elif as_d == today and not in_session:
+        reason = "outside_session_use_prev_tradeday"
+    elif as_d != today:
+        reason = "historical_file"
+    else:
+        reason = "file"
+
+    return {
+        "as_of": effective_asof,
+        "use_live": False,
+        "in_session": in_session,
+        "reason": reason,
+        "requested_force_live": requested,
+    }
+
+
 def load_ma_zong_intraday_bundle(
     as_of: DateLike = None,
     *,
@@ -480,41 +572,87 @@ def load_ma_zong_intraday_bundle(
     refresh: bool = False,
     min_inflow_wan: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """返回盘中/落地快照 bundle。
+    """Return intraday/file snapshot bundle.
 
-    min_inflow_wan: live 模式下按净流入降序早停翻页（策略扫描用，默认 None=全量）。
+    min_inflow_wan: live mode early-stop by inflow (default None=full).
     force_live:
-      None → 选股日=今天则 live，否则 file
-      True/False → 强制
+      None  -> live only if today AND in session; else prev trading day file
+      True  -> real live only in session; outside session demote to file
+      False -> force file
+
+    When live fetch fails:
+      - in session: do NOT fall back to CSV; keep error
+      - outside session: fall back to prev trading day CSV, mode=file_fallback
     """
-    as_d = _as_date(as_of) or date.today()
-    today = date.today()
-    use_live = bool(force_live) if force_live is not None else (as_d == today)
+    now = datetime.now()
+    resolved = resolve_ma_zong_data_mode(as_of, force_live=force_live, now=now)
+    as_d = resolved["as_of"]
+    use_live = bool(resolved["use_live"])
+    in_session = bool(resolved["in_session"])
+    reason = str(resolved.get("reason") or "")
+
     key = "%s:%s" % (as_d.isoformat(), "live" if use_live else "file")
-    now = time.time()
+    now_ts = time.time()
     if (
         not refresh
         and _CACHE.get("key") == key
         and isinstance(_CACHE.get("bundle"), dict)
-        and (now - float(_CACHE.get("ts") or 0.0)) < float(ttl_sec)
+        and (now_ts - float(_CACHE.get("ts") or 0.0)) < float(ttl_sec)
     ):
         return _CACHE["bundle"]
 
-    bundle = _empty_bundle(as_d, mode="live" if use_live else "file")
-    bundle["fetched_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mode = "live" if use_live else "file"
+    bundle = _empty_bundle(as_d, mode=mode)
+    bundle["fetched_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+    bundle["mode_reason"] = reason
+    bundle["in_session"] = in_session
+    if reason and reason != "live_session":
+        print(
+            "[马总盘中] data_mode=%s as_of=%s reason=%s in_session=%s"
+            % (mode, as_d.isoformat(), reason, in_session)
+        )
 
     if use_live:
         quotes, qerr = _load_quotes_live(min_inflow_wan=min_inflow_wan)
         ind, con, ind_chg, con_chg, berr = _load_board_ranks_live()
         ind_fr, con_fr, ferr = _load_board_flow_ratio_live()
-        if ferr and not ind_fr and not con_fr:
-            # live 资金流失败时回退当日本地 CSV
-            ind_fr2, con_fr2, ferr2 = _load_board_flow_ratio_file(as_d)
-            if ind_fr2 or con_fr2:
-                ind_fr, con_fr = ind_fr2, con_fr2
-                ferr = ""
+        # In session: never fall back to CSV (including board fund-flow).
+        live_failed = (not quotes) or bool(qerr)
+        boards_empty = (not ind and not con) and (not ind_fr and not con_fr)
+        if live_failed or (boards_empty and (berr or ferr)):
+            if in_session:
+                pass
             else:
-                ferr = ferr2 or ferr
+                try:
+                    from utils.trading_day import previous_tradeday
+
+                    fb_d = previous_tradeday(now.date())
+                except Exception:
+                    fb_d = as_d
+                print(
+                    "[马总盘中] live failed; off-session CSV fallback mode=file_fallback as_of=%s; live_err=%s"
+                    % (
+                        fb_d.isoformat(),
+                        "; ".join(e for e in (qerr, berr, ferr) if e),
+                    )
+                )
+                quotes2, qerr2 = _load_quotes_file(fb_d)
+                ind2, con2, ind_chg2, con_chg2, berr2 = _load_board_ranks_file(fb_d)
+                ind_fr2, con_fr2, ferr2 = _load_board_flow_ratio_file(fb_d)
+                if quotes2:
+                    quotes, qerr = quotes2, ""
+                    as_d = fb_d
+                    bundle["as_of"] = as_d
+                    bundle["mode"] = "file_fallback"
+                    mode = "file_fallback"
+                if ind2 or con2:
+                    ind, con, ind_chg, con_chg = ind2, con2, ind_chg2, con_chg2
+                    berr = "" if (ind2 or con2) else (berr2 or berr)
+                if ind_fr2 or con_fr2:
+                    ind_fr, con_fr = ind_fr2, con_fr2
+                    ferr = "" if (ind_fr2 or con_fr2) else (ferr2 or ferr)
+                if not quotes2:
+                    qerr = qerr or qerr2
     else:
         quotes, qerr = _load_quotes_file(as_d)
         ind, con, ind_chg, con_chg, berr = _load_board_ranks_file(as_d)
@@ -532,9 +670,10 @@ def load_ma_zong_intraday_bundle(
     bundle["board_err"] = "; ".join(board_parts)
     errs = [e for e in (qerr, bundle["board_err"]) if e]
     bundle["error"] = "; ".join(errs)
+    bundle["mode"] = mode
 
-    _CACHE["key"] = key
-    _CACHE["ts"] = now
+    _CACHE["key"] = "%s:%s" % (as_d.isoformat(), "file" if mode == "file_fallback" else mode)
+    _CACHE["ts"] = now_ts
     _CACHE["bundle"] = bundle
     return bundle
 

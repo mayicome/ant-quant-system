@@ -86,7 +86,20 @@ DEFAULT_SECTIONS: "OrderedDict[str, OrderedDict[str, str]]" = OrderedDict(
             ),
         ),
         (
+            "MaZongIntradayDump",
+            OrderedDict(
+                [
+                    ("enabled", "1"),
+                    ("dump_times", "11:00,14:00,14:30,14:40,14:50,14:55"),
+                    ("grace_minutes", "15"),
+                    ("output_dir", "data/ma_zong_intraday_candidates"),
+                    ("min_inflow_wan", "3500"),
+                ]
+            ),
+        ),
+        (
             "Today Analyse",
+
             OrderedDict(
                 [
                     ("limit_up_ask_price", "0"),

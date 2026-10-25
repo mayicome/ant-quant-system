@@ -91,11 +91,30 @@ def run(codes, prices, get_name, account, params):
     except Exception:
         pass
 
-    force_live = trade_d == _date.today()
-    print(
-        "[马总盘中买] 开始扫描 as_of=%s live=%s inflow>=%.0f万 amount=%.0f"
-        % (trade_d.isoformat(), force_live, min_inflow, amount)
-    )
+    # Session gate: live only on trading-day session; else prev day file via bundle.
+    try:
+        from utils.ma_zong_intraday_ctx import resolve_ma_zong_data_mode
+
+        _mode = resolve_ma_zong_data_mode(trade_d, force_live=(trade_d == _date.today()))
+        force_live = bool(_mode.get("use_live"))
+        trade_d = _mode.get("as_of") or trade_d
+        print(
+            "[马总盘中买] 开始扫描 as_of=%s live=%s reason=%s in_session=%s inflow>=%.0f万 amount=%.0f"
+            % (
+                trade_d.isoformat(),
+                force_live,
+                _mode.get("reason"),
+                _mode.get("in_session"),
+                min_inflow,
+                amount,
+            )
+        )
+    except Exception as _e:
+        force_live = trade_d == _date.today()
+        print(
+            "[马总盘中买] 开始扫描 as_of=%s live=%s inflow>=%.0f万 amount=%.0f (mode_resolve_fail=%s)"
+            % (trade_d.isoformat(), force_live, min_inflow, amount, _e)
+        )
     scan = scan_logic2_meet_candidates(
         trade_d,
         force_live=force_live,
