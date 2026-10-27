@@ -2617,10 +2617,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.backtest_run_btn.clicked.connect(self._on_run_backtest)
         self.backtest_batch_file_btn = QPushButton("批量回测(选股文件)…")
         self.backtest_batch_file_btn.setToolTip(
-            "选择含「选股日」列的 Excel/CSV。\n"
-            "默认「实盘对齐」：按批量导入设置（最近起始/截止交易日）滚动建池 + 涨幅过滤，连续仿真；\n"
-            "关闭对齐：按每个选股日单独股票池回测（区间 T+1/T 起，长度=运行交易日数）。\n"
-            "卖出轮用「下一轮接续」里的持有交易日数。分时段组合规则与单次回测相同。"
+            "通用策略：选择含选股日的选股文件做批量回测。\n"
+            "【马总逻辑1】不再选手动选股文件：用回测页起止日期，\n"
+            "按「批量导入选股文件」同款设置滚动建池，再生成 QMT 细回测脚本投递探针。\n"
+            "券商 tick 约近 1 个月；更早日期常缺 tick。"
         )
         self.backtest_batch_file_btn.clicked.connect(self._on_batch_backtest_from_selection_file)
         self.backtest_export_last_btn = QPushButton("导出上次回测结果…")
@@ -2667,6 +2667,29 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
         backtest_layout.addLayout(backtest_btn_row1)
         backtest_layout.addLayout(backtest_btn_row2)
+
+        # 马总逻辑1 · QMT 模型交易细回测（3b）：投递 watch 供探针热加载 + 导入 FormulaOutput
+        backtest_btn_row3 = QHBoxLayout()
+        self.backtest_mz1_qmt_gen_btn = QPushButton("生成QMT细回测脚本…")
+        self.backtest_mz1_qmt_gen_btn.setToolTip(
+            "【马总逻辑1】按当前股票池/选股日与回测起止，生成细回测脚本并原子写入\n"
+            "国金 QMT userdata\\mz1_qmt_fine_watch\\current.py；若模型交易里「探针」在跑会自动重载回测。\n"
+            "券商 tick 约近 1 个月，区间自动钳制。结果在 FormulaOutput（ANT_MZ1_BT|）。\n"
+            "首次：模型交易 → 新建策略 → Python → 粘贴/加载 python\\探针.py → 启动。"
+        )
+        self.backtest_mz1_qmt_gen_btn.clicked.connect(self._on_generate_mz1_qmt_fine_script)
+        self.backtest_mz1_qmt_ingest_btn = QPushButton("导入QMT细回测结果…")
+        self.backtest_mz1_qmt_ingest_btn.setToolTip(
+            "自动读取当天 userdata\\log\\XtClient_FormulaOutput_YYYYMMDD.log，无需选文件。"
+        )
+        self.backtest_mz1_qmt_ingest_btn.clicked.connect(self._on_ingest_mz1_qmt_fine_result)
+        for _b in (self.backtest_mz1_qmt_gen_btn, self.backtest_mz1_qmt_ingest_btn):
+            _b.setMinimumWidth(0)
+            _b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        backtest_btn_row3.addWidget(self.backtest_mz1_qmt_gen_btn)
+        backtest_btn_row3.addWidget(self.backtest_mz1_qmt_ingest_btn)
+        backtest_btn_row3.addStretch()
+        backtest_layout.addLayout(backtest_btn_row3)
 
         # 工具：合并买卖成交明细 → 各日选股收益汇总.xlsx
         self.merge_trades_group = QGroupBox("选股收益汇总（合并买卖成交明细）")
@@ -4111,6 +4134,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         # 先加载参数（含运行交易日数），再填股票池进度，避免分母先按默认 1 显示成 1/1
         self._load_params_to_form(cfg.strategy_params or {})
         self._fill_pool_list(cfg.stock_codes, set_original=True)
+        self._refresh_backtest_mode_hint()
         code = (cfg.strategy_code or "").strip()
         self.logic_code_edit.setPlainText(code if code else _default_strategy_code())
         self._last_saved_snapshot = self._take_snapshot()
@@ -7098,6 +7122,494 @@ class StrategyGeneratorMainWindow(QMainWindow):
             else:
                 QMessageBox.critical(self, "错误", f"写入失败：{e}")
 
+
+    def _mz1_qmt_fine_mod(self):
+        try:
+            from strategy_generator_app.backtest import mz1_qmt_fine as m
+            return m
+        except ImportError:
+            from backtest import mz1_qmt_fine as m  # type: ignore
+            return m
+
+    def _default_qmt_formula_log_dir(self) -> str:
+        candidates = [
+            r"D:\国金证券QMT交易端2\userdata\log",
+            r"D:\国金证券QMT交易端\userdata\log",
+        ]
+        for c in candidates:
+            if os.path.isdir(c):
+                return c
+        return ""
+
+    def _on_generate_mz1_qmt_fine_script(self):
+        """生成马总逻辑1 QMT 模型交易细回测脚本（3b）。"""
+        m = self._mz1_qmt_fine_mod()
+        sid = (self._get_selected_strategy_id() or "").strip()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        name = (getattr(cfg, "name", "") or "") if cfg else ""
+        if not m.is_mz1_buy_strategy(sid, name):
+            reply = QMessageBox.question(
+                self,
+                "生成QMT细回测脚本",
+                "当前策略看起来不是「买：马总逻辑1」。仍按马总逻辑1买腿规则生成脚本吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        codes = self._get_pool_codes_from_list()
+        sel_map = {}
+        if cfg is not None:
+            sp = self._merge_strategy_params_from_form(cfg.strategy_params or {})
+            raw = sp.get("selection_date_by_code") or {}
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    c6 = str(k).strip()
+                    if "." in c6:
+                        c6 = c6.split(".", 1)[0]
+                    c6 = "".join(ch for ch in c6 if ch.isdigit())[-6:].zfill(6)
+                    if len(c6) == 6:
+                        sel_map[c6] = str(v)[:10]
+        if not codes:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "股票池为空：选择选股文件生成脚本",
+                "",
+                "Excel/CSV (*.xlsx *.xls *.csv);;所有文件 (*.*)",
+            )
+            if not path:
+                return
+            try:
+                by_day, _strength, hint = group_codes_and_clip_strength_by_selection_date(
+                    path
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "生成失败", str(e))
+                return
+            codes = []
+            for d, lst in (by_day or {}).items():
+                ds = str(d)[:10]
+                for c in lst or []:
+                    c6 = _normalize_code(c)
+                    if not c6:
+                        continue
+                    codes.append(c6)
+                    sel_map.setdefault(c6, ds)
+            if hint:
+                try:
+                    self.statusBar().showMessage(str(hint), 8000)
+                except Exception:
+                    pass
+        if not codes:
+            QMessageBox.warning(self, "提示", "没有可用代码。")
+            return
+        start_d = self.backtest_start_date.date().toPyDate()
+        end_d = self.backtest_end_date.date().toPyDate()
+        from_t1 = bool(self.backtest_batch_from_t1_cb.isChecked())
+        entry_w = 10
+        if hasattr(self, "param_entry_window_spin"):
+            entry_w = int(self.param_entry_window_spin.value() or 10)
+        sp_disk = m.load_mz1_strategy_params()
+        amount = float(sp_disk.get("buy_amount_per_stock") or 50000)
+        min_order = float(sp_disk.get("min_order_amount") or 5000)
+        rise = float(sp_disk.get("rise_percent") or 0)
+        if cfg is not None:
+            sp = self._merge_strategy_params_from_form(cfg.strategy_params or {})
+            try:
+                amount = float(sp.get("buy_amount_per_stock") or amount)
+            except Exception:
+                pass
+            try:
+                min_order = float(sp.get("min_order_amount") or min_order)
+            except Exception:
+                pass
+            try:
+                rise = float(sp.get("rise_percent") or rise)
+            except Exception:
+                pass
+        sel_days = []
+        for v in sel_map.values():
+            d = m.parse_ymd(v)
+            if d:
+                sel_days.append(d)
+        if sel_days:
+            cr = m.clamp_selection_days(
+                sel_days, entry_window=entry_w, from_t1=from_t1
+            )
+            if cr.dropped_selection_days:
+                drop = set(cr.dropped_selection_days)
+                sel_map = {
+                    k: v for k, v in sel_map.items() if str(v)[:10] not in drop
+                }
+                keep = set(sel_map.keys())
+                if keep:
+                    codes = [c for c in codes if _normalize_code(c) in keep]
+        else:
+            cr = m.clamp_range(start_d, end_d)
+        try:
+            src = m.build_qmt_strategy_source(
+                codes=codes,
+                selection_date_by_code=sel_map,
+                start=cr.start,
+                end=cr.end,
+                entry_window=entry_w,
+                buy_amount_per_stock=amount,
+                min_order_amount=min_order,
+                rise_percent=rise,
+                from_t1=from_t1,
+            )
+            out = m.write_qmt_strategy_file(src, also_watch=True)
+        except Exception as e:
+            QMessageBox.critical(self, "生成失败", str(e))
+            return
+        watch = None
+        try:
+            watch = m.last_watch_path() or m.default_watch_path()
+        except Exception:
+            try:
+                watch = m.default_watch_path()
+            except Exception:
+                watch = r"D:\国金证券QMT交易端2\userdata\mz1_qmt_fine_watch\current.py"
+        werr = None
+        try:
+            werr = m.last_watch_write_error()
+        except Exception:
+            werr = None
+        meta_bits = [
+            "已投递到 userdata\\mz1_qmt_fine_watch\\current.py；若模型交易里探针在跑会自动重载回测。",
+            "watch：%s" % watch,
+            "备份：%s" % out,
+            "区间：%s～%s" % (cr.start.isoformat(), cr.end.isoformat()),
+            "代码数：%d" % len(set(_normalize_code(c) for c in codes)),
+        ]
+        if werr:
+            meta_bits.append("watch 写入失败：%s（备份仍已生成）" % werr)
+        if cr.reason:
+            meta_bits.append(cr.reason)
+        msg = "\n".join(meta_bits)
+        msg += (
+            "\n\n首次请：模型交易 → 新建策略 → Python → 粘贴探针源码（或已加载的探针）→ 启动。"
+            "\n跑完后点「导入QMT细回测结果」，自动读当天 userdata\\log\\XtClient_FormulaOutput_YYYYMMDD.log。"
+        )
+        self.backtest_result_text.setPlainText(msg)
+        try:
+            _rtag = self._extract_mz1_run_tag_from_source(src)
+            self._start_mz1_qmt_run_monitor(_rtag, note='generate')
+        except Exception as _mon_e:
+            try:
+                self.statusBar().showMessage("启动完成监视失败：%s" % _mon_e, 8000)
+            except Exception:
+                pass
+
+        box = QMessageBox(self)
+        box.setWindowTitle("生成QMT细回测脚本")
+        box.setText(msg)
+        copy_probe_btn = box.addButton("复制探针路径", QMessageBox.ActionRole)
+        open_btn = box.addButton("打开备份文件夹", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked == copy_probe_btn:
+            probe_path = r"D:\国金证券QMT交易端2\python\探针.py"
+            try:
+                QApplication.clipboard().setText(probe_path)
+                self.statusBar().showMessage("已复制探针路径：" + probe_path, 6000)
+            except Exception as e:
+                QMessageBox.warning(self, "复制失败", str(e))
+        elif clicked == open_btn:
+            try:
+                os.startfile(str(out.parent))
+            except Exception as e:
+                QMessageBox.warning(self, "打开失败", str(e))
+
+
+
+    def _extract_mz1_run_tag_from_source(self, source: str) -> str:
+        m = re.search(r'"run_tag"\s*:\s*"([^"]+)"', source or "")
+        return (m.group(1) if m else "") or datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def _stop_mz1_qmt_run_monitor(self):
+        t = getattr(self, "_mz1_qmt_monitor_timer", None)
+        if t is not None:
+            try:
+                t.stop()
+            except Exception:
+                pass
+        self._mz1_qmt_monitor_timer = None
+
+    def _start_mz1_qmt_run_monitor(self, run_tag: str, *, note: str = ""):
+        """生成/投递 watch 后轮询当天 FormulaOutput，跑完弹窗并自动导入。"""
+        self._stop_mz1_qmt_run_monitor()
+        run_tag = (run_tag or "").strip() or datetime.now().strftime("%Y%m%d_%H%M%S")
+        baseline = 0
+        path_obj, _err = (None, None)
+        try:
+            path_obj, _err = self._resolve_today_qmt_formula_output()
+        except Exception:
+            path_obj = None
+        if path_obj is not None:
+            try:
+                baseline = int(path_obj.stat().st_size)
+            except Exception:
+                baseline = 0
+        self._mz1_qmt_monitor = {
+            "run_tag": run_tag,
+            "baseline": baseline,
+            "baseline0": baseline,
+            "started_at": datetime.now(),
+            "seen_start": False,
+            "done": False,
+            "note": note or "",
+            "last_status_at": None,
+        }
+        timer = QTimer(self)
+        timer.setInterval(2000)
+        timer.timeout.connect(self._on_mz1_qmt_run_monitor_tick)
+        self._mz1_qmt_monitor_timer = timer
+        timer.start()
+        try:
+            self.statusBar().showMessage(
+                "已投递 QMT 细回测，等待探针跑完（run_tag=%s）…" % run_tag, 0
+            )
+        except Exception:
+            pass
+        # 立刻扫一次，避免刚好已写完
+        try:
+            QTimer.singleShot(500, self._on_mz1_qmt_run_monitor_tick)
+        except Exception:
+            pass
+
+    def _on_mz1_qmt_run_monitor_tick(self):
+        st = getattr(self, "_mz1_qmt_monitor", None)
+        if not st or st.get("done"):
+            return
+        run_tag = st.get("run_tag") or ""
+        started = st.get("started_at") or datetime.now()
+        elapsed = (datetime.now() - started).total_seconds()
+        path_obj, err = self._resolve_today_qmt_formula_output()
+        if path_obj is None:
+            last = st.get("last_status_at")
+            if last is None or (datetime.now() - last).total_seconds() >= 15:
+                st["last_status_at"] = datetime.now()
+                try:
+                    self.statusBar().showMessage(
+                        "等待当天 FormulaOutput 出现…（探针跑完后会自动提示）", 0
+                    )
+                except Exception:
+                    pass
+            return
+        try:
+            size = int(path_obj.stat().st_size)
+        except Exception:
+            return
+        baseline = int(st.get("baseline") or 0)
+        if size < baseline:
+            # 日志轮转/截断，从头读
+            baseline = 0
+            st["baseline"] = 0
+        if size <= baseline:
+            last = st.get("last_status_at")
+            if last is None or (datetime.now() - last).total_seconds() >= 10:
+                st["last_status_at"] = datetime.now()
+                try:
+                    self.statusBar().showMessage(
+                        "QMT 细回测进行中…已等待 %d 秒（run_tag=%s）"
+                        % (int(elapsed), run_tag),
+                        0,
+                    )
+                except Exception:
+                    pass
+            return
+        try:
+            with open(path_obj, "rb") as f:
+                f.seek(baseline)
+                raw = f.read()
+        except Exception:
+            return
+        text_chunk = None
+        for enc in ("utf-8", "gbk", "utf-16", "latin-1"):
+            try:
+                text_chunk = raw.decode(enc)
+                break
+            except Exception:
+                continue
+        if text_chunk is None:
+            text_chunk = raw.decode("utf-8", errors="replace")
+        # 推进已读偏移（即使尚未完成）
+        st["baseline"] = size
+        m = self._mz1_qmt_fine_mod()
+        parsed = m.parse_formula_output_text(text_chunk)
+        start = parsed.get("start") or {}
+        summary = parsed.get("summary") or {}
+        errors = parsed.get("errors") or []
+        if start and (
+            not run_tag
+            or str(start.get("run_tag") or "") == run_tag
+            or run_tag in str(start)
+        ):
+            st["seen_start"] = True
+        summary_hit = bool(summary) and (
+            not run_tag
+            or str(summary.get("run_tag") or "") == run_tag
+            or run_tag in json.dumps(summary, ensure_ascii=False)
+        )
+        # ERROR 行可能是字符串化 dict
+        error_hit = False
+        error_txt = ""
+        for e in errors:
+            es = str(e)
+            if (not run_tag) or (run_tag in es) or st.get("seen_start"):
+                error_hit = True
+                error_txt = es
+                break
+        if not summary_hit and not error_hit:
+            last = st.get("last_status_at")
+            if last is None or (datetime.now() - last).total_seconds() >= 10:
+                st["last_status_at"] = datetime.now()
+                try:
+                    self.statusBar().showMessage(
+                        "QMT 细回测进行中…已等待 %d 秒（run_tag=%s）"
+                        % (int(elapsed), run_tag),
+                        0,
+                    )
+                except Exception:
+                    pass
+            return
+        st["done"] = True
+        self._stop_mz1_qmt_run_monitor()
+        if error_hit and not summary_hit:
+            try:
+                self.statusBar().showMessage("QMT 细回测失败（见弹窗）", 15000)
+            except Exception:
+                pass
+            QMessageBox.critical(
+                self,
+                "QMT细回测失败",
+                "探针/脚本报错（run_tag=%s）：\n%s" % (run_tag, error_txt[:1500]),
+            )
+            return
+        # 成功：自动导入
+        try:
+            self.statusBar().showMessage(
+                "QMT 细回测已完成，正在自动导入…（run_tag=%s）" % run_tag, 0
+            )
+        except Exception:
+            pass
+        try:
+            self._on_ingest_mz1_qmt_fine_result()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "QMT细回测完成",
+                "已跑完，但自动导入失败：%s\n请再点「导入QMT细回测结果」。" % e,
+            )
+            return
+        # ingest 已有 information 弹窗；再补一行状态
+        try:
+            tc = (summary or {}).get("trade_count")
+            self.statusBar().showMessage(
+                "QMT 细回测完成并已导入（成交 %s，run_tag=%s）"
+                % (tc if tc is not None else "?", run_tag),
+                20000,
+            )
+        except Exception:
+            pass
+
+
+    def _resolve_today_qmt_formula_output(self):
+        """当天 FormulaOutput：userdata\log\XtClient_FormulaOutput_YYYYMMDD.log。"""
+        from pathlib import Path as _Path
+
+        log_dir = self._default_qmt_formula_log_dir()
+        if not log_dir:
+            return None, "未找到 QMT userdata\log 目录。"
+        day = datetime.now().strftime("%Y%m%d")
+        today = _Path(log_dir) / ("XtClient_FormulaOutput_%s.log" % day)
+        if today.is_file():
+            return today, None
+        cands = sorted(
+            _Path(log_dir).glob("XtClient_FormulaOutput_%s*.log" % day),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if cands:
+            return cands[0], None
+        return None, (
+            "今天还没有 FormulaOutput 日志：\n%s\n"
+            "请先在模型交易里跑完探针/细回测再导入。" % today
+        )
+
+
+    def _on_ingest_mz1_qmt_fine_result(self):
+        """从当天 FormulaOutput 日志回灌马总逻辑1 QMT 细回测成交（自动定位，不弹选文件）。"""
+        from pathlib import Path as _Path
+
+        m = self._mz1_qmt_fine_mod()
+        path_obj, err = self._resolve_today_qmt_formula_output()
+        if path_obj is None:
+            QMessageBox.warning(self, "导入QMT细回测结果", err or "未找到当天日志。")
+            return
+        path = str(path_obj)
+        try:
+            result = m.parse_formula_output_file(_Path(path))
+            rows = m.trades_to_backtest_rows(result.get("trades") or [])
+            out_dir = m.default_out_dir()
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_json = out_dir / ("ingest_%s.json" % stamp)
+            out_json.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "导入失败", str(e))
+            return
+        self._fill_backtest_trades_table(rows)
+        summary = result.get("summary") or {}
+        errors = result.get("errors") or []
+        lines = [
+            "QMT细回测导入（当天自动）：%s" % path,
+            "成交笔数：%s（日志内共 %s 次跑，本 run_tag=%s，本段原始 TRADE %s）"
+            % (
+                result.get("trade_count"),
+                result.get("runs_in_log"),
+                result.get("run_tag") or (summary.get("run_tag") if summary else ""),
+                result.get("raw_trade_count_in_run"),
+            ),
+            (
+                "SUMMARY：%s" % json.dumps(summary, ensure_ascii=False)
+                if summary
+                else "SUMMARY：（无）"
+            ),
+            "落盘：%s" % out_json,
+        ]
+        if errors:
+            lines.append("ERROR：%s" % (errors[:3],))
+        self.backtest_result_text.setPlainText("\n".join(lines))
+        if not rows:
+            summary = result.get("summary") or {}
+            if summary:
+                QMessageBox.information(
+                    self,
+                    "导入QMT细回测结果",
+                    "日志已读到 SUMMARY，但成交为 0（没有 ANT_MZ1_BT|TRADE 行）。\n"
+                    "run_tag=%s trade_count=%s\n%s\n"
+                    "这不是导入失败；是回测没有产出成交。"
+                    % (summary.get("run_tag"), summary.get("trade_count"), path),
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "导入QMT细回测结果",
+                    "已读当天日志，但未解析到 ANT_MZ1_BT|TRADE 行：\n%s\n"
+                    "请确认模型交易里已跑完生成的脚本且日志含此前缀。" % path,
+                )
+        else:
+            QMessageBox.information(
+                self,
+                "导入QMT细回测结果",
+                "已从当天日志导入 %d 笔成交到下方表格。\n%s" % (len(rows), path),
+            )
+
+
     def _fill_backtest_trades_table(self, trades: List[dict]) -> None:
         """将回测成交列表填入下方表格（含选股日/start_date/end_date，供导出 CSV 与合并汇总）。"""
         trades = list(trades or [])
@@ -7245,10 +7757,26 @@ class StrategyGeneratorMainWindow(QMainWindow):
             from strategy_generator_app.backtest.preflight import backtest_preflight_hint_lines
         except ImportError:
             from backtest.preflight import backtest_preflight_hint_lines  # type: ignore
-        if hasattr(self, "backtest_mode_hint_label"):
-            self.backtest_mode_hint_label.setText(
-                "\n".join(backtest_preflight_hint_lines())
+        lines = list(backtest_preflight_hint_lines() or [])
+        try:
+            from strategy_generator_app.backtest.mz1_qmt_fine import is_mz1_buy_strategy
+        except ImportError:
+            try:
+                from backtest.mz1_qmt_fine import is_mz1_buy_strategy  # type: ignore
+            except ImportError:
+                is_mz1_buy_strategy = None  # type: ignore
+        sid = (self._get_selected_strategy_id() or "").strip()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        name = (getattr(cfg, "name", "") or "") if cfg else ""
+        mz1 = bool(is_mz1_buy_strategy and is_mz1_buy_strategy(sid, name))
+        if mz1:
+            lines.append(
+                "【马总逻辑1 · QMT细回测】券商 tick 约近1个月：首次在模型交易加载并启动「探针」，"
+                "之后点「生成QMT细回测脚本」即投递 userdata\\mz1_qmt_fine_watch\\current.py 自动重载；"
+                "再「导入QMT细回测结果」回灌成交表。本地「运行回测/批量回测」仍可用，但更早日期常缺 tick。"
             )
+        if hasattr(self, "backtest_mode_hint_label"):
+            self.backtest_mode_hint_label.setText("\n".join(lines))
 
     def _backtest_preflight_union_codes(
         self,
@@ -8288,6 +8816,338 @@ class StrategyGeneratorMainWindow(QMainWindow):
         except Exception:
             pass
 
+
+    def _on_batch_mz1_qmt_fine_live_align(self, cfg):
+        """马总逻辑1 批量回测：回测页起止日期 + 批量导入同款按日建池 → QMT 探针 tick。"""
+        m = self._mz1_qmt_fine_mod()
+        from batch_import_pool import (
+            build_pool_for_as_of,
+            find_selection_files_by_prefix,
+            load_batch_import_settings,
+            lookback_selection_days_range,
+            normalize_lookback_bounds,
+        )
+
+        start_d = self.backtest_start_date.date().toPyDate()
+        end_d = self.backtest_end_date.date().toPyDate()
+        if end_d < start_d:
+            start_d, end_d = end_d, start_d
+
+        settings = load_batch_import_settings()
+        prefix = str(settings.get("file_prefix") or "").strip()
+        if not prefix:
+            QMessageBox.warning(
+                self,
+                "批量回测",
+                "请先在「批量导入选股文件 → 设置」中填写选股文件前缀。",
+            )
+            return
+
+        only_meet = bool(settings.get("only_meet_condition", True))
+        start_n, end_n = normalize_lookback_bounds(settings)
+        from_t1 = bool(self.backtest_batch_from_t1_cb.isChecked())
+        entry_w = 10
+        if hasattr(self, "param_entry_window_spin"):
+            try:
+                entry_w = max(1, int(self.param_entry_window_spin.value() or 10))
+            except Exception:
+                entry_w = 10
+        else:
+            try:
+                entry_w = int(
+                    _entry_window_trading_days_from_params(
+                        self._merge_strategy_params_from_form(cfg.strategy_params or {})
+                    )
+                    or 10
+                )
+            except Exception:
+                entry_w = 10
+
+        sp_disk = m.load_mz1_strategy_params()
+        amount = float(sp_disk.get("buy_amount_per_stock") or 50000)
+        min_order = float(sp_disk.get("min_order_amount") or 5000)
+        rise = float(sp_disk.get("rise_percent") or 0)
+        if cfg is not None:
+            sp = self._merge_strategy_params_from_form(cfg.strategy_params or {})
+            try:
+                amount = float(sp.get("buy_amount_per_stock") or amount)
+            except Exception:
+                pass
+            try:
+                min_order = float(sp.get("min_order_amount") or min_order)
+            except Exception:
+                pass
+            try:
+                rise = float(sp.get("rise_percent") or rise)
+            except Exception:
+                pass
+
+        # 钳制到券商 tick 可下窗口
+        cr = m.clamp_range(start_d, end_d)
+        start_d, end_d = cr.start, cr.end
+
+        try:
+            from strategy_generator_app.trading_calendar import get_trading_dates_in_range_sorted
+        except Exception:
+            try:
+                from trading_calendar import get_trading_dates_in_range_sorted
+            except Exception:
+                get_trading_dates_in_range_sorted = None
+
+        if get_trading_dates_in_range_sorted is not None:
+            asof_days = list(get_trading_dates_in_range_sorted(start_d, end_d) or [])
+        else:
+            asof_days = []
+            d = start_d
+            while d <= end_d:
+                if d.weekday() < 5:
+                    asof_days.append(d)
+                d += timedelta(days=1)
+        if not asof_days:
+            QMessageBox.warning(self, "批量回测", "回测起止区间内没有交易日。")
+            return
+
+        # 收集覆盖各 as_of 滚动 lookback 所需的选股日，再按前缀找文件
+        need_days = set()
+        for as_of in asof_days:
+            for d in lookback_selection_days_range(as_of, start_n, end_n) or []:
+                need_days.add(d)
+        if not need_days:
+            QMessageBox.warning(self, "批量回测", "无法计算选股 lookback 交易日。")
+            return
+
+        history_dir = os.path.join(self._project_root(), "history_data")
+        paths = find_selection_files_by_prefix(
+            history_dir, prefix, sorted(need_days)
+        )
+        if not paths:
+            QMessageBox.warning(
+                self,
+                "批量回测",
+                "未找到匹配的选股文件。\n前缀：%s\n"
+                "lookback 窗口：最近第 %s～第 %s 个交易日\n"
+                "目录：%s" % (prefix, start_n, end_n, history_dir),
+            )
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        by_day_all = {}
+        strength_all = {}
+        used_files = []
+        skip_notes = []
+        err = None
+        daily_pools = {}
+        pool_stats = []
+        try:
+            for path in paths:
+                try:
+                    by_day, strength_by_day, _hint = group_codes_and_clip_strength_by_selection_date(
+                        path, only_meet_condition=only_meet
+                    )
+                except Exception as e:
+                    skip_notes.append("%s：%s" % (os.path.basename(path), e))
+                    continue
+                if not by_day:
+                    continue
+                used_files.append(path)
+                for d, codes_d in by_day.items():
+                    bucket = by_day_all.setdefault(d, [])
+                    seen = set(bucket)
+                    for c6 in codes_d or []:
+                        c6 = _normalize_code(c6)
+                        if c6 and c6 not in seen:
+                            seen.add(c6)
+                            bucket.append(c6)
+                for d, day_map in (strength_by_day or {}).items():
+                    sm = strength_all.setdefault(d, {})
+                    for c6, meta in (day_map or {}).items():
+                        c6 = _normalize_code(c6)
+                        if c6 and isinstance(meta, dict):
+                            sm[c6] = meta
+
+            for as_of in asof_days:
+                info = build_pool_for_as_of(
+                    by_day_all,
+                    as_of,
+                    settings,
+                    entry_window=entry_w,
+                    resolve_selection_dates_fn=_resolve_selection_dates_by_code,
+                    strength_by_day=strength_all,
+                )
+                codes = list(info.get("codes") or [])
+                sel_map = dict(info.get("selection_date_by_code") or {})
+                daily_pools[as_of.isoformat()] = {
+                    "codes": codes,
+                    "selection_date_by_code": sel_map,
+                }
+                pool_stats.append(
+                    "%s:池%d 涨幅剔%d+%d"
+                    % (
+                        as_of.isoformat(),
+                        len(codes),
+                        len(info.get("gain_dropped") or []),
+                        len(info.get("intraday_dropped") or []),
+                    )
+                )
+        except Exception as e:
+            err = e
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if err is not None:
+            QMessageBox.critical(self, "批量回测失败", str(err))
+            return
+
+        n_pool_days = sum(1 for v in daily_pools.values() if (v.get("codes") or []))
+        if n_pool_days <= 0:
+            detail = "\n".join(skip_notes[:8]) if skip_notes else "各交易日建池均为空"
+            QMessageBox.warning(
+                self,
+                "批量回测",
+                "建池后没有可用代码。\n%s" % detail,
+            )
+            return
+
+        all_codes = []
+        all_sel = {}
+        for info in daily_pools.values():
+            for c in info.get("codes") or []:
+                c6 = _normalize_code(c)
+                if c6:
+                    all_codes.append(c6)
+            for k, v in (info.get("selection_date_by_code") or {}).items():
+                c6 = _normalize_code(k)
+                if c6 and c6 not in all_sel:
+                    all_sel[c6] = str(v)[:10]
+
+        look_txt = (
+            "最近第 %d 个" % start_n
+            if start_n == end_n
+            else "最近第 %d～第 %d 个" % (start_n, end_n)
+        )
+        filt_bits = []
+        if only_meet:
+            filt_bits.append("仅满足条件")
+        if settings.get("filter_post_select_max_gain"):
+            filt_bits.append("相对收盘最大涨幅剔除")
+        if settings.get("filter_post_select_max_intraday_gain"):
+            filt_bits.append("相对昨收单日最大涨幅剔除")
+        filt_txt = "、".join(filt_bits) if filt_bits else "无额外过滤"
+
+        reply = QMessageBox.question(
+            self,
+            "确认QMT细回测（实盘对齐建池）",
+            (
+                "马总逻辑1：按回测页起止滚动建池后交给 QMT 探针。\n\n"
+                "区间：%s～%s（%d 个交易日）\n"
+                "建池：%s交易日选股文件（前缀 %s）\n"
+                "过滤：%s\n"
+                "运行交易日数=%d；有池天数=%d；并集代码=%d\n"
+                "匹配文件 %d 个。\n\n"
+                "样例：%s\n\n是否继续？"
+            )
+            % (
+                start_d.isoformat(),
+                end_d.isoformat(),
+                len(asof_days),
+                look_txt,
+                prefix,
+                filt_txt,
+                entry_w,
+                n_pool_days,
+                len(set(all_codes)),
+                len(used_files),
+                "；".join(pool_stats[:3]),
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            src = m.build_qmt_strategy_source(
+                codes=all_codes,
+                selection_date_by_code=all_sel,
+                start=start_d,
+                end=end_d,
+                entry_window=entry_w,
+                buy_amount_per_stock=amount,
+                min_order_amount=min_order,
+                rise_percent=rise,
+                from_t1=from_t1,
+                daily_pools=daily_pools,
+            )
+            out = m.write_qmt_strategy_file(src, also_watch=True)
+        except Exception as e:
+            QMessageBox.critical(self, "生成失败", str(e))
+            return
+
+        watch = None
+        try:
+            watch = m.last_watch_path() or m.default_watch_path()
+        except Exception:
+            watch = r"D:\国金证券QMT交易端2\userdata\mz1_qmt_fine_watch\current.py"
+        werr = None
+        try:
+            werr = m.last_watch_write_error()
+        except Exception:
+            werr = None
+
+        meta_bits = [
+            "马总逻辑1 批量回测（实盘对齐建池→QMT）：已投递 watch。",
+            "watch：%s" % watch,
+            "备份：%s" % out,
+            "区间：%s～%s" % (start_d.isoformat(), end_d.isoformat()),
+            "有池天数：%d；并集代码：%d" % (n_pool_days, len(set(all_codes))),
+            "选股前缀：%s；文件数：%d" % (prefix, len(used_files)),
+        ]
+        if cr.reason:
+            meta_bits.append(cr.reason)
+        if werr:
+            meta_bits.append("watch 写入失败：%s（备份仍已生成）" % werr)
+        if pool_stats:
+            meta_bits.append("建池摘要：" + "；".join(pool_stats[:8]))
+        msg = "\n".join(meta_bits)
+        msg += (
+            "\n\n若模型交易里探针在跑会自动热加载。"
+            "\n跑完点「导入QMT细回测结果」。"
+        )
+        self.backtest_result_text.setPlainText(msg)
+        try:
+            _rtag = self._extract_mz1_run_tag_from_source(src)
+            self._start_mz1_qmt_run_monitor(_rtag, note="batch_live_align")
+        except Exception as _mon_e:
+            try:
+                self.statusBar().showMessage("启动完成监视失败：%s" % _mon_e, 8000)
+            except Exception:
+                pass
+
+        box = QMessageBox(self)
+        box.setWindowTitle("批量→QMT细回测（实盘对齐）")
+        box.setText(msg)
+        copy_probe_btn = box.addButton("复制探针路径", QMessageBox.ActionRole)
+        open_btn = box.addButton("打开备份文件夹", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked == copy_probe_btn:
+            probe_path = r"D:\国金证券QMT交易端2\python\探针.py"
+            try:
+                QApplication.clipboard().setText(probe_path)
+                self.statusBar().showMessage("已复制探针路径：" + probe_path, 6000)
+            except Exception as e:
+                QMessageBox.warning(self, "复制失败", str(e))
+        elif clicked == open_btn:
+            try:
+                os.startfile(str(Path(out).parent))
+            except Exception as e:
+                QMessageBox.warning(self, "打开失败", str(e))
+
+    def _on_batch_mz1_qmt_fine_from_selection_file(self, path, cfg):
+        """兼容旧入口：改走实盘对齐建池（忽略手动选股文件）。"""
+        self._on_batch_mz1_qmt_fine_live_align(cfg)
+
     def _on_batch_backtest_from_selection_file(self):
         """按选股文件回测：默认实盘对齐（近N日滚动建池连续仿真）；可关回按选股日分档。"""
         sid = self._get_selected_strategy_id()
@@ -8302,6 +9162,17 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if refreshed_b is not None:
             cfg = refreshed_b
         use_dual = hasattr(self, "backtest_dual_cb") and self.backtest_dual_cb.isChecked()
+        # 马总逻辑1：按回测页起止日期 + 批量导入同款滚动建池 → QMT 探针（不再选手动选股文件）
+        _is_mz1_batch = False
+        try:
+            _mz1m = self._mz1_qmt_fine_mod()
+            _mz1_name = (getattr(cfg, "name", "") or "")
+            _is_mz1_batch = bool(_mz1m.is_mz1_buy_strategy(sid, _mz1_name))
+        except Exception:
+            _is_mz1_batch = False
+        if _is_mz1_batch:
+            self._on_batch_mz1_qmt_fine_live_align(cfg)
+            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择含「选股日」的选股结果文件",

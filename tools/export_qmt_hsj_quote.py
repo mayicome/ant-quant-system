@@ -86,24 +86,81 @@ def _press_escape() -> None:
     win32api.keybd_event(win32con.VK_ESCAPE, 0, win32con.KEYEVENTF_KEYUP, 0)
 
 
-def _right_click(x: int, y: int) -> None:
-    import win32api
-    import win32con
+def _virtual_screen():
+    """多屏虚拟桌面原点与宽高（SendInput 绝对坐标用）。"""
+    import ctypes
 
-    win32api.SetCursorPos((x, y))
-    time.sleep(0.05)
-    win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
-    win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+    user32 = ctypes.windll.user32
+    return (
+        int(user32.GetSystemMetrics(76)),  # SM_XVIRTUALSCREEN
+        int(user32.GetSystemMetrics(77)),  # SM_YVIRTUALSCREEN
+        int(user32.GetSystemMetrics(78)),  # SM_CXVIRTUALSCREEN
+        int(user32.GetSystemMetrics(79)),  # SM_CYVIRTUALSCREEN
+    )
+
+
+def _send_input_click(x: int, y: int, right: bool = False) -> None:
+    """用 SendInput 绝对坐标点击。双屏下 mouse_event 经常点不出 Qt 右键菜单。"""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    INPUT_MOUSE = 0
+    MOUSEEVENTF_MOVE = 0x0001
+    MOUSEEVENTF_LEFTDOWN = 0x0002
+    MOUSEEVENTF_LEFTUP = 0x0004
+    MOUSEEVENTF_RIGHTDOWN = 0x0008
+    MOUSEEVENTF_RIGHTUP = 0x0010
+    MOUSEEVENTF_ABSOLUTE = 0x8000
+    MOUSEEVENTF_VIRTUALDESK = 0x4000
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = (
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        )
+
+    class INPUT(ctypes.Structure):
+        class _I(ctypes.Union):
+            _fields_ = (("mi", MOUSEINPUT),)
+
+        _anonymous_ = ("i",)
+        _fields_ = (("type", wintypes.DWORD), ("i", _I))
+
+    vx, vy, vw, vh = _virtual_screen()
+    ax = int((x - vx) * 65535 / max(1, vw - 1))
+    ay = int((y - vy) * 65535 / max(1, vh - 1))
+    base = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE
+
+    def fire(flags):
+        inp = INPUT(
+            type=INPUT_MOUSE,
+            mi=MOUSEINPUT(ax, ay, 0, base | flags, 0, None),
+        )
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+    fire(0)
+    time.sleep(0.02)
+    if right:
+        fire(MOUSEEVENTF_RIGHTDOWN)
+        time.sleep(0.03)
+        fire(MOUSEEVENTF_RIGHTUP)
+    else:
+        fire(MOUSEEVENTF_LEFTDOWN)
+        time.sleep(0.03)
+        fire(MOUSEEVENTF_LEFTUP)
+
+
+def _right_click(x: int, y: int) -> None:
+    _send_input_click(x, y, right=True)
 
 
 def _left_click(x: int, y: int) -> None:
-    import win32api
-    import win32con
-
-    win32api.SetCursorPos((x, y))
-    time.sleep(0.05)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    _send_input_click(x, y, right=False)
 
 
 def _menu_bands(hwnd):
@@ -349,33 +406,62 @@ def _ensure_qmt_foreground(main) -> tuple:
 
 
 def _navigate_to_hsj_a_shares(main) -> None:
-    """切到「行情」并用板块搜索定位「沪深京A股」。
+    """从任意页（含模型交易）切到左侧栏「行情」，再搜索「沪深京A股」。
 
-    QMT 为 Qt 自绘，无可靠 UIA 子控件；用左侧图标栏相对坐标 + 搜索框输入。
-    用户只需保证客户端已打开登录。
+    实测：模型交易下点顶部标签无效；左侧栏图标 y≈ top+118..190 才能进行情。
     """
+    import win32con
+    import win32gui
+
     left, top, right, bottom = _ensure_qmt_foreground(main)
     width = max(1, right - left)
     height = max(1, bottom - top)
 
-    # 左侧竖条自上而下：我的 / 行情 / 交易 / 模型研究 / 模型交易
-    # 行情图标中心约相对 y=150~160。旧式 height*0.22 在 1080p 会钳到 200，正好点到「交易」。
-    quote_x = left + max(24, min(40, width // 55))
-    quote_y = top + max(148, min(162, int(height * 0.15)))
-    _left_click(quote_x, quote_y)
-    time.sleep(0.9)
+    try:
+        win32gui.SetWindowPos(
+            main,
+            win32con.HWND_TOPMOST,
+            0, 0, 0, 0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+        )
+        win32gui.SetForegroundWindow(main)
+    except Exception:
+        pass
+    time.sleep(0.2)
+    _press_escape()
+    time.sleep(0.12)
 
-    # 「搜索板块」在行情页板块树顶部（rail 右侧）；略下移避免点到上方工具栏
-    search_x = left + max(120, min(200, int(width * 0.10)))
-    search_y = top + max(68, min(95, int(height * 0.08)))
+    # 左侧竖条「行情」图标（第 2 个大图标附近）
+    rail_x = left + 32
+    for quote_y in (top + 130, top + 150, top + 118):
+        _left_click(rail_x, quote_y)
+        time.sleep(0.45)
+
+    # 搜索「沪深京A股」
+    search_x = left + max(140, min(220, int(width * 0.10)))
+    search_y = top + max(72, min(92, int(height * 0.08)))
     _left_click(search_x, search_y)
     time.sleep(0.35)
     _ctrl_a()
     time.sleep(0.08)
     _send_unicode("沪深京A股")
-    time.sleep(0.35)
+    time.sleep(0.4)
     _press_enter()
     time.sleep(1.0)
+    _press_escape()
+    time.sleep(0.15)
+
+    try:
+        win32gui.SetWindowPos(
+            main,
+            win32con.HWND_NOTOPMOST,
+            0, 0, 0, 0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+        )
+        win32gui.SetForegroundWindow(main)
+    except Exception:
+        pass
+    time.sleep(0.15)
 
 
 
@@ -433,20 +519,27 @@ def _match_label_y(img, label: str):
         tmp = Image.new("RGB", (1, 1))
         bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font)
         tw, th = bbox[2] - bbox[0] + 6, bbox[3] - bbox[1] + 6
-        needle = Image.new("RGB", (tw, th), (30, 30, 30))
-        ImageDraw.Draw(needle).text((3, 3), label, font=font, fill=(230, 230, 230))
-        N = np.asarray(needle).astype(np.float32)
-        nh, nw = N.shape[:2]
-        if nh >= H.shape[0] or nw >= H.shape[1]:
-            continue
-        n = (N.reshape(-1, 3) - N.reshape(-1, 3).mean(0)) / (N.std() + 1e-6)
-        for y in range(0, H.shape[0] - nh, 2):
-            for x in range(0, min(80, H.shape[1] - nw), 2):
-                patch = H[y : y + nh, x : x + nw].reshape(-1, 3)
-                p = (patch - patch.mean(0)) / (patch.std() + 1e-6)
-                score = float((n * p).mean())
-                if score > best[0]:
-                    best = (score, y + nh // 2)
+        # 深色菜单：深底浅字；浅色菜单：浅底深字（国金 2.1 常见浅色右键）
+        themes = (
+            ((30, 30, 30), (230, 230, 230)),
+            ((245, 245, 245), (20, 20, 20)),
+            ((220, 220, 220), (0, 0, 0)),
+        )
+        for bg, fg in themes:
+            needle = Image.new("RGB", (tw, th), bg)
+            ImageDraw.Draw(needle).text((3, 3), label, font=font, fill=fg)
+            N = np.asarray(needle).astype(np.float32)
+            nh, nw = N.shape[:2]
+            if nh >= H.shape[0] or nw >= H.shape[1]:
+                continue
+            n = (N.reshape(-1, 3) - N.reshape(-1, 3).mean(0)) / (N.std() + 1e-6)
+            for y in range(0, H.shape[0] - nh, 2):
+                for x in range(0, min(80, H.shape[1] - nw), 2):
+                    patch = H[y : y + nh, x : x + nw].reshape(-1, 3)
+                    p = (patch - patch.mean(0)) / (patch.std() + 1e-6)
+                    score = float((n * p).mean())
+                    if score > best[0]:
+                        best = (score, y + nh // 2)
     if best[0] >= 0.55 and best[1] is not None:
         return int(best[1])
     return None
@@ -460,14 +553,17 @@ def _click_export_menu_item(popup) -> bool:
     y_rel = _match_label_y(img, "导出数据")
     left, top, right, bottom = win32gui.GetWindowRect(popup)
     if y_rel is None:
-        # 回退：行情表完整菜单里「导出数据」通常靠近顶部第 3 个亮行
+        # 浅色菜单亮带检测会糊成一条，不能靠 bands。
+        # 菜单顺序：调整列宽、定制列、导出数据… → 第 3 项约在高度 12%~18%
+        left0, top0, right0, bottom0 = left, top, right, bottom
+        height = max(1, bottom0 - top0)
         bands = _menu_bands(popup)
-        if len(bands) >= 3:
+        if len(bands) >= 6:
+            # 深色菜单条目带清晰时，第 3 项
             y_rel = bands[2]
-        elif bands:
-            y_rel = bands[min(5, len(bands) - 1)]
         else:
-            return False
+            y_rel = int(height * 0.145)
+
     _left_click((left + right) // 2, top + y_rel)
     return True
 
@@ -482,22 +578,80 @@ def export_via_ui(dest: Path) -> None:
         )
     # 自动：行情 → 搜索「沪深京A股」（用户只需保证客户端开着）
     _navigate_to_hsj_a_shares(main)
+    import win32con
+    try:
+        win32gui.SetWindowPos(
+            main, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+        )
+        win32gui.SetForegroundWindow(main)
+    except Exception:
+        pass
+    time.sleep(0.25)
     left, top, right, bottom = win32gui.GetWindowRect(main)
     # 点行情表中部，避开左侧板块树和上下工具条
     x = left + int((right - left) * 0.55)
     y = top + int((bottom - top) * 0.45)
-    before = _visible_windows()
-    _right_click(x, y)
     popup = None
-    deadline = time.time() + 2.5
-    while time.time() < deadline and popup is None:
+    for attempt in range(3):
+        _press_escape()
         time.sleep(0.15)
-        for hwnd in _visible_windows() - before:
-            if hwnd == main:
-                continue
-            if "Popup" in win32gui.GetClassName(hwnd):
-                popup = hwnd
+        before = _visible_windows()
+        _right_click(x, y)
+        deadline = time.time() + 3.0
+        while time.time() < deadline and popup is None:
+            time.sleep(0.15)
+            for hwnd in _visible_windows() - before:
+                if hwnd == main:
+                    continue
+                cls = win32gui.GetClassName(hwnd) or ""
+                if "Popup" in cls:
+                    left2, top2, right2, bottom2 = win32gui.GetWindowRect(hwnd)
+                    w2, h2 = right2 - left2, bottom2 - top2
+                    # 行情表右键「导出数据」菜单很高；模型交易短菜单通常 <200，直接丢弃
+                    if 40 <= w2 <= 600 and 200 <= h2 <= 900:
+                        popup = hwnd
+                        break
+        if popup:
+            break
+        time.sleep(0.3)
+
+    if not popup:
+        # 仍停在模型交易等页时，再导航一次后重试右键
+        _navigate_to_hsj_a_shares(main)
+        try:
+            win32gui.SetWindowPos(
+                main, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+            )
+            win32gui.SetForegroundWindow(main)
+        except Exception:
+            pass
+        time.sleep(0.25)
+        left, top, right, bottom = win32gui.GetWindowRect(main)
+        x = left + int((right - left) * 0.55)
+        y = top + int((bottom - top) * 0.45)
+        for attempt in range(2):
+            _press_escape()
+            time.sleep(0.12)
+            before = _visible_windows()
+            _right_click(x, y)
+            deadline = time.time() + 3.0
+            while time.time() < deadline and popup is None:
+                time.sleep(0.15)
+                for hwnd in _visible_windows() - before:
+                    if hwnd == main:
+                        continue
+                    cls = win32gui.GetClassName(hwnd) or ""
+                    if "Popup" in cls:
+                        left2, top2, right2, bottom2 = win32gui.GetWindowRect(hwnd)
+                        w2, h2 = right2 - left2, bottom2 - top2
+                        if 40 <= w2 <= 600 and 200 <= h2 <= 900:
+                            popup = hwnd
+                            break
+            if popup:
                 break
+            time.sleep(0.25)
     if not popup:
         _press_escape()
         raise RuntimeError("行情表没有弹出右键菜单")
@@ -516,7 +670,21 @@ def export_via_ui(dest: Path) -> None:
                 break
     if not dialog:
         _press_escape()
+        try:
+            win32gui.SetWindowPos(
+                main, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+            )
+        except Exception:
+            pass
         raise RuntimeError("没有出现导出保存框")
+    try:
+        win32gui.SetWindowPos(
+            main, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+        )
+    except Exception:
+        pass
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         dest.unlink()

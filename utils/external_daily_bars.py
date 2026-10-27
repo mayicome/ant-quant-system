@@ -228,6 +228,110 @@ _FETCHERS = (
 )
 
 
+
+def _px_close_enough(a: float, b: float, rel: float = 0.002, abs_tol: float = 0.015) -> bool:
+    if a <= 0 or b <= 0:
+        return False
+    return abs(a - b) <= max(abs_tol, rel * max(a, b))
+
+
+def _ohlc_agree(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    return all(
+        _px_close_enough(float(a[k]), float(b[k]))
+        for k in ("open", "high", "low", "close")
+    )
+
+
+def fetch_day_bar_consensus(
+    stock_code: str,
+    day: str,
+    session: Optional[requests.Session] = None,
+    *,
+    min_agree: int = 2,
+    retries: int = 2,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Single-day OHLC with multi-source agreement.
+
+    Fetches eastmoney / tencent / ths for that day (volume>0), each with light retries.
+    - If >= min_agree sources agree on OHLC, return consensus bar; source like "eastmoney+ths".
+    - If only one source has data, return that bar with "|solo" suffix (caller decides overwrite).
+    - If sources disagree or all empty, return (None, reason).
+
+    New append may use solo; overwrite should prefer multi-source (no |solo).
+    """
+    day = str(day or "")[:10]
+    if len(day) < 10:
+        return None, "bad_day"
+    ymd = day.replace("-", "")
+    sess = session or _session()
+    got: List[Tuple[str, Dict[str, Any]]] = []
+    errors: List[str] = []
+    for name, fn in _FETCHERS:
+        hit = None
+        last_err = ""
+        for attempt in range(max(1, int(retries))):
+            try:
+                rows = fn(stock_code, ymd, ymd, session=sess)
+            except Exception as exc:
+                last_err = "%s:%s" % (name, type(exc).__name__)
+                continue
+            for bar in rows or []:
+                if str(bar.get("date") or "")[:10] == day and float(bar.get("volume") or 0) > 0:
+                    hit = bar
+                    break
+            if hit is not None:
+                break
+            last_err = "%s:empty" % name
+        if hit is None:
+            errors.append(last_err or ("%s:empty" % name))
+            continue
+        got.append((name, hit))
+
+    if not got:
+        return None, ";".join(errors) or "empty"
+
+    if len(got) == 1:
+        name, bar = got[0]
+        out = dict(bar)
+        out["source"] = name + "|solo"
+        return out, name + "|solo"
+
+    best: List[Tuple[str, Dict[str, Any]]] = []
+    for i, (n1, b1) in enumerate(got):
+        group = [(n1, b1)]
+        for j, (n2, b2) in enumerate(got):
+            if i == j:
+                continue
+            if _ohlc_agree(b1, b2):
+                group.append((n2, b2))
+        if len(group) > len(best):
+            best = group
+
+    if len(best) < max(2, int(min_agree)):
+        names = "+".join(n for n, _ in got)
+        return None, "disagree:%s" % names
+
+    names = "+".join(n for n, _ in best)
+    out = dict(best[0][1])
+    out["source"] = names
+    return out, names
+
+
+def looks_like_incomplete_eod(local: Dict[str, Any], ext: Dict[str, Any]) -> bool:
+    """Local bar looks like an intraday snapshot vs a fuller external EOD bar."""
+    try:
+        lo, lh, ll, lc = float(local["open"]), float(local["high"]), float(local["low"]), float(local["close"])
+        eo, eh, el, ec = float(ext["open"]), float(ext["high"]), float(ext["low"]), float(ext["close"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not _px_close_enough(lo, eo):
+        return False
+    # open matches; high/close materially lower on local (classic early freeze)
+    high_low = lh < eh and (eh - lh) > max(0.02, 0.005 * eh)
+    close_low = lc < ec and (ec - lc) > max(0.02, 0.005 * ec)
+    return bool(high_low or close_low)
+
+
 def fetch_daily_bars(
     stock_code: str,
     start: str,

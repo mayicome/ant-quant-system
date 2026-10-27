@@ -557,7 +557,7 @@ def after_hours_volume_rank(ContextInfo):
 
 
 def tick_full_sync(ContextInfo):
-    """旧分笔定时名。不再加载分笔模块。"""
+    """旧分笔定时名。已永久停用：不再全 A 落盘 data/ticks（占硬盘）。"""
     del ContextInfo
     return False
 

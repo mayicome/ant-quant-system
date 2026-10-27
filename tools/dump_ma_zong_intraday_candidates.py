@@ -5,6 +5,7 @@
 
 用法：
   python tools/dump_ma_zong_intraday_candidates.py
+  # 手动无 --clock 时文件名用当前 HH:MM
   python tools/dump_ma_zong_intraday_candidates.py --clock 14:40
   python tools/dump_ma_zong_intraday_candidates.py --scheduled --clock 14:40  # 启动器按槽位调用
   python tools/dump_ma_zong_intraday_candidates.py --allow-file  # 盘外手动：允许降为上一交易日文件
@@ -85,7 +86,7 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument(
         "--clock",
         default="",
-        help="落盘时钟 HH:MM（默认读 config 首个 dump_times=%s；定时须显式传入）" % cfg["dump_time"],
+        help="标签时刻 HH:MM；手动未传时用当前时刻；定时 --scheduled 必须显式传入"
     )
     ap.add_argument("--date", default="", help="选股日 YYYY-MM-DD；默认今天")
     ap.add_argument(
@@ -119,7 +120,15 @@ def main(argv: Optional[list] = None) -> int:
     if args.scheduled and not str(args.clock or "").strip():
         print("[dump] abort scheduled: --clock required for multi dump_times")
         return 2
-    clock = (args.clock or cfg["dump_time"] or (cfg.get("dump_times") or ["14:40"])[0]).strip()
+    now = datetime.now()
+    # Manual (not --scheduled) without --clock: filename uses real start time.
+    # Scheduled slots must pass --clock explicitly.
+    if str(args.clock or "").strip():
+        clock = str(args.clock).strip()
+    elif args.scheduled:
+        clock = (cfg["dump_time"] or (cfg.get("dump_times") or ["14:40"])[0]).strip()
+    else:
+        clock = now.strftime("%H:%M")
     clock_tag = _clock_label(clock)
     as_of = _parse_date(args.date or None)
     out_dir = Path(args.out_dir or cfg["output_dir"])
@@ -130,8 +139,6 @@ def main(argv: Optional[list] = None) -> int:
         if args.min_inflow_wan is not None
         else float(cfg["min_inflow_wan"])
     )
-
-    now = datetime.now()
     in_session = is_a_share_intraday_session(now)
     is_td = _is_trading_day(now.date())
 

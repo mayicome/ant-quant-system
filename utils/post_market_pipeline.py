@@ -333,7 +333,7 @@ def run_step(
                 "tools/append_daily_cache_external.py",
                 ("--date", d, "--prev", prev),
             )
-            detail = "东财日线，腾讯、同花顺兜底"
+            detail = "外部日线(+ETF自2025-01-01)：追加+目标日校对+上回补；覆盖需多源一致或半截K"
             return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
 
         if step_id == "limit_up":
