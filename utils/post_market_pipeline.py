@@ -653,8 +653,24 @@ def run_step(
 
 
         if step_id == "daily_cache":
-            # 生产默认：国金 QMT 探针分片日线（每片100、片间3秒）；外源 append 仅作手工备用
-            # 需模型交易里日线探针在跑；全量约半小时。备用：tools/append_daily_cache_external.py
+            # 仅实盘（data/qmt_live_only.flag / --live-only）：外源东财/腾讯/同花顺（原路径）
+            # 全量机：国金 QMT 探针分片（需模型交易里日线探针在跑）
+            from utils.live_only import is_live_only_machine
+            from utils.trading_day import previous_tradeday
+
+            use_external = bool(live_only) or is_live_only_machine(root)
+            if use_external:
+                prev = previous_tradeday(day).strftime("%Y-%m-%d")
+                rc = run(
+                    "tools/append_daily_cache_external.py",
+                    ("--date", d, "--prev", prev),
+                )
+                detail = (
+                    "仅实盘→外源日线(+ETF自2025-01-01)：追加+目标日校对+上回补；"
+                    "覆盖需多源一致或半截K"
+                )
+                return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
+
             rc = run(
                 "tools/run_qmt_daily_cache.py",
                 (
@@ -668,7 +684,7 @@ def run_step(
                 freeze=False,
             )
             detail = (
-                "QMT探针日线分片(shard=100,interval=3s)->daily_cache；"
+                "全量→QMT探针日线分片(shard=100,interval=3s)->daily_cache；"
                 "请保持国金QMT模型交易探针运行；失败可手工改跑 append_daily_cache_external"
             )
             return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
