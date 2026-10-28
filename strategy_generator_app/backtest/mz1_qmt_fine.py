@@ -199,6 +199,9 @@ def build_qmt_strategy_source(
     from_t1: bool = True,
     run_tag: str = "",
     daily_pools: Optional[Dict[str, Dict[str, Any]]] = None,
+    strategy_generation_time: str = "09:25",
+    strategy_run_start_time: str = "09:30",
+    strategy_run_end_time: str = "15:00",
 ) -> str:
     pool = []
     sel: Dict[str, str] = {}
@@ -246,6 +249,21 @@ def build_qmt_strategy_source(
 
     pool = sorted(set(pool))
     tag = run_tag or datetime.now().strftime("%Y%m%d_%H%M%S")
+    def _norm_hm(s, default):
+        s = str(s or "").strip() or default
+        parts = s.split(":")
+        try:
+            h = int(parts[0]); m = int(parts[1]) if len(parts) > 1 else 0
+            sec = int(float(parts[2])) if len(parts) > 2 else 0
+        except Exception:
+            return default
+        if len(parts) > 2:
+            return "%02d:%02d:%02d" % (h, m, sec)
+        return "%02d:%02d" % (h, m)
+
+    gen_t = _norm_hm(strategy_generation_time, "09:25")
+    rs_t = _norm_hm(strategy_run_start_time, "09:30")
+    re_t = _norm_hm(strategy_run_end_time, "15:00")
     cfg = {
         "codes": pool,
         "selection_date_by_code": sel,
@@ -258,6 +276,9 @@ def build_qmt_strategy_source(
         "from_t1": bool(from_t1),
         "run_tag": tag,
         "result_prefix": RESULT_PREFIX,
+        "strategy_generation_time": gen_t,
+        "strategy_run_start_time": rs_t,
+        "strategy_run_end_time": re_t,
     }
     if pools_out:
         cfg["daily_pools"] = pools_out

@@ -385,12 +385,57 @@ def _ma_from_daily(closes, idx, period):
     return sum(vals) / float(period)
 
 
-def _first_break_price(times, lasts, lows, trigger, rise_pct):
+def _parse_hms(s):
+    """HH:mm or HH:mm:ss -> (h,m,sec) or None."""
+    s = str(s or "").strip()
+    if not s:
+        return None
+    parts = s.replace(".", ":").split(":")
+    try:
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 else 0
+        sec = int(float(parts[2])) if len(parts) > 2 else 0
+    except Exception:
+        return None
+    if h < 0 or h > 23 or m < 0 or m > 59 or sec < 0 or sec > 59:
+        return None
+    return (h, m, sec)
+
+
+def _hms_to_sec(hms):
+    if not hms:
+        return None
+    return int(hms[0]) * 3600 + int(hms[1]) * 60 + int(hms[2])
+
+
+def _tick_tod_sec(tm):
+    """Tick stamp -> seconds since midnight, or None."""
+    if tm is None:
+        return None
+    if isinstance(tm, datetime):
+        return tm.hour * 3600 + tm.minute * 60 + tm.second
+    # datetime.time
+    if hasattr(tm, "hour") and hasattr(tm, "minute") and not hasattr(tm, "year"):
+        try:
+            return int(tm.hour) * 3600 + int(tm.minute) * 60 + int(getattr(tm, "second", 0) or 0)
+        except Exception:
+            pass
+    s = _fmt_tick_time(tm)
+    if not s or len(s) < 8 or s[2] != ":":
+        return None
+    hms = _parse_hms(s[:8])
+    return _hms_to_sec(hms)
+
+
+def _first_break_price(times, lasts, lows, trigger, rise_pct, run_start_hms=None, run_end_hms=None):
+    """First MA break inside [run_start, run_end] (inclusive). Ticks before run_start are ignored."""
     if trigger is None or trigger <= 0:
         return None, None
     thr = float(trigger) * (1.0 - float(rise_pct or 0) / 100.0)
     n = min(len(lasts), len(times))
     use_low = bool(lows) and len(lows) >= n
+    start_sec = _hms_to_sec(run_start_hms)
+    end_sec = _hms_to_sec(run_end_hms)
     for i in range(n):
         try:
             last = float(lasts[i])
@@ -400,6 +445,14 @@ def _first_break_price(times, lasts, lows, trigger, rise_pct):
         # QMT tick often has 0 placeholders before auction; never treat as touch
         if last <= 0 or px <= 0:
             continue
+        if start_sec is not None or end_sec is not None:
+            tod = _tick_tod_sec(times[i])
+            if tod is None:
+                continue
+            if start_sec is not None and tod < start_sec:
+                continue
+            if end_sec is not None and tod > end_sec:
+                continue
         if px <= thr:
             return last, times[i]
     return None, None
@@ -542,6 +595,9 @@ def _run_backtest(ContextInfo):
     min_order = float(CFG.get("min_order_amount") or 5000)
     rise_pct = float(CFG.get("rise_percent") or 0)
     from_t1 = bool(CFG.get("from_t1", True))
+    run_start_hms = _parse_hms(CFG.get("strategy_run_start_time") or "09:30")
+    run_end_hms = _parse_hms(CFG.get("strategy_run_end_time") or "15:00")
+    gen_hms = _parse_hms(CFG.get("strategy_generation_time") or "09:25")
     half = amount_per / 2.0
 
     if start_d is None or end_d is None:
@@ -559,6 +615,9 @@ def _run_backtest(ContextInfo):
         "n_codes": len(codes),
         "n_daily_pools": len(daily_pools) if isinstance(daily_pools, dict) else 0,
         "mode": "daily_pools" if daily_pools else "static_pool",
+        "strategy_generation_time": CFG.get("strategy_generation_time") or "09:25",
+        "strategy_run_start_time": CFG.get("strategy_run_start_time") or "09:30",
+        "strategy_run_end_time": CFG.get("strategy_run_end_time") or "15:00",
         "unicodedata": _UNICODEDATA_STATUS,
     })
 
@@ -595,6 +654,8 @@ def _run_backtest(ContextInfo):
     trades = []
     days = _weekday_days(start_d, end_d)
     skip = {"no_ma": 0, "no_last": 0, "no_break": 0, "no_vol": 0, "days_checked": 0, "already": 0, "out_window": 0}
+    # generation_time kept in CFG/START; trigger uses run_start/run_end only (align local simulator).
+    _ = gen_hms
 
     # cache daily maps per full_code
     daily_cache = {}
@@ -676,7 +737,8 @@ def _run_backtest(ContextInfo):
                         continue
                     skip["days_checked"] += 1
                     fill_px, fill_tm = _first_break_price(
-                        t_times, t_last, t_low, ma_px, rise_pct
+                        t_times, t_last, t_low, ma_px, rise_pct,
+                        run_start_hms=run_start_hms, run_end_hms=run_end_hms,
                     )
                     if fill_px is None:
                         skip["no_break"] += 1
@@ -750,7 +812,8 @@ def _run_backtest(ContextInfo):
                         continue
                     skip["days_checked"] += 1
                     fill_px, fill_tm = _first_break_price(
-                        t_times, t_last, t_low, ma_px, rise_pct
+                        t_times, t_last, t_low, ma_px, rise_pct,
+                        run_start_hms=run_start_hms, run_end_hms=run_end_hms,
                     )
                     if fill_px is None:
                         skip["no_break"] += 1

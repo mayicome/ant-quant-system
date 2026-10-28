@@ -3,8 +3,8 @@
 
 流水线：
   1) push2 按净流入降序早停 ≥ min_inflow_wan（性能预筛，软门槛仍在 select 复判）
-  2) 硬门槛：当时涨幅（主板/创科北）
-  3) 拉日线 + logic2 select() 复判五项软门槛；硬通过但未全满足的也输出
+  2) 硬门槛：当时涨幅（主板/创科北）+ 当前非涨停板（select 内；开板可硬入选）
+  3) 拉日线 + logic2 select() 复判软门槛；硬通过但未全满足的也输出（near_miss）
 """
 from __future__ import annotations
 

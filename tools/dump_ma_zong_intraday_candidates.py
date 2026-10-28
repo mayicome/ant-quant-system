@@ -14,7 +14,7 @@
   [MaZongIntradayDump]
   enabled = 1
   dump_times = 11:00,14:00,14:30,14:40,14:50,14:55
-  grace_minutes = 15
+  grace_minutes = 4
   output_dir = data/ma_zong_intraday_candidates
   min_inflow_wan = 3500
   # 兼容旧键 dump_time = 14:40（单时刻）
@@ -69,6 +69,32 @@ def _is_trading_day(d: date) -> bool:
         return bool(is_tradeday(d))
     except Exception:
         return d.weekday() < 5
+
+
+
+def _allow_last_slot_post_close(now: datetime, clock: str, cfg: Dict[str, Any]) -> bool:
+    """Last dump_times slot (default 14:55) may write shortly after close.
+
+    Grace is tiny (must be < 5min gap). If the prior slot finishes a bit late,
+    the last slot can cross 15:00. Only for scheduled + last clock; deadline is
+    max(slot+grace, slot+10min) (~15:05 for 14:55). Not an all-day off-session dump.
+    """
+    from utils.ma_zong_candidate_dump import format_dump_time, parse_dump_time
+
+    times = list(cfg.get("dump_times") or [])
+    if not times:
+        return False
+    try:
+        clock_hm = format_dump_time(parse_dump_time(clock))
+        last_hm = format_dump_time(parse_dump_time(times[-1]))
+        last_t = parse_dump_time(last_hm)
+    except Exception:
+        return False
+    if clock_hm != last_hm:
+        return False
+    grace = int(cfg.get("grace_minutes") or 4)
+    end = datetime.combine(now.date(), last_t) + timedelta(minutes=max(grace, 10))
+    return now <= end
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -163,9 +189,18 @@ def main(argv: Optional[list] = None) -> int:
         return 0
 
     # 定时：盘外不落盘（避免把日终文件当成 14:40）
+    # Scheduled dumps need intraday session; last slot (e.g. 14:55) gets a short
+    # post-close window (~slot+10min / ~15:05) so a slightly late run still writes.
+    last_slot_late = False
     if args.scheduled and not in_session:
-        print("[dump] skip: scheduled dump requires intraday session (no CSV fallback)")
-        return 0
+        last_slot_late = _allow_last_slot_post_close(now, clock, cfg)
+        if not last_slot_late:
+            print("[dump] skip: scheduled dump requires intraday session (no CSV fallback)")
+            return 0
+        print(
+            "[dump] note: last-slot post-close window allowed for clock=%s (until ~slot+10min)"
+            % clock
+        )
 
     # 定时：同日同时钟已有文件则跳过
     if args.scheduled:
@@ -219,8 +254,15 @@ def main(argv: Optional[list] = None) -> int:
     )
 
     if args.scheduled and mode != "live":
-        print("[dump] abort scheduled: expected live mode, got", mode)
-        return 2
+        if last_slot_late:
+            # After close, live may demote; still write as the day last-slot marker.
+            print(
+                "[dump] warn: last-slot late window got mode=%s; still writing"
+                % mode
+            )
+        else:
+            print("[dump] abort scheduled: expected live mode, got", mode)
+            return 2
 
     if not (scan.get("hard_pass_all") or scan.get("candidates")):
         if err:

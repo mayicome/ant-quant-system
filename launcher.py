@@ -799,6 +799,7 @@ class AntLauncherWindow(QMainWindow):
             "post_market_watch_date": "",
             "auto_update_check_on_start": True,
             "update_mirrors": list(_DEFAULT_UPDATE_MIRRORS),
+            "ma_zong_dump_done_slots": [],
         }
         if not os.path.isfile(path):
             return data
@@ -817,6 +818,12 @@ class AntLauncherWindow(QMainWindow):
             mirrors = raw.get("update_mirrors")
             if isinstance(mirrors, list) and mirrors:
                 data["update_mirrors"] = [str(x).strip() for x in mirrors if str(x).strip()]
+            # Persist intraday dump done marks across reload (same key as _mark_mz_dump_slot_done).
+            slots = raw.get("ma_zong_dump_done_slots")
+            if isinstance(slots, list):
+                data["ma_zong_dump_done_slots"] = [str(x) for x in slots if str(x).strip()]
+            elif isinstance(slots, str) and slots.strip():
+                data["ma_zong_dump_done_slots"] = [slots.strip()]
         return data
 
     def _save_post_market_settings(self) -> None:
@@ -1312,7 +1319,7 @@ class AntLauncherWindow(QMainWindow):
         """返回 (enabled, [(HH:MM, time), ...], grace_minutes)。"""
         enabled = True
         slots = [("14:40", dt_time(14, 40))]
-        grace = 15
+        grace = 4
         try:
             from pathlib import Path as _Path
             from utils.ma_zong_candidate_dump import load_dump_config
@@ -1325,10 +1332,31 @@ class AntLauncherWindow(QMainWindow):
                 slots = list(zip(times, objs))
             elif times:
                 slots = [(hm, dt_time(*map(int, (hm + ":0").split(":")[:2]))) for hm in times]
-            grace = int(cfg.get("grace_minutes") or 15)
+            grace = int(cfg.get("grace_minutes") or 4)
         except Exception as exc:
             self._append_launcher_log("ma_zong_dump: load config failed %s" % exc)
         return enabled, slots, grace
+
+
+    def _mz_dump_output_exists(self, day, clock_hm: str) -> bool:
+        """True if today's dump file for this clock slot already exists on disk."""
+        try:
+            from pathlib import Path as _Path
+            from utils.ma_zong_candidate_dump import load_dump_config, output_stem
+
+            cfg = load_dump_config(_Path(self._project_root()))
+            out_dir = _Path(str(cfg.get("output_dir") or "data/ma_zong_intraday_candidates"))
+            if not out_dir.is_absolute():
+                out_dir = _Path(self._project_root()) / out_dir
+            day_s = day.isoformat() if hasattr(day, "isoformat") else str(day)
+            stem = output_stem(day_s, clock_hm)
+            for name in ("%s.csv" % stem, "%s_meta.json" % stem, "%s.jsonl" % stem):
+                fp = out_dir / name
+                if fp.is_file() and fp.stat().st_size > 0:
+                    return True
+            return False
+        except Exception:
+            return False
 
     def _mz_dump_already_running(self) -> bool:
         try:
@@ -1363,21 +1391,36 @@ class AntLauncherWindow(QMainWindow):
             if now.weekday() >= 5:
                 return
 
+        last_hm = slots[-1][0] if slots else ""
         for hm, dump_at in slots:
             if self._mz_dump_slot_done(now.date(), hm):
                 continue
-            end_dt = datetime.combine(now.date(), dump_at) + timedelta(minutes=max(0, int(grace)))
+            # Disk already has today's file for this clock -> mark done, do not relaunch.
+            if self._mz_dump_output_exists(now.date(), hm):
+                self._append_launcher_log(
+                    "ma_zong_dump: output exists for %s, mark done" % hm
+                )
+                self._mark_mz_dump_slot_done(now.date(), hm)
+                continue
+            # Last slot: extend grace so a slightly late run can still fire until ~15:05
+            # (normal grace must stay < min gap; last slot is past the next slot).
+            slot_grace = int(grace)
+            if hm == last_hm:
+                slot_grace = max(slot_grace, 10)
+            end_dt = datetime.combine(now.date(), dump_at) + timedelta(
+                minutes=max(0, slot_grace)
+            )
             if now.time() < dump_at:
-                # 尚未到该槽，后面更晚的也不用看
+                # not yet this slot; later slots are later too
                 break
             if now > end_dt:
                 self._append_launcher_log(
                     "ma_zong_dump: missed window %s(+%s min), mark done"
-                    % (hm, grace)
+                    % (hm, slot_grace)
                 )
                 self._mark_mz_dump_slot_done(now.date(), hm)
                 continue
-            # 落在 [dump_at, dump_at+grace]
+            # window [dump_at, dump_at+slot_grace]
             if self._mz_dump_already_running():
                 self._append_launcher_log(
                     "ma_zong_dump: already running, wait (pending slot %s)" % hm
@@ -1386,7 +1429,7 @@ class AntLauncherWindow(QMainWindow):
             script = "tools/dump_ma_zong_intraday_candidates.py"
             self._append_launcher_log(
                 "ma_zong_dump: launching scheduled at %s (slot %s, grace %s)"
-                % (now.strftime("%H:%M:%S"), hm, grace)
+                % (now.strftime("%H:%M:%S"), hm, slot_grace)
             )
             try:
                 self._launch_python(

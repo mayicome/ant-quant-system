@@ -231,10 +231,12 @@ def _allocate_sell_fifo(
     sell_amt: float,
     sell_d: Optional[date],
     end_d: Optional[date] = None,
+    hint_sel: str = "",
 ) -> None:
     """
-    卖出无真实选股日时：按买入日 FIFO 把数量/金额摊到仍有剩余仓位的买入腿。
-    超出买入合计的部分挂到最后一腿（或回挂解析出的选股日），保留「含初始仓」语义。
+    按代码 FIFO 把卖出数量/金额摊到仍有剩余仓位的买入腿（继承买入选股日）。
+    不再依赖卖出 CSV 的选股日硬配对（卖出侧常把选股日写成买入成交日，会拆出假「未清仓」）。
+    无未清仓买入腿时：回挂 hint_sel / 解析选股日，保留「含初始仓」语义。
     """
     vol = int(sell_vol or 0)
     amt = float(sell_amt or 0.0)
@@ -247,6 +249,8 @@ def _allocate_sell_fifo(
         targets = [k for _bd, _sel, _rem, k in lots]
         if not targets:
             sel = _resolve_sell_sel_when_missing(code, sell_d, buy_sels_by_code)
+            if not sel:
+                sel = _norm_sel_key(hint_sel or "")
             if sel:
                 targets = [(sel, code)]
         for k in targets:
@@ -260,6 +264,8 @@ def _allocate_sell_fifo(
 
     if not lots:
         sel = _resolve_sell_sel_when_missing(code, sell_d, buy_sels_by_code)
+        if not sel:
+            sel = _norm_sel_key(hint_sel or "")
         if not sel:
             return
         _apply_sell_to_group(st, (sel, code), sell_vol=vol, sell_amt=amt, end_d=end_d)
@@ -846,10 +852,10 @@ def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, floa
 
 def build_position_corrected_ledger(buy_path: Path, sell_path: Path) -> List[dict]:
     """
-    合并买卖 CSV 后按「选股日+代码」时间序重算「交易后持仓」。
+    合并买卖 CSV 后按「代码」时间序重算「交易后持仓」（连续持仓，不按选股日拆仓）。
 
     买入侧单独导出时 position_after 只含买入路径（未扣已卖），与接续卖出对照会虚高；
-    本流水用买卖合并回放得到真实持仓。
+    本流水用买卖合并回放得到真实持仓。选股日列继承买入腿（卖出侧常错写为买入成交日）。
 
     若卖出 CSV 已含「买入注入」接续流水：以卖出 CSV 为完整账本，不再并入买入 CSV，
     避免同一笔买入（注入 09:30 vs 真实成交时刻）被双计导致持仓虚高。
@@ -889,8 +895,8 @@ def build_position_corrected_ledger(buy_path: Path, sell_path: Path) -> List[dic
             code = code.zfill(6)
         return code
 
-    def _row_key(r: dict) -> Tuple[str, str, str, str, str, int, str]:
-        sel = _norm_sel_key(_sel_from_row(r))
+    def _row_key(r: dict) -> Tuple[str, str, str, str, int, str]:
+        # 去重键不含选股日：买卖两侧选股日常不一致，按代码+时刻+方向+量+腿去重
         code = _code6(r)
         d = _parse_row_date(r.get("日期") or r.get("date"))
         ds = d.isoformat() if d else str(r.get("日期") or r.get("date") or "").strip()[:10]
@@ -900,7 +906,7 @@ def build_position_corrected_ledger(buy_path: Path, sell_path: Path) -> List[dic
         # 同秒两腿（OPEN50+LU10）常同量，须带规则名/腿键，否则第二笔会被去重丢掉
         leg = str(r.get("腿键") or r.get("leg_key") or "").strip()
         rule = str(r.get("规则名") or r.get("rule_name") or "").strip()
-        return (sel, code, ds, tm, side, vol, leg or rule)
+        return (code, ds, tm, side, vol, leg or rule)
 
     # 卖出侧已是完整接续账本时，只回放卖出 CSV
     sources: List[Tuple[str, List[dict]]]
@@ -920,7 +926,7 @@ def build_position_corrected_ledger(buy_path: Path, sell_path: Path) -> List[dic
             if side == "卖出" and _int_vol(r.get("数量") or r.get("volume")) <= 0:
                 continue
             k = _row_key(r)
-            if not k[0] or not k[1]:
+            if not k[0]:
                 continue
             if k in seen:
                 continue
@@ -928,17 +934,20 @@ def build_position_corrected_ledger(buy_path: Path, sell_path: Path) -> List[dic
             nr = dict(r)
             nr["_src"] = src
             nr["_side"] = side
-            nr["_sort_sel"] = k[0]
-            nr["_sort_code"] = k[1]
-            nr["_sort_date"] = k[2]
-            nr["_sort_time"] = k[3] or "00:00:00"
+            # 买入：用自身选股日；卖出：稍后按 FIFO 开仓腿继承
+            nr["_row_sel"] = _norm_sel_key(
+                _sel_from_row(r, fallback_trade_date=(side == "买入"))
+            )
+            nr["_sort_code"] = k[0]
+            nr["_sort_date"] = k[1]
+            nr["_sort_time"] = k[2] or "00:00:00"
             # 同时刻：先买后卖
             nr["_sort_side"] = 0 if side == "买入" else 1
             merged.append(nr)
 
+    # 按代码时间序回放（连续持仓，不按选股日拆仓）
     merged.sort(
         key=lambda r: (
-            r.get("_sort_sel") or "",
             r.get("_sort_code") or "",
             r.get("_sort_date") or "",
             r.get("_sort_time") or "",
@@ -947,23 +956,44 @@ def build_position_corrected_ledger(buy_path: Path, sell_path: Path) -> List[dic
         )
     )
 
-    pos: Dict[Tuple[str, str], int] = defaultdict(int)
+    # FIFO 开仓腿：(sel, rem_vol) 队列，按代码
+    open_lots: Dict[str, List[List]] = defaultdict(list)  # code -> [[sel, rem], ...]
+    pos_by_code: Dict[str, int] = defaultdict(int)
     out: List[dict] = []
     for r in merged:
-        sel = _norm_sel_key(_sel_from_row(r))
-        code = _code6(r)
+        code = r["_sort_code"]
         side = r["_side"]
         vol = _int_vol(r.get("数量") or r.get("volume"))
-        key = (sel, code)
         if side == "买入":
-            pos[key] = int(pos.get(key) or 0) + vol
+            sel = r.get("_row_sel") or ""
+            if not sel:
+                # 无选股日时用成交日兜底，保证流水可选中
+                sel = r.get("_sort_date") or ""
+            open_lots[code].append([sel, vol])
+            pos_by_code[code] = int(pos_by_code.get(code) or 0) + vol
+            disp_sel = sel
         else:
-            pos[key] = max(0, int(pos.get(key) or 0) - vol)
+            # 卖出：FIFO 扣开仓腿，选股日继承最早未清仓买入腿
+            left = vol
+            disp_sel = ""
+            lots = open_lots[code]
+            while left > 0 and lots:
+                if not disp_sel:
+                    disp_sel = lots[0][0]
+                take = min(lots[0][1], left)
+                lots[0][1] -= take
+                left -= take
+                if lots[0][1] <= 0:
+                    lots.pop(0)
+            if not disp_sel:
+                # 无对应买入（初始仓）时回退卖出自身选股日
+                disp_sel = r.get("_row_sel") or ""
+            pos_by_code[code] = max(0, int(pos_by_code.get(code) or 0) - vol)
         old_pa = r.get("交易后持仓")
         if old_pa is None or str(old_pa).strip() == "":
             old_pa = r.get("position_after")
         row_out = {
-            "选股日": sel,
+            "选股日": disp_sel,
             "日期": r.get("_sort_date") or "",
             "时间": r.get("_sort_time") or "",
             "代码": code,
@@ -973,7 +1003,7 @@ def build_position_corrected_ledger(buy_path: Path, sell_path: Path) -> List[dic
             "数量": vol,
             "金额": r.get("金额") if r.get("金额") not in (None, "") else r.get("amount"),
             "交易后持仓(原)": old_pa,
-            "交易后持仓": int(pos[key]),
+            "交易后持仓": int(pos_by_code[code]),
             "规则名": r.get("规则名") or r.get("rule_name") or "",
             "腿键": r.get("腿键") or r.get("leg_key") or "",
             "触发信息": r.get("触发信息") or "",
@@ -1081,38 +1111,30 @@ def aggregate(buy_path: Path, sell_path: Path) -> List[dict]:
         sell_vol = _int_vol(r.get("数量") or r.get("volume"))
         # 与持仓回放一致：汇总占位 0 股卖出不计入清仓，但仍可写 end_date
         if sell_vol <= 0:
-            if sel:
-                k = (sel, code)
-                if ed and st[k]["end_date"] is None:
-                    st[k]["end_date"] = ed
-            else:
-                _allocate_sell_fifo(
-                    st,
-                    buy_sels_by_code,
-                    code=code,
-                    sell_vol=0,
-                    sell_amt=0.0,
-                    sell_d=sell_d,
-                    end_d=ed,
-                )
-            continue
-        sell_amt = _num(r.get("金额"))
-        if sel:
-            # 买卖两侧都有真实选股日：按原键合并
-            _apply_sell_to_group(
-                st, (sel, code), sell_vol=sell_vol, sell_amt=sell_amt, end_d=ed
-            )
-        else:
-            # live_align / 空选股日：按代码 FIFO 挂回买入腿
             _allocate_sell_fifo(
                 st,
                 buy_sels_by_code,
                 code=code,
-                sell_vol=sell_vol,
-                sell_amt=sell_amt,
+                sell_vol=0,
+                sell_amt=0.0,
                 sell_d=sell_d,
                 end_d=ed,
+                hint_sel=sel,
             )
+            continue
+        sell_amt = _num(r.get("金额"))
+        # 统一按代码 FIFO 挂回买入腿（继承买入选股日）。
+        # 卖出 CSV 选股日常被写成买入成交日，硬配对会产生假「未清仓」+「卖出来自初始」。
+        _allocate_sell_fifo(
+            st,
+            buy_sels_by_code,
+            code=code,
+            sell_vol=sell_vol,
+            sell_amt=sell_amt,
+            sell_d=sell_d,
+            end_d=ed,
+            hint_sel=sel,
+        )
 
     out: List[dict] = []
     for (sel, code) in sorted(st.keys(), key=lambda x: (x[0], x[1])):
@@ -1179,27 +1201,32 @@ def aggregate_with_hold_sell_filter(
     sell_path: Path,
     hold_from_next_day: int,
 ) -> Tuple[List[dict], dict]:
-    """按持仓窗截断卖出后再汇总。
+    """汇总买卖成交（FIFO 按代码挂到买入批次）。
 
-    解决卖出 CSV 选股日为 live_align 时，FIFO 把上一轮卖出挂到本轮买入、
-    出现「卖出数量多于买入」的问题。截断规则与 summarize_hold_days_from_trades
-    一致：卖出不得早于该腿买入日，且不得晚于选股锚定结束日（多腿按末笔买入起算）。
+    hold_from_next_day 仅保留兼容签名；**不再**按「计划持仓结束日」截掉卖出。
+    持有交易日数用于后续 apply_hold_end_date_from_buy（计划持仓结束日展示）
+    以及未真正卖完时的盯市估值，不应用来丢掉已成交卖单。
+
+    返回的 stats 与旧版字段兼容（sell_kept_* / sell_dropped / vol_*），
+    但 sell_dropped 恒为 0（全量保留）。
     """
-    import tempfile
-
-    from tools.summarize_hold_days_from_trades import (  # noqa: WPS433
-        _write_csv,
-        filter_sells_within_hold,
-    )
-
-    hold_n = max(1, int(hold_from_next_day))
+    _ = hold_from_next_day  # 兼容 UI/CLI 入参；截断已取消
     buy_rows = _read_rows(buy_path)
     sell_rows = _read_rows(sell_path)
-    filt, st = filter_sells_within_hold(buy_rows, sell_rows, hold_n)
-    with tempfile.TemporaryDirectory() as td:
-        sell_filtered = Path(td) / f"sell_hold{hold_n}_filtered.csv"
-        _write_csv(filt, sell_filtered)
-        rows = aggregate(buy_path, sell_filtered)
+    sells = [r for r in sell_rows if (r.get("方向") or "").strip() == "卖出"]
+    vol_in = 0
+    for r in sells:
+        vol_in += _int_vol(r.get("数量") or r.get("volume"))
+    st = {
+        "sell_in": len(sells),
+        "sell_kept_full": len(sells),
+        "sell_kept_partial": 0,
+        "sell_dropped": 0,
+        "vol_in": vol_in,
+        "vol_kept": vol_in,
+        "hold_sell_filter": "disabled_keep_all_sells",
+    }
+    rows = aggregate(buy_path, sell_path)
     return rows, st
 
 
@@ -2204,11 +2231,9 @@ def main() -> int:
         buy_p, sell_p, hold_from_next_day=int(args.hold_days)
     )
     print(
-        f"卖出截断: kept {sell_filt_st.get('sell_kept_full', 0)}"
-        f"+partial{sell_filt_st.get('sell_kept_partial', 0)}"
-        f" / in{sell_filt_st.get('sell_in', 0)}；"
-        f"vol {sell_filt_st.get('vol_kept', 0)}/{sell_filt_st.get('vol_in', 0)}；"
-        f"dropped {sell_filt_st.get('sell_dropped', 0)}",
+        f"卖出配对(全量保留, 不按持有窗截断): in{sell_filt_st.get('sell_in', 0)} "
+        f"vol={sell_filt_st.get('vol_in', 0)} "
+        f"mode={sell_filt_st.get('hold_sell_filter', '')}",
         file=sys.stderr,
     )
     # 优先：按买入日 + 持有天数写 end_date；再可选覆盖为纯选股日窗

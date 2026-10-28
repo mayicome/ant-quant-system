@@ -7,6 +7,8 @@
 网络：先直连；若被对端掐断，再试本机代理（EM_FUND_FLOW_PROXY / EM_HIST_PROXY /
 环境变量 HTTPS_PROXY，以及常见本地端口 7078/7890）。
 盘后默认仅东财 push2；仅显式 allow_ths=True 时才允许同花顺兜底。
+若 push2 持续 RemoteDisconnected（出口/IPv4 被对端掐），请临时加 --allow-ths。
+请求顺序：系统双栈优先，失败再 prefer_ipv4（办公网 IPv6 黑洞场景）。
 """
 from __future__ import annotations
 
@@ -122,6 +124,32 @@ def _session() -> requests.Session:
     return s
 
 
+def _do_get(
+    session: requests.Session,
+    host: str,
+    params: Dict[str, Any],
+    proxies: Optional[Dict[str, str]],
+    *,
+    force_ipv4: bool,
+):
+    """单次 GET；force_ipv4=False 走系统双栈（东财 IPv4 当前常被掐）。"""
+    def _once():
+        r = session.get(
+            host,
+            params=params,
+            headers=_HEADERS,
+            timeout=as_timeout((3.0, 25.0)),
+            proxies=proxies or {},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    if force_ipv4:
+        with prefer_ipv4():
+            return _once()
+    return _once()
+
+
 def _get_json(
     session: requests.Session,
     params: Dict[str, Any],
@@ -129,7 +157,11 @@ def _get_json(
     hosts: Sequence[str] = _HOSTS,
     rounds: int = 3,
 ) -> dict:
-    """多轮 × 多 host × 可用代理；单次失败短暂退避，整轮失败再拉长等待。"""
+    """代理 × 多 host × 双栈优先再 IPv4；记住可用代理，全失败退避重试。
+
+    2026-10 起东财 push2 的 IPv4 常 RemoteDisconnected，而 IPv6/双栈正常；
+    故默认先不强制 IPv4，失败后再用 prefer_ipv4 兜底（办公网 IPv6 黑洞场景）。
+    """
     global _WORKING_PROXIES, _WORKING_PROXIES_RESOLVED
     last_err: Optional[Exception] = None
 
@@ -146,39 +178,39 @@ def _get_json(
                 continue
             for host in hosts:
                 attempt += 1
-                try:
-                    with prefer_ipv4():
-                        r = session.get(
-                            host,
-                            params=params,
-                            headers=_HEADERS,
-                            timeout=as_timeout(25),
-                            proxies=proxies or {},
+                # 先双栈，再强制 IPv4
+                for force_v4 in (False, True):
+                    try:
+                        data = _do_get(
+                            session, host, params, proxies, force_ipv4=force_v4
                         )
-                        r.raise_for_status()
-                        data = r.json()
-                    if isinstance(data, dict) and data.get("data") is not None:
-                        _WORKING_PROXIES = proxies
-                        _WORKING_PROXIES_RESOLVED = True
-                        return data
-                    last_err = RuntimeError(f"empty payload from {host}")
-                except Exception as e:
-                    last_err = e
-                    msg = str(e).lower()
-                    # 代理拒绝/不存在：记入死名单，本轮不再试
-                    if proxies and (
-                        "10061" in msg
-                        or "refused" in msg
-                        or "unable to connect to proxy" in msg
-                    ):
-                        _DEAD_PROXIES.add(_proxy_key(proxies))
-                        break
-                    time.sleep(0.25 * attempt + random.random() * 0.25)
+                        if isinstance(data, dict) and data.get("data") is not None:
+                            _WORKING_PROXIES = proxies
+                            _WORKING_PROXIES_RESOLVED = True
+                            return data
+                        last_err = RuntimeError(f"empty payload from {host}")
+                    except Exception as e:
+                        last_err = e
+                        msg = str(e).lower()
+                        if proxies and (
+                            "10061" in msg
+                            or "refused" in msg
+                            or "unable to connect to proxy" in msg
+                        ):
+                            _DEAD_PROXIES.add(_proxy_key(proxies))
+                            # 代理挂了，换下一个代理（跳出 force_v4 与 host 循环由外层 break）
+                            break
+                        # 双栈失败再试 IPv4；IPv4 也失败再短睡
+                        if force_v4:
+                            time.sleep(0.25 * attempt + random.random() * 0.25)
+                else:
+                    continue
+                # proxies dead → break host loop
+                break
         if round_i + 1 < rounds:
             time.sleep(1.5 * (round_i + 1) + random.random())
 
     raise RuntimeError(f"东方财富资金流接口失败: {last_err}")
-
 
 def fetch_individual_fund_flow_rows(
     *,

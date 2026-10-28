@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import requests
 
-from utils.http_ipv4 import as_timeout, prefer_ipv4
+from utils.http_ipv4 import install_prefer_ipv4, as_timeout, prefer_ipv4
 
 from utils.daily_cache_reader import to_full_stock_code
 
@@ -21,9 +21,14 @@ OUT_COLS = ("date", "open", "high", "low", "close", "volume", "amount")
 
 _EM_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 _EM_UT = "7eea3edcaed734bea9cbfc24409ed989"
-_TX_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+_TX_URL = "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get"
 _THS_URL = "https://d.10jqka.com.cn/v6/line/{key}/01/last.js"
 
+
+try:
+    install_prefer_ipv4()
+except Exception:
+    pass
 
 def _session() -> requests.Session:
     os.environ.setdefault("NO_PROXY", "*")
@@ -153,15 +158,32 @@ def fetch_tencent(
     symbol = prefix + num
     # 接口按根数返回，多取一些再按日期裁。
     sess = session or _session()
-    with prefer_ipv4():
-        resp = sess.get(
-            _TX_URL,
-            params={"param": f"{symbol},day,,,320,"},
-            timeout=as_timeout(timeout),
-        )
-    resp.raise_for_status()
-    node = ((resp.json() or {}).get("data") or {}).get(symbol) or {}
-    rows = node.get("day") or []
+    # 旧 fqkline 已 501；newfqkline 为现行接口。保留 fallback。
+    tx_urls = (
+        _TX_URL,
+        "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get",
+        "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get",
+    )
+    node = {}
+    last_exc = None
+    for url in tx_urls:
+        try:
+            with prefer_ipv4():
+                resp = sess.get(
+                    url,
+                    params={"param": f"{symbol},day,,,320,"},
+                    timeout=as_timeout(timeout),
+                )
+            resp.raise_for_status()
+            node = ((resp.json() or {}).get("data") or {}).get(symbol) or {}
+            if node:
+                break
+        except Exception as exc:
+            last_exc = exc
+            node = {}
+    if not node and last_exc is not None:
+        raise last_exc
+    rows = node.get("day") or node.get("qfqday") or []
     out: List[Dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, (list, tuple)) or len(row) < 6:

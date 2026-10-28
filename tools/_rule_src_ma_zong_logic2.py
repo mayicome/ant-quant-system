@@ -2,12 +2,13 @@
 # 硬入选（不进结果表则跳过）：
 #   - 当时涨幅 主板>=6%、创业/科创/北交所>=10%
 #   - 近 EX_DIV_LOOKBACK 交易日无疑似除权开盘缺口（整表回测/因子筛选不应带上）
+#   - 当前非涨停板（当时已封板则硬跳过；今日曾涨停但现已开板仍可硬入选）
 # 满足条件（全部为真才 True；前10日窗口不含当日）：
 #   1) 所属行业东财涨幅原始排名前 BOARD_TOP_N_INDUSTRY，或概念前 BOARD_TOP_N_CONCEPT（任一）
 #   2) 当时主力净流入 >= 3500万
 #   3) 前10个交易日：主板无涨幅>=5%；创业/科创/北交所无涨幅>=10%
 #   4) 当时价 > MA5 且 > MA20（MA 用日线，今日收盘用当时价替换）
-#   5) 当天未涨停过（当时涨停，或今日最高价曾触及涨停价 → 满足条件=False；仍可因硬门槛入选）
+#   5) 当天未涨停过（当时涨停或今日最高曾触及涨停价 → 满足条件=False；开板股可硬入选但本项软不满足）
 # 盘中数据：utils.ma_zong_intraday_ctx（东财 push2 实时涨幅+主力净流入+板块榜）
 # 历史选股日：回退本地 CSV；涨幅缺省时用日线收盘算
 # 另保留 besttest 热门诊断字段（ctx em_board_hot，非入选门槛）
@@ -833,6 +834,19 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
     not_touched_lu = not _touched_limit_up_today(
         pct, q, daily_data, stock_code, name_em, as_of_date
     )
+    # hard: only skip if currently sealed at limit-up; opened-after-touch stays in hard_pass
+    if _is_limit_up_now(pct, stock_code, name_em, as_of_date):
+        high_px, pre_close_px = _day_high_and_pre_close(q, daily_data, as_of_date)
+        lu_px = _limit_up_price(pre_close_px, stock_code, name_em, as_of_date)
+        return False, {
+            "热门模式": HOT_MODE,
+            "当时涨跌幅": "" if pct is None else round(float(pct), 4),
+            "今日最高价": "" if high_px is None else round(float(high_px), 4),
+            "涨停价": "" if lu_px is None else round(float(lu_px), 4),
+            "条件_非当时涨停": False,
+            "条件_当天未涨停过": bool(not_touched_lu),
+            "_skip": "当前为涨停板",
+        }
 
     meet_all = (
         bool(board_ok)

@@ -100,7 +100,8 @@ def load_dump_config(root: Optional[Path] = None) -> Dict[str, Any]:
         "dump_time": default_times[0],
         "dump_time_obj": parse_dump_time(default_times[0]),
         "dump_time_objs": [parse_dump_time(x) for x in default_times],
-        "grace_minutes": 15,
+        # grace must be < min slot gap (14:50->14:55 = 5min); else prior slot delays next
+        "grace_minutes": 4,
         "output_dir": str(default_output_dir(root)),
         "min_inflow_wan": 3500.0,
         "config_path": str(path),

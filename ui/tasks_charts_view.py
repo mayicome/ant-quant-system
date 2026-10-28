@@ -1491,9 +1491,16 @@ class TasksChartsView(QWidget):
                     if hasattr(chart, 'toggle_btn'):
                         header_layout.addSpacing(1)  # 在股票名称和状态按钮之间添加小间距
                         header_layout.addWidget(chart.toggle_btn)
+                        # QMT 未确认醒目徽标（紧挨启停按钮右侧）
+                        if getattr(chart, 'qmt_ack_badge', None) is not None:
+                            header_layout.addSpacing(4)
+                            header_layout.addWidget(chart.qmt_ack_badge)
                     elif hasattr(chart, 'start_btn'):  # 兼容旧代码
                         header_layout.addSpacing(1)
                         header_layout.addWidget(chart.start_btn)
+                        if getattr(chart, 'qmt_ack_badge', None) is not None:
+                            header_layout.addSpacing(4)
+                            header_layout.addWidget(chart.qmt_ack_badge)
                     
                     header_layout.addStretch()
                     
@@ -3140,8 +3147,10 @@ class TasksChartsView(QWidget):
         """解析任务运行/暂停显示状态。
 
         优先信任：TaskManager.running_tasks；
+        再：params.task_running（武装同步后的确认会回写此标志，「真运行中」以此为准）；
         再：params 明确「已暂停」时覆盖图表残留的 live 态（加载意图暂停）；
-        再回退图表实况 / status / params。避免切列重排后用陈旧 params 把「运行中」刷成「已暂停」。
+        再回退图表实况 / status。避免切列重排后用陈旧 params 把「运行中」刷成「已暂停」。
+        图表点击可先乐观刷新，最终以 rules_armed 确认后的 params 为准。
         """
         # 图表挂着旧 task_id 时，改用当前任务表判断，避免误显示「已暂停/未运行」
         if self.task_manager and task_id and task_id not in getattr(self.task_manager, "tasks", {}):
@@ -3319,6 +3328,95 @@ class TasksChartsView(QWidget):
                     self.task_manager._reload_paused_norms = set()
             except Exception:
                 pass
+
+
+    def apply_armed_run_reconcile(self, changes) -> int:
+        """按武装确认结果刷新缓存/本页图表启停按钮。返回更新数量。
+
+        changes: [{task_id, stock_code, running, paused, reason}, ...]
+        「真运行中」以武装集合为准，覆盖图表乐观点击态。
+        """
+        if not changes:
+            return 0
+        by_tid = {}
+        by_code = {}
+        for c in changes:
+            if not isinstance(c, dict):
+                continue
+            tid = str(c.get("task_id") or "")
+            sc = str(c.get("stock_code") or "").strip().upper()
+            if tid:
+                by_tid[tid] = c
+            if sc:
+                by_code[sc] = c
+                digits = "".join(ch for ch in sc if ch.isdigit())
+                if len(digits) >= 6:
+                    by_code[digits.zfill(6)[-6:]] = c
+
+        updated = 0
+        seen = set()
+        for source in (
+            getattr(self, "chart_widgets", None) or {},
+            getattr(self, "_chart_cache", None) or {},
+        ):
+            for stock_code, chart_data in list(source.items()):
+                chart = chart_data.get("chart") if isinstance(chart_data, dict) else chart_data
+                if not chart:
+                    continue
+                key = id(chart)
+                if key in seen:
+                    continue
+                seen.add(key)
+                tid = str(getattr(chart, "task_id", "") or "")
+                c = by_tid.get(tid) if tid else None
+                if c is None:
+                    sc = str(stock_code or getattr(chart, "stock_code", "") or "").strip().upper()
+                    c = by_code.get(sc)
+                    if c is None:
+                        digits = "".join(ch for ch in sc if ch.isdigit())
+                        if len(digits) >= 6:
+                            c = by_code.get(digits.zfill(6)[-6:])
+                if c is None:
+                    continue
+                running = bool(c.get("running"))
+                paused = bool(c.get("paused")) and not running
+                unconfirmed = bool(c.get("unconfirmed"))
+                try:
+                    if hasattr(chart, "set_task_status"):
+                        try:
+                            chart.set_task_status(
+                                running, paused, qmt_ack_unconfirmed=unconfirmed
+                            )
+                        except TypeError:
+                            chart.set_task_status(running, paused)
+                            if hasattr(chart, "set_qmt_ack_unconfirmed"):
+                                chart.set_qmt_ack_unconfirmed(unconfirmed)
+                    task = getattr(chart, "task", None)
+                    if isinstance(task, dict):
+                        if not isinstance(task.get("params"), dict):
+                            task["params"] = {}
+                        task["params"]["task_running"] = running
+                        task["params"]["task_paused"] = paused
+                        task["params"]["qmt_ack_unconfirmed"] = unconfirmed
+                        if unconfirmed:
+                            task["params"]["pending_qmt_ack"] = False
+                        task["status"] = "运行中" if running else "未运行"
+                    updated += 1
+                    try:
+                        bang = "!" if unconfirmed else ""
+                        self.logger.info(
+                            f"[{stock_code}] 图表已按武装确认刷新: "
+                            f"{'运行中' if running else ('已暂停' if paused else '未运行')}{bang} "
+                            f"({c.get('reason') or ''})"
+                        )
+                    except Exception:
+                        pass
+                except Exception as e:
+                    try:
+                        self.logger.warning(f"武装确认刷新图表失败 {stock_code}: {e}")
+                    except Exception:
+                        pass
+        return updated
 
     def sync_charts_with_running_tasks(self) -> int:
         """按 TaskManager.running_tasks 同步当前缓存/本页图表的运行态。返回同步为运行中的数量。"""

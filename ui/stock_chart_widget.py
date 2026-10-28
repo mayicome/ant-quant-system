@@ -85,6 +85,7 @@ class StockChartWidget(QWidget):
         # 任务运行状态
         self.task_running = False  # 任务是否正在运行
         self.task_paused = False   # 任务是否暂停
+        self.qmt_ack_unconfirmed = False  # QMT 未确认启停回执时显示醒目徽标
         
         # clear-branch pending blink: 1s on / 1s off (marker artists only; no full redraw)
         self._clear_branch_blink_visible = True
@@ -764,6 +765,27 @@ class StockChartWidget(QWidget):
         # 保留旧的按钮引用以兼容现有代码（隐藏它们）
         self.start_btn = self.toggle_btn  # 兼容性
         self.pause_btn = self.toggle_btn  # 兼容性
+
+        # QMT 未确认回执：独立醒目徽标（由 tasks_charts_view 放进标题栏，紧挨启停按钮）
+        self.qmt_ack_badge = QLabel("⚠ QMT未确认")
+        self.qmt_ack_badge.setObjectName("qmt_ack_badge")
+        self.qmt_ack_badge.setAlignment(Qt.AlignCenter)
+        self.qmt_ack_badge.setMinimumHeight(26)
+        self.qmt_ack_badge.setStyleSheet(
+            "QLabel#qmt_ack_badge {"
+            "background-color: #FF3D00;"
+            "color: #FFFFFF;"
+            "font-weight: 900;"
+            "font-size: 13px;"
+            "padding: 3px 10px;"
+            "border: 2px solid #BF360C;"
+            "border-radius: 6px;"
+            "}"
+        )
+        self.qmt_ack_badge.setToolTip(
+            "QMT未确认：启停切换未回执，或运行途中心跳失联。请检查 QMT 模型交易；恢复后叹号会自动消失。"
+        )
+        self.qmt_ack_badge.setVisible(False)
         
         # 创建matplotlib图表 - 只显示价格位置图
         self.figure = Figure(figsize=(10, 4), dpi=100)
@@ -1463,17 +1485,43 @@ class StockChartWidget(QWidget):
         if redraw and hasattr(self, 'price_position_ax'):
             self.update_chart()
     
-    def set_task_status(self, task_running=False, task_paused=False):
-        """设置任务运行状态（从保存的数据中恢复）"""
+    def set_task_status(self, task_running=False, task_paused=False, qmt_ack_unconfirmed=None):
+        """设置任务运行状态（从保存的数据中恢复）。
+
+        qmt_ack_unconfirmed: True/False 显式设置叹号；None 则尝试从 task.params 读取。
+        """
         self.task_running = task_running
         self.task_paused = task_paused
+        if qmt_ack_unconfirmed is None:
+            try:
+                params = (getattr(self, "task", None) or {}).get("params") or {}
+                qmt_ack_unconfirmed = bool(params.get("qmt_ack_unconfirmed"))
+            except Exception:
+                qmt_ack_unconfirmed = False
+        self.qmt_ack_unconfirmed = bool(qmt_ack_unconfirmed)
         self._refresh_toggle_btn_ui()
         self._sync_clear_branch_blink_timer()
 
+    def set_qmt_ack_unconfirmed(self, unconfirmed=False):
+        """仅更新 QMT 未确认叹号，不改运行/暂停态。"""
+        self.qmt_ack_unconfirmed = bool(unconfirmed)
+        try:
+            if isinstance(getattr(self, "task", None), dict):
+                if not isinstance(self.task.get("params"), dict):
+                    self.task["params"] = {}
+                self.task["params"]["qmt_ack_unconfirmed"] = bool(unconfirmed)
+        except Exception:
+            pass
+        self._refresh_toggle_btn_ui()
+
     def _refresh_toggle_btn_ui(self):
-        """仅刷新启停按钮文案/样式（不落盘、不重绘图表）。"""
+        """仅刷新启停按钮文案/样式与 QMT 未确认徽标（不落盘、不重绘图表）。"""
         if not hasattr(self, 'toggle_btn') or self.toggle_btn is None:
             return
+        bang = bool(getattr(self, "qmt_ack_unconfirmed", False))
+        tip_base = "启动/暂停任务（点击切换状态）"
+        tip_bang = "QMT未确认：启停切换未回执，或运行途中心跳失联。请检查 QMT 模型交易；恢复后叹号会自动消失。"
+        # 启停按钮保持状态色；缺回执用旁边独立醒目徽标，不再塞一个小「!」
         if self.task_running and not self.task_paused:
             self.toggle_btn.setText("🟢 运行中 | 暂停")
             self.toggle_btn.setStyleSheet(
@@ -1495,6 +1543,28 @@ class StockChartWidget(QWidget):
                 "border: 2px solid #999; border-radius: 8px; color: #666; font-size: 11px;"
             )
             self.toggle_btn.setEnabled(True)
+        self.toggle_btn.setToolTip(tip_bang if bang else tip_base)
+
+        badge = getattr(self, "qmt_ack_badge", None)
+        if badge is not None:
+            try:
+                badge.setVisible(bool(bang))
+                badge.setToolTip(tip_bang)
+                if bang:
+                    # 再次强调样式，避免被主题覆盖后变淡
+                    badge.setStyleSheet(
+                        "QLabel#qmt_ack_badge {"
+                        "background-color: #FF3D00;"
+                        "color: #FFFFFF;"
+                        "font-weight: 900;"
+                        "font-size: 13px;"
+                        "padding: 3px 10px;"
+                        "border: 2px solid #BF360C;"
+                        "border-radius: 6px;"
+                        "}"
+                    )
+            except Exception:
+                pass
 
     def _sync_task_status_to_memory(self):
         """只更新内存中的任务状态，不写盘。"""
@@ -2110,6 +2180,7 @@ class StockChartWidget(QWidget):
         # 优先通过任务管理器启动真实任务进程，避免仅UI置状态导致“看起来暂停但实际仍在运行”
         task_id = self._resolve_live_task_id()
         # 先乐观刷新按钮，再启动进程；失败则回滚，避免“点了没反应”
+        # 运行态以人工启停为准；未进武装（如熔断关光规则）不再自动回退未运行。
         prev_running, prev_paused = self.task_running, self.task_paused
         self.task_running = True
         self.task_paused = False
@@ -2187,7 +2258,8 @@ class StockChartWidget(QWidget):
             persist: 是否写盘；全部暂停批量调用时传 False，最后统一 save 一次
             stop_via_tm: 是否通过 TaskManager.stop_task 停进程
         """
-        # 先立刻刷新按钮，再做停进程/写盘，避免点了半天没反馈
+        # 先立刻刷新按钮，再做停进程/写盘，避免点了半天没反馈。
+        # 若 stop 后仍留在武装集，同步确认会把按钮拉回「运行中」。
         self.task_running = False
         self.task_paused = True
         self._refresh_toggle_btn_ui()
@@ -4276,7 +4348,11 @@ class StockChartWidget(QWidget):
             self.logger.error(f"[{self.stock_code}] 检查夜市规则完成状态失败: {str(e)}")
     
     def _toggle_task(self):
-        """切换任务运行状态（合并启动/暂停功能）"""
+        """切换任务运行状态（合并启动/暂停功能）。
+
+        按钮可先乐观切换；builtin 模式下「真运行中/未运行」以 rules_armed
+        同步后的武装确认为准（见 TaskManager._sync_rules_armed_if_builtin）。
+        """
         if self.task_running and not self.task_paused:
             # 运行中 -> 暂停
             self.pause_task()

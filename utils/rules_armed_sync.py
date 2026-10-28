@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
@@ -676,6 +677,677 @@ def _read_buy_block_window() -> Dict[str, Any]:
     return out
 
 
+
+def armed_parent_task_ids(armed_tasks) -> Set[str]:
+    """从武装导出行提取父任务 id（metadata.parent_task_id 或 task_id 冒号前缀）。"""
+    out: Set[str] = set()
+    for row in armed_tasks or []:
+        if not isinstance(row, dict):
+            continue
+        meta = row.get("metadata") or {}
+        parent = ""
+        if isinstance(meta, dict):
+            parent = str(meta.get("parent_task_id") or "").strip()
+        if not parent:
+            tid = str(row.get("task_id") or "").strip()
+            parent = tid.split(":", 1)[0].strip() if tid else ""
+        if parent:
+            out.add(parent)
+    return out
+
+
+def _stash_last_armed(task_manager, armed_tasks) -> None:
+    if task_manager is None:
+        return
+    try:
+        task_manager._last_rules_armed_tasks = list(armed_tasks or [])
+        task_manager._last_rules_armed_parent_ids = armed_parent_task_ids(armed_tasks)
+    except Exception:
+        pass
+
+
+def _read_armed_tasks_from_disk(project_root_override: Optional[str] = None) -> List[Dict[str, Any]]:
+    root = project_root_override or project_root()
+    rules_path, _ = default_paths(root)
+    try:
+        if not os.path.isfile(rules_path):
+            return []
+        with open(rules_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            tasks = data.get("tasks") or []
+            return tasks if isinstance(tasks, list) else []
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return []
+
+
+
+
+def qmt_armed_ack_status(
+    task_id: str,
+    *,
+    publish_ts: float = 0.0,
+    grace_sec: float = 6.0,
+    alive_sec: float = 90.0,
+) -> str:
+    """第二道门：QMT 是否确认吃到武装。返回 confirmed/pending/failed。"""
+    tid = str(task_id or "").strip()
+    now = time.time()
+    try:
+        from utils.qmt_formula_result_log import (
+            armed_ack,
+            armed_ack_at,
+            heartbeat_at,
+            heartbeat_seen,
+            qmt_strategy_alive,
+        )
+    except Exception:
+        if publish_ts and (now - float(publish_ts)) < float(grace_sec):
+            return "pending"
+        return "failed"
+
+    alive = False
+    try:
+        alive = bool(qmt_strategy_alive(alive_sec))
+    except Exception:
+        alive = False
+    if not alive:
+        try:
+            hb = float(heartbeat_at() or 0) if heartbeat_seen() else 0.0
+            ack = float(armed_ack_at() or 0)
+            latest = max(hb, ack)
+            alive = latest > 0 and (now - latest) <= float(alive_sec)
+        except Exception:
+            alive = False
+
+    ack_at = 0.0
+    ack = {}
+    try:
+        ack_at = float(armed_ack_at() or 0)
+        ack = armed_ack() or {}
+    except Exception:
+        ack_at = 0.0
+        ack = {}
+
+    pub = float(publish_ts or 0)
+    in_grace = bool(pub > 0 and (now - pub) < float(grace_sec))
+
+    if not alive:
+        return "pending" if in_grace else "failed"
+
+    ids = set()
+    raw_ids = ack.get("ids") if isinstance(ack, dict) else None
+    if isinstance(raw_ids, list):
+        ids = {str(x).strip() for x in raw_ids if str(x or "").strip()}
+
+    ack_after_pub = (pub <= 0) or (ack_at >= pub - 0.5)
+    if ids:
+        if tid in ids and ack_after_pub:
+            return "confirmed"
+        if in_grace and not ack_after_pub:
+            return "pending"
+        if ack_after_pub and tid not in ids:
+            return "failed"
+        return "pending" if in_grace else "failed"
+
+    if ack_after_pub and ack_at > 0:
+        return "confirmed"
+    return "pending" if in_grace else "failed"
+
+
+def qmt_pause_ack_status(
+    task_id: str,
+    *,
+    publish_ts: float = 0.0,
+    grace_sec: float = 6.0,
+    alive_sec: float = 90.0,
+) -> str:
+    """暂停/停止回执：confirmed=QMT 已不含该任务；pending；failed=仍武装或无回执。"""
+    tid = str(task_id or "").strip()
+    now = time.time()
+    try:
+        from utils.qmt_formula_result_log import (
+            armed_ack,
+            armed_ack_at,
+            heartbeat_at,
+            heartbeat_seen,
+            qmt_strategy_alive,
+        )
+    except Exception:
+        if publish_ts and (now - float(publish_ts)) < float(grace_sec):
+            return "pending"
+        return "failed"
+
+    alive = False
+    try:
+        alive = bool(qmt_strategy_alive(alive_sec))
+    except Exception:
+        alive = False
+    if not alive:
+        try:
+            hb = float(heartbeat_at() or 0) if heartbeat_seen() else 0.0
+            ack = float(armed_ack_at() or 0)
+            latest = max(hb, ack)
+            alive = latest > 0 and (now - latest) <= float(alive_sec)
+        except Exception:
+            alive = False
+
+    ack_at = 0.0
+    ack = {}
+    try:
+        ack_at = float(armed_ack_at() or 0)
+        ack = armed_ack() or {}
+    except Exception:
+        ack_at = 0.0
+        ack = {}
+
+    pub = float(publish_ts or 0)
+    in_grace = bool(pub > 0 and (now - pub) < float(grace_sec))
+
+    if not alive:
+        return "pending" if in_grace else "failed"
+
+    ids = set()
+    raw_ids = ack.get("ids") if isinstance(ack, dict) else None
+    if isinstance(raw_ids, list):
+        ids = {str(x).strip() for x in raw_ids if str(x or "").strip()}
+
+    ack_after_pub = (pub <= 0) or (ack_at >= pub - 0.5)
+    if not ack_after_pub:
+        return "pending" if in_grace else "failed"
+
+    if ids:
+        if tid in ids:
+            return "failed"  # QMT 仍武装该任务
+        return "confirmed"
+
+    if ack_at > 0:
+        return "confirmed"
+    return "pending" if in_grace else "failed"
+
+
+
+def _in_a_share_qmt_watch_session(now_ts=None) -> bool:
+    """盘中（含集合竞价至 15:05）才把心跳失联当成运行途中告警，避免收盘无 tick 误报。"""
+    from datetime import datetime
+    from datetime import time as dt_time
+
+    now = datetime.fromtimestamp(float(time.time() if now_ts is None else now_ts))
+    t = now.time()
+    return dt_time(9, 15) <= t <= dt_time(15, 5)
+
+
+def apply_mid_run_qmt_liveness(
+    task_manager,
+    *,
+    logger=None,
+    alive_sec: float = 90.0,
+):
+    """运行途中盯 QMT 心跳：已确认运行中的任务，心跳过期则叹号；恢复则消叹号。不改运行/暂停。"""
+    if task_manager is None:
+        return []
+    if getattr(task_manager, "_armed_reconcile_busy", False):
+        return []
+
+    try:
+        from utils.qmt_formula_result_log import qmt_strategy_alive, poll as poll_formula
+    except Exception:
+        return []
+
+    try:
+        poll_formula()
+    except Exception:
+        pass
+
+    alive = False
+    try:
+        alive = bool(qmt_strategy_alive(alive_sec))
+    except Exception:
+        alive = False
+
+    in_session = _in_a_share_qmt_watch_session()
+    changes = []
+    tasks_map = getattr(task_manager, "tasks", None) or {}
+
+    for task_id, task in list(tasks_map.items()):
+        if not isinstance(task, dict):
+            continue
+        tid = str(task_id)
+        params = task.get("params") if isinstance(task.get("params"), dict) else None
+        if not isinstance(params, dict):
+            continue
+        if bool(params.get("pending_qmt_ack")):
+            continue
+        flag_running = bool(params.get("task_running"))
+        status = str(task.get("status") or "")
+        status_running = status in ("运行中", "已委托", "夜盘已委托")
+        if not (flag_running or status_running):
+            continue
+        if bool(params.get("task_paused")) and not flag_running:
+            continue
+
+        stock_code = str(task.get("stock_code") or "")
+        was_unconfirmed = bool(params.get("qmt_ack_unconfirmed"))
+
+        if alive:
+            if was_unconfirmed:
+                params["qmt_ack_unconfirmed"] = False
+                params["pending_qmt_ack"] = False
+                task["params"] = params
+                try:
+                    task_manager.tasks[tid]["params"] = params
+                    task_manager.task_params[tid] = params
+                except Exception:
+                    pass
+                reason = "QMT心跳恢复已清除未确认"
+                if logger is not None:
+                    try:
+                        logger.info("[%s] %s (task_id=%s)" % (stock_code, reason, tid))
+                    except Exception:
+                        pass
+                changes.append(
+                    {
+                        "task_id": tid,
+                        "stock_code": stock_code,
+                        "running": True,
+                        "paused": False,
+                        "reason": reason,
+                        "qmt_ack": "confirmed",
+                        "unconfirmed": False,
+                    }
+                )
+            continue
+
+        if not in_session:
+            continue
+        if was_unconfirmed:
+            continue
+        params["qmt_ack_unconfirmed"] = True
+        params["pending_qmt_ack"] = False
+        task["params"] = params
+        try:
+            task_manager.tasks[tid]["params"] = params
+            task_manager.task_params[tid] = params
+        except Exception:
+            pass
+        reason = "QMT运行途中失联已标记未确认"
+        if logger is not None:
+            try:
+                logger.warning("[%s] %s (task_id=%s)" % (stock_code, reason, tid))
+            except Exception:
+                pass
+        changes.append(
+            {
+                "task_id": tid,
+                "stock_code": stock_code,
+                "running": True,
+                "paused": False,
+                "reason": reason,
+                "qmt_ack": "failed",
+                "unconfirmed": True,
+            }
+        )
+    return changes
+
+
+def reconcile_run_state_with_armed(
+    task_manager,
+    armed_tasks=None,
+    *,
+    logger=None,
+    require_qmt_ack: bool = True,
+    publish_ts: float = 0.0,
+    qmt_grace_sec: float = 6.0,
+) -> List[Dict[str, Any]]:
+    """以武装集合确认运行态。
+
+    本地武装为第一道；QMT ACK 为第二道。
+    QMT 超时不再回退点击后的运行/暂停状态，只打 qmt_ack_unconfirmed（图表叹号）；
+    晚到回执会清叹号。本地未进武装（熔断关光规则等）也不再自动回退未运行；
+    运行态仅人工启停/删图表可改。意图只认 params.task_running，避免暂停被拉回。
+    """
+    if task_manager is None:
+        return []
+    if getattr(task_manager, "_armed_reconcile_busy", False):
+        return []
+
+    if armed_tasks is None:
+        armed_tasks = getattr(task_manager, "_last_rules_armed_tasks", None)
+    if armed_tasks is None:
+        armed_tasks = _read_armed_tasks_from_disk()
+
+    parent_ids = armed_parent_task_ids(armed_tasks)
+    changes: List[Dict[str, Any]] = []
+    tasks_map = getattr(task_manager, "tasks", None) or {}
+    running_tasks = getattr(task_manager, "running_tasks", None) or {}
+
+    task_manager._armed_reconcile_busy = True
+    try:
+        for task_id, task in list(tasks_map.items()):
+            if not isinstance(task, dict):
+                continue
+            tid = str(task_id)
+            params = task.get("params") if isinstance(task.get("params"), dict) else {}
+            if not isinstance(params, dict):
+                params = {}
+                task["params"] = params
+
+            in_armed = tid in parent_ids
+            in_running_map = tid in running_tasks
+            flag_running = bool(params.get("task_running"))
+            status = str(task.get("status") or "")
+            status_running = status in ("运行中", "已委托", "夜市已委托")
+            # 运行意图只认人工写的 params.task_running（点启/停）。
+            # 勿用 running_tasks/status 反推：暂停时尚未清 running_tasks，
+            # 会误判仍要运行，未进武装分支又强制拉回「运行中」并刷 UI。
+            intended_running = flag_running and not bool(params.get("task_paused"))
+            stock_code = str(task.get("stock_code") or "")
+            pub = float(
+                publish_ts
+                or getattr(task_manager, "_rules_armed_published_at", 0)
+                or 0
+            )
+            was_unconfirmed = bool(params.get("qmt_ack_unconfirmed"))
+            was_pending = bool(params.get("pending_qmt_ack"))
+
+            def _apply_params(new_status=None):
+                task["params"] = params
+                status_changed = False
+                if new_status is not None and str(task.get("status") or "") != str(new_status):
+                    task["status"] = new_status
+                    status_changed = True
+                try:
+                    task_manager.tasks[tid]["params"] = params
+                    if status_changed:
+                        task_manager.tasks[tid]["status"] = new_status
+                    task_manager.task_params[tid] = params
+                except Exception:
+                    pass
+                # 状态没变不发 UI，避免轮询武装确认刷「UI状态已更新为」
+                if status_changed:
+                    try:
+                        task_manager.update_task_ui.emit(tid, "status", new_status)
+                    except Exception:
+                        pass
+
+            def _emit(*, running, paused, reason, qmt_ack, unconfirmed):
+                changes.append(
+                    {
+                        "task_id": tid,
+                        "stock_code": stock_code,
+                        "running": running,
+                        "paused": paused,
+                        "reason": reason,
+                        "qmt_ack": qmt_ack,
+                        "unconfirmed": bool(unconfirmed),
+                    }
+                )
+
+            if in_armed and intended_running:
+                qmt_state = "confirmed"
+                if require_qmt_ack:
+                    qmt_state = qmt_armed_ack_status(
+                        tid,
+                        publish_ts=pub,
+                        grace_sec=qmt_grace_sec,
+                    )
+
+                if qmt_state == "failed":
+                    # 不回退运行态；仅叹号。日志/UI 只在状态变化时发一次，避免刷屏。
+                    params["task_running"] = True
+                    params["task_paused"] = False
+                    params["pending_qmt_ack"] = False
+                    params["qmt_ack_unconfirmed"] = True
+                    _apply_params("运行中")
+                    reason = "QMT未确认已标记未确认"
+                    if not was_unconfirmed:
+                        if logger is not None:
+                            try:
+                                logger.warning(f"[{stock_code}] {reason} (task_id={tid})")
+                            except Exception:
+                                pass
+                        _emit(
+                            running=True,
+                            paused=False,
+                            reason=reason,
+                            qmt_ack="failed",
+                            unconfirmed=True,
+                        )
+                    continue
+
+                need = (
+                    (not flag_running)
+                    or bool(params.get("task_paused"))
+                    or status != "运行中"
+                    or bool(params.get("pending_qmt_ack")) != (qmt_state == "pending")
+                    or bool(params.get("qmt_ack_unconfirmed"))
+                )
+                if not need and qmt_state == "confirmed":
+                    if was_unconfirmed or was_pending:
+                        params["pending_qmt_ack"] = False
+                        params["qmt_ack_unconfirmed"] = False
+                        _apply_params(None)
+                        reason = "QMT确认运行中"
+                        if logger is not None:
+                            try:
+                                logger.info(f"[{stock_code}] {reason} (task_id={tid})")
+                            except Exception:
+                                pass
+                        _emit(
+                            running=True,
+                            paused=False,
+                            reason=reason,
+                            qmt_ack="confirmed",
+                            unconfirmed=False,
+                        )
+                    else:
+                        params["pending_qmt_ack"] = False
+                        params["qmt_ack_unconfirmed"] = False
+                    continue
+
+                params["task_running"] = True
+                params["task_paused"] = False
+                params["pending_qmt_ack"] = qmt_state == "pending"
+                # 宽限期内只 pending，超时后才叹号
+                params["qmt_ack_unconfirmed"] = False
+                _apply_params("运行中")
+                if qmt_state == "pending":
+                    reason = "等待QMT确认"
+                else:
+                    reason = "QMT确认运行中"
+                if logger is not None:
+                    try:
+                        logger.info(f"[{stock_code}] {reason} (task_id={tid})")
+                    except Exception:
+                        pass
+                _emit(
+                    running=True,
+                    paused=False,
+                    reason=reason,
+                    qmt_ack=qmt_state,
+                    unconfirmed=False,
+                )
+                continue
+
+            if in_armed and not intended_running:
+                # 点了暂停但本地仍在武装：保持未运行/暂停，标待确认（不拉回运行中）
+                qmt_state = "failed"
+                if require_qmt_ack:
+                    qmt_state = qmt_pause_ack_status(
+                        tid,
+                        publish_ts=pub,
+                        grace_sec=qmt_grace_sec,
+                    )
+                new_status = "未运行" if status_running else (status or "未运行")
+                if qmt_state == "pending":
+                    params["pending_qmt_ack"] = True
+                    params["qmt_ack_unconfirmed"] = False
+                    reason = "等待QMT确认暂停"
+                    unconfirmed = False
+                elif qmt_state == "confirmed":
+                    params["pending_qmt_ack"] = False
+                    params["qmt_ack_unconfirmed"] = True
+                    reason = "本地仍武装已标记待确认"
+                    unconfirmed = True
+                else:
+                    params["pending_qmt_ack"] = False
+                    params["qmt_ack_unconfirmed"] = True
+                    reason = "QMT未确认已标记待确认"
+                    unconfirmed = True
+                params["task_running"] = False
+                params["task_paused"] = True
+                _apply_params(new_status)
+                if logger is not None:
+                    try:
+                        logger.warning(f"[{stock_code}] {reason} (task_id={tid})")
+                    except Exception:
+                        pass
+                _emit(
+                    running=False,
+                    paused=True,
+                    reason=reason,
+                    qmt_ack=qmt_state,
+                    unconfirmed=unconfirmed,
+                )
+                continue
+
+            if not intended_running:
+                # 已暂停且本地不在武装：宽限期内可等卸装回执；超时/失败不再给未运行任务打叹号
+                # （否则熔断/武装未包含回退后，暂停 ACK 失败会把叹号永久卡住）
+                now = time.time()
+                in_grace = pub > 0 and (now - pub) < max(float(qmt_grace_sec) * 3.0, 20.0)
+                track = was_pending or in_grace
+                if require_qmt_ack and track:
+                    pause_state = qmt_pause_ack_status(
+                        tid,
+                        publish_ts=pub,
+                        grace_sec=qmt_grace_sec,
+                    )
+                    if pause_state == "confirmed":
+                        if was_unconfirmed or was_pending:
+                            params["pending_qmt_ack"] = False
+                            params["qmt_ack_unconfirmed"] = False
+                            _apply_params(None)
+                            reason = "QMT确认已暂停"
+                            if logger is not None:
+                                try:
+                                    logger.info(
+                                        f"[{stock_code}] {reason} (task_id={tid})"
+                                    )
+                                except Exception:
+                                    pass
+                            _emit(
+                                running=False,
+                                paused=bool(params.get("task_paused")),
+                                reason=reason,
+                                qmt_ack="confirmed",
+                                unconfirmed=False,
+                            )
+                        else:
+                            params["pending_qmt_ack"] = False
+                            params["qmt_ack_unconfirmed"] = False
+                    elif pause_state == "pending":
+                        if not was_pending or was_unconfirmed:
+                            params["pending_qmt_ack"] = True
+                            params["qmt_ack_unconfirmed"] = False
+                            _apply_params(None)
+                            _emit(
+                                running=False,
+                                paused=bool(params.get("task_paused")),
+                                reason="等待QMT确认暂停",
+                                qmt_ack="pending",
+                                unconfirmed=False,
+                            )
+                        else:
+                            params["pending_qmt_ack"] = True
+                            params["qmt_ack_unconfirmed"] = False
+                    else:
+                        # 未运行且不在武装：卸装回执失败只清标志，不再打「未确认」
+                        if was_unconfirmed or was_pending:
+                            params["pending_qmt_ack"] = False
+                            params["qmt_ack_unconfirmed"] = False
+                            _apply_params(None)
+                            reason = "未运行已忽略暂停回执失败"
+                            if logger is not None:
+                                try:
+                                    logger.info(
+                                        f"[{stock_code}] {reason} (task_id={tid})"
+                                    )
+                                except Exception:
+                                    pass
+                            _emit(
+                                running=False,
+                                paused=bool(params.get("task_paused")),
+                                reason=reason,
+                                qmt_ack="failed",
+                                unconfirmed=False,
+                            )
+                        else:
+                            params["pending_qmt_ack"] = False
+                            params["qmt_ack_unconfirmed"] = False
+                elif was_unconfirmed or was_pending:
+                    # 宽限期外仍挂着叹号/pending：直接清掉
+                    params["pending_qmt_ack"] = False
+                    params["qmt_ack_unconfirmed"] = False
+                    _apply_params(None)
+                    reason = "未运行已清除陈旧未确认"
+                    if logger is not None:
+                        try:
+                            logger.info(
+                                f"[{stock_code}] {reason} (task_id={tid})"
+                            )
+                        except Exception:
+                            pass
+                    _emit(
+                        running=False,
+                        paused=bool(params.get("task_paused")),
+                        reason=reason,
+                        qmt_ack="",
+                        unconfirmed=False,
+                    )
+                continue
+
+            # 意图运行却未进武装：保持运行态，绝不自动卸（熔断关规则/暂无武装规则亦然；仅人工可停）
+            # 已是运行中且无 pending/叹号时不要反复 _apply_params，否则 UI 状态日志刷屏
+            need = (
+                (not flag_running)
+                or bool(params.get("task_paused"))
+                or status != "运行中"
+                or was_unconfirmed
+                or was_pending
+            )
+            reason = "武装未包含但保持运行中"
+            if not need:
+                continue
+            params["task_running"] = True
+            params["task_paused"] = False
+            params["pending_qmt_ack"] = False
+            params["qmt_ack_unconfirmed"] = False
+            _apply_params("运行中")
+            if logger is not None:
+                try:
+                    logger.info(
+                        f"[{stock_code}] {reason} (task_id={tid}, "
+                        f"had_running_flag={flag_running}, in_running_tasks={in_running_map})"
+                    )
+                except Exception:
+                    pass
+            _emit(
+                running=True,
+                paused=False,
+                reason=reason,
+                qmt_ack="",
+                unconfirmed=False,
+            )
+    finally:
+        task_manager._armed_reconcile_busy = False
+
+    return changes
+
+
+
+
 def sync_rules_armed(
     task_manager,
     qmt_adapter=None,
@@ -770,6 +1442,7 @@ def sync_rules_armed(
                 sort_keys=True,
             )
             if old_sig == new_sig:
+                _stash_last_armed(task_manager, tasks)
                 return False
     except (OSError, json.JSONDecodeError, TypeError):
         pass
@@ -793,6 +1466,12 @@ def sync_rules_armed(
 
     try:
         save_json_atomic(rules_path, payload)
+        _stash_last_armed(task_manager, tasks)
+        try:
+            if task_manager is not None:
+                task_manager._rules_armed_published_at = time.time()
+        except Exception:
+            pass
         if logger is not None:
             logger.info(
                 f"[rules_armed] 已同步 tasks={len(tasks)} watch={len(watch_codes)} "
@@ -805,6 +1484,8 @@ def sync_rules_armed(
             )
         return True
     except OSError as e:
+        # 写失败时仍用本次计算出的武装集做 UI 确认；必要时可读盘兜底
+        _stash_last_armed(task_manager, tasks)
         if logger is not None:
             logger.error(f"[rules_armed] 写入失败: {e}")
         return False

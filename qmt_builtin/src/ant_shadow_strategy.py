@@ -2227,10 +2227,13 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
 
 def _log_armed_tasks(rules: Optional[dict]) -> None:
     tasks = (rules or {}).get("tasks") or []
-    if not tasks:
-        return
-    print("[交易核心] 已武装任务=%d" % len(tasks))
+    n_tasks = len(tasks)
+    print("[交易核心] 已武装任务=%d" % n_tasks)
+    parents = []
+    seen = set()
     for t in tasks:
+        if not isinstance(t, dict):
+            continue
         print(
             "[交易核心] task %s %s type=%s trig=%s vol=%s enabled=%s"
             % (
@@ -2242,6 +2245,33 @@ def _log_armed_tasks(rules: Optional[dict]) -> None:
                 t.get("enabled"),
             )
         )
+        meta = t.get("metadata") or {}
+        parent = ""
+        if isinstance(meta, dict):
+            parent = str(meta.get("parent_task_id") or "").strip()
+        if not parent:
+            tid = str(t.get("task_id") or "").strip()
+            parent = tid.split(":", 1)[0].strip() if tid else ""
+        if parent and parent not in seen:
+            seen.add(parent)
+            parents.append(parent)
+    try:
+        rl = _load_result_log_mod()
+        if rl is not None and hasattr(rl, "emit_armed_ack"):
+            sig = ""
+            try:
+                if _RULES_PATH:
+                    sig = str(rules_file_signature(_RULES_PATH) or "")
+            except Exception:
+                sig = ""
+            sub_n = None
+            try:
+                sub_n = len(_SUBSCRIBED_CODES or [])
+            except Exception:
+                sub_n = None
+            rl.emit_armed_ack(n_tasks, sig=sig, parents=parents, subscribe_count=sub_n)
+    except Exception as e:
+        print("[交易核心] 武装ACK输出失败: %s" % e)
 
 
 def _load_session_rules():
@@ -2428,6 +2458,12 @@ def _periodic_sync_body(ContextInfo):
     _process_pending_resubscribe(ContextInfo)
     reload_rules_if_changed(ContextInfo, allow_resubscribe=True)
     _maybe_seed_snapshots(force=False)
+    # mid-run liveness heartbeat: 无 tick（午休等）时仍约 60s 打一枪 ANTRES hb，
+    # 便于交易端判断影子策略仍活着；策略停掉后心跳自然过期。
+    try:
+        _publish_result_log([], "", force_hb=False)
+    except Exception:
+        pass
     # tick 回调停掉时：用 results.stocks 已有价格判触发并回写 skipped/委托
     try:
         if _RUNNER is not None and _RESULTS is not None and hasattr(

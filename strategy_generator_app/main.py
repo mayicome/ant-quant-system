@@ -2471,6 +2471,16 @@ class StrategyGeneratorMainWindow(QMainWindow):
         )
         self.backtest_load_buy_batch_btn.clicked.connect(self._on_load_buy_batch_into_current_strategy)
         backtest_chain_row.addWidget(self.backtest_load_buy_batch_btn)
+        self.backtest_load_buy_csv_btn = QPushButton("从买入成交明细CSV接续…")
+        self.backtest_load_buy_csv_btn.setMinimumWidth(0)
+        self.backtest_load_buy_csv_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.backtest_load_buy_csv_btn.setToolTip(
+            "卖出回测（实盘同路径）：选择买入侧「导出成交明细」CSV，\n"
+            "按时间连续注入加仓（同票跨选股日累加），走可用仓/T+1、\n"
+            "positions_baseline 半仓、末笔买入锚定清仓。不按选股日切开模拟。"
+        )
+        self.backtest_load_buy_csv_btn.clicked.connect(self._on_load_buy_trades_csv_for_sell_chain)
+        backtest_chain_row.addWidget(self.backtest_load_buy_csv_btn)
         backtest_chain_row.addStretch()
         backtest_layout.addLayout(backtest_chain_row)
         sell_chain_row = QHBoxLayout()
@@ -2690,6 +2700,29 @@ class StrategyGeneratorMainWindow(QMainWindow):
         backtest_btn_row3.addWidget(self.backtest_mz1_qmt_ingest_btn)
         backtest_btn_row3.addStretch()
         backtest_layout.addLayout(backtest_btn_row3)
+
+        # 马总逻辑1卖 · QMT 细回测：同 watch 路径，覆盖写入；Prefix ANT_MZ1_SELL_BT|
+        backtest_btn_row3s = QHBoxLayout()
+        self.backtest_mz1_qmt_sell_gen_btn = QPushButton("生成卖出QMT细回测…")
+        self.backtest_mz1_qmt_sell_gen_btn.setToolTip(
+            "【马总逻辑1卖】用已载入的买入 CSV/批量接续状态，生成卖出细回测脚本并原子写入\n"
+            "国金 QMT userdata\\mz1_qmt_fine_watch\\current.py（与买腿同一路径，覆盖）。\n"
+            "需先「从买入成交明细CSV接续…」或「载入上一轮批量回测→本策略」。\n"
+            "结果在 FormulaOutput（ANT_MZ1_SELL_BT|）。不改「下一轮批量」引擎路径。"
+        )
+        self.backtest_mz1_qmt_sell_gen_btn.clicked.connect(self._on_generate_mz1_qmt_sell_fine_script)
+        self.backtest_mz1_qmt_sell_ingest_btn = QPushButton("导入卖出QMT结果…")
+        self.backtest_mz1_qmt_sell_ingest_btn.setToolTip(
+            "自动读取当天 FormulaOutput 中 ANT_MZ1_SELL_BT| 行并回灌卖出成交。"
+        )
+        self.backtest_mz1_qmt_sell_ingest_btn.clicked.connect(self._on_ingest_mz1_qmt_sell_fine_result)
+        for _b in (self.backtest_mz1_qmt_sell_gen_btn, self.backtest_mz1_qmt_sell_ingest_btn):
+            _b.setMinimumWidth(0)
+            _b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        backtest_btn_row3s.addWidget(self.backtest_mz1_qmt_sell_gen_btn)
+        backtest_btn_row3s.addWidget(self.backtest_mz1_qmt_sell_ingest_btn)
+        backtest_btn_row3s.addStretch()
+        backtest_layout.addLayout(backtest_btn_row3s)
 
         # 工具：合并买卖成交明细 → 各日选股收益汇总.xlsx
         self.merge_trades_group = QGroupBox("选股收益汇总（合并买卖成交明细）")
@@ -5590,6 +5623,18 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 scheduled.append(fill_row)
                 cash_add += float(amount) + float(commission)
 
+        pre_last: Dict[str, date] = {}
+        for f in fills_raw:
+            if not isinstance(f, dict):
+                continue
+            code_6 = _normalize_code_6(f.get("code") or f.get("stock_code"))
+            bd = self._parse_iso_date_val(f.get("date") or f.get("trade_date"))
+            if not code_6 or bd is None or bd >= start_d:
+                continue
+            prev = pre_last.get(code_6)
+            if prev is None or bd > prev:
+                pre_last[code_6] = bd
+
         init_pos: Dict[str, Dict[str, Any]] = {}
         for code_6, vol in pre_vol.items():
             if vol <= 0:
@@ -5600,6 +5645,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
             row: Dict[str, Any] = {"volume": int(vol), "cost": cost}
             if ed is not None:
                 row["entry_date"] = ed.isoformat()
+            ld = pre_last.get(code_6) or ed
+            if ld is not None:
+                row["last_buy_date"] = ld.isoformat()
             init_pos[code_6] = row
 
         hints = dict(fb_from_fills)
@@ -5644,7 +5692,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         return initial_positions
 
     def _first_buy_dates_from_segment(self, seg: dict) -> Dict[str, date]:
-        """接续卖出：各仍持仓股票的首次买入日。"""
+        """接续卖出：各股首次买入日（含买入CSV连续回放：无期末持仓时以成交为准）。"""
         out: Dict[str, date] = {}
         fb_map = seg.get("first_buy_dates") or {}
         for k, raw in fb_map.items():
@@ -5674,9 +5722,72 @@ class StrategyGeneratorMainWindow(QMainWindow):
             )
             if ed is not None:
                 out[code_6] = ed
-        # 仅保留仍有持仓的代码
+        for f in seg.get("buy_fills") or []:
+            if not isinstance(f, dict):
+                continue
+            side = str(f.get("side") or "buy").strip().lower()
+            if side and side not in ("buy", "买入", "b"):
+                continue
+            code_6 = _normalize_code_6(f.get("code") or f.get("stock_code"))
+            bd = self._parse_iso_date_val(f.get("date") or f.get("trade_date"))
+            if not code_6 or bd is None:
+                continue
+            prev = out.get(code_6)
+            if prev is None or bd < prev:
+                out[code_6] = bd
         held = set(self._initial_positions_dict_from_segment(seg).keys())
+        if not held:
+            held = set(out.keys())
+            for f in seg.get("buy_fills") or []:
+                if not isinstance(f, dict):
+                    continue
+                c6 = _normalize_code_6(f.get("code") or f.get("stock_code"))
+                if c6:
+                    held.add(c6)
         return {c: d for c, d in out.items() if c in held}
+
+    def _last_buy_dates_from_segment(self, seg: dict) -> Dict[str, date]:
+        """接续卖出：各股末笔买入日（再次买入顺延无条件清仓锚定）。"""
+        out: Dict[str, date] = {}
+        lb_map = seg.get("last_buy_dates") or {}
+        for k, raw in lb_map.items():
+            code_6 = (str(k) or "").strip().replace(".", "")[:6]
+            if len(code_6) < 6 and code_6:
+                code_6 = code_6.zfill(6)
+            bd = self._parse_iso_date_val(raw)
+            if code_6 and len(code_6) == 6 and bd is not None:
+                out[code_6] = bd
+        for k, p in (seg.get("positions") or {}).items():
+            code_6 = (str(k) or "").strip().replace(".", "")[:6]
+            if len(code_6) < 6 and code_6:
+                code_6 = code_6.zfill(6)
+            if len(code_6) != 6:
+                continue
+            ld = (
+                self._parse_iso_date_val((p or {}).get("last_buy_date"))
+                or self._parse_iso_date_val((p or {}).get("entry_date"))
+                or out.get(code_6)
+            )
+            if ld is not None:
+                out[code_6] = ld
+        for f in seg.get("buy_fills") or []:
+            if not isinstance(f, dict):
+                continue
+            side = str(f.get("side") or "buy").strip().lower()
+            if side and side not in ("buy", "买入", "b"):
+                continue
+            code_6 = _normalize_code_6(f.get("code") or f.get("stock_code"))
+            bd = self._parse_iso_date_val(f.get("date") or f.get("trade_date"))
+            if not code_6 or bd is None:
+                continue
+            prev = out.get(code_6)
+            if prev is None or bd > prev:
+                out[code_6] = bd
+        first = self._first_buy_dates_from_segment(seg)
+        for c6, fb in first.items():
+            if c6 not in out:
+                out[c6] = fb
+        return out
 
     def _compute_chained_round_window(
         self, seg: dict, from_t1: bool, hold_n: int
@@ -5704,6 +5815,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 trading_day_window_from_start,
             )
         first_buys = self._first_buy_dates_from_segment(seg)
+        last_buys = self._last_buy_dates_from_segment(seg)
         if first_buys:
             starts: List[date] = []
             ends: List[date] = []
@@ -5711,17 +5823,27 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 ns = next_trading_day_after(fb)
                 if ns is None:
                     return None, None, f"无法计算 {_c} 首次买入日后的下一交易日"
-                # 自买入次日起持有 hold_n 日（第 hold_n 日强清）
-                _s, e_hold, wmsg = trading_day_window_from_start(ns, hold_n)
+                lb = last_buys.get(_c) or fb
+                ns_clear = next_trading_day_after(lb)
+                if ns_clear is None:
+                    return None, None, f"无法计算 {_c} 末笔买入日后的下一交易日"
+                _s, e_hold, wmsg = trading_day_window_from_start(ns_clear, hold_n)
                 if e_hold is None:
-                    return None, None, wmsg or f"{_c} 自买入次日持有窗口不足"
+                    return None, None, wmsg or f"{_c} 自末笔买入次日持有窗口不足"
                 starts.append(ns)
                 ends.append(e_hold)
             s_eff = min(starts)
             e_eff = max(ends)
+            n_re = sum(
+                1
+                for c, fb in first_buys.items()
+                if (last_buys.get(c) or fb) != fb
+            )
             note = (
-                f"按首次买入次日接续：{s_eff}～{e_eff}"
-                f"（{len(first_buys)}只，持有{hold_n}日自买入次日起算）"
+                f"连续接续：{s_eff}～{e_eff}"
+                f"（{len(first_buys)}只，持有{hold_n}日自末笔买入次日起算"
+                + (f"，其中{n_re}只曾加仓顺延清仓" if n_re else "")
+                + "）"
             )
             return s_eff, e_eff, note
 
@@ -5934,6 +6056,74 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "请确认「持有交易日数」，再点「运行下一轮批量回测」。",
         )
 
+    def _on_load_buy_trades_csv_for_sell_chain(self):
+        """从买入成交明细 CSV 武装连续接续卖出（实盘同路径，不按选股日分档）。"""
+        sid = self._get_selected_strategy_id()
+        if not sid:
+            QMessageBox.warning(self, "提示", "请先在左侧选中卖出策略。")
+            return
+        cfg = self._find_strategy_by_id(sid)
+        if not cfg:
+            QMessageBox.warning(self, "提示", "未找到该策略配置。")
+            return
+        name = str(getattr(cfg, "name", "") or "")
+        if self._strategy_name_looks_like_buy(name):
+            r = QMessageBox.question(
+                self,
+                "当前像买入策略",
+                f"当前策略「{name}」名称像买入侧。\n"
+                "卖出接续请先切换到卖出策略（如马总逻辑1卖出）。\n\n"
+                "仍要用当前策略武装接续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if r != QMessageBox.Yes:
+                return
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        hd = os.path.join(root, "history_data")
+        start_dir = hd if os.path.isdir(hd) else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择买入侧成交明细 CSV",
+            start_dir,
+            "CSV (*.csv);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        try:
+            try:
+                from strategy_generator_app.backtest.buy_chain_from_csv import (
+                    build_continuous_chain_segment_from_buy_fills,
+                    load_buy_fills_from_trades_csv,
+                )
+            except ImportError:
+                from backtest.buy_chain_from_csv import (  # type: ignore
+                    build_continuous_chain_segment_from_buy_fills,
+                    load_buy_fills_from_trades_csv,
+                )
+            fills, parse_note = load_buy_fills_from_trades_csv(path)
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", str(e))
+            return
+        if not fills:
+            QMessageBox.warning(self, "提示", "CSV 中没有有效的买入成交行。")
+            return
+        seg = build_continuous_chain_segment_from_buy_fills(
+            fills, source_path=path, source_label=os.path.basename(path)
+        )
+        arm_msg = self._arm_chained_export_segment(seg)
+        n_code = len(seg.get("first_buy_dates") or {})
+        n_fill = len(fills)
+        QMessageBox.information(
+            self,
+            "已武装连续接续",
+            f"{parse_note}\n"
+            f"涉及 {n_code} 只 / {n_fill} 笔买入（连续时间线，不按选股日切开）。\n\n"
+            f"{arm_msg}\n\n"
+            "请确认「持有交易日数」与运行起止时间，再点「运行下一轮批量回测」。",
+        )
+
+
     def _on_run_chained_batch_backtest(self):
         """按已载入的每一档上一轮状态，用当前策略（策略 B）跑下一轮批量回测。"""
         sid = self._get_selected_strategy_id()
@@ -5954,7 +6144,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "提示",
-                "请先点击「载入上一轮批量回测→本策略」或确保已载入 version=2 批量 JSON 的全部档位。",
+                "请先「从买入成交明细CSV接续…」或「载入上一轮批量回测→本策略」（也可导入含 buy_fills 的回测 JSON）。",
             )
             return
         from_t1 = self.sell_chain_from_t1_cb.isChecked()
@@ -7257,6 +7447,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 min_order_amount=min_order,
                 rise_percent=rise,
                 from_t1=from_t1,
+                strategy_generation_time=self._backtest_page_time_params()["strategy_generation_time"],
+                strategy_run_start_time=self._backtest_page_time_params()["strategy_run_start_time"],
+                strategy_run_end_time=self._backtest_page_time_params()["strategy_run_end_time"],
             )
             out = m.write_qmt_strategy_file(src, also_watch=True)
         except Exception as e:
@@ -7337,8 +7530,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 pass
         self._mz1_qmt_monitor_timer = None
 
-    def _start_mz1_qmt_run_monitor(self, run_tag: str, *, note: str = ""):
-        """生成/投递 watch 后轮询当天 FormulaOutput，跑完弹窗并自动导入。"""
+    def _start_mz1_qmt_run_monitor(self, run_tag: str, *, note: str = "", kind: str = "buy"):
+        """生成/投递 watch 后轮询当天 FormulaOutput，跑完弹窗并自动导入。kind=buy|sell。"""
         self._stop_mz1_qmt_run_monitor()
         run_tag = (run_tag or "").strip() or datetime.now().strftime("%Y%m%d_%H%M%S")
         baseline = 0
@@ -7361,6 +7554,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "done": False,
             "note": note or "",
             "last_status_at": None,
+            "kind": (kind or "buy").strip().lower() or "buy",
         }
         timer = QTimer(self)
         timer.setInterval(2000)
@@ -7437,7 +7631,11 @@ class StrategyGeneratorMainWindow(QMainWindow):
             text_chunk = raw.decode("utf-8", errors="replace")
         # 推进已读偏移（即使尚未完成）
         st["baseline"] = size
-        m = self._mz1_qmt_fine_mod()
+        _kind = str((st or {}).get("kind") or "buy").lower()
+        if _kind == "sell":
+            m = self._mz1_qmt_sell_fine_mod()
+        else:
+            m = self._mz1_qmt_fine_mod()
         parsed = m.parse_formula_output_text(text_chunk)
         start = parsed.get("start") or {}
         summary = parsed.get("summary") or {}
@@ -7496,12 +7694,17 @@ class StrategyGeneratorMainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self._on_ingest_mz1_qmt_fine_result()
+            if str(st.get("kind") or "buy").lower() == "sell":
+                self._on_ingest_mz1_qmt_sell_fine_result()
+            else:
+                self._on_ingest_mz1_qmt_fine_result()
         except Exception as e:
+            _title = "卖出QMT细回测完成" if str(st.get("kind") or "").lower() == "sell" else "QMT细回测完成"
+            _hint = "导入卖出QMT结果" if str(st.get("kind") or "").lower() == "sell" else "导入QMT细回测结果"
             QMessageBox.warning(
                 self,
-                "QMT细回测完成",
-                "已跑完，但自动导入失败：%s\n请再点「导入QMT细回测结果」。" % e,
+                _title,
+                "已跑完，但自动导入失败：%s\n请再点「%s」。" % (e, _hint),
             )
             return
         # ingest 已有 information 弹窗；再补一行状态
@@ -7607,6 +7810,256 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 self,
                 "导入QMT细回测结果",
                 "已从当天日志导入 %d 笔成交到下方表格。\n%s" % (len(rows), path),
+            )
+
+
+    def _mz1_qmt_sell_fine_mod(self):
+        try:
+            from strategy_generator_app.backtest import mz1_qmt_sell_fine as m
+            return m
+        except ImportError:
+            from backtest import mz1_qmt_sell_fine as m  # type: ignore
+            return m
+
+    def _on_generate_mz1_qmt_sell_fine_script(self):
+        """生成马总逻辑1卖 QMT 细回测脚本，写入同一 mz1_qmt_fine_watch/current.py。"""
+        m = self._mz1_qmt_sell_fine_mod()
+        sid = (self._get_selected_strategy_id() or "").strip()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        name = (getattr(cfg, "name", "") or "") if cfg else ""
+        if not m.is_mz1_sell_strategy(sid, name):
+            reply = QMessageBox.question(
+                self,
+                "生成卖出QMT细回测",
+                "当前策略看起来不是「卖：马总逻辑1」。仍按卖腿规则生成脚本吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        segs = list(getattr(self, "_chained_batch_segments", None) or [])
+        if not segs:
+            QMessageBox.warning(
+                self,
+                "生成卖出QMT细回测",
+                "请先「从买入成交明细CSV接续…」或「载入上一轮批量回测→本策略」，再生成卖出QMT细回测。",
+            )
+            return
+        start_d = self.backtest_start_date.date().toPyDate()
+        end_d = self.backtest_end_date.date().toPyDate()
+        from_t1 = True
+        if hasattr(self, "sell_chain_from_t1_cb"):
+            from_t1 = bool(self.sell_chain_from_t1_cb.isChecked())
+        hold_n = 2
+        if hasattr(self, "sell_chain_hold_spin"):
+            hold_n = int(self.sell_chain_hold_spin.value() or 2)
+        clear_t = "14:56:00"
+        if hasattr(self, "sell_chain_scheduled_clear_time"):
+            try:
+                clear_t = self._clear_time_str_from_qtime(self.sell_chain_scheduled_clear_time)
+            except Exception:
+                clear_t = "14:56:00"
+        merged_init = {}
+        merged_fills = []
+        first_buy = {}
+        last_buy = {}
+        notes = []
+        codes = []
+        for seg in segs:
+            cash0, init_pos, sched_fills, fb_map, note = self._prepare_chained_injection(seg, start_d)
+            notes.append(str(note or ""))
+            for c6, row in (init_pos or {}).items():
+                prev = merged_init.get(c6)
+                if prev is None:
+                    merged_init[c6] = dict(row)
+                else:
+                    try:
+                        v0 = int(prev.get("volume") or 0)
+                        v1 = int(row.get("volume") or 0)
+                    except (TypeError, ValueError):
+                        v0, v1 = 0, 0
+                    merged_init[c6] = dict(row)
+                    merged_init[c6]["volume"] = v0 + v1
+                codes.append(c6)
+            for f in sched_fills or []:
+                if isinstance(f, dict):
+                    merged_fills.append(dict(f))
+                    c6 = str(f.get("code") or "")
+                    if c6:
+                        codes.append(c6)
+            for c6, d in (fb_map or {}).items():
+                ds = d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
+                prev = first_buy.get(c6)
+                if prev is None or ds < prev:
+                    first_buy[c6] = ds
+            try:
+                lb = self._last_buy_dates_from_segment(seg)
+            except Exception:
+                lb = {}
+            for c6, d in (lb or {}).items():
+                ds = d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
+                prev = last_buy.get(c6)
+                if prev is None or ds > prev:
+                    last_buy[c6] = ds
+        codes = sorted(set(_normalize_code(c) for c in codes if _normalize_code(c)))
+        if not codes and not merged_init and not merged_fills:
+            QMessageBox.warning(self, "提示", "接续状态里没有可用持仓/买入成交。")
+            return
+        cr = m.clamp_range(start_d, end_d)
+        params = {}
+        if cfg is not None:
+            try:
+                params = dict(self._merge_strategy_params_from_form(cfg.strategy_params or {}) or {})
+            except Exception:
+                params = dict(getattr(cfg, "strategy_params", None) or {})
+        try:
+            tp = self._backtest_page_time_params()
+        except Exception:
+            tp = {
+                "strategy_generation_time": "09:25",
+                "strategy_run_start_time": "09:30",
+                "strategy_run_end_time": "15:00",
+            }
+        try:
+            src = m.build_qmt_strategy_source(
+                codes=codes,
+                start=cr.start,
+                end=cr.end,
+                initial_positions=merged_init,
+                scheduled_buy_fills=merged_fills,
+                params=params,
+                from_t1=from_t1,
+                sell_hold_from_next_day=hold_n,
+                scheduled_clear_time=clear_t,
+                strategy_generation_time=tp.get("strategy_generation_time", "09:25"),
+                strategy_run_start_time=tp.get("strategy_run_start_time", "09:30"),
+                strategy_run_end_time=tp.get("strategy_run_end_time", "15:00"),
+                first_buy_dates=first_buy,
+                last_buy_dates=last_buy,
+            )
+            out = m.write_qmt_strategy_file(src, also_watch=True)
+        except Exception as e:
+            QMessageBox.critical(self, "生成失败", str(e))
+            return
+        watch = None
+        try:
+            watch = m.last_watch_path() or m.default_watch_path()
+        except Exception:
+            watch = r"D:\国金证券QMT交易端2\userdata\mz1_qmt_fine_watch\current.py"
+        werr = None
+        try:
+            werr = m.last_watch_write_error()
+        except Exception:
+            werr = None
+        meta_bits = [
+            "已投递卖出细回测到 userdata\\mz1_qmt_fine_watch\\current.py（覆盖买腿脚本；探针热加载）。",
+            "watch：%s" % watch,
+            "备份：%s" % out,
+            "区间：%s～%s" % (cr.start.isoformat(), cr.end.isoformat()),
+            "代码数：%d | 初始持仓：%d | 注入买入：%d" % (
+                len(codes), len(merged_init), len(merged_fills)
+            ),
+            "持有交易日数：%d | 定时清仓：%s | from_t1=%s" % (hold_n, clear_t, from_t1),
+            "前缀：ANT_MZ1_SELL_BT|",
+        ]
+        if any(notes):
+            meta_bits.append("注入说明：" + " | ".join([n for n in notes if n][:3]))
+        if werr:
+            meta_bits.append("watch 写入失败：%s（备份仍已生成）" % werr)
+        if getattr(cr, "reason", None):
+            meta_bits.append(cr.reason)
+        msg = "\n".join(meta_bits)
+        msg += (
+            "\n\n请确认模型交易里「探针」已在跑；跑完后点「导入卖出QMT结果」。"
+            "\n（引擎「下一轮批量回测」仍可用，未移除。）"
+        )
+        self.backtest_result_text.setPlainText(msg)
+        try:
+            _rtag = self._extract_mz1_run_tag_from_source(src)
+            self._start_mz1_qmt_run_monitor(_rtag, note="sell_generate", kind="sell")
+        except Exception as _mon_e:
+            try:
+                self.statusBar().showMessage("启动卖出完成监视失败：%s" % _mon_e, 8000)
+            except Exception:
+                pass
+        box = QMessageBox(self)
+        box.setWindowTitle("生成卖出QMT细回测")
+        box.setText(msg)
+        open_btn = box.addButton("打开备份文件夹", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec_()
+        if box.clickedButton() == open_btn:
+            try:
+                os.startfile(str(out.parent))
+            except Exception as e:
+                QMessageBox.warning(self, "打开失败", str(e))
+
+    def _on_ingest_mz1_qmt_sell_fine_result(self):
+        """从当天 FormulaOutput 回灌卖出 QMT 细回测成交（ANT_MZ1_SELL_BT|）。"""
+        from pathlib import Path as _Path
+
+        m = self._mz1_qmt_sell_fine_mod()
+        path_obj, err = self._resolve_today_qmt_formula_output()
+        if path_obj is None:
+            QMessageBox.warning(self, "导入卖出QMT结果", err or "未找到当天日志。")
+            return
+        path = str(path_obj)
+        try:
+            result = m.parse_formula_output_file(_Path(path))
+            rows = m.trades_to_backtest_rows(result.get("trades") or [])
+            out_dir = m.default_out_dir()
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_json = out_dir / ("ingest_sell_%s.json" % stamp)
+            out_json.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "导入失败", str(e))
+            return
+        self._fill_backtest_trades_table(rows)
+        summary = result.get("summary") or {}
+        errors = result.get("errors") or []
+        lines = [
+            "卖出QMT细回测导入（当天自动）：%s" % path,
+            "成交笔数：%s（日志内共 %s 次跑，本 run_tag=%s，本段原始 TRADE %s）"
+            % (
+                result.get("trade_count"),
+                result.get("runs_in_log"),
+                result.get("run_tag") or (summary.get("run_tag") if summary else ""),
+                result.get("raw_trade_count_in_run"),
+            ),
+            (
+                "SUMMARY：%s" % json.dumps(summary, ensure_ascii=False)
+                if summary
+                else "SUMMARY：（无）"
+            ),
+            "落盘：%s" % out_json,
+        ]
+        if errors:
+            lines.append("ERROR：%s" % (errors[:3],))
+        self.backtest_result_text.setPlainText("\n".join(lines))
+        if not rows:
+            if summary:
+                QMessageBox.information(
+                    self,
+                    "导入卖出QMT结果",
+                    "日志已读到 SUMMARY，但卖出成交为 0（没有 ANT_MZ1_SELL_BT|TRADE 行）。\n"
+                    "run_tag=%s trade_count=%s\n%s\n"
+                    "这不是导入失败；是回测没有产出成交。"
+                    % (summary.get("run_tag"), summary.get("trade_count"), path),
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "导入卖出QMT结果",
+                    "已读当天日志，但未解析到 ANT_MZ1_SELL_BT|TRADE 行：\n%s\n"
+                    "请确认模型交易里已跑完卖出脚本且日志含此前缀。" % path,
+                )
+        else:
+            QMessageBox.information(
+                self,
+                "导入卖出QMT结果",
+                "已从当天日志导入 %d 笔卖出成交到下方表格。\n%s" % (len(rows), path),
             )
 
 
@@ -8615,6 +9068,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
             import pandas as pd
 
             _ensure_repo_root_on_sys_path()
+            import importlib
+            import tools.merge_backtest_trades_by_selection as _merge_bt
+            importlib.reload(_merge_bt)
             from tools.merge_backtest_trades_by_selection import (
                 aggregate_with_hold_sell_filter,
                 build_position_corrected_ledger,
@@ -8687,6 +9143,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 get_name = _get_stock_name_fn() or (lambda c: "")
                 if "代码" in df.columns:
                     codes = df["代码"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip().str.zfill(6)
+                    df["代码"] = codes
                     df["股票名称"] = codes.map(lambda c: (get_name(c) or "").strip())
                     # 插到“代码”后面
                     cols = list(df.columns)
@@ -8725,12 +9182,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
             msg = f"已生成汇总：{out_path_abs}\n共 {len(rows)} 行"
             n_over = sum(1 for rr in rows if int(rr.get("剩余持仓数量") or 0) < 0)
             msg += (
-                f"\n卖出截断（持有{hold_from_next}日窗）："
-                f"保留 {sell_filt_st.get('sell_kept_full', 0)}"
-                f"+拆薄{sell_filt_st.get('sell_kept_partial', 0)}"
-                f" / 入{sell_filt_st.get('sell_in', 0)}，"
-                f"丢弃 {sell_filt_st.get('sell_dropped', 0)}；"
-                f"量 {sell_filt_st.get('vol_kept', 0)}/{sell_filt_st.get('vol_in', 0)}"
+                f"\n卖出配对：全量保留（不再按持有{hold_from_next}日窗截断），"
+                f"入{sell_filt_st.get('sell_in', 0)}笔 / "
+                f"量{sell_filt_st.get('vol_in', 0)}"
+                + (
+                    f"；mode={sell_filt_st.get('hold_sell_filter')}"
+                    if sell_filt_st.get("hold_sell_filter")
+                    else ""
+                )
             )
             if n_over:
                 msg += f"\n⚠ 仍有 {n_over} 行卖出多于买入，请核对买卖 CSV"
@@ -8816,6 +9275,18 @@ class StrategyGeneratorMainWindow(QMainWindow):
         except Exception:
             pass
 
+
+
+    def _backtest_page_time_params(self) -> Dict[str, str]:
+        """回测页：策略生成 / 运行开始 / 运行结束（HH:mm）。"""
+        gen_t = self.backtest_generation_time.time()
+        run_start_t = self.backtest_run_start_time.time()
+        run_end_t = self.backtest_run_end_time.time()
+        return {
+            "strategy_generation_time": "%02d:%02d" % (gen_t.hour(), gen_t.minute()),
+            "strategy_run_start_time": "%02d:%02d" % (run_start_t.hour(), run_start_t.minute()),
+            "strategy_run_end_time": "%02d:%02d" % (run_end_t.hour(), run_end_t.minute()),
+        }
 
     def _on_batch_mz1_qmt_fine_live_align(self, cfg):
         """马总逻辑1 批量回测：回测页起止日期 + 批量导入同款按日建池 → QMT 探针 tick。"""
@@ -9042,6 +9513,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 "区间：%s～%s（%d 个交易日）\n"
                 "建池：%s交易日选股文件（前缀 %s）\n"
                 "过滤：%s\n"
+                "日内窗口：生成 %s / 运行 %s～%s（触发只用运行窗口内 tick）\n"
                 "运行交易日数=%d；有池天数=%d；并集代码=%d\n"
                 "匹配文件 %d 个。\n\n"
                 "样例：%s\n\n是否继续？"
@@ -9053,6 +9525,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 look_txt,
                 prefix,
                 filt_txt,
+                self._backtest_page_time_params()["strategy_generation_time"],
+                self._backtest_page_time_params()["strategy_run_start_time"],
+                self._backtest_page_time_params()["strategy_run_end_time"],
                 entry_w,
                 n_pool_days,
                 len(set(all_codes)),
@@ -9066,6 +9541,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             return
 
         try:
+            _tparams = self._backtest_page_time_params()
             src = m.build_qmt_strategy_source(
                 codes=all_codes,
                 selection_date_by_code=all_sel,
@@ -9077,6 +9553,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 rise_percent=rise,
                 from_t1=from_t1,
                 daily_pools=daily_pools,
+                strategy_generation_time=_tparams["strategy_generation_time"],
+                strategy_run_start_time=_tparams["strategy_run_start_time"],
+                strategy_run_end_time=_tparams["strategy_run_end_time"],
             )
             out = m.write_qmt_strategy_file(src, also_watch=True)
         except Exception as e:

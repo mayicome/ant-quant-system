@@ -1253,13 +1253,93 @@ class TaskManager(QObject):
         """builtin/standalone 模式下，将任务与持仓同步到 rules_armed.json。
 
         任务有变化时，再把同一份写成 QMT 的会话文件。策略约 1 秒内自行重载。
+        同步后按武装集合确认「真运行中」（图表乐观启停的 ACK）。
         """
+        if getattr(self, "_skip_rules_armed_sync", False):
+            return
         try:
             from utils.qmt_execution_config import use_builtin_price_feed
             if not use_builtin_price_feed():
                 return
-            from utils.rules_armed_sync import sync_rules_armed
+            from utils.rules_armed_sync import (
+                sync_rules_armed,
+                reconcile_run_state_with_armed,
+                _read_armed_tasks_from_disk,
+            )
             changed = sync_rules_armed(self, self.qmt_adapter, logger=self.logger)
+            try:
+                from utils.qmt_formula_result_log import poll as poll_formula
+
+                poll_formula()
+            except Exception:
+                pass
+            armed_on_disk = _read_armed_tasks_from_disk()
+            changes = reconcile_run_state_with_armed(
+                self,
+                armed_tasks=armed_on_disk,
+                logger=self.logger,
+                require_qmt_ack=True,
+                publish_ts=float(
+                    getattr(self, "_rules_armed_published_at", 0) or 0
+                ),
+            )
+            if changes:
+                try:
+                    self._notify_armed_run_reconcile(changes)
+                except Exception as e:
+                    self.logger.debug("armed reconcile UI notify skipped: %s" % e)
+                try:
+                    self._persist_after_armed_reconcile()
+                except Exception as e:
+                    self.logger.debug("armed reconcile persist skipped: %s" % e)
+            try:
+                pending = any(
+                    isinstance(c, dict)
+                    and (
+                        c.get("qmt_ack") == "pending"
+                        or c.get("unconfirmed")
+                        or c.get("qmt_ack") == "failed"
+                    )
+                    for c in (changes or [])
+                )
+                if not pending:
+                    pending = any(
+                        bool(
+                            (
+                                (task.get("params") or {})
+                                if isinstance(task, dict)
+                                else {}
+                            ).get("pending_qmt_ack")
+                        )
+                        or bool(
+                            (
+                                (task.get("params") or {})
+                                if isinstance(task, dict)
+                                else {}
+                            ).get("qmt_ack_unconfirmed")
+                        )
+                        for task in (self.tasks or {}).values()
+                    )
+                any_running_for_liveness = any(
+                    bool(
+                        (
+                            (task.get("params") or {})
+                            if isinstance(task, dict)
+                            else {}
+                        ).get("task_running")
+                    )
+                    or str((task or {}).get("status") or "")
+                    in ("运行中", "已委托", "夜盘已委托")
+                    for task in (self.tasks or {}).values()
+                    if isinstance(task, dict)
+                )
+                if pending or changed or any_running_for_liveness:
+                    if pending:
+                        self._schedule_qmt_ack_recheck(2500)
+                    elif any_running_for_liveness:
+                        self._schedule_qmt_ack_recheck(15000)
+            except Exception as e:
+                self.logger.debug("schedule qmt ack recheck skipped: %s" % e)
             if self._ui_boot_pending and self.tasks:
                 self._publish_qmt_session(ui_boot=True)
                 self._ui_boot_pending = False
@@ -1268,6 +1348,222 @@ class TaskManager(QObject):
                 self._publish_qmt_session()
         except Exception as e:
             self.logger.debug("sync rules_armed skipped: %s" % e)
+
+    def _persist_after_armed_reconcile(self) -> None:
+        """武装确认改写了 task_running/status 后回写任务文件；跳过再次 sync 防循环。"""
+        self._skip_rules_armed_sync = True
+        prev_block = getattr(self, "_block_tasks_updated_signal", False)
+        try:
+            self._block_tasks_updated_signal = True
+            self.save_tasks(list(self.tasks.values()), merge_external=False)
+        finally:
+            self._block_tasks_updated_signal = prev_block
+            self._skip_rules_armed_sync = False
+
+    def _notify_armed_run_reconcile(self, changes) -> None:
+        """把武装确认结果推到图表按钮 / 任务表。"""
+        if not changes:
+            return
+        mw = getattr(self, "main_window", None)
+        tcv = getattr(mw, "tasks_charts_view", None) if mw is not None else None
+        if tcv is not None and hasattr(tcv, "apply_armed_run_reconcile"):
+            try:
+                tcv.apply_armed_run_reconcile(changes)
+            except Exception as e:
+                self.logger.debug("charts armed reconcile failed: %s" % e)
+        if mw is None:
+            return
+        table = getattr(mw, "tableWidget_2", None)
+        if table is None:
+            return
+        try:
+            from PyQt5.QtCore import Qt
+            from PyQt5.QtGui import QColor
+        except Exception:
+            Qt = None
+            QColor = None
+        by_id = {str(c.get("task_id")): c for c in changes if isinstance(c, dict)}
+        try:
+            for row in range(table.rowCount()):
+                item0 = table.item(row, 0)
+                if item0 is None:
+                    continue
+                tid = ""
+                try:
+                    tid = str(item0.data(Qt.UserRole) if Qt is not None else "") or ""
+                except Exception:
+                    tid = ""
+                if not tid or tid not in by_id:
+                    continue
+                c = by_id[tid]
+                status_item = table.item(row, 6)
+                if status_item is None:
+                    continue
+                if c.get("running"):
+                    status_item.setText("运行中")
+                    try:
+                        if Qt is not None:
+                            status_item.setForeground(Qt.red)
+                    except Exception:
+                        pass
+                else:
+                    status_item.setText("未运行")
+                    try:
+                        if QColor is not None:
+                            status_item.setForeground(QColor("#666666"))
+                    except Exception:
+                        pass
+        except Exception as e:
+            self.logger.debug("table armed reconcile failed: %s" % e)
+
+
+    def _schedule_qmt_ack_recheck(self, delay_ms: int = 2500) -> None:
+        """发布武装后延迟再读 FormulaOutput，确认或回退图表运行中。"""
+        try:
+            from PyQt5.QtCore import QTimer
+        except Exception:
+            return
+        timer = getattr(self, "_qmt_ack_timer", None)
+        if timer is None:
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._recheck_qmt_armed_ack)
+            self._qmt_ack_timer = timer
+        try:
+            delay = max(500, int(delay_ms))
+        except (TypeError, ValueError):
+            delay = 2500
+        timer.start(delay)
+
+    def _recheck_qmt_armed_ack(self) -> None:
+        """轮询 QMT 武装 ACK / 运行途中心跳：确认或叹号，超时不回退状态。"""
+        try:
+            from utils.qmt_formula_result_log import poll as poll_formula
+
+            poll_formula()
+        except Exception:
+            pass
+        try:
+            from utils.rules_armed_sync import (
+                reconcile_run_state_with_armed,
+                _read_armed_tasks_from_disk,
+                apply_mid_run_qmt_liveness,
+            )
+        except Exception as e:
+            try:
+                self.logger.debug("qmt ack recheck import failed: %s" % e)
+            except Exception:
+                pass
+            return
+        try:
+            import time as _time
+
+            armed_on_disk = _read_armed_tasks_from_disk()
+            changes = reconcile_run_state_with_armed(
+                self,
+                armed_tasks=armed_on_disk,
+                logger=self.logger,
+                require_qmt_ack=True,
+                publish_ts=float(
+                    getattr(self, "_rules_armed_published_at", 0) or 0
+                ),
+                qmt_grace_sec=6.0,
+            ) or []
+            try:
+                live_changes = (
+                    apply_mid_run_qmt_liveness(
+                        self, logger=self.logger, alive_sec=90.0
+                    )
+                    or []
+                )
+                if live_changes:
+                    changes = list(changes) + list(live_changes)
+            except Exception as e:
+                try:
+                    self.logger.debug("mid-run qmt liveness skipped: %s" % e)
+                except Exception:
+                    pass
+            if changes:
+                try:
+                    self._notify_armed_run_reconcile(changes)
+                except Exception:
+                    pass
+                try:
+                    self._persist_after_armed_reconcile()
+                except Exception:
+                    pass
+            still_pending = any(
+                isinstance(c, dict)
+                and (
+                    c.get("qmt_ack") == "pending"
+                    or c.get("unconfirmed")
+                    or c.get("qmt_ack") == "failed"
+                )
+                for c in (changes or [])
+            )
+            if not still_pending:
+                still_pending = any(
+                    bool(
+                        (
+                            (task.get("params") or {})
+                            if isinstance(task, dict)
+                            else {}
+                        ).get("pending_qmt_ack")
+                    )
+                    or bool(
+                        (
+                            (task.get("params") or {})
+                            if isinstance(task, dict)
+                            else {}
+                        ).get("qmt_ack_unconfirmed")
+                    )
+                    for task in (self.tasks or {}).values()
+                )
+            any_running = any(
+                bool(
+                    (
+                        (task.get("params") or {})
+                        if isinstance(task, dict)
+                        else {}
+                    ).get("task_running")
+                )
+                or str((task or {}).get("status") or "")
+                in ("运行中", "已委托", "夜盘已委托")
+                for task in (self.tasks or {}).values()
+                if isinstance(task, dict)
+            )
+            if still_pending or any_running:
+                pub = float(getattr(self, "_rules_armed_published_at", 0) or 0)
+                has_unconfirmed = any(
+                    bool(
+                        (
+                            (task.get("params") or {})
+                            if isinstance(task, dict)
+                            else {}
+                        ).get("qmt_ack_unconfirmed")
+                    )
+                    or bool(
+                        (
+                            (task.get("params") or {})
+                            if isinstance(task, dict)
+                            else {}
+                        ).get("pending_qmt_ack")
+                    )
+                    for task in (self.tasks or {}).values()
+                    if isinstance(task, dict)
+                )
+                if has_unconfirmed:
+                    self._schedule_qmt_ack_recheck(2500)
+                elif still_pending or pub <= 0 or (_time.time() - pub) < 90.0:
+                    self._schedule_qmt_ack_recheck(2000)
+                elif any_running:
+                    self._schedule_qmt_ack_recheck(15000)
+        except Exception as e:
+            try:
+                self.logger.debug("qmt ack recheck failed: %s" % e)
+            except Exception:
+                pass
+
 
     def publish_ui_boot_session(self) -> None:
         """交易程序刚启动时写一次带启动标志的会话。任务还没载入就先记着。"""

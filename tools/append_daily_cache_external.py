@@ -350,6 +350,11 @@ def append_trade_day(day: str, prev: str, workers: int = 16) -> int:
 
 
 def main() -> int:
+    try:
+        from utils.http_ipv4 import install_prefer_ipv4
+        install_prefer_ipv4()
+    except Exception:
+        pass
     from utils.post_market_pipeline import resolve_asof_day
     from utils.trading_day import previous_tradeday
 

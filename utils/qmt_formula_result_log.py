@@ -23,6 +23,8 @@ _DIRTY = False
 _HB_AT = 0.0
 _HB_SEEN = False
 _HB_SUB = None
+_ARMED_ACK = {}
+_ARMED_ACK_AT = 0.0
 _SNAP_SEQ = 0
 _OPEN_SNAP: Dict[str, Any] = {}
 _STATUS = {
@@ -67,6 +69,25 @@ def heartbeat_subscribe():
         return int(_HB_SUB)
     except (TypeError, ValueError):
         return None
+
+
+
+def armed_ack() -> Dict[str, Any]:
+    """最近一次 ANTRES armed 载荷。"""
+    return dict(_ARMED_ACK) if _ARMED_ACK else {}
+
+
+def armed_ack_at() -> float:
+    return float(_ARMED_ACK_AT or 0)
+
+
+def qmt_strategy_alive(max_age_sec: float = 90.0) -> bool:
+    """心跳或武装 ACK 任一新鲜，即视为 QMT 策略仍在跑。"""
+    now = time.time()
+    latest = max(float(_HB_AT or 0), float(_ARMED_ACK_AT or 0))
+    if latest <= 0:
+        return False
+    return (now - latest) <= float(max_age_sec)
 
 
 def _install_root() -> str:
@@ -119,7 +140,7 @@ def _accept_line(line: str) -> None:
         return
     if not isinstance(payload, dict):
         return
-    global _LIVE, _DIRTY, _HB_AT, _HB_SEEN, _HB_SUB
+    global _LIVE, _DIRTY, _HB_AT, _HB_SEEN, _HB_SUB, _ARMED_ACK, _ARMED_ACK_AT
     _LIVE = True
     if kind == "hb":
         _HB_SEEN = True
@@ -132,6 +153,38 @@ def _accept_line(line: str) -> None:
                 _HB_SUB = 0
             row["s"] = _HB_SUB
         _RESULTS["heartbeat"] = row
+        return
+    if kind == "armed":
+        _ARMED_ACK_AT = time.time()
+        _HB_SEEN = True
+        _HB_AT = _ARMED_ACK_AT
+        ids = []
+        raw_ids = payload.get("ids") or []
+        if isinstance(raw_ids, list):
+            for item in raw_ids:
+                tid = str(item or "").strip()
+                if tid:
+                    ids.append(tid)
+        row = {
+            "n": payload.get("n"),
+            "sig": str(payload.get("sig") or "")[:40],
+            "ids": ids,
+            "at": _ARMED_ACK_AT,
+        }
+        if "s" in payload:
+            try:
+                row["s"] = int(payload.get("s"))
+                _HB_SUB = int(payload.get("s"))
+            except (TypeError, ValueError):
+                row["s"] = 0
+        _ARMED_ACK = row
+        _RESULTS["armed_ack"] = row
+        _RESULTS["heartbeat"] = {
+            "n": row.get("n"),
+            "t": "",
+            "at": _ARMED_ACK_AT,
+            **({"s": row["s"]} if "s" in row else {}),
+        }
         return
     if kind == "asset":
         _set_asset(payload)
@@ -548,6 +601,8 @@ def poll(results_path: str = "") -> Dict[str, Any]:
     out["live"] = _LIVE
     out["heartbeat_seen"] = _HB_SEEN
     out["heartbeat_at"] = _HB_AT
+    out["armed_ack_at"] = _ARMED_ACK_AT
+    out["armed_ack"] = dict(_ARMED_ACK) if _ARMED_ACK else {}
     out["snapshot_seq"] = _SNAP_SEQ
     out["positions"] = dict(_RESULTS.get("positions") or {})
     out["asset"] = {

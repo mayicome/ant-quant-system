@@ -9,6 +9,7 @@ import pandas as pd
 from typing import Optional
 from datetime import date, datetime, timedelta
 import os
+from pathlib import Path
 import argparse
 from utils.trading_day import is_tradeday
 from utils.selenium_chrome import create_chrome_driver
@@ -604,13 +605,275 @@ def click_next_page(driver):
         return False
 
 
-def get_capital_flow_selenium(min_amount_threshold=3000):
+
+def _selenium_page_dir(save_date_str: str, history_dir: str = "history_data") -> str:
+    from utils.main_force_inflow_path import ensure_flow_data_dir
+    base = ensure_flow_data_dir(history_dir)
+    d = os.path.join(base, "_pages_%s" % save_date_str)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _selenium_progress_paths(save_date_str: str, history_dir: str = "history_data"):
+    d = _selenium_page_dir(save_date_str, history_dir)
+    return d, os.path.join(d, "progress.json"), os.path.join(d, "page_%03d.csv")
+
+
+def _load_selenium_progress(progress_path: str) -> dict:
+    import json
+    if os.path.isfile(progress_path):
+        try:
+            with open(progress_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {"next_page": 1, "ok_pages": []}
+
+
+def _save_selenium_progress(progress_path: str, data: dict) -> None:
+    import json
+    tmp = progress_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, progress_path)
+
+
+def _merge_selenium_page_csvs(page_dir: str, ok_pages) -> "pd.DataFrame":
+    frames = []
+    for pn in sorted(int(x) for x in (ok_pages or [])):
+        fp = os.path.join(page_dir, "page_%03d.csv" % pn)
+        if os.path.isfile(fp):
+            frames.append(pd.read_csv(fp, encoding="utf-8-sig"))
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+
+
+def _consecutive_ok_pages(ok_pages):
+    """Pages 1..k with no gaps (missing early pages block the day merge)."""
+    if not ok_pages:
+        return []
+    s = sorted({int(x) for x in ok_pages})
+    out = []
+    expect = 1
+    for p in s:
+        if p == expect:
+            out.append(p)
+            expect += 1
+        elif p < expect:
+            continue
+        else:
+            break
+    return out
+
+
+def _day_csv_path(save_date_str, history_dir="history_data"):
+    root = Path(str(history_dir)) / "个股主力净流入"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / ("个股主力净流入_%s.csv" % save_date_str)
+
+
+def _write_day_csv_from_pages(page_dir, ok_pages, save_date_str, history_dir="history_data"):
+    """Merge consecutive pages from 1 and write/overwrite the day CSV. Returns row count or 0."""
+    consec = _consecutive_ok_pages(ok_pages)
+    if not consec:
+        print("  日文件：尚无从第1页起的连续分页，暂不合成")
+        return 0
+    merged = _merge_selenium_page_csvs(page_dir, consec)
+    if merged is None or getattr(merged, "empty", True):
+        print("  日文件：连续页合并为空，跳过")
+        return 0
+    try:
+        merged = clean_dataframe(merged)
+    except Exception:
+        pass
+    # drop dup codes if column exists
+    code_col = None
+    for c in merged.columns:
+        if str(c).strip() in ("代码", "股票代码") or str(c) == "代码":
+            code_col = c
+            break
+    if code_col is None:
+        for c in merged.columns:
+            if "代码" in str(c):
+                code_col = c
+                break
+    if code_col is not None:
+        try:
+            merged[code_col] = (
+                merged[code_col]
+                .astype(str)
+                .str.replace(r"\.0$", "", regex=True)
+                .str.zfill(6)
+            )
+            merged = merged.drop_duplicates(subset=[code_col], keep="first")
+        except Exception:
+            pass
+    out = _day_csv_path(save_date_str, history_dir)
+    merged.to_csv(out, index=False, encoding="utf_8_sig")
+    print(
+        "  已合成日文件 %s （连续页 1..%s，共 %s 行）"
+        % (out.name, consec[-1], len(merged))
+    )
+    return int(len(merged))
+
+
+def _count_table_data_rows(driver) -> int:
+    """Count rows whose first few tds contain a 6-digit stock code."""
+    try:
+        n = driver.execute_script(
+            """
+            function countRows(root) {
+              if (!root) return 0;
+              var tbody = root.querySelector('tbody') || root;
+              var trs = tbody.querySelectorAll('tr');
+              var n = 0;
+              for (var i = 0; i < trs.length; i++) {
+                var tds = trs[i].querySelectorAll('td');
+                var lim = Math.min(tds.length, 4);
+                for (var j = 0; j < lim; j++) {
+                  var t = (tds[j].innerText || '').trim();
+                  if (/^\\d{6}$/.test(t)) { n++; break; }
+                }
+              }
+              return n;
+            }
+            var table = document.querySelector('table#dt_1')
+                    || document.querySelector('#dataview table')
+                    || document.querySelector('table');
+            return countRows(table);
+            """
+        )
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+def _first_table_code(driver) -> str:
+    """First 6-digit stock code visible in the data table."""
+    try:
+        code = driver.execute_script(
+            """
+            var table = document.querySelector('table#dt_1')
+                    || document.querySelector('#dataview table')
+                    || document.querySelector('table');
+            if (!table) return '';
+            var tbody = table.querySelector('tbody') || table;
+            var trs = tbody.querySelectorAll('tr');
+            for (var i = 0; i < trs.length; i++) {
+              var tds = trs[i].querySelectorAll('td');
+              var lim = Math.min(tds.length, 4);
+              for (var j = 0; j < lim; j++) {
+                var t = (tds[j].innerText || '').trim();
+                if (/^\\d{6}$/.test(t)) return t;
+              }
+            }
+            return '';
+            """
+        )
+        return str(code or "")
+    except Exception:
+        return ""
+
+
+def _get_total_pages(driver) -> int:
+    """Best-effort total page count from dataview / pager links."""
+    try:
+        n = driver.execute_script(
+            """
+            try {
+              var dv = window.jQuery && window.jQuery('#dataview').data('dataview');
+              if (dv) {
+                if (dv.pages) return parseInt(dv.pages, 10) || 0;
+                if (dv.maxPage) return parseInt(dv.maxPage, 10) || 0;
+              }
+            } catch (e) {}
+            var as = document.querySelectorAll('#dataview .pagerbox a[data-page]');
+            var maxp = 0;
+            for (var i = 0; i < as.length; i++) {
+              var p = parseInt(as[i].getAttribute('data-page'), 10);
+              if (!isNaN(p) && p > maxp) maxp = p;
+            }
+            return maxp;
+            """
+        )
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+def _wait_table_data_rows(driver, timeout=25, min_rows=5) -> int:
+    """Poll until enough code-rows appear or timeout. Return last count."""
+    deadline = time.time() + float(timeout)
+    last = 0
+    while time.time() < deadline:
+        last = _count_table_data_rows(driver)
+        if last >= int(min_rows):
+            return last
+        time.sleep(0.5)
+    return last
+
+
+def go_selenium_page(driver, page_num: int, wait_rows: bool = True) -> bool:
+    """Jump to absolute page via emdataview.goPage / pager link; optionally wait for rows."""
+    page_num = int(page_num)
+    pre_code = _first_table_code(driver) if wait_rows else ""
+    try:
+        ok = driver.execute_script(
+            """
+            var pn = arguments[0];
+            try {
+              var dv = window.jQuery && window.jQuery('#dataview').data('dataview');
+              if (dv && typeof dv.goPage === 'function') { dv.goPage(pn); return true; }
+            } catch (e) {}
+            var a = document.querySelector('#dataview .pagerbox a[data-page="'+pn+'"]');
+            if (a) { a.click(); return true; }
+            return false;
+            """,
+            page_num,
+        )
+    except Exception as e:
+        print(f"go_selenium_page({page_num}) 失败: {e}")
+        return False
+    if not ok:
+        return False
+    if not wait_rows:
+        return True
+    # Wait up to ~28s for >=5 code-rows AND (first code changed OR page_num<=1),
+    # requiring 2 consecutive stable polls.
+    deadline = time.time() + 28.0
+    last_n = 0
+    stable = 0
+    while time.time() < deadline:
+        last_n = _count_table_data_rows(driver)
+        first = _first_table_code(driver)
+        code_ok = (page_num <= 1) or (bool(first) and first != pre_code) or (not pre_code and bool(first))
+        if last_n >= 5 and code_ok:
+            stable += 1
+            if stable >= 2:
+                print(f"goPage({page_num}) 已有 {last_n} 行")
+                return True
+        else:
+            stable = 0
+        time.sleep(0.5)
+    print(f"goPage({page_num}) 等待表格数据超时（当前 {last_n} 行）")
+    return False
+
+
+def get_capital_flow_selenium(min_amount_threshold=3000, save_date_str=None, resume=True, history_dir="history_data"):
     """
     使用Selenium控制测试版Chrome获取个股主力净流入数据
     
     参数:
         min_amount_threshold: 最小净流入金额阈值（万元），默认3000万元
                              当某页最后一条数据的净额小于此值时，停止提取
+        save_date_str: 交易日 YYYYMMDD；提供则每页立即落盘并支持断点续跑
+        resume: True 时从 progress.json 的 next_page 继续
+        history_dir: 历史数据根目录
     """
     # 便携 Chrome(D:/C:/download/...) 优先；否则系统 Chrome + Selenium Manager
     driver = create_chrome_driver()
@@ -911,45 +1174,125 @@ def get_capital_flow_selenium(min_amount_threshold=3000):
             except:
                 pass
 
-        # 循环提取多页数据（根据最后一条数据的净额决定是否继续）
+        # 循环提取多页数据：一页一存，失败从断点页续跑
+        page_dir = None
+        progress_path = None
+        page_path_tpl = None
+        progress = {"next_page": 1, "ok_pages": []}
+        if save_date_str:
+            page_dir, progress_path, page_path_tpl = _selenium_progress_paths(
+                str(save_date_str), history_dir
+            )
+            if resume:
+                progress = _load_selenium_progress(progress_path)
+            print(
+                f"分页落盘目录: {page_dir}  resume={resume} next_page={progress.get('next_page')} ok={len(progress.get('ok_pages') or [])}"
+            )
+
         all_dataframes = []
-        page_num = 0
-        
+        # 若续跑：先装入已成功页
+        if save_date_str and (progress.get("ok_pages") or []):
+            pre = _merge_selenium_page_csvs(page_dir, progress.get("ok_pages"))
+            if pre is not None and not pre.empty:
+                all_dataframes.append(pre)
+                print(f"已装入断点前 {len(progress.get('ok_pages') or [])} 页，共 {len(pre)} 行")
+
+        start_page = int(progress.get("next_page") or 1)
+        if start_page < 1:
+            start_page = 1
+        page_num = start_page - 1
+        empty_fail_streak = 0
+        stopped_incomplete = False
+
+        # 续跑且不是第1页：先跳到目标页
+        if save_date_str and start_page > 1:
+            print(f"断点续跑：导航到第 {start_page} 页...")
+            _wait_table_data_rows(driver, timeout=25, min_rows=5)
+            jumped = go_selenium_page(driver, start_page, wait_rows=True)
+            if not jumped:
+                # 退化：连点下一页
+                for _ in range(start_page - 1):
+                    if not click_next_page(driver):
+                        print("连点下一页失败，进度停在当前页")
+                        break
+
         while True:
             page_num += 1
             print(f"\n{'='*60}")
             print(f"开始提取第 {page_num} 页数据...")
             print(f"{'='*60}")
-            
-            # 提取当前页数据
-            df_page = extract_page_data(driver)
-            
+
+            try:
+                df_page = extract_page_data(driver)
+            except Exception as e:
+                print(f"✗ 第 {page_num} 页提取异常: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                if save_date_str and progress_path:
+                    progress["next_page"] = page_num
+                    _save_selenium_progress(progress_path, progress)
+                    print(f"  已记录断点 next_page={page_num}")
+                empty_fail_streak += 1
+                if empty_fail_streak >= 3:
+                    print("连续异常过多，退出以便续跑")
+                    stopped_incomplete = True
+                    break
+                time.sleep(1)
+                try:
+                    driver.get("https://data.eastmoney.com/zjlx/detail.html")
+                    time.sleep(3)
+                    _wait_table_data_rows(driver, timeout=25, min_rows=5)
+                    go_selenium_page(driver, page_num, wait_rows=True)
+                except Exception as e:
+                    print(f"  异常后刷新重试失败: {e}")
+                page_num -= 1
+                continue
+
             if df_page is not None and not df_page.empty:
+                empty_fail_streak = 0
                 print(f"✓ 第 {page_num} 页提取成功，共 {len(df_page)} 行数据")
                 all_dataframes.append(df_page)
-                
+
+                # 一页一存
+                if save_date_str and page_path_tpl:
+                    fp = page_path_tpl % page_num
+                    try:
+                        df_page.to_csv(fp, index=False, encoding="utf_8_sig")
+                        ok_pages = list(progress.get("ok_pages") or [])
+                        if page_num not in ok_pages:
+                            ok_pages.append(page_num)
+                        progress["ok_pages"] = sorted(int(x) for x in ok_pages)
+                        progress["next_page"] = page_num + 1
+                        _save_selenium_progress(progress_path, progress)
+                        print(f"  已落盘 {fp} ；进度 next_page={progress['next_page']}")
+
+                        try:
+                            _write_day_csv_from_pages(
+                                page_dir,
+                                progress.get("ok_pages") or [],
+                                save_date_str,
+                                history_dir,
+                            )
+                        except Exception as _e_day:
+                            print(f"  日文件增量合成失败: {_e_day}")
+                    except Exception as e:
+                        print(f"  落盘失败（仍保留内存页）: {e}")
+
                 # 检查最后一条数据的"今日主力净流入-净额"
                 last_row = df_page.iloc[-1]
-                
-                # 查找"今日主力净流入-净额"列（按优先级查找）
+
                 amount_col = None
-                
-                # 优先级1：查找包含"今日主力净流入"和"净额"的列
                 for col in df_page.columns:
                     if '今日主力净流入' in str(col) and '净额' in str(col):
                         amount_col = col
                         print(f"  找到列（优先级1）: {col}")
                         break
-                
-                # 优先级2：查找包含"今日主力净"的列（可能是"今日主力净"）
                 if amount_col is None:
                     for col in df_page.columns:
                         if '今日主力净' in str(col):
                             amount_col = col
                             print(f"  找到列（优先级2）: {col}")
                             break
-                
-                # 优先级3：查找包含"净额"的列（作为备用）
                 if amount_col is None:
                     print("⚠ 警告：未找到'今日主力净流入-净额'或'今日主力净'列，尝试查找包含'净额'的列...")
                     for col in df_page.columns:
@@ -957,26 +1300,22 @@ def get_capital_flow_selenium(min_amount_threshold=3000):
                             amount_col = col
                             print(f"  找到列（优先级3）: {col}")
                             break
-                
+
                 if amount_col:
-                    # 确保获取标量值而不是 Series
                     try:
-                        # 使用 .at 方法获取标量值（最快且最安全）
                         last_row_idx = df_page.index[-1]
                         last_amount_str = df_page.at[last_row_idx, amount_col]
                     except (KeyError, IndexError, AttributeError):
                         try:
-                            # 备用方法：直接通过列索引获取
                             last_amount_str = df_page[amount_col].iloc[-1]
                         except (KeyError, IndexError):
                             print(f"⚠ 警告：无法获取列 '{amount_col}' 的值")
                             last_amount_str = None
-                    
+
                     last_amount = parse_capital_flow_amount(last_amount_str)
-                    
+
                     if last_amount is not None:
                         print(f"\n第 {page_num} 页最后一条数据:")
-                        # 尝试查找代码和名称列
                         code_col = None
                         name_col = None
                         for col in df_page.columns:
@@ -984,62 +1323,119 @@ def get_capital_flow_selenium(min_amount_threshold=3000):
                                 code_col = col
                             if '名称' in str(col) and name_col is None:
                                 name_col = col
-                        
                         if code_col:
                             print(f"  股票代码: {last_row.get(code_col, 'N/A')}")
                         if name_col:
                             print(f"  股票名称: {last_row.get(name_col, 'N/A')}")
                         print(f"  今日主力净流入-净额: {last_amount_str} (解析为: {last_amount:.2f} 万元)")
-                        
+
                         if last_amount >= min_amount_threshold:
                             print(f"  ✓ 净额 ({last_amount:.2f} 万元) >= 阈值 ({min_amount_threshold} 万元)，继续获取下一页...")
-                            # 尝试点击下一页
-                            if not click_next_page(driver):
+                            if not (go_selenium_page(driver, page_num + 1) or click_next_page(driver)):
                                 print(f"无法继续到下一页，停止提取（已提取 {page_num} 页）")
+                                if save_date_str and progress_path:
+                                    progress["next_page"] = page_num + 1
+                                    _save_selenium_progress(progress_path, progress)
                                 break
+                            time.sleep(1.0)
                         else:
                             print(f"  ✗ 净额 ({last_amount:.2f} 万元) < 阈值 ({min_amount_threshold} 万元)，停止提取")
                             break
                     else:
                         print(f"⚠ 警告：无法解析最后一条数据的净额值: {last_amount_str}")
                         print("  继续尝试获取下一页...")
-                        # 如果无法解析，继续尝试下一页（可能是数据格式问题）
-                        if not click_next_page(driver):
+                        if not (go_selenium_page(driver, page_num + 1) or click_next_page(driver)):
                             print(f"无法继续到下一页，停止提取（已提取 {page_num} 页）")
+                            if save_date_str and progress_path:
+                                progress["next_page"] = page_num + 1
+                                _save_selenium_progress(progress_path, progress)
                             break
+                        time.sleep(1.0)
                 else:
                     print("⚠ 警告：未找到'今日主力净流入-净额'列，显示最后一条数据的所有列:")
                     print(f"  列名: {list(df_page.columns)}")
                     print(f"  最后一行数据: {dict(last_row)}")
                     print("  继续尝试获取下一页...")
-                    # 如果找不到列，继续尝试下一页
                     if not click_next_page(driver):
                         print(f"无法继续到下一页，停止提取（已提取 {page_num} 页）")
                         break
             else:
                 print(f"✗ 第 {page_num} 页提取失败或数据为空")
-                if page_num == 1:
-                    # 第一页就失败，直接返回
-                    print("第一页提取失败，无法继续")
+                empty_fail_streak += 1
+                # 进度停在失败页，便于下次从本页重试
+                if save_date_str and progress_path:
+                    progress["next_page"] = page_num
+                    _save_selenium_progress(progress_path, progress)
+                    print(f"  已记录断点 next_page={page_num}，下次从本页重试")
+                if page_num == 1 and empty_fail_streak >= 2:
+                    print("第一页连续失败，无法继续")
+                    stopped_incomplete = True
                     break
-                else:
-                    # 后续页失败，停止提取
-                    print(f"第 {page_num} 页提取失败，停止提取（已提取 {page_num - 1} 页）")
+                if empty_fail_streak >= 3:
+                    print(f"第 {page_num} 页连续失败 {empty_fail_streak} 次，停止（已提取成功页可续跑）")
+                    stopped_incomplete = True
                     break
-        
-        # 合并所有页的数据
+                # 同页重试：整页刷新后再跳到目标页并等待表格行
+                print("  同页重试中...")
+                try:
+                    driver.get("https://data.eastmoney.com/zjlx/detail.html")
+                    time.sleep(3)
+                    _wait_table_data_rows(driver, timeout=25, min_rows=5)
+                    go_selenium_page(driver, page_num, wait_rows=True)
+                except Exception as e:
+                    print(f"  同页刷新重试失败: {e}")
+                page_num -= 1  # 循环末尾会 +1，保持同页
+                continue
+
+        def _mark_incomplete_if_needed(df_combined):
+            """Tag partial day merge so __main__ skips overwriting the day CSV."""
+            if df_combined is None or getattr(df_combined, "empty", True):
+                return df_combined
+            next_p = int((progress or {}).get("next_page") or (page_num if page_num > 0 else 1))
+            try:
+                total_p = _get_total_pages(driver)
+            except Exception:
+                total_p = 0
+            if not total_p:
+                total_p = int((progress or {}).get("total_pages") or 0)
+            if total_p > 0 and progress_path:
+                try:
+                    progress["total_pages"] = total_p
+                    _save_selenium_progress(progress_path, progress)
+                except Exception:
+                    pass
+            if stopped_incomplete and (total_p <= 0 or next_p <= total_p):
+                df_combined.attrs["incomplete"] = True
+                df_combined.attrs["next_page"] = next_p
+                df_combined.attrs["total_pages"] = total_p
+                print(
+                    f"⚠ 未完成全量抓取：next_page={next_p}"
+                    f"/{total_p or '?'}，日文件不应视为完整成功（分页 CSV/progress 已保留，可续跑）"
+                )
+            return df_combined
+
+        # 合并所有页的数据（含断点已落盘页）
+        if save_date_str and page_dir:
+            merged = _merge_selenium_page_csvs(page_dir, progress.get("ok_pages"))
+            if merged is not None and not merged.empty:
+                print(f"\n{'='*60}")
+                print(f"从落盘页合并 {len(progress.get('ok_pages') or [])} 页...")
+                df_combined = clean_dataframe(merged)
+                print(f"合并完成，共 {len(df_combined)} 行数据")
+                return _mark_incomplete_if_needed(df_combined)
+
         if all_dataframes:
             print(f"\n{'='*60}")
             print(f"合并 {len(all_dataframes)} 页数据...")
             df_combined = pd.concat(all_dataframes, ignore_index=True)
             df_combined = clean_dataframe(df_combined)
             print(f"合并完成，共 {len(df_combined)} 行数据")
-            return df_combined
+            return _mark_incomplete_if_needed(df_combined)
         else:
             print("\n未能提取到任何数据")
             return None
 
-        # 以下代码已不再使用，保留作为备用
+
         # 首先尝试使用JavaScript直接获取表格数据
         print("提取表格数据...")
         try:
@@ -1976,7 +2372,7 @@ if __name__ == "__main__":
             thr = float(args.min_amount)
         else:
             thr = 3000
-        df = get_capital_flow_selenium(min_amount_threshold=thr)
+        df = get_capital_flow_selenium(min_amount_threshold=thr, save_date_str=save_date_str, resume=True)
         fetch_source = "selenium"
     else:
         print("正在拉取全量个股主力净流入（仅东财 push2；同花顺兜底默认关闭）...")
@@ -2018,6 +2414,33 @@ if __name__ == "__main__":
             sys.exit(1)
 
     if df is not None and not df.empty:
+        _incomplete = bool(getattr(df, "attrs", {}) and df.attrs.get("incomplete"))
+        if _incomplete:
+            print(f"\n抓取未跑完（共 {len(df)} 条内存合并），分页/progress 已保留可续跑。")
+            print(
+                f"  next_page={df.attrs.get('next_page')} "
+                f"total_pages={df.attrs.get('total_pages')}"
+            )
+            # 日文件已在每页成功时按「从第1页起连续页」增量合成；这里再刷一次兜底
+            try:
+                page_dir, progress_path, _tpl = _selenium_progress_paths(
+                    save_date_str, "history_data"
+                )
+                prog = _load_selenium_progress(progress_path)
+                n = _write_day_csv_from_pages(
+                    page_dir, prog.get("ok_pages") or [], save_date_str, "history_data"
+                )
+                if n > 0:
+                    print(f"已用连续分页更新日文件（{n} 行）；续跑会继续往后追加。")
+                    try:
+                        print(df.head(5).to_string(index=False))
+                    except Exception:
+                        pass
+                    sys.exit(0)
+            except Exception as e:
+                print(f"incomplete 兜底合成失败: {e}")
+            sys.exit(2)
+
         print(f"\n获取成功！共 {len(df)} 条数据：")
         print(df.head(10).to_string(index=False))
 

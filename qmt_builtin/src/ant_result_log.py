@@ -98,6 +98,39 @@ def heartbeat(watch_count, tick_time, force=False, subscribe_count=None):
     emit("hb", row)
 
 
+
+def emit_armed_ack(n_tasks, sig="", parents=None, subscribe_count=None):
+    """规则重装后打一拍，GUI 用它确认 QMT 已吃到 rules_armed。"""
+    row = {"n": int(n_tasks or 0)}
+    if sig:
+        row["sig"] = str(sig)[:40]
+    ids = []
+    for item in parents or []:
+        tid = str(item or "").strip()
+        if not tid:
+            continue
+        ids.append(tid[:40])
+        if len(ids) >= 16:
+            break
+    if ids:
+        row["ids"] = ids
+    if subscribe_count is not None:
+        try:
+            row["s"] = int(subscribe_count)
+        except (TypeError, ValueError):
+            row["s"] = 0
+    emit("armed", row)
+    try:
+        heartbeat(
+            n_tasks,
+            "",
+            force=True,
+            subscribe_count=subscribe_count if subscribe_count is not None else n_tasks,
+        )
+    except Exception:
+        pass
+
+
 def emit_asset(account, force=False):
     """仅可用资金变化或 force 时打 asset；总市值/持仓市值抖动不打。"""
     global _LAST_ASSET, _LAST_ASSET_AT

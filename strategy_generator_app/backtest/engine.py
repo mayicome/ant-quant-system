@@ -446,7 +446,7 @@ def _simulate_fills_tick_with_ohlc_fallback(
     simulate_fills_with_ticks: Any,
     simulate_fills_same_day_ohlc: Any,
 ) -> Tuple[List[Dict[str, Any]], float, Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
-    """有 tick 走 tick 撮合；缺 tick 的意图用同日日线兜底（含 best_sell / 强清近似）。"""
+    """有 tick 走 tick 撮合；缺 tick 的意图跳过成交并记 failure_reasons（禁止日线兜底）。"""
     intents = list(intents or [])
     if not intents:
         return [], cash, positions, []
@@ -489,6 +489,9 @@ def _simulate_fills_tick_with_ohlc_fallback(
         remaining.extend(rem_t or [])
 
     if ohlc_intents:
+        # 硬规则：tick 模式下禁止日线 OHLC 兜底。缺 tick → 跳过成交、记原因，不成交。
+        # get_daily_ohlc_for_codes / simulate_fills_same_day_ohlc 仍保留在签名中以兼容调用方，此处故意不调用。
+        _ = (get_daily_ohlc_for_codes, simulate_fills_same_day_ohlc)
         ohlc_codes = sorted(
             {
                 c
@@ -496,35 +499,16 @@ def _simulate_fills_tick_with_ohlc_fallback(
                 if c
             }
         )
-        ohlc_map = get_daily_ohlc_for_codes(ohlc_codes, fill_day) or {}
-        trades_o, cash, positions, rem_o = simulate_fills_same_day_ohlc(
-            ohlc_intents, ohlc_map, fill_day, cash, positions
-        )
-        for t in trades_o or []:
-            if not isinstance(t, dict):
-                continue
-            ti = str(t.get("trigger_info") or "").strip()
-            if not ti.startswith("[缺tick"):
-                t["trigger_info"] = f"[缺tick·日线兜底] {ti}".strip()
-            day_trades.append(t)
-        remaining.extend(rem_o or [])
-        miss_show = ",".join((missing or ohlc_codes)[:12])
-        if len(missing or ohlc_codes) > 12:
+        miss_list = list(missing or ohlc_codes)
+        miss_show = ",".join(miss_list[:12])
+        if len(miss_list) > 12:
             miss_show += "…"
-        n_fill = len(trades_o or [])
-        if n_fill > 0:
-            failure_reasons.append(
-                f"[{fill_day}] [{seg_name}] 缺 tick {len(ohlc_codes)} 只已日线兜底"
-                f"（成交 {n_fill} 笔）：{miss_show}"
-            )
-        elif not ohlc_map:
-            failure_reasons.append(
-                f"[{fill_day}] [{seg_name}] 缺 tick 且无日线 OHLC，无法兜底：{miss_show}"
-            )
-        else:
-            failure_reasons.append(
-                f"[{fill_day}] [{seg_name}] 缺 tick 已尝试日线兜底但未成交：{miss_show}"
-            )
+        n_skip = len(ohlc_intents)
+        failure_reasons.append(
+            f"[{fill_day}] [{seg_name}] 缺 tick，跳过成交：{miss_show}"
+            f"（意图 {n_skip} 笔未成交，已禁用日线兜底）"
+        )
+        # 丢弃缺 tick 意图（不放入 remaining，避免无 tick 假成交）
 
     return day_trades, cash, positions, remaining
 
@@ -1085,15 +1069,19 @@ def run_backtest_segmented(
 
     _fm = (fill_mode or "tick").strip().lower()
     if _fm in ("same_day_ohlc", "daily_ohlc", "ohlc", "daily"):
-        _fm = "same_day_ohlc"
+        raise ValueError(
+            "fill_mode=same_day_ohlc（日线撮合）已禁用："
+            "有 tick 用 tick 回测，无 tick 则跳过并报告缺 tick，禁止日线兜底。"
+            "请使用 fill_mode='tick'（默认）。"
+        )
     elif _fm in ("next_day_open", "next_day"):
         _fm = "next_day_open"
     else:
         _fm = "tick"
-    # 兼容旧开关：fill_mode=tick 时仍看 use_tick_level；same_day_ohlc 强制走日线撮合
-    use_same_day_ohlc = _fm == "same_day_ohlc"
-    use_tick_level_eff = (not use_same_day_ohlc) and bool(use_tick_level) and _fm == "tick"
-    use_next_day_open = (not use_same_day_ohlc) and (not use_tick_level_eff)
+    # 日线同日撮合已硬禁用；use_same_day_ohlc 恒为 False
+    use_same_day_ohlc = False
+    use_tick_level_eff = bool(use_tick_level) and _fm == "tick"
+    use_next_day_open = (not use_tick_level_eff) and _fm == "next_day_open"
 
     # 末日出清 N：若策略参数已指定成交后持有天数则保留；否则用区间交易日数对齐
     try:

@@ -583,14 +583,26 @@ def run(codes, prices, get_name, account, params):
 
         # 半仓按总仓位基准；并入零头对照当前持股 hold
         if want_open and want_lu:
-            open_vol, lu_vol = _half_pair_absorb_dust(base)
-            # 两腿合计可能超过当前持股：按持股截断到可分配量
-            pair_cap = hold
-            if open_vol + lu_vol > pair_cap:
-                open_vol = min(open_vol, pair_cap)
-                lu_vol = max(0, pair_cap - open_vol)
-                if lu_vol < 100:
-                    open_vol, lu_vol = pair_cap, 0
+            _a, _b = _half_pair_absorb_dust(base)
+            _open50_filled = any(
+                str(k) == ("%s:OPEN50" % c6) or str(k).startswith("%s:OPEN50:" % c6)
+                for k in filled
+            )
+            # 已卖过 OPEN50 半仓、或持股只剩另一半：两腿均按剩余全仓挂单，先成交者清空，另一腿见 0
+            if _open50_filled or (_full_lot(hold) > 0 and _full_lot(hold) <= _b):
+                px_min_o = open_trig * (1.0 - float(day_open_drop) / 100.0) if open_trig > 0 else 0.0
+                px_min_l = lu_trig * (1.0 - float(day_lu_drop) / 100.0) if lu_trig > 0 else 0.0
+                open_vol = _fold_dust(hold, hold, px_min_o)
+                lu_vol = _fold_dust(hold, hold, px_min_l)
+            else:
+                open_vol, lu_vol = _a, _b
+                # 两腿合计可能超过当前持股：按持股截断到可分配量
+                pair_cap = hold
+                if open_vol + lu_vol > pair_cap:
+                    open_vol = min(open_vol, pair_cap)
+                    lu_vol = max(0, pair_cap - open_vol)
+                    if lu_vol < 100:
+                        open_vol, lu_vol = pair_cap, 0
         elif want_open:
             px_min = open_trig * (1.0 - float(day_open_drop) / 100.0) if open_trig > 0 else 0.0
             open_vol = _fold_dust(half, hold, px_min)
