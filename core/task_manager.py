@@ -1585,7 +1585,58 @@ class TaskManager(QObject):
     def _publish_qmt_session(self, ui_boot=False) -> None:
         """把刚写好的 rules_armed 整份打进 QMT 会话文件。"""
         try:
-            from tools.export_qmt_session import deploy_session_file, export_enabled
+            from tools.export_qmt_session import OUT, deploy_session_file, export_enabled
+            import json as _json
+
+            try:
+                from pathlib import Path as _Path
+
+                rules_path = _Path(__file__).resolve().parents[1] / "data" / "rules_armed.json"
+                raw = (
+                    _json.loads(rules_path.read_text(encoding="utf-8"))
+                    if rules_path.is_file()
+                    else {}
+                )
+                new_n = len(raw.get("tasks") or []) if isinstance(raw, dict) else 0
+                old_n = None
+                if OUT.is_file():
+                    prev = OUT.read_text(encoding="utf-8", errors="ignore")
+                    if "USE_SESSION = False" in prev:
+                        old_n = 0
+                    else:
+                        old_n = prev.count('"task_id"')
+                # 空→空且非启动：别反复改 mtime，否则 QMT 连打 n:0 武装回执
+                if (not ui_boot) and new_n == 0 and (old_n == 0):
+                    self.logger.debug("QMT 会话已是空任务，跳过重复写入")
+                    return
+                # 仍有运行中任务但武装列表空（熔断关规则等）：不要把空会话推给 QMT，
+                # 否则会打出 n:0 盖掉带 ids 的武装回执；卸装只走人工停/删图表。
+                if (not ui_boot) and new_n == 0:
+                    running_n = 0
+                    for _t in (getattr(self, "tasks", None) or {}).values():
+                        if not isinstance(_t, dict):
+                            continue
+                        try:
+                            from utils.rules_armed_sync import _parse_params
+
+                            _p = _parse_params(_t)
+                        except Exception:
+                            _p = _t.get("params") if isinstance(_t.get("params"), dict) else {}
+                            if isinstance(_t.get("params"), str):
+                                try:
+                                    _p = _json.loads(_t.get("params") or "{}")
+                                except Exception:
+                                    _p = {}
+                        if isinstance(_p, dict) and _p.get("task_running"):
+                            running_n += 1
+                    if running_n > 0 and (old_n or 0) > 0:
+                        self.logger.info(
+                            "运行中=%d 但武装为空，跳过写入空 QMT 会话（保留上次 tasks≈%s）"
+                            % (running_n, old_n)
+                        )
+                        return
+            except Exception:
+                pass
 
             session = export_enabled(ui_boot=ui_boot)
             target = deploy_session_file()

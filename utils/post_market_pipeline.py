@@ -735,11 +735,11 @@ def run_step(
 
         if step_id == "capital_flow":
 
-            # 默认仅东财 push2（不同花顺）。
+            # 默认仅东财 push2（不同花顺）：先 >=3000 万早停落盘，再尝试全量。
 
             # 定时/自动：失败 Server酱 + 打开 zjlx 拖验证，每 CAPITAL_FLOW_RETRY_SEC 重试 push2。
 
-            # 手动版（capital_flow_selenium_fallback=True）：push2 失败后改走 --selenium 网页翻页全量；
+            # 手动版（capital_flow_selenium_fallback=True）：push2 失败后改走 --selenium（>=3000 早停保底），不发 Server酱；
 
             # 仍不同花顺；Selenium 失败则返回，不再 60s 死循环。
 
@@ -767,7 +767,8 @@ def run_step(
 
             # 1) push2
 
-            last = _run_flow()
+            # push2：--min-amount=3000 表示先保子集再尝试全量（见 get_capital_flow_selenium）
+            last = _run_flow(("--min-amount=3000",))
 
             if last.ok:
 
@@ -779,7 +780,7 @@ def run_step(
 
 
 
-            # 手动：push2 失败 → 网页 Selenium 全量翻页（--min-amount=-1）
+            # 手动：push2 失败 → 网页 Selenium 按 >=3000 早停保底（--min-amount=3000）
 
             if capital_flow_selenium_fallback:
 
@@ -797,33 +798,13 @@ def run_step(
 
                 _open_eastmoney_zjlx_for_captcha("push2失败，改用Selenium")
 
-                notify_alert(
 
-                    title=f"盘后手动 · 主力资金流改用网页 {d}",
+                # 手动补跑不发 Server酱，控制台日志即可
 
-                    content=(
 
-                        f"**日期**：{d}\n"
+                print(f"[资金流] push2 失败（{detail}），改用 --selenium 网页翻页（>=3000早停）…")
 
-                        f"**原因**：东财 push2 失败：{detail}\n"
-
-                        f"**动作**：改用 Chrome Selenium 打开 {EASTMONEY_ZJLX_URL} "
-
-                        f"自动翻页全量抓取（不同花顺）。\n"
-
-                        f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-                    ),
-
-                    alert_key=f"capital_flow_selenium_{d8}",
-
-                    cooldown_sec=0,
-
-                )
-
-                print(f"[资金流] push2 失败（{detail}），改用 --selenium 网页翻页全量…")
-
-                sel = _run_flow(("--selenium", "--min-amount=-1"))
+                sel = _run_flow(("--selenium", "--min-amount=3000"))
 
                 if sel.ok:
 
@@ -1059,7 +1040,7 @@ def run_step(
 
                 attempt += 1
 
-                last = _run_flow()
+                last = _run_flow(("--min-amount=3000",))
 
                 if last.ok:
 

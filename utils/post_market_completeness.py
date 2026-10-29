@@ -91,12 +91,76 @@ def check_lu_board_rank(asof: date) -> CheckResult:
     return False, "缺少 " + ", ".join(miss)
 
 
+def _csv_row_count(path: Path) -> int:
+    n = 0
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="ignore") as f:
+            next(f, None)
+            for line in f:
+                if line.strip():
+                    n += 1
+    except Exception:
+        return 0
+    return n
+
+
+def _csv_crossed_min_inflow(path: Path, min_inflow_wan: float = 3000.0) -> bool:
+    """CSV 按净流入降序时，若出现 < 门槛的行，则 >=门槛 子集已完整。"""
+    try:
+        from utils.main_force_inflow_rank import parse_inflow_to_yuan
+    except Exception:
+        parse_inflow_to_yuan = None  # type: ignore
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="ignore") as f:
+            header = next(f, "")
+            cols = [c.strip().strip('"') for c in header.strip().split(",")]
+            inflow_i = None
+            for i, c in enumerate(cols):
+                if "主力净流入" in c and "净额" in c:
+                    inflow_i = i
+                    break
+            if inflow_i is None:
+                return False
+            thr = float(min_inflow_wan) * 1e4
+            for line in f:
+                if not line.strip():
+                    continue
+                parts = line.strip().split(",")
+                if inflow_i >= len(parts):
+                    continue
+                raw = parts[inflow_i].strip().strip('"')
+                yuan = None
+                if parse_inflow_to_yuan is not None:
+                    try:
+                        yuan = parse_inflow_to_yuan(raw)
+                    except Exception:
+                        yuan = None
+                if yuan is None:
+                    continue
+                if yuan < thr:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def check_capital_flow(asof: date) -> CheckResult:
     d8 = asof.strftime("%Y%m%d")
     p = ROOT / "history_data" / "个股主力净流入" / f"个股主力净流入_{d8}.csv"
-    if _exists_nonempty(p, 100) and _csv_has_data_row(p):
-        return True, str(p.relative_to(ROOT))
-    return False, f"缺少 {p.relative_to(ROOT)}"
+    if not (_exists_nonempty(p, 100) and _csv_has_data_row(p)):
+        return False, f"缺少 {p.relative_to(ROOT)}"
+    n = _csv_row_count(p)
+    rel = str(p.relative_to(ROOT))
+    # 全量通常 4000+；>=1000 视为全日可用
+    if n >= 1000:
+        return True, f"{rel} 全量可用 n={n}"
+    # >=3000 万子集：已穿越门槛，或至少有一定行数
+    if _csv_crossed_min_inflow(p, 3000.0):
+        return True, f"{rel} >=3000万子集完整 n={n}"
+    if n >= 50:
+        # 未穿越也可能全是高流入日；有数据则先放行，避免整日卡死
+        return True, f"{rel} 子集可用(未确认穿越) n={n}"
+    return False, f"{rel} 行数过少 n={n}"
 
 
 def check_board_snapshot(asof: date) -> CheckResult:

@@ -165,6 +165,26 @@ def _accept_line(line: str) -> None:
                 tid = str(item or "").strip()
                 if tid:
                     ids.append(tid)
+        try:
+            n_tasks = int(payload.get("n") or 0)
+        except (TypeError, ValueError):
+            n_tasks = 0
+        try:
+            part = payload.get("p")
+            part_c = payload.get("pc")
+            if part is not None and part_c is not None and ids:
+                prev = dict(_ARMED_ACK) if _ARMED_ACK else {}
+                prev_ids = list(prev.get("ids") or []) if isinstance(prev.get("ids"), list) else []
+                merged = []
+                seen = set()
+                for tid in prev_ids + ids:
+                    tid = str(tid or "").strip()
+                    if tid and tid not in seen:
+                        seen.add(tid)
+                        merged.append(tid)
+                ids = merged
+        except Exception:
+            pass
         row = {
             "n": payload.get("n"),
             "sig": str(payload.get("sig") or "")[:40],
@@ -177,6 +197,17 @@ def _accept_line(line: str) -> None:
                 _HB_SUB = int(payload.get("s"))
             except (TypeError, ValueError):
                 row["s"] = 0
+        # 空武装回执（启动/瞬时 tasks=0）不要盖掉已有带 ids 的确认，
+        # 否则 GUI 会以为从未回执；心跳时间仍刷新。
+        prev = dict(_ARMED_ACK) if _ARMED_ACK else {}
+        prev_ids = prev.get("ids") if isinstance(prev.get("ids"), list) else []
+        if (not ids) and n_tasks <= 0 and prev_ids:
+            keep = dict(prev)
+            keep["at"] = _ARMED_ACK_AT
+            if "s" in row:
+                keep["s"] = row["s"]
+            keep["empty_seen_at"] = _ARMED_ACK_AT
+            row = keep
         _ARMED_ACK = row
         _RESULTS["armed_ack"] = row
         _RESULTS["heartbeat"] = {

@@ -931,9 +931,16 @@ def apply_mid_run_qmt_liveness(
         was_unconfirmed = bool(params.get("qmt_ack_unconfirmed"))
 
         if alive:
+            # 只清运行途中心跳失联标的叹号（kind=mid_run_hb 或旧数据无 kind）。
+            # 武装 ACK 失败（kind=ack）必须等真正的 armed 回执，不能靠心跳清，
+            # 否则与 reconcile 每 ~2s 来回抖，日志/图表刷屏。
+            kind = str(params.get("qmt_ack_unconfirmed_kind") or "").strip()
+            if was_unconfirmed and kind == "ack":
+                continue
             if was_unconfirmed:
                 params["qmt_ack_unconfirmed"] = False
                 params["pending_qmt_ack"] = False
+                params["qmt_ack_unconfirmed_kind"] = ""
                 task["params"] = params
                 try:
                     task_manager.tasks[tid]["params"] = params
@@ -964,6 +971,7 @@ def apply_mid_run_qmt_liveness(
         if was_unconfirmed:
             continue
         params["qmt_ack_unconfirmed"] = True
+        params["qmt_ack_unconfirmed_kind"] = "mid_run_hb"
         params["pending_qmt_ack"] = False
         task["params"] = params
         try:
@@ -1094,11 +1102,47 @@ def reconcile_run_state_with_armed(
                     )
 
                 if qmt_state == "failed":
+                    # 启停宽限期过后的 failed：若只是过期/空 armed 回执，但策略心跳仍在，
+                    # 且当前不是「刚点运行还在等回执」，则视为稳态在线，不要打未确认叹号。
+                    # （QMT 常在启动时打一条 n:0 armed，之后只靠 hb；本地再 sync 会让 ACK 相对 publish 过期。）
+                    waiting_ack = bool(was_pending or params.get("pending_qmt_ack"))
+                    alive_ok = False
+                    if not waiting_ack:
+                        try:
+                            from utils.qmt_formula_result_log import qmt_strategy_alive
+
+                            alive_ok = bool(qmt_strategy_alive(90.0))
+                        except Exception:
+                            alive_ok = False
+                    if alive_ok:
+                        params["task_running"] = True
+                        params["task_paused"] = False
+                        params["pending_qmt_ack"] = False
+                        params["qmt_ack_unconfirmed"] = False
+                        params["qmt_ack_unconfirmed_kind"] = ""
+                        _apply_params("运行中")
+                        if was_unconfirmed or was_pending:
+                            reason = "QMT心跳在线已忽略过期武装回执"
+                            if logger is not None:
+                                try:
+                                    logger.info(f"[{stock_code}] {reason} (task_id={tid})")
+                                except Exception:
+                                    pass
+                            _emit(
+                                running=True,
+                                paused=False,
+                                reason=reason,
+                                qmt_ack="confirmed",
+                                unconfirmed=False,
+                            )
+                        continue
+
                     # 不回退运行态；仅叹号。日志/UI 只在状态变化时发一次，避免刷屏。
                     params["task_running"] = True
                     params["task_paused"] = False
                     params["pending_qmt_ack"] = False
                     params["qmt_ack_unconfirmed"] = True
+                    params["qmt_ack_unconfirmed_kind"] = "ack"
                     _apply_params("运行中")
                     reason = "QMT未确认已标记未确认"
                     if not was_unconfirmed:
@@ -1127,6 +1171,7 @@ def reconcile_run_state_with_armed(
                     if was_unconfirmed or was_pending:
                         params["pending_qmt_ack"] = False
                         params["qmt_ack_unconfirmed"] = False
+                        params["qmt_ack_unconfirmed_kind"] = ""
                         _apply_params(None)
                         reason = "QMT确认运行中"
                         if logger is not None:
@@ -1144,6 +1189,7 @@ def reconcile_run_state_with_armed(
                     else:
                         params["pending_qmt_ack"] = False
                         params["qmt_ack_unconfirmed"] = False
+                        params["qmt_ack_unconfirmed_kind"] = ""
                     continue
 
                 params["task_running"] = True
@@ -1151,6 +1197,7 @@ def reconcile_run_state_with_armed(
                 params["pending_qmt_ack"] = qmt_state == "pending"
                 # 宽限期内只 pending，超时后才叹号
                 params["qmt_ack_unconfirmed"] = False
+                params["qmt_ack_unconfirmed_kind"] = ""
                 _apply_params("运行中")
                 if qmt_state == "pending":
                     reason = "等待QMT确认"

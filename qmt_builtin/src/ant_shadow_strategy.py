@@ -2228,23 +2228,11 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
 def _log_armed_tasks(rules: Optional[dict]) -> None:
     tasks = (rules or {}).get("tasks") or []
     n_tasks = len(tasks)
-    print("[交易核心] 已武装任务=%d" % n_tasks)
     parents = []
     seen = set()
     for t in tasks:
         if not isinstance(t, dict):
             continue
-        print(
-            "[交易核心] task %s %s type=%s trig=%s vol=%s enabled=%s"
-            % (
-                t.get("task_id"),
-                t.get("stock_code"),
-                t.get("rule_type"),
-                t.get("trigger_price"),
-                t.get("max_volume"),
-                t.get("enabled"),
-            )
-        )
         meta = t.get("metadata") or {}
         parent = ""
         if isinstance(meta, dict):
@@ -2272,6 +2260,7 @@ def _log_armed_tasks(rules: Optional[dict]) -> None:
             rl.emit_armed_ack(n_tasks, sig=sig, parents=parents, subscribe_count=sub_n)
     except Exception as e:
         print("[交易核心] 武装ACK输出失败: %s" % e)
+    print("[交易核心] 已武装任务=%d parents=%d" % (n_tasks, len(parents)))
 
 
 def _load_session_rules():
@@ -2343,7 +2332,11 @@ def init(ContextInfo):
     _refresh_orders_enabled(rules)
     _RULES_SIG = "session"
     _RUNNER = ShadowTickRunner(rules, mode="shadow")
-    _log_armed_tasks(rules)
+    # 启动时空任务不打 n:0 armed，避免盖住稍后的真实回执；有任务才 ACK
+    if len(rules.get("tasks") or []) > 0:
+        _log_armed_tasks(rules)
+    else:
+        print("[交易核心] 启动暂无任务，跳过空武装回执", flush=True)
     _RESULTS = empty_results(mode="shadow", trade_date=str(rules.get("trade_date") or ""))
     if not isinstance(_RESULTS, dict):
         _RESULTS = empty_results(mode="shadow", trade_date=str(rules.get("trade_date") or ""))

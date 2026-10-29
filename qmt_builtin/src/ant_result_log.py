@@ -70,16 +70,38 @@ def emit(kind, obj):
     payload = _dump(obj) if not isinstance(obj, str) else str(obj).replace("\r", " ").replace("\n", " ")
     if not payload:
         return
+    # armed 带多个 parent uuid 很容易超过 240；过短会静默丢回执
+    max_len = 1200 if str(kind) == "armed" else 240
     line = "ANTRES %s %s" % (kind, payload)
-    if len(line) > 240 and isinstance(obj, dict):
+    if len(line) > max_len and isinstance(obj, dict):
         slim = dict(obj)
-        for key in ("msg", "detail", "true_breakthrough_detail", "strategy_name", "n"):
+        for key in ("msg", "detail", "true_breakthrough_detail", "strategy_name"):
             slim.pop(key, None)
+        if str(kind) != "armed":
+            slim.pop("n", None)
         payload = _dump(slim)
         line = "ANTRES %s %s" % (kind, payload)
-    if not payload or len(line) > 240:
+    if not payload or len(line) > max_len:
+        if str(kind) == "armed" and isinstance(obj, dict):
+            ids = list(obj.get("ids") or [])
+            if ids:
+                base = {k: v for k, v in obj.items() if k != "ids"}
+                chunk = 4
+                parts = (len(ids) + chunk - 1) // chunk
+                for i in range(0, len(ids), chunk):
+                    part = dict(base)
+                    part["ids"] = ids[i : i + chunk]
+                    if parts > 1:
+                        part["p"] = i // chunk
+                        part["pc"] = parts
+                    payload2 = _dump(part)
+                    line2 = "ANTRES armed %s" % payload2
+                    if payload2 and len(line2) <= max_len:
+                        print(line2)
+                return
         return
     print(line)
+
 
 
 def heartbeat(watch_count, tick_time, force=False, subscribe_count=None):
@@ -110,7 +132,7 @@ def emit_armed_ack(n_tasks, sig="", parents=None, subscribe_count=None):
         if not tid:
             continue
         ids.append(tid[:40])
-        if len(ids) >= 16:
+        if len(ids) >= 32:
             break
     if ids:
         row["ids"] = ids

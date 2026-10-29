@@ -2,7 +2,7 @@
 """东方财富个股资金流向排行（push2 JSON，全量分页）。
 
 对应网页：https://data.eastmoney.com/zjlx/detail.html
-优先于 Selenium：快、可拿全市场，适合盘后落盘。
+优先于 Selenium：快。盘后默认先按主力净流入门槛早停落盘子集，再继续翻页尝试全量；全量失败保留子集。
 
 网络：先直连；若被对端掐断，再试本机代理（EM_FUND_FLOW_PROXY / EM_HIST_PROXY /
 环境变量 HTTPS_PROXY，以及常见本地端口 7078/7890）。
@@ -212,18 +212,43 @@ def _get_json(
 
     raise RuntimeError(f"东方财富资金流接口失败: {last_err}")
 
+def _row_inflow_yuan(r: dict) -> float:
+    try:
+        return float(r.get("f62") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _filter_rows_min_inflow(rows: List[dict], min_inflow_wan: float) -> List[dict]:
+    thr = float(min_inflow_wan) * 1e4
+    out: List[dict] = []
+    for r in rows:
+        if _row_inflow_yuan(r) + 1e-9 >= thr:
+            out.append(r)
+    return out
+
+
 def fetch_individual_fund_flow_rows(
     *,
     page_size: int = 100,
     pause_s: float = 0.08,
+    min_inflow_wan: Optional[float] = None,
+    then_full: bool = False,
+    on_min_subset: Optional[Any] = None,
 ) -> Tuple[List[dict], dict]:
     """
-    拉取全市场「今日」个股资金流排行。
+    拉取「今日」个股资金流排行（按 f62 主力净流入降序）。
 
-    返回 (raw_rows, meta)；raw_rows 为接口 diff 元素列表。
+    - min_inflow_wan 为空/<=0：翻完全市场（旧行为）。
+    - min_inflow_wan >0：先翻到「整页都 < 门槛」得到子集；
+      then_full=True 时继续往后补全市场；中途失败则返回已拿到的 >=门槛 子集。
+    - on_min_subset(rows, meta)：子集刚齐全时回调（便于先落盘）。
     """
     session = _session()
     pz = max(20, min(int(page_size), 100))
+    thr_wan = float(min_inflow_wan) if min_inflow_wan is not None else 0.0
+    thr_yuan = thr_wan * 1e4
+    want_min = thr_wan > 0
     params = {
         "fid": "f62",
         "po": "1",
@@ -240,44 +265,173 @@ def fetch_individual_fund_flow_rows(
     data = first.get("data") or {}
     total = int(data.get("total") or 0)
     rows: List[dict] = []
+    min_rows: List[dict] = []
+    min_done = False
+    pages_ok = 0
+    incomplete = False
+    full_error = ""
+    max_pages = max(1, (total + pz - 1) // pz) if total else 200
 
-    def _extend(diff_obj: Any) -> None:
+    def _extend_page(diff_obj: Any) -> Tuple[int, int]:
+        """返回 (page_len, page_kept_ge_thr)。"""
+        page_list: List[dict] = []
         if not diff_obj:
-            return
+            return 0, 0
         if isinstance(diff_obj, dict):
-            rows.extend(list(diff_obj.values()))
+            page_list = list(diff_obj.values())
         else:
-            rows.extend(list(diff_obj))
+            page_list = list(diff_obj)
+        kept = 0
+        for r in page_list:
+            rows.append(r)
+            if want_min and (not min_done):
+                if _row_inflow_yuan(r) + 1e-9 >= thr_yuan:
+                    min_rows.append(r)
+                    kept += 1
+            elif want_min and min_done:
+                pass
+            else:
+                kept += 1
+        return len(page_list), kept
 
-    _extend(data.get("diff"))
-    total_pages = max(1, (total + pz - 1) // pz) if total else 1
+    page_len, page_kept = _extend_page(data.get("diff"))
+    pages_ok = 1 if page_len else 0
 
-    for pn in range(2, total_pages + 1):
+    def _maybe_finish_min(pn: int, page_len: int, page_kept: int) -> bool:
+        nonlocal min_done
+        if not want_min or min_done:
+            return False
+        # 整页都 < 门槛、空页、或本页已出现 < 门槛（子集已齐）
+        if page_len == 0 or page_kept == 0 or page_kept < page_len:
+            min_done = True
+            meta_cb = {
+                "source": "eastmoney_push2",
+                "total": total,
+                "fetched": len(min_rows),
+                "pages": pn,
+                "page_size": pz,
+                "coverage": "min_inflow_subset",
+                "min_inflow_wan": thr_wan,
+                "stopped_early": True,
+            }
+            if callable(on_min_subset):
+                try:
+                    on_min_subset(list(min_rows), dict(meta_cb))
+                except Exception as e:
+                    # 回调失败不阻断后续全量
+                    meta_cb["on_min_subset_error"] = f"{type(e).__name__}: {e}"
+            return True
+        return False
+
+    if pages_ok:
+        _maybe_finish_min(1, page_len, page_kept)
+
+    # 只要还没拿到子集齐全，或需要继续全量，就继续翻页
+    pn = 1
+    while pn < max_pages:
+        if want_min and min_done and not then_full:
+            break
+        if (not want_min) and total and pn >= max_pages:
+            break
+        if total and pn >= max_pages:
+            break
+        # 无 total 时：空页即停
+        pn += 1
         params = dict(params)
         params["pn"] = str(pn)
-        # 翻页失败时重置「可用代理」记忆，再试一轮（push2 中途掐线常见）
         try:
-            payload = _get_json(session, params, rounds=2)
-        except Exception:
-            global _WORKING_PROXIES_RESOLVED
-            _WORKING_PROXIES_RESOLVED = False
-            payload = _get_json(session, params, rounds=3)
-        _extend((payload.get("data") or {}).get("diff"))
+            try:
+                payload = _get_json(session, params, rounds=2)
+            except Exception:
+                global _WORKING_PROXIES_RESOLVED
+                _WORKING_PROXIES_RESOLVED = False
+                payload = _get_json(session, params, rounds=3)
+        except Exception as e:
+            incomplete = True
+            full_error = f"{type(e).__name__}: {e}"
+            break
+        page_len, page_kept = _extend_page((payload.get("data") or {}).get("diff"))
+        if page_len == 0:
+            if want_min and not min_done:
+                _maybe_finish_min(pn, 0, 0)
+            break
+        pages_ok = pn
+        just_min = _maybe_finish_min(pn, page_len, page_kept)
         if pause_s > 0:
             time.sleep(pause_s)
+        # 旧全量：按 total_pages 走完
+        if (not want_min) and total and pn >= max_pages:
+            break
+        if want_min and min_done and then_full and total and pn >= max_pages:
+            break
+        if just_min and not then_full:
+            break
+
+    if want_min and not min_done and rows:
+        # 翻完仍未穿越门槛：子集=全部已拉且均可能 >=门槛
+        min_rows = _filter_rows_min_inflow(rows, thr_wan)
+        min_done = True
+        if callable(on_min_subset) and min_rows:
+            try:
+                on_min_subset(
+                    list(min_rows),
+                    {
+                        "source": "eastmoney_push2",
+                        "total": total,
+                        "fetched": len(min_rows),
+                        "pages": pages_ok,
+                        "page_size": pz,
+                        "coverage": "min_inflow_subset",
+                        "min_inflow_wan": thr_wan,
+                        "stopped_early": False,
+                        "note": "exhausted_pages_without_cross",
+                    },
+                )
+            except Exception:
+                pass
+
+    full_ok = (not incomplete) and (
+        (total > 0 and len(rows) >= max(1, int(total * 0.95)))
+        or ((not total) and pages_ok > 0 and not want_min)
+        or (want_min and then_full and not incomplete and total > 0 and len(rows) >= max(1, int(total * 0.95)))
+        or (want_min and then_full and not incomplete and (not total) and pages_ok >= max_pages)
+    )
+    # 更朴素：无中断且页数走到 max_pages（或空页自然结束且非 incomplete）
+    if not incomplete and total > 0 and pages_ok >= max_pages:
+        full_ok = True
+    if not incomplete and total > 0 and len(rows) >= total:
+        full_ok = True
+
+    if want_min and then_full and full_ok:
+        out_rows = rows
+        coverage = "full"
+    elif want_min:
+        out_rows = list(min_rows) if min_rows else _filter_rows_min_inflow(rows, thr_wan)
+        coverage = "min_inflow_subset"
+    else:
+        out_rows = rows
+        coverage = "full" if full_ok else "partial"
 
     meta = {
         "source": "eastmoney_push2",
         "total": total,
-        "fetched": len(rows),
-        "pages": total_pages,
+        "fetched": len(out_rows),
+        "fetched_all_pages": len(rows),
+        "pages": pages_ok,
         "page_size": pz,
         "via_proxy": bool(_WORKING_PROXIES),
         "proxy": (_WORKING_PROXIES or {}).get("https")
         or (_WORKING_PROXIES or {}).get("http")
         or "",
+        "coverage": coverage,
+        "min_inflow_wan": thr_wan if want_min else 0.0,
+        "min_subset_ready": bool(want_min and min_done),
+        "incomplete": bool(incomplete),
+        "full_ok": bool(full_ok),
+        "full_error": full_error,
+        "stopped_early": bool(want_min and coverage == "min_inflow_subset"),
     }
-    return rows, meta
+    return out_rows, meta
 
 
 def _fmt_pct(v: Any) -> str:
@@ -367,8 +521,17 @@ def fetch_individual_fund_flow_df(
     *,
     page_size: int = 100,
     pause_s: float = 0.08,
+    min_inflow_wan: Optional[float] = None,
+    then_full: bool = False,
+    on_min_subset: Optional[Any] = None,
 ) -> Tuple[pd.DataFrame, dict]:
-    rows, meta = fetch_individual_fund_flow_rows(page_size=page_size, pause_s=pause_s)
+    rows, meta = fetch_individual_fund_flow_rows(
+        page_size=page_size,
+        pause_s=pause_s,
+        min_inflow_wan=min_inflow_wan,
+        then_full=then_full,
+        on_min_subset=on_min_subset,
+    )
     df = rows_to_flow_dataframe(rows)
     meta["dataframe_rows"] = len(df)
     return df, meta
@@ -380,14 +543,46 @@ def fetch_individual_fund_flow_df_resilient(
     pause_s: float = 0.08,
     as_of: Optional[date] = None,
     allow_ths: bool = False,
+    prefer_min_inflow_wan: float = 3000.0,
+    then_full: bool = True,
+    on_min_subset: Optional[Any] = None,
 ) -> Tuple[pd.DataFrame, dict]:
-    """东财 push2 优先；仅 allow_ths=True 时同花顺兜底（盘后默认关闭）。"""
+    """东财 push2：先保 >=prefer_min_inflow_wan 子集，再尝试全量；仅 allow_ths=True 时同花顺兜底。"""
     errors: List[str] = []
+    min_wan = float(prefer_min_inflow_wan or 0.0)
     try:
-        df, meta = fetch_individual_fund_flow_df(page_size=page_size, pause_s=pause_s)
-        if df is not None and not df.empty and len(df) >= 1000:
-            return df, meta
-        errors.append(f"eastmoney rows too few: {0 if df is None else len(df)}")
+        if min_wan > 0:
+            df, meta = fetch_individual_fund_flow_df(
+                page_size=page_size,
+                pause_s=pause_s,
+                min_inflow_wan=min_wan,
+                then_full=bool(then_full),
+                on_min_subset=on_min_subset,
+            )
+        else:
+            df, meta = fetch_individual_fund_flow_df(
+                page_size=page_size,
+                pause_s=pause_s,
+            )
+        if df is not None and not df.empty:
+            # 子集或全量只要非空即成功；全量不足时 coverage 已标 min_inflow_subset
+            if meta.get("coverage") == "full" or meta.get("full_ok"):
+                meta["coverage"] = "full"
+                return df, meta
+            if min_wan > 0 and (
+                meta.get("min_subset_ready")
+                or meta.get("coverage") == "min_inflow_subset"
+                or len(df) > 0
+            ):
+                meta["coverage"] = "min_inflow_subset"
+                return df, meta
+            if len(df) >= 1000:
+                meta["coverage"] = meta.get("coverage") or "full"
+                return df, meta
+        errors.append(
+            f"eastmoney rows too few: {0 if df is None else len(df)} "
+            f"coverage={None if not meta else meta.get('coverage')}"
+        )
     except Exception as e:
         errors.append(f"eastmoney: {type(e).__name__}: {e}")
 

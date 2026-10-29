@@ -112,7 +112,7 @@ class BuiltinPricePoller(QObject):
                 self.logger.debug("[builtin_price] 策略日志读取失败: %s" % exc)
 
     def _note_formula_heartbeat(self) -> None:
-        """早盘见过心跳后再停 90 秒才报。午后从 13:00 起算，30 秒没有推送就报。"""
+        """早盘见过心跳后再停 90 秒才报。午后：13:00 后未见心跳则从 13:00 起 30 秒报；已有墙钟心跳（含空 t）按 90 秒超时。"""
         try:
             from utils.qmt_formula_result_log import (
                 current,
@@ -171,24 +171,16 @@ class BuiltinPricePoller(QObject):
 
         if now.time() < dt_time(13, 0, 30):
             return
-        row = {}
-        try:
-            data = current() or {}
-            got = data.get("heartbeat") if isinstance(data, dict) else None
-            if isinstance(got, dict):
-                row = got
-        except Exception:
-            row = {}
-        tick = self._tick_clock(row.get("t"))
-        seen_afternoon = tick is not None and dt_time(13, 0) <= tick <= dt_time(15, 0)
+        # 午后无 tick 时策略仍约 60s 打 ANTRES hb，且 t 常为空；空 t 不能当成「下午还没推送」，
+        # 否则会用 13:00+30s 阈值反复误报并刷 Server酱。
         session_start = now.replace(hour=13, minute=0, second=0, microsecond=0)
-        if seen_afternoon:
-            hb = float(heartbeat_at() or 0)
-            limit = 90.0
-        else:
-            hb = session_start.timestamp()
-            limit = 30.0
-        self._raise_heartbeat_stop(now, hb, heartbeat_subscribe, limit_sec=limit)
+        hb = float(heartbeat_at() or 0)
+        if hb >= session_start.timestamp():
+            self._raise_heartbeat_stop(now, hb, heartbeat_subscribe, limit_sec=90.0)
+            return
+        self._raise_heartbeat_stop(
+            now, session_start.timestamp(), heartbeat_subscribe, limit_sec=30.0
+        )
 
     def _raise_heartbeat_stop(self, now, hb, heartbeat_subscribe, limit_sec: float) -> None:
         if heartbeat_subscribe is not None and heartbeat_subscribe() == 0:
@@ -241,7 +233,7 @@ class BuiltinPricePoller(QObject):
                 "交易时段里，蚂蚁量化规则超过 %d 秒没有打出日志心跳。\n\n请看一下 QMT 里的蚂蚁量化规则是否还在运行。"
                 % waited,
                 alert_key="qmt_hb_%s" % now.strftime("%Y%m%d"),
-                cooldown_sec=0,
+                cooldown_sec=1800,
             )
             if self.logger and result.get("success"):
                 self.logger.warning("[大QMT健康] 策略心跳停止已通过 Server酱 推送")

@@ -2310,8 +2310,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--min-amount",
         type=float,
-        default=0,
-        help="落盘过滤阈值（万元）；Selenium 时：>0 页末低于此值停翻，<0 翻到末页全量，0 兼容旧默认 3000",
+        default=3000,
+        help="门槛（万元，默认3000）。push2：先早停落盘>=门槛子集再尝试全量；"
+        "Selenium：>0 页末低于此值停翻，<0 翻到末页全量",
     )
     parser.add_argument(
         "--selenium",
@@ -2375,18 +2376,60 @@ if __name__ == "__main__":
         df = get_capital_flow_selenium(min_amount_threshold=thr, save_date_str=save_date_str, resume=True)
         fetch_source = "selenium"
     else:
-        print("正在拉取全量个股主力净流入（仅东财 push2；同花顺兜底默认关闭）...")
+        min_wan = float(args.min_amount) if args.min_amount and args.min_amount > 0 else 0.0
+        print(
+            "正在拉取个股主力净流入（仅东财 push2；"
+            + (f"先>={min_wan:.0f}万早停落盘再尝试全量；" if min_wan > 0 else "全量；")
+            + "同花顺兜底默认关闭）..."
+        )
         print("-" * 60)
         try:
             from utils.eastmoney_fund_flow import (
                 fetch_individual_fund_flow_df_resilient,
+                rows_to_flow_dataframe,
             )
+            from utils.main_force_inflow_rank import enrich_and_rank_by_inflow_ratio
 
             as_of_day = datetime.strptime(save_date_str, "%Y%m%d").date()
+            history_dir = "history_data"
+            if not os.path.exists(history_dir):
+                os.makedirs(history_dir)
+            filename = _flow_csv_path(save_date_str, history_dir)
+            min_saved = {"ok": False, "rows": 0}
+
+            def _on_min_subset(raw_rows, meta_min):
+                """子集齐全时先落盘，全量失败也不至于整日空档。"""
+                try:
+                    df_min = rows_to_flow_dataframe(list(raw_rows or []))
+                    if df_min is None or df_min.empty:
+                        print("[资金流] 子集回调：无行，跳过先落盘")
+                        return
+                    df_min, st = enrich_and_rank_by_inflow_ratio(df_min, min_inflow_wan=0.0)
+                    df_min.to_csv(filename, index=False, encoding="utf_8_sig")
+                    min_saved["ok"] = True
+                    min_saved["rows"] = len(df_min)
+                    print(
+                        f"[资金流] 已先落盘 >={min_wan:.0f}万子集："
+                        f"{filename} rows={len(df_min)} pages={meta_min.get('pages')}"
+                    )
+                    try:
+                        from tools.export_main_flow_to_jsonl import (
+                            write_daily_main_flow_jsonl_shard,
+                        )
+
+                        write_daily_main_flow_jsonl_shard(filename, save_date_str)
+                    except Exception as e:
+                        print(f"[main_flow jsonl] 子集写出失败: {e}")
+                except Exception as e:
+                    print(f"[资金流] 子集先落盘失败: {e}")
+
             df, meta = fetch_individual_fund_flow_df_resilient(
                 page_size=args.page_size,
                 as_of=as_of_day,
                 allow_ths=bool(args.allow_ths),
+                prefer_min_inflow_wan=min_wan,
+                then_full=True if min_wan > 0 else True,
+                on_min_subset=_on_min_subset if min_wan > 0 else None,
             )
             fetch_source = str(meta.get("source") or "api")
             if fetch_source == "ths" and not args.allow_ths:
@@ -2398,17 +2441,39 @@ if __name__ == "__main__":
                 else ("同花顺" if fetch_source == "ths" else "直连")
             )
             print(
-                f"接口完成: source={fetch_source} total={meta.get('total')} "
-                f"fetched={meta.get('fetched')} pages={meta.get('pages')} "
-                f"df={meta.get('dataframe_rows')} via={via}"
+                f"接口完成: source={fetch_source} coverage={meta.get('coverage')} "
+                f"total={meta.get('total')} fetched={meta.get('fetched')} "
+                f"fetched_all={meta.get('fetched_all_pages')} pages={meta.get('pages')} "
+                f"df={meta.get('dataframe_rows')} full_ok={meta.get('full_ok')} "
+                f"incomplete={meta.get('incomplete')} via={via}"
             )
+            if meta.get("full_error"):
+                print(f"[warn] 全量未完成: {meta.get('full_error')}")
             if meta.get("fallback_errors"):
                 print(f"[warn] 前置数据源失败: {meta.get('fallback_errors')}")
+            # 若最终仍是子集且已先落盘，后面保存逻辑会再写一次（幂等）
+            if (
+                (df is None or df.empty)
+                and min_saved.get("ok")
+            ):
+                print(
+                    f"[资金流] 最终 df 空但子集已落盘 rows={min_saved.get('rows')}，视为成功"
+                )
+                sys.exit(0)
         except Exception as e:
             print(f"东财资金流接口失败: {e}")
             import traceback
 
             traceback.print_exc()
+            # 子集若已先落盘，不整日作废
+            try:
+                if os.path.isfile(filename) and os.path.getsize(filename) > 100:
+                    print(
+                        f"[资金流] push2 异常但已有落盘文件，保留: {filename}，exit=0"
+                    )
+                    sys.exit(0)
+            except Exception:
+                pass
             # 批跑路径禁止静默 Selenium/同花顺；由上层每 60s 阻塞重试
             print("[退出] 东财失败且未启用 --selenium/--allow-ths，exit=1（供批跑重试）")
             sys.exit(1)
@@ -2458,8 +2523,9 @@ if __name__ == "__main__":
                 # 接口/同花顺结果已是干净中文列；再跑一遍排序/补列以统一格式
                 df_clean = df.copy()
 
+            # 全量成功保留全市场；子集路径行已是 >=门槛；此处不再按门槛丢行
             df_clean, rank_stats = enrich_and_rank_by_inflow_ratio(
-                df_clean, min_inflow_wan=float(args.min_amount or 0)
+                df_clean, min_inflow_wan=0.0
             )
             print(
                 f"按净流入/流通市值重排: {rank_stats.get('in')} → {rank_stats.get('out')} 条"
