@@ -167,33 +167,125 @@ def upsert_bar(path: Path, bar: dict) -> str:
     return "upserted"
 
 
+def _etf_stem_set() -> set:
+    """ETF file stems like 510010.SH from data/etf_universe.json (cached)."""
+    cached = getattr(_etf_stem_set, "_cached", None)
+    if cached is not None:
+        return cached
+    out = set()
+    path = ROOT / "data" / "etf_universe.json"
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        for raw in data.get("codes") or []:
+            c = str(raw or "").strip().upper()
+            if not c:
+                continue
+            if "." not in c:
+                c6 = "".join(ch for ch in c if ch.isdigit())[-6:].zfill(6)
+                if len(c6) != 6:
+                    continue
+                if c6.startswith(("5", "6", "9")):
+                    c = c6 + ".SH"
+                elif c6.startswith(("0", "1", "2", "3")):
+                    c = c6 + ".SZ"
+                else:
+                    c = c6 + ".BJ"
+            out.add(c.split("/")[-1])
+    _etf_stem_set._cached = out
+    return out
+
+
+def _count_codes_with_day(day: str, *, stocks_only: bool = True) -> int:
+    """Count daily_cache CSVs whose last bar date == day (YYYY-MM-DD).
+
+    Default stocks_only=True: exclude ETF (etf_universe.json), matching
+    manifest.universe_count which is the A-share stock pool size.
+    """
+    day = str(day or "")[:10]
+    if not day or not CACHE.is_dir():
+        return 0
+    etf = _etf_stem_set() if stocks_only else set()
+    n = 0
+    for path in CACHE.glob("*.csv"):
+        stem = path.name[:-4] if path.name.lower().endswith(".csv") else path.stem
+        stem = str(stem).strip().upper()
+        if stocks_only and stem in etf:
+            continue
+        if _last_date(path) == day:
+            n += 1
+    return n
+
+
 def _update_manifest(day: str, ok: int, miss: int, universe: int) -> None:
+    """Mark completed only when coverage reaches 80% of full universe_count.
+
+    Shard SUMMARY.total is typically ~100 and must NOT satisfy the 80% gate.
+    Mid-run writes status=running (and clears a premature completed for the same day).
+    """
     if not MANIFEST.is_file():
         return
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    covered = ok
-    base = max(universe, int(data.get("universe_count") or 0), 1)
-    success = (universe > 0 and ok >= int(universe * 0.8)) or (
-        ok >= int(base * 0.8)
-    )
-    if not success:
-        print(
-            "[ingest] manifest 未更新：ok=%d universe/job_total=%d base=%d (<80%%)"
-            % (ok, universe, base),
-            flush=True,
-        )
-        return
-    data["sync_trade_date"] = day
-    data["status"] = "completed"
-    data["ok_count"] = ok
-    data["fail_count"] = miss
+    day = str(day or "")[:10]
+    universe_full = int(data.get("universe_count") or 0)
+    job_total = int(universe or 0)
+
+    # Prefer stock-only on-disk coverage for the trade day (ETF excluded; survives multi-shard).
+    covered = _count_codes_with_day(day, stocks_only=True)
+    if covered <= 0 and ok > 0:
+        covered = int(ok)
+
+    # Threshold base: full universe from manifest; never a small shard total.
+    if universe_full > 0:
+        base = universe_full
+    else:
+        base = max(job_total, 1)
+
+    need = max(1, int(base * 0.8))
+    success = covered >= need
+
+    data["ok_count"] = covered
+    data["fail_count"] = int(miss or 0)
     data["skip_count"] = 0
-    data["finished_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     data["trigger"] = "qmt_probe"
     data["primary_source"] = "qmt"
     data["primary_path"] = "qmt_probe/formula_or_jsonl"
-    MANIFEST.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print("[ingest] manifest 已更新 sync_trade_date=%s ok=%d" % (day, ok), flush=True)
+    data["coverage_ok_ratio"] = round(float(covered) / float(base), 4) if base else 0.0
+
+    nl = chr(10)
+    if success:
+        data["sync_trade_date"] = day
+        data["status"] = "completed"
+        data["finished_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        MANIFEST.write_text(json.dumps(data, ensure_ascii=False, indent=2) + nl, encoding="utf-8")
+        print(
+            "[ingest] manifest 已更新 completed sync_trade_date=%s ok=%d base=%d"
+            % (day, covered, base),
+            flush=True,
+        )
+        return
+
+    # Incomplete: progress only. Do not leave a false completed for this day.
+    if str(data.get("sync_trade_date") or "")[:10] == day and str(data.get("status") or "") == "completed":
+        data["status"] = "running"
+        data.pop("finished_at", None)
+        print(
+            "[ingest] manifest 撤回过早 completed → running（ok=%d < need=%d base=%d）"
+            % (covered, need, base),
+            flush=True,
+        )
+    else:
+        data["status"] = "running"
+        print(
+            "[ingest] manifest 进度 running ok=%d need=%d base=%d job_total=%d（未标 completed）"
+            % (covered, need, base, job_total),
+            flush=True,
+        )
+    data["pending_trade_date"] = day
+    MANIFEST.write_text(json.dumps(data, ensure_ascii=False, indent=2) + nl, encoding="utf-8")
+
 
 
 def ingest_rows(

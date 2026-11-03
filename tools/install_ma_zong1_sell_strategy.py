@@ -54,7 +54,8 @@ NAME_CLEAR_GROWTH = "马总1卖-非主板涨幅弹性清仓"
 
 # 回落比例%%（缺省）；改这里即可分腿调弹性；params 同名键可覆盖
 DROP_PERCENT_OPEN = 1.5          # 开盘涨幅弹性半仓
-DROP_PERCENT_LU = 1.5            # 近10日涨停价弹性半仓
+DROP_PERCENT_LU = 1.5            # 近涨停价弹性半仓回落%%
+LU_HIGH_OFFSET = 0.01            # 近涨停触发价 = 窗口最高价 − 本值（元）；params.lu_high_offset 可覆盖
 DROP_PERCENT_CLEAR_MAIN = 0.0    # 主板清仓回落；与 CLEAR_GAIN_MAIN=0.10 搭配 → 涨停即清（单点卖）
 DROP_PERCENT_CLEAR_GROWTH = 1.5  # 非主板涨幅弹性清仓
 
@@ -93,6 +94,18 @@ def run(codes, prices, get_name, account, params):
 
     open_drop_pct = _leg_drop("open_drop_percent", DROP_PERCENT_OPEN)
     lu_drop_pct = _leg_drop("lu_drop_percent", DROP_PERCENT_LU)
+    try:
+        _off_raw = params.get("lu_high_offset")
+        if _off_raw is None or _off_raw == "":
+            lu_high_offset = float(LU_HIGH_OFFSET)
+        else:
+            lu_high_offset = float(_off_raw)
+    except (TypeError, ValueError):
+        lu_high_offset = 0.01
+    if lu_high_offset < 0:
+        lu_high_offset = 0.0
+
+    sel_map = params.get("selection_date_by_code") or {}
     clear_drop_main_pct = _leg_drop("clear_drop_percent_main", DROP_PERCENT_CLEAR_MAIN)
     clear_drop_growth_pct = _leg_drop("clear_drop_percent", DROP_PERCENT_CLEAR_GROWTH)
 
@@ -414,7 +427,10 @@ def run(codes, prices, get_name, account, params):
             return max(ld, min(lu, px))
         return px
 
-    def _recent_lu_trigger(c6, name, as_d):
+    def _recent_lu_trigger(c6, name, as_d, sel_d):
+        """选股日涨停板起至昨天：日线最高价最大值减去固定价差，作近涨停半仓触发价。"""
+        if sel_d is None:
+            return None
         try:
             from utils.daily_cache_reader import load_daily_from_cache
         except Exception:
@@ -429,32 +445,43 @@ def run(codes, prices, get_name, account, params):
             dd = df.copy()
             dd["date"] = dd["date"].map(_parse_d)
             dd = dd.dropna(subset=["date"]).sort_values("date")
-            dd = dd[dd["date"] < as_d]
         except Exception:
             return None
-        if dd is None or dd.empty or len(dd) < 2:
+        if dd is None or dd.empty:
             return None
-        window = dd.tail(11)
-        if len(window) < 2:
+        prior = dd[dd["date"] < sel_d]
+        on_sel = dd[dd["date"] == sel_d]
+        if prior.empty or on_sel.empty:
             return None
-        rows = list(window.itertuples(index=False))
-        for i in range(len(rows) - 1, 0, -1):
-            try:
-                prev_c = float(getattr(rows[i - 1], "close"))
-                cur_c = float(getattr(rows[i], "close"))
-                d_i = getattr(rows[i], "date")
-            except Exception:
-                continue
-            if prev_c <= 0 or cur_c <= 0:
-                continue
-            lr = _limit_ratio(c6, name, d_i if isinstance(d_i, _date) else as_d)
-            lim = round(prev_c * (1.0 + lr), 2)
-            inc = (cur_c - prev_c) / prev_c
-            ok = abs(cur_c - lim) < 0.02 or inc >= lr * 0.99
-            if ok:
-                return float(lim)
-        return None
-
+        try:
+            prev_c = float(prior.iloc[-1]["close"])
+            row_sel = on_sel.iloc[-1]
+            cur_c = float(row_sel["close"])
+        except Exception:
+            return None
+        if prev_c <= 0 or cur_c <= 0:
+            return None
+        lr = _limit_ratio(c6, name, sel_d if isinstance(sel_d, _date) else as_d)
+        lim = round(prev_c * (1.0 + lr), 2)
+        inc = (cur_c - prev_c) / prev_c
+        if not (abs(cur_c - lim) < 0.02 or inc >= lr * 0.99):
+            return None
+        win = dd[(dd["date"] >= sel_d) & (dd["date"] < as_d)]
+        if win is None or win.empty:
+            return None
+        try:
+            hi = float(win["high"].astype(float).max())
+        except Exception:
+            return None
+        if hi <= 0:
+            return None
+        try:
+            off = float(lu_high_offset)
+        except (TypeError, ValueError):
+            off = 0.01
+        if off < 0:
+            off = 0.0
+        return float(round(hi - off, 2))
     for code in codes or []:
         c6 = _code6(code)
         if not c6:
@@ -518,7 +545,8 @@ def run(codes, prices, get_name, account, params):
         if prev_close > 0:
             open_ref = _clamp(round(prev_close * (1.0 + thr), 2), limit_down, limit_up)
         lu_ref = 0.0
-        lu_trig_raw = _recent_lu_trigger(c6, name, trade_d)
+        sel_d = _parse_d(sel_map.get(c6) or sel_map.get(code))
+        lu_trig_raw = _recent_lu_trigger(c6, name, trade_d, sel_d)
         if lu_trig_raw is not None and lu_trig_raw > 0:
             lu_ref = _clamp(round(float(lu_trig_raw), 2), limit_down, limit_up)
 

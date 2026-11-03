@@ -120,16 +120,25 @@ def _limit_up_pct(stock_code, stock_name, as_of_date=None):
     return 10.0
 
 
-def _is_limit_up_now(pct, stock_code, stock_name, as_of_date=None):
-    if pct is None:
-        return False
-    try:
-        p = float(pct)
-    except (TypeError, ValueError):
-        return False
+def _is_limit_up_now(pct, stock_code, stock_name, as_of_date=None, price=None, pre_close=None):
+    """当前是否涨停板：涨幅达阈值99%，或现价已达到涨停价（防 pct 舍入漏判封板；差1分不算）。"""
     lim = _limit_up_pct(stock_code, stock_name, as_of_date)
-    # 与日线涨停判定类似：达到涨停幅度的 99% 即视作涨停
-    return p >= float(lim) * 0.99
+    if pct is not None:
+        try:
+            if float(pct) >= float(lim) * 0.99:
+                return True
+        except (TypeError, ValueError):
+            pass
+    if price is not None and pre_close is not None:
+        lu = _limit_up_price(pre_close, stock_code, stock_name, as_of_date)
+        if lu is not None:
+            try:
+                # 现价必须达到涨停价才算当前封板；差 1 分不算（与「曾触及」软门槛不同）
+                if float(price) + 1e-6 >= float(lu):
+                    return True
+            except (TypeError, ValueError):
+                pass
+    return False
 
 
 def _limit_up_price(pre_close, stock_code, stock_name, as_of_date=None):
@@ -834,10 +843,13 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
     not_touched_lu = not _touched_limit_up_today(
         pct, q, daily_data, stock_code, name_em, as_of_date
     )
+    high_px, pre_close_px = _day_high_and_pre_close(q, daily_data, as_of_date)
+    lu_px = _limit_up_price(pre_close_px, stock_code, name_em, as_of_date)
     # hard: only skip if currently sealed at limit-up; opened-after-touch stays in hard_pass
-    if _is_limit_up_now(pct, stock_code, name_em, as_of_date):
-        high_px, pre_close_px = _day_high_and_pre_close(q, daily_data, as_of_date)
-        lu_px = _limit_up_price(pre_close_px, stock_code, name_em, as_of_date)
+    # 同时比价：涨幅因舍入可 < 阈值*0.99 但仍封在涨停价（如 002086@9.83% 价=涨停价）
+    if _is_limit_up_now(
+        pct, stock_code, name_em, as_of_date, price=price, pre_close=pre_close_px
+    ):
         return False, {
             "热门模式": HOT_MODE,
             "当时涨跌幅": "" if pct is None else round(float(pct), 4),
@@ -862,8 +874,6 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         except (TypeError, ValueError):
             pass
 
-    high_px, pre_close_px = _day_high_and_pre_close(q, daily_data, as_of_date)
-    lu_px = _limit_up_price(pre_close_px, stock_code, name_em, as_of_date)
     fail_reasons = _fail_reasons_logic2(
         cond_board=bool(board_ok),
         cond_inflow=bool(inflow_ok),
@@ -898,7 +908,11 @@ def select(stock_code, stock_name, sectors, daily_data, as_of_date, ctx):
         "涨幅门槛": thr,
         "条件_盘中涨幅达标": True,
         "条件_当天未涨停过": bool(not_touched_lu),
-        "条件_非当时涨停": bool(not _is_limit_up_now(pct, stock_code, name_em, as_of_date)),
+        "条件_非当时涨停": bool(
+            not _is_limit_up_now(
+                pct, stock_code, name_em, as_of_date, price=price, pre_close=pre_close_px
+            )
+        ),
         "条件_行业或概念排名达标": bool(board_ok),
         "条件_行业前N": int(BOARD_TOP_N_INDUSTRY),
         "条件_概念前N": int(BOARD_TOP_N_CONCEPT),

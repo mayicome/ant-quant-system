@@ -241,9 +241,19 @@ def discover_dump_csvs(
 
 
 def read_dump_rows(path: Path) -> List[Dict[str, str]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        return [dict(r) for r in reader]
+    """Read dump CSV; try UTF-8 first, then GBK/GB18030 (Windows dump path)."""
+    last_err: Optional[Exception] = None
+    for enc in ("utf-8-sig", "gbk", "gb18030"):
+        try:
+            with path.open("r", encoding=enc, newline="") as f:
+                reader = csv.DictReader(f)
+                return [dict(r) for r in reader]
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("read_dump_rows: no encoding tried")
 
 
 def _pct(x: Optional[float]) -> str:

@@ -5,12 +5,271 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-SHADOW_VERSION = "20261017.2"
+SHADOW_VERSION = "20261103.2"
 SEED_INTERVAL_SEC = 3
 AUCTION_SEED_INTERVAL_SEC = 1.0
 # 盘中 quotes_recv_at(本机收到推送墙钟) 落后超过该秒数 → full_tick 补种
 # 须早于主程序「行情推送停」告警（约 50s），否则会先告警再补种
 QUOTE_STALE_SEED_SEC = 18.0
+
+QUOTE_FRESH_GATE_TIMEOUT_SEC = 5.0
+# 重载/刚武装后：禁止快照/补种首轮用旧 timetag 开火。结构：
+# {"active": bool, "armed_wall": float, "reason": str,
+#  "anchor_by_code": {code: last_tick_time}, "log_at": {key: ts}}
+_QUOTE_FRESH_GATE = None
+_SELL_HIT_TYPES_FOR_QUOTE_GATE = (
+    "single_sell_hit",
+    "breakthrough_sell_hit",
+    "best_sell_hit",
+    "cage_sell_hit",
+    "grid_sell_hit",
+    "scheduled_clear_hit",
+)
+
+
+def _timetag_to_sec(tt: str) -> int:
+    s = str(tt or "").strip()
+    if len(s) >= 8 and s[2] == ":" and s[5] == ":":
+        try:
+            return int(s[0:2]) * 3600 + int(s[3:5]) * 60 + int(s[6:8])
+        except (TypeError, ValueError):
+            return -1
+    digits = "".join(c for c in s if c.isdigit())
+    if len(digits) >= 6:
+        try:
+            return int(digits[0:2]) * 3600 + int(digits[2:4]) * 60 + int(digits[4:6])
+        except (TypeError, ValueError):
+            return -1
+    return -1
+
+
+def _timetag_newer(cur: str, anchor: str) -> bool:
+    """行情 timetag 是否严格新于锚点。空 cur 不算新；空锚点时任意非空 cur 算新。"""
+    c = str(cur or "").strip()
+    a = str(anchor or "").strip()
+    if not c:
+        return False
+    if not a:
+        return True
+    cs = _timetag_to_sec(c)
+    as_ = _timetag_to_sec(a)
+    if cs >= 0 and as_ >= 0:
+        return cs > as_
+    return c > a
+
+
+def _arm_quote_fresh_gate(reason: str = "reload") -> None:
+    """重载/任务刚武装：记下墙钟与各股当前 last_tick_time 作为锚点。"""
+    global _QUOTE_FRESH_GATE
+    import time as _time
+
+    anchors = {}
+    stocks = (_RESULTS or {}).get("stocks") if isinstance(_RESULTS, dict) else {}
+    if isinstance(stocks, dict):
+        for code, bucket in stocks.items():
+            c = str(code or "").strip().upper()
+            if not c or not isinstance(bucket, dict):
+                continue
+            anchors[c] = str(bucket.get("last_tick_time") or "").strip()
+    for c in list(_SUBSCRIBED_CODES or []):
+        cu = str(c or "").strip().upper()
+        if cu and cu not in anchors:
+            anchors[cu] = ""
+    _QUOTE_FRESH_GATE = {
+        "active": True,
+        "armed_wall": float(_time.time()),
+        "reason": str(reason or "reload"),
+        "anchor_by_code": anchors,
+        "log_at": {},
+    }
+    print(
+        "[交易核心] quote_fresh_gate armed reason=%s codes=%d timeout=%.0fs"
+        % (reason, len(anchors), float(QUOTE_FRESH_GATE_TIMEOUT_SEC))
+    )
+
+
+def _release_quote_fresh_gate_code(code: str, timetag: str) -> None:
+    """正常 tick 推进后，该股锚点释放；全部释放则关闭闸。"""
+    global _QUOTE_FRESH_GATE
+    gate = _QUOTE_FRESH_GATE
+    if not isinstance(gate, dict) or not gate.get("active"):
+        return
+    c = str(code or "").strip().upper()
+    if not c:
+        return
+    anchors = gate.get("anchor_by_code")
+    if not isinstance(anchors, dict) or c not in anchors:
+        return
+    if not _timetag_newer(timetag, str(anchors.get(c) or "")):
+        return
+    anchors.pop(c, None)
+    if not anchors:
+        gate["active"] = False
+        print("[交易核心] quote_fresh_gate cleared (all codes fresh)")
+
+
+def _quote_gate_log(key: str, msg: str, *, every_sec: float = 5.0) -> None:
+    import time as _time
+
+    gate = _QUOTE_FRESH_GATE if isinstance(_QUOTE_FRESH_GATE, dict) else {}
+    log_at = gate.setdefault("log_at", {}) if isinstance(gate, dict) else {}
+    now = _time.time()
+    last = float(log_at.get(key) or 0) if isinstance(log_at, dict) else 0.0
+    if now - last < float(every_sec):
+        return
+    if isinstance(log_at, dict):
+        log_at[key] = now
+    print(msg)
+
+
+def _code_quote_timetag(
+    code: str,
+    tick_row: Optional[Dict[str, Any]] = None,
+    ev: Optional[Dict[str, Any]] = None,
+) -> str:
+    """取用于新鲜度判断的行情 timetag（不认 recv_at）。"""
+    if isinstance(tick_row, dict):
+        raw = None
+        if ShadowTickRunner is not None:
+            try:
+                raw = ShadowTickRunner._tick_row_timetag(tick_row)
+            except Exception:
+                raw = None
+        if raw is None:
+            raw = tick_row.get("timetag") or tick_row.get("time")
+        if ShadowTickRunner is not None:
+            try:
+                tt = ShadowTickRunner._format_tick_time(raw)
+                if tt:
+                    return tt
+            except Exception:
+                pass
+        s = str(raw or "").strip()
+        if s:
+            return s
+    if isinstance(ev, dict):
+        tt = str(ev.get("tick_time") or "").strip()
+        if tt:
+            return tt
+    stocks = (_RESULTS or {}).get("stocks") if isinstance(_RESULTS, dict) else {}
+    bucket = (stocks or {}).get(str(code or "").strip().upper()) or {}
+    if isinstance(bucket, dict):
+        return str(bucket.get("last_tick_time") or "").strip()
+    return ""
+
+
+def _refresh_code_full_tick(code: str):
+    """超时后拉一次 ContextInfo.get_full_tick；返回 (row, tick_time, last_price)。"""
+    global _RESULTS
+    c = str(code or "").strip().upper()
+    if not c:
+        return None, "", 0.0
+    ctx = _CONTEXT
+    if ctx is None or not hasattr(ctx, "get_full_tick"):
+        return None, "", 0.0
+    try:
+        tick_map = ctx.get_full_tick([c])
+    except Exception as e:
+        print("[交易核心] stale_quote_block full_tick失败 %s: %s" % (c, e))
+        return None, "", 0.0
+    if not isinstance(tick_map, dict) or not tick_map:
+        return None, "", 0.0
+    row = None
+    if _light_row is not None:
+        row = _light_row(tick_map.get(c))
+        if not row:
+            row = _light_row(tick_map.get(c.lower()) or tick_map.get(c.upper()))
+    elif isinstance(tick_map.get(c), dict):
+        row = tick_map.get(c)
+    if not isinstance(row, dict) or not row:
+        return None, "", 0.0
+    try:
+        lp = float(extract_tick_price(row) or 0)
+    except Exception:
+        lp = 0.0
+    if lp <= 0:
+        try:
+            lp = float(row.get("lastPrice") or row.get("last_price") or 0)
+        except (TypeError, ValueError):
+            lp = 0.0
+    raw_tt = None
+    if ShadowTickRunner is not None:
+        try:
+            raw_tt = ShadowTickRunner._tick_row_timetag(row)
+        except Exception:
+            raw_tt = None
+    if raw_tt is None:
+        raw_tt = row.get("timetag") or row.get("time")
+    tick_time = (
+        ShadowTickRunner._format_tick_time(raw_tt)
+        if ShadowTickRunner is not None
+        else str(raw_tt or "")
+    )
+    if _RESULTS is not None and lp > 0:
+        try:
+            update_price_snapshot(_RESULTS, c, lp, tick_time, tick_row=row)
+        except Exception:
+            pass
+    return row, str(tick_time or "").strip(), float(lp or 0)
+
+
+def _prepare_sell_quote_under_gate(
+    code: str,
+    *,
+    ev: Dict[str, Any],
+    tick_dict: Optional[Dict[str, Any]],
+    last_px: float,
+):
+    """快照/补种闸：无新 timetag 则等；超时拉 full_tick；仍旧则跳过。
+
+    返回 (action, tick_dict, last_px)
+    action: "ok" | "wait" | "block"
+    """
+    import time as _time
+
+    gate = _QUOTE_FRESH_GATE
+    if not isinstance(gate, dict) or not gate.get("active"):
+        return "ok", tick_dict, last_px
+    c = str(code or "").strip().upper()
+    anchors = gate.get("anchor_by_code")
+    if not isinstance(anchors, dict) or c not in anchors:
+        return "ok", tick_dict, last_px
+    anchor = str(anchors.get(c) or "")
+    cur_tt = _code_quote_timetag(c, tick_dict, ev)
+    if _timetag_newer(cur_tt, anchor):
+        _release_quote_fresh_gate_code(c, cur_tt)
+        return "ok", tick_dict, last_px
+
+    armed_wall = float(gate.get("armed_wall") or 0)
+    elapsed = _time.time() - armed_wall
+    reason = str(gate.get("reason") or "reload")
+    if elapsed < float(QUOTE_FRESH_GATE_TIMEOUT_SEC):
+        _quote_gate_log(
+            "wait:%s" % c,
+            "[交易核心] stale_quote_wait %s cur=%s anchor=%s elapsed=%.1fs reason=%s"
+            % (c, cur_tt or "-", anchor or "-", elapsed, reason),
+            every_sec=2.0,
+        )
+        return "wait", tick_dict, last_px
+
+    row, tt, lp = _refresh_code_full_tick(c)
+    if row is not None and _timetag_newer(tt, anchor):
+        _release_quote_fresh_gate_code(c, tt)
+        use_lp = float(lp or 0) if float(lp or 0) > 0 else float(last_px or 0)
+        print(
+            "[交易核心] stale_quote_refresh %s new_tt=%s anchor=%s last=%.4f"
+            % (c, tt or "-", anchor or "-", use_lp)
+        )
+        return "ok", row, use_lp
+
+    _quote_gate_log(
+        "block:%s" % c,
+        "[交易核心] stale_quote_block %s cur=%s refresh_tt=%s anchor=%s reason=%s → 跳过等下一拍"
+        % (c, cur_tt or "-", tt or "-", anchor or "-", reason),
+        every_sec=5.0,
+    )
+    return "block", tick_dict, last_px
+
 NIGHT_RETRY_INTERVAL_SEC = 3.0
 NIGHT_PENDING_TIMEOUT_SEC = 90.0
 # 策略重新运行时 QMT 会先回放图表日线（约 3 秒）。这段时间 quickTrade=1 的委托会被丢掉。
@@ -1237,6 +1496,190 @@ def _finalize_buy_cash_end_skip(
             _disarm_task_in_rules_armed(tid)
 
 
+
+def _position_row(code: str):
+    """持仓行：优先 results.positions，其次账户快照回调缓存 _CACHED_POSITIONS。"""
+    code = str(code or "").strip().upper()
+    if not code:
+        return None
+    short = code.split(".")[0]
+    if isinstance(_RESULTS, dict):
+        pos_map = _RESULTS.get("positions") or {}
+        if isinstance(pos_map, dict):
+            prow = pos_map.get(code) or pos_map.get(short)
+            if isinstance(prow, dict):
+                return prow
+    try:
+        snap = _load_py_module("ant_account_snapshot", "ant_account_snapshot.py")
+        cached = getattr(snap, "_CACHED_POSITIONS", None) if snap is not None else None
+        if isinstance(cached, dict):
+            prow = cached.get(code) or cached.get(short)
+            if isinstance(prow, dict):
+                return prow
+    except Exception:
+        pass
+    return None
+
+
+def _position_can_use_volume(code: str) -> int:
+    """从内存持仓读可卖量（未整手对齐）。缺记录视为 0。"""
+    prow = _position_row(code)
+    if not isinstance(prow, dict):
+        return 0
+    try:
+        return int(float(prow.get("can_use_volume") or prow.get("volume") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _position_volume(code: str) -> int:
+    prow = _position_row(code)
+    if not isinstance(prow, dict):
+        return 0
+    try:
+        return int(float(prow.get("volume") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+_OPEN_SELL_STATUSES = (
+    "submitted",
+    "pending",
+    "accepted",
+    "partial",
+    "partial_filled",
+    "已报",
+    "部成",
+    "已报待撤",
+)
+
+
+def _local_open_sell_volume(code: str) -> int:
+    """本地未完成卖单剩余量（用于校正尚未刷进 can_use 的占仓）。"""
+    code = str(code or "").strip().upper()
+    if not code or not isinstance(_RESULTS, dict):
+        return 0
+    short = code.split(".")[0]
+    total = 0
+    for key in ("orders", "broker_orders"):
+        rows = _RESULTS.get(key) or []
+        if not isinstance(rows, list):
+            continue
+        for o in rows:
+            if not isinstance(o, dict):
+                continue
+            oc = str(o.get("stock_code") or "").strip().upper()
+            if oc != code and oc.split(".")[0] != short:
+                continue
+            if str(o.get("side") or "").lower() != "sell":
+                continue
+            st = str(o.get("status") or "").strip().lower()
+            bst = str(o.get("broker_status_text") or "").strip()
+            if st not in _OPEN_SELL_STATUSES and bst not in ("已报", "部成", "已报待撤"):
+                # 数字柜台状态：50已报 51已报待撤 55部成（常见）
+                try:
+                    bi = int(o.get("broker_status"))
+                except (TypeError, ValueError):
+                    bi = -1
+                if bi not in (50, 51, 55):
+                    continue
+            try:
+                vol = int(float(o.get("volume") or 0))
+            except (TypeError, ValueError):
+                vol = 0
+            try:
+                traded = int(float(o.get("traded_volume") or 0))
+            except (TypeError, ValueError):
+                traded = 0
+            left = max(0, vol - traded)
+            if left > 0:
+                total += left
+    return int(total)
+
+
+def _effective_can_use_volume(code: str) -> int:
+    """内存可卖量，并用本地未完成卖单校正偏高的旧 can_use（不重复扣已冻结）。"""
+    can_use = max(0, int(_position_can_use_volume(code) or 0))
+    vol = max(0, int(_position_volume(code) or 0))
+    reserved = max(0, int(_local_open_sell_volume(code) or 0))
+    if vol > 0 and reserved > 0:
+        implied = max(0, vol - reserved)
+        # 柜台已反映冻结时 can_use<=implied；未刷新时 can_use 偏高，取较小值
+        return min(can_use, implied)
+    return can_use
+
+
+def _finalize_sell_no_avail_skip(
+    *,
+    po,
+    code: str,
+    tid: str,
+    ev_type: str,
+    gi_raw,
+    uid: str,
+    px: float,
+    planned_vol: int,
+    can_use: int,
+    strategy_name: str,
+    ev: dict,
+    msg: str,
+    not_ready: bool = False,
+) -> None:
+    """卖出可用仓为 0：记 skipped 并结束任务（不排队、不 unlock 重试）。"""
+    from datetime import datetime as _dt
+
+    record = {
+        "stock_code": code,
+        "side": "sell",
+        "price": float(px or 0),
+        "volume": 0,
+        "status": "skipped",
+        "msg": msg,
+        "strategy_name": strategy_name,
+        "task_id": tid,
+        "event_type": ev_type,
+        "user_order_id": uid,
+        "at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "sell_block": "no_avail",
+        "planned_volume": int(planned_vol or 0),
+        "can_use_volume": int(can_use or 0),
+        "order_sysid": "NO_AVAIL",
+    }
+    if not_ready:
+        record["position_not_ready"] = True
+    _attach_event_context_to_order(record, ev)
+    if gi_raw is not None and ev_type == "grid_sell_hit":
+        try:
+            record["grid_index"] = int(gi_raw)
+        except (TypeError, ValueError):
+            pass
+    po.append_order_record(_RESULTS, record)
+    ev["order"] = {
+        "ok": False,
+        "price": record.get("price"),
+        "volume": 0,
+        "status": "skipped",
+        "msg": msg,
+        "sell_block": "no_avail",
+        "planned_volume": int(planned_vol or 0),
+        "can_use_volume": int(can_use or 0),
+    }
+    print(
+        "[交易核心] 委托无可用仓结束 %s tid=%s planned=%s can_use=%s msg=%s"
+        % (code, tid, planned_vol, can_use, msg)
+    )
+    _mark_buy_task_done(code, tid, gi_raw)
+    if tid:
+        if ev_type == "grid_sell_hit" and gi_raw is not None:
+            try:
+                gi = int(gi_raw)
+            except (TypeError, ValueError):
+                gi = -1
+            _mark_grid_point_in_rules_armed(tid, gi, all_done=True)
+        else:
+            _disarm_task_in_rules_armed(tid)
+
+
 def _available_cash() -> float:
     acc = (_RESULTS or {}).get("account") if isinstance(_RESULTS, dict) else None
     if not isinstance(acc, dict):
@@ -1419,7 +1862,7 @@ def _drop_stale_session(for_night=False):
     return True
 
 
-def _handle_order_events(ContextInfo, events, datas) -> bool:
+def _handle_order_events(ContextInfo, events, datas, quote_gate: bool = False) -> bool:
     """对 single_buy/sell 与真突破 tb_pass 调 passorder；返回是否写入了订单记录。"""
     global _RESULTS
     night_only = bool(events) and all(
@@ -1881,21 +2324,84 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             )
             changed = True
             continue
-        if ev_type == "best_sell_hit" and vol <= 0:
-            # volume=0 表示清仓：用 results 持仓可卖量
-            pos_map = (_RESULTS or {}).get("positions") or {}
-            prow = None
-            if isinstance(pos_map, dict):
-                prow = pos_map.get(code) or pos_map.get(code.split(".")[0])
-            if isinstance(prow, dict):
+        if ev_type == "best_sell_hit":
+            # 触发下单前看可用仓：优先内存（results + 持仓回调缓存），
+            # 仅缺持仓行/持仓告警时才打柜台 sync；0 → 失败结束；少于计划量 → 按可用下。
+            planned = int(vol or 0)
+            sync_ok = False
+            prow = _position_row(code)
+            pos_alert = (
+                (_RESULTS or {}).get("position_alert")
+                if isinstance(_RESULTS, dict)
+                else None
+            )
+            need_sync = (prow is None) or (
+                isinstance(pos_alert, dict) and pos_alert.get("active")
+            )
+            if need_sync:
                 try:
-                    vol = int(float(prow.get("can_use_volume") or prow.get("volume") or 0))
-                except (TypeError, ValueError):
-                    vol = 0
-            vol = (vol // 100) * 100
-            if vol <= 0:
-                print("[交易核心] 弹性卖跳过 无持仓 %s" % code)
+                    snap = _load_py_module(
+                        "ant_account_snapshot", "ant_account_snapshot.py"
+                    )
+                    if (
+                        snap is not None
+                        and hasattr(snap, "sync_account_snapshot_to_results")
+                        and _RESULTS is not None
+                    ):
+                        snap.sync_account_snapshot_to_results(ContextInfo, _RESULTS)
+                        sync_ok = True
+                        prow = _position_row(code)
+                except Exception as e:
+                    print("[交易核心] 弹性卖持仓同步失败: %s" % e)
+            can_use_raw = _effective_can_use_volume(code)
+            can_use = (int(can_use_raw) // 100) * 100
+            not_ready = bool(
+                isinstance(pos_alert, dict) and pos_alert.get("active")
+            ) or (prow is None and not sync_ok and can_use <= 0)
+            if planned <= 0:
+                # max_volume=0：清仓语义，按可用全卖
+                order_vol = can_use
+            elif can_use <= 0:
+                order_vol = 0
+            elif can_use < planned:
+                order_vol = can_use
+            else:
+                order_vol = planned
+            order_vol = (int(order_vol) // 100) * 100
+            if order_vol <= 0:
+                ready_note = "，持仓快照可疑/未就绪" if not_ready else ""
+                msg = (
+                    "无可用仓位，弹性卖失败结束（计划%d股，可用%d股%s）"
+                    % (planned, can_use, ready_note)
+                )
+                _finalize_sell_no_avail_skip(
+                    po=po,
+                    code=code,
+                    tid=tid,
+                    ev_type=ev_type,
+                    gi_raw=gi_raw,
+                    uid=uid,
+                    px=float(last_px or trig or 0),
+                    planned_vol=planned,
+                    can_use=can_use,
+                    strategy_name="蚂蚁-弹性卖出",
+                    ev=ev,
+                    msg=msg,
+                    not_ready=not_ready,
+                )
+                changed = True
                 continue
+            if planned > 0 and order_vol < planned:
+                print(
+                    "[交易核心] 弹性卖按可用裁剪 %s planned=%s can_use=%s -> %s"
+                    % (code, planned, can_use, order_vol)
+                )
+            elif planned <= 0:
+                print(
+                    "[交易核心] 弹性卖清仓用量 %s can_use=%s -> %s"
+                    % (code, can_use, order_vol)
+                )
+            vol = order_vol
         if ev_type == "scheduled_clear_hit":
             # 生成时 max_volume 常为全仓；盘中弹性/突破已卖后须按可卖量截断，否则柜台废单。
             # 先强制刷持仓；若快照空，则用「任务量 - 当日已卖成交」兜底。
@@ -1974,12 +2480,58 @@ def _handle_order_events(ContextInfo, events, datas) -> bool:
             "scheduled_clear_hit",
         ):
             is_buy_order = False
+            if quote_gate:
+                _g_act, tick_dict, last_px = _prepare_sell_quote_under_gate(
+                    code, ev=ev, tick_dict=tick_dict, last_px=last_px
+                )
+                if _g_act in ("wait", "block"):
+                    _unlock_order_task(code, tid, gi_raw, ev_type)
+                    ev["order"] = {
+                        "ok": False,
+                        "price": float(last_px or 0),
+                        "volume": int(vol or 0),
+                        "status": "stale_quote_wait" if _g_act == "wait" else "stale_quote_block",
+                        "msg": "stale_quote_block" if _g_act == "block" else "stale_quote_wait",
+                    }
+                    continue
+            # 闸已放行（timetag 已新或超时刷新成功）：可用买一/新现价；
+            # 若仍无盘口且 quote_gate，禁止静默用触发价凑限价。
+            # 下单瞬间优先用当前 tick 现价，避免事件里旧 last_price 参与兜底。
+            if isinstance(tick_dict, dict):
+                for _k in (
+                    "lastPrice",
+                    "last",
+                    "price",
+                ):
+                    try:
+                        _lp = float(tick_dict.get(_k) or 0)
+                    except (TypeError, ValueError):
+                        _lp = 0.0
+                    if _lp > 0:
+                        last_px = _lp
+                        break
             sell_px = po.resolve_sell_limit_price(
                 code,
                 last_price=last_px,
                 trigger_price=trig,
                 tick_row=tick_dict,
+                allow_last_price_fallback=True,
             )
+            if quote_gate and float(sell_px or 0) <= 0:
+                _unlock_order_task(code, tid, gi_raw, ev_type)
+                _quote_gate_log(
+                    "nobook:%s" % code,
+                    "[交易核心] stale_quote_block %s 无可用卖出价 → 跳过等下一拍" % code,
+                    every_sec=5.0,
+                )
+                ev["order"] = {
+                    "ok": False,
+                    "price": float(last_px or 0),
+                    "volume": int(vol or 0),
+                    "status": "stale_quote_block",
+                    "msg": "stale_quote_no_book",
+                }
+                continue
             if ev_type == "best_sell_hit":
                 strategy_name = "蚂蚁-弹性卖出"
                 side_tag = "弹性卖"
@@ -2464,7 +3016,7 @@ def _periodic_sync_body(ContextInfo):
         ):
             snap_events = _RUNNER.evaluate_price_map(_RESULTS.get("stocks") or {})
             if snap_events:
-                _apply_runner_events(snap_events, {})
+                _apply_runner_events(snap_events, {}, quote_gate=True)
     except Exception as e:
         print("[交易核心] 快照触发错误: %s" % e)
     try:
@@ -2703,18 +3255,22 @@ def _apply_reloaded_rules(ContextInfo, rules, allow_resubscribe=True, runner_rel
     if codes_changed or subscribe_changed:
         if allow_resubscribe:
             _SUBSCRIBED_CODES = list(subscribe_codes)
-            _subscribe_codes(ContextInfo, subscribe_codes)
-            if _RESULTS is not None:
-                removed = prune_results_stocks(_RESULTS, subscribe_codes)
-                if removed:
-                    print("[交易核心] 规则重载: 已裁剪股票 removed=%d" % removed)
-            print("[交易核心] 规则重载: 重新订阅完成")
         else:
             _PENDING_RESUBSCRIBE = list(subscribe_codes)
             print(
                 "[交易核心] 规则重载: 重新订阅已延迟 codes=%d"
                 % len(subscribe_codes)
             )
+    # 更新订阅列表后记锚点，再真正 subscribe/seed，避免首轮旧盘口开火
+    _arm_quote_fresh_gate("session_reload" if _SESSION_MODE else "rules_reload")
+    if codes_changed or subscribe_changed:
+        if allow_resubscribe:
+            _subscribe_codes(ContextInfo, subscribe_codes)
+            if _RESULTS is not None:
+                removed = prune_results_stocks(_RESULTS, subscribe_codes)
+                if removed:
+                    print("[交易核心] 规则重载: 已裁剪股票 removed=%d" % removed)
+            print("[交易核心] 规则重载: 重新订阅完成")
     elif tasks_changed:
         print("[交易核心] 规则重载: 任务已更新（触发价/参数）")
 
@@ -2774,18 +3330,22 @@ def reload_rules_if_changed(ContextInfo, *, allow_resubscribe: bool = True):
     if codes_changed or subscribe_changed:
         if allow_resubscribe:
             _SUBSCRIBED_CODES = list(subscribe_codes)
-            _subscribe_codes(ContextInfo, subscribe_codes)
-            if _RESULTS is not None:
-                removed = prune_results_stocks(_RESULTS, subscribe_codes)
-                if removed:
-                    print("[交易核心] 规则重载: 已裁剪股票 removed=%d" % removed)
-            print("[交易核心] 规则重载: 重新订阅完成")
         else:
             _PENDING_RESUBSCRIBE = list(subscribe_codes)
             print(
                 "[交易核心] 规则重载: 重新订阅已延迟 codes=%d"
                 % len(subscribe_codes)
             )
+    # 更新订阅列表后记锚点，再真正 subscribe/seed，避免首轮旧盘口开火
+    _arm_quote_fresh_gate("rules_reload")
+    if codes_changed or subscribe_changed:
+        if allow_resubscribe:
+            _subscribe_codes(ContextInfo, subscribe_codes)
+            if _RESULTS is not None:
+                removed = prune_results_stocks(_RESULTS, subscribe_codes)
+                if removed:
+                    print("[交易核心] 规则重载: 已裁剪股票 removed=%d" % removed)
+            print("[交易核心] 规则重载: 重新订阅完成")
     elif tasks_changed:
         print("[交易核心] 规则重载: 任务已更新（触发价/参数）")
 
@@ -3039,12 +3599,12 @@ def _seed_snapshots_from_full_tick(codes: List[str]) -> bool:
             print("[交易核心] seed 触发错误: %s" % e)
             events = []
         if events:
-            _apply_runner_events(events, tick_datas)
+            _apply_runner_events(events, tick_datas, quote_gate=True)
             changed = True
     return changed
 
 
-def _apply_runner_events(events, datas) -> bool:
+def _apply_runner_events(events, datas, quote_gate: bool = False) -> bool:
     """打印、passorder/跳过、写 results.orders 与 done_task_ids。"""
     global _RUNNER, _RESULTS
     if not events or _RESULTS is None:
@@ -3064,7 +3624,7 @@ def _apply_runner_events(events, datas) -> bool:
         if ev.get("detail"):
             print("[交易核心] 详情: %s" % ev.get("detail"))
     try:
-        _handle_order_events(_CONTEXT, events, datas or {})
+        _handle_order_events(_CONTEXT, events, datas or {}, quote_gate=bool(quote_gate))
     except Exception as e:
         print("[交易核心] 委托处理错误: %s: %s" % (type(e).__name__, e))
     try:
@@ -3130,6 +3690,8 @@ def _on_tick_body(datas):
             continue
         if update_price_snapshot(_RESULTS, code, lp, tick_time, tick_row=row):
             price_changed = True
+        if tick_time:
+            _release_quote_fresh_gate_code(code, tick_time)
 
     if _startup_tasks_held():
         if price_changed:

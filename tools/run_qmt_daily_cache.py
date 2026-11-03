@@ -274,7 +274,7 @@ def main() -> int:
 
     from tools.ingest_qmt_daily_cache import ingest_from_summary
 
-    def _one_shot(codes_part, tag_suffix=""):
+    def _one_shot(codes_part, tag_suffix="", update_manifest=True):
         run_tag = (args.run_tag.strip() or make_run_tag()) + (tag_suffix or "")
         pre_offset = 0
         pre_path, _ = resolve_today_formula_output()
@@ -324,72 +324,134 @@ def main() -> int:
             summary,
             trade_date=str(summary.get("trade_date") or trade_date),
             run_tag=run_tag,
+            update_manifest=bool(update_manifest),
         )
         return rc, run_tag, summary
 
-    if shard_size <= 0 or len(codes) <= shard_size:
-        rc, _, _ = _one_shot(codes)
-        return rc
+    def _run_code_shards(codes_part, *, phase: str, update_manifest: bool, tag_base: str):
+        """Sequential shards for one phase. Returns (rc, last_tag)."""
+        if not codes_part:
+            print("[qmt-daily] %s 段为空，跳过" % phase, flush=True)
+            return 0, ""
 
-    # sequential shards
-    total = len(codes)
-    n_shards = (total + shard_size - 1) // shard_size
-    print(
-        "[qmt-daily] 分片模式 total=%d shard_size=%d shards=%d offset0=%d"
-        % (total, shard_size, n_shards, offset0),
-        flush=True,
-    )
-    last_rc = 0
-    for si in range(n_shards):
-        a = si * shard_size
-        b = min(total, a + shard_size)
-        part = codes[a:b]
-        abs_off = offset0 + a
-        tag_suffix = "_s%02d" % (si + 1)
+        local_shard = shard_size
+        if local_shard <= 0 and len(codes_part) > 100 and not args.dry_run:
+            local_shard = 100
+            print(
+                "[qmt-daily] %s 超过 100，自动按 shard_size=%d 分片" % (phase, local_shard),
+                flush=True,
+            )
+
+        if local_shard <= 0 or len(codes_part) <= local_shard:
+            rc, tag, _ = _one_shot(
+                codes_part, tag_suffix=tag_base or "", update_manifest=update_manifest
+            )
+            return int(rc or 0), tag
+
+        total = len(codes_part)
+        n_shards = (total + local_shard - 1) // local_shard
         print(
-            "[qmt-daily] === shard %d/%d codes[%d:%d] abs_offset=%d n=%d ==="
-            % (si + 1, n_shards, a, b, abs_off, len(part)),
+            "[qmt-daily] %s 分片 total=%d shard_size=%d shards=%d"
+            % (phase, total, local_shard, n_shards),
             flush=True,
         )
-        rc, tag, summary = _one_shot(part, tag_suffix=tag_suffix)
-        last_rc = rc
-        if args.dry_run:
-            # dry-run only writes last shard file; still ok to stop after first write demo
-            print("[qmt-daily] dry-run 只演示第 1 片，退出", flush=True)
-            return 0
-        if rc not in (0, None) and rc != 0:
+        last_rc = 0
+        last_tag = ""
+        for si in range(n_shards):
+            a = si * local_shard
+            b = min(total, a + local_shard)
+            part = codes_part[a:b]
+            tag_suffix = "%s_s%02d" % (tag_base, si + 1)
             print(
-                "[qmt-daily] 分片失败 rc=%d run_tag=%s；QMT 若已崩请重启后继续："
-                " python tools/run_qmt_daily_cache.py --offset %d --shard-size %d"
-                % (rc, tag, abs_off + (len(part) if summary and not summary.get("error") else 0), shard_size),
+                "[qmt-daily] === %s shard %d/%d codes[%d:%d] n=%d ==="
+                % (phase, si + 1, n_shards, a, b, len(part)),
                 flush=True,
             )
-            # if no summary (crash), resume at this shard start
-            if summary is None:
-                print(
-                    "[qmt-daily] 无 SUMMARY（疑似客户端崩溃），从 abs_offset=%d 重跑本片"
-                    % abs_off,
-                    flush=True,
-                )
-            return int(rc or 3)
-        if summary and summary.get("error"):
-            print(
-                "[qmt-daily] 本片 SUMMARY 带 error，停止。续跑 --offset %d --shard-size %d"
-                % (abs_off, shard_size),
-                flush=True,
+            rc, tag, summary = _one_shot(
+                part, tag_suffix=tag_suffix, update_manifest=update_manifest
             )
-            return 4
-        # 片间冷却，减轻客户端内存/日志压力
-        if si + 1 < n_shards:
-            gap = float(getattr(args, "shard_interval", 3.0) or 0.0)
-            if gap > 0:
+            last_rc = rc
+            last_tag = tag
+            if args.dry_run:
+                print("[qmt-daily] dry-run 只演示第 1 片，退出", flush=True)
+                return 0, tag
+            if rc not in (0, None) and rc != 0:
                 print(
-                    "[qmt-daily] 片间等待 %.1fs 后继续下一片…" % gap,
+                    "[qmt-daily] %s 分片失败 rc=%d run_tag=%s；续跑可用 --offset 对应该段起点"
+                    % (phase, rc, tag),
                     flush=True,
                 )
-                time.sleep(gap)
+                if summary is None:
+                    print(
+                        "[qmt-daily] 无 SUMMARY（疑似客户端崩溃），从本片起点重跑",
+                        flush=True,
+                    )
+                return int(rc or 3), tag
+            if summary and summary.get("error"):
+                print(
+                    "[qmt-daily] %s 本片 SUMMARY 带 error，停止。" % phase,
+                    flush=True,
+                )
+                return 4, tag
+            if si + 1 < n_shards:
+                gap = float(getattr(args, "shard_interval", 3.0) or 0.0)
+                if gap > 0:
+                    print(
+                        "[qmt-daily] 片间等待 %.1fs 后继续下一片…" % gap,
+                        flush=True,
+                    )
+                    time.sleep(gap)
+        return int(last_rc or 0), last_tag
+
+    # Split stock vs ETF so stock coverage can seal manifest before ETF pull.
+    stocks_full = load_universe_codes(
+        include_etf=False, include_bj=not args.no_bj
+    )
+    stock_set = set(stocks_full)
+    stock_part = [c for c in codes if c in stock_set]
+    etf_part = [c for c in codes if c not in stock_set]
+    print(
+        "[qmt-daily] 分段 stock=%d etf=%d (门禁用股票覆盖率；ETF 不改 manifest)"
+        % (len(stock_part), len(etf_part)),
+        flush=True,
+    )
+
+    rc_stock, _ = _run_code_shards(
+        stock_part, phase="股票", update_manifest=True, tag_base="_stk"
+    )
+    if args.dry_run:
+        return 0
+    if rc_stock != 0:
+        return rc_stock
+
+    # Seal manifest after stocks — 岳教授 can start; ETF quality does not matter.
+    try:
+        from tools.ingest_qmt_daily_cache import _update_manifest, _count_codes_with_day
+
+        covered = _count_codes_with_day(trade_date, stocks_only=True)
+        _update_manifest(trade_date, ok=covered, miss=0, universe=0)
+        print(
+            "[qmt-daily] 股票段收尾 manifest（仅股票）ok=%d" % covered,
+            flush=True,
+        )
+    except Exception as e:
+        print("[qmt-daily] 股票段收尾 manifest 失败（忽略）: %s" % e, flush=True)
+
+    rc_etf = 0
+    if etf_part:
+        rc_etf, _ = _run_code_shards(
+            etf_part, phase="ETF", update_manifest=False, tag_base="_etf"
+        )
+        print(
+            "[qmt-daily] ETF 段结束 rc=%d（不改动 manifest）" % int(rc_etf or 0),
+            flush=True,
+        )
+    else:
+        print("[qmt-daily] 无 ETF 段", flush=True)
+
     print("[qmt-daily] 全部分片完成", flush=True)
-    return int(last_rc or 0)
+    return int(rc_etf or rc_stock or 0)
+
 
 
 if __name__ == "__main__":

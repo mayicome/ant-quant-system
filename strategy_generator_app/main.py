@@ -2307,6 +2307,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self._backtest_trades_data: List[dict] = []
         # 股票池跨策略复制/粘贴缓存（仅在当前程序运行期有效）
         self._pool_clipboard_codes = []
+        self._pool_clipboard_selection_dates = {}
         self._pool_clipboard_source_name = ""
         # 未保存修改追踪：四个可编辑区块（备注、股票池、策略参数、策略逻辑）
         self._loading_strategy = False
@@ -2630,7 +2631,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "通用策略：选择含选股日的选股文件做批量回测。\n"
             "【马总逻辑1】不再选手动选股文件：用回测页起止日期，\n"
             "按「批量导入选股文件」同款设置滚动建池，再生成 QMT 细回测脚本投递探针。\n"
-            "券商 tick 约近 1 个月；更早日期常缺 tick。"
+            "券商 tick 约近 1 个月；更早日期常缺 tick。\n"
+            "【买：马总盘中-满足条件单点】也不选手动文件：用回测起止日期 + 策略生成时间，\n"
+            "读取 data\\ma_zong_intraday_candidates\\YYYY-MM-DD_HHMM.csv，\n"
+            "按当时最新价+0.01 生成买入成交明细（不滤软门槛；仅买、暂无卖）。"
         )
         self.backtest_batch_file_btn.clicked.connect(self._on_batch_backtest_from_selection_file)
         self.backtest_export_last_btn = QPushButton("导出上次回测结果…")
@@ -2705,7 +2709,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         backtest_btn_row3s = QHBoxLayout()
         self.backtest_mz1_qmt_sell_gen_btn = QPushButton("生成卖出QMT细回测…")
         self.backtest_mz1_qmt_sell_gen_btn.setToolTip(
-            "【马总逻辑1卖】用已载入的买入 CSV/批量接续状态，生成卖出细回测脚本并原子写入\n"
+            "【马总逻辑1卖 / 盘中买入次日了结】用已载入的买入 CSV/批量接续状态，生成卖出细回测脚本并原子写入\n"
             "国金 QMT userdata\\mz1_qmt_fine_watch\\current.py（与买腿同一路径，覆盖）。\n"
             "需先「从买入成交明细CSV接续…」或「载入上一轮批量回测→本策略」。\n"
             "结果在 FormulaOutput（ANT_MZ1_SELL_BT|）。不改「下一轮批量」引擎路径。"
@@ -4447,6 +4451,107 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sp["selection_date_by_code"] = new_map
         cfg.strategy_params = sp
 
+    @staticmethod
+    def _norm_selection_date_map(raw) -> Dict[str, str]:
+        """Normalize selection_date_by_code to {code6: yyyy-mm-dd}."""
+        out: Dict[str, str] = {}
+        if not isinstance(raw, dict):
+            return out
+        for k, v in raw.items():
+            c6 = _normalize_code(k)
+            ds = str(v or "").strip()[:10]
+            if c6 and len(ds) >= 10:
+                out[c6] = ds
+        return out
+
+    def _collect_selection_dates_across_strategies(
+        self, codes: Optional[List[str]] = None
+    ) -> Dict[str, str]:
+        """Gather selection_date_by_code from all loaded strategies.
+
+        Prefer buy-side maps when the same code appears in multiple strategies
+        (sell pools often lose dates after sync-positions). Later strategies only
+        fill still-missing codes.
+        """
+        want = {
+            _normalize_code(c)
+            for c in (codes or [])
+            if _normalize_code(c)
+        }
+        buy_maps: List[Dict[str, str]] = []
+        sell_maps: List[Dict[str, str]] = []
+        for cfg in list(getattr(self, "_strategies", None) or []):
+            sp = getattr(cfg, "strategy_params", None) or {}
+            m = self._norm_selection_date_map(sp.get("selection_date_by_code"))
+            if not m:
+                continue
+            is_sell = False
+            try:
+                is_sell = strategy_uses_positions(
+                    getattr(cfg, "strategy_code", "") or "",
+                    sp,
+                    getattr(cfg, "name", "") or "",
+                )
+            except Exception:
+                is_sell = False
+            (sell_maps if is_sell else buy_maps).append(m)
+        out: Dict[str, str] = {}
+        for m in buy_maps + sell_maps:
+            for c6, ds in m.items():
+                if want and c6 not in want:
+                    continue
+                if c6 not in out:
+                    out[c6] = ds
+        return out
+
+    def _ensure_pool_selection_dates(
+        self,
+        cfg,
+        codes: Optional[List[str]] = None,
+        *,
+        persist: bool = False,
+        extra_incoming: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
+        """Ensure params.selection_date_by_code covers pool codes.
+
+        Existing dates win; missing ones are filled from extra_incoming then
+        from other strategies' selection_date_by_code. Empty remains skipped
+        (LU10 still needs a real selection date).
+        """
+        if cfg is None:
+            return {}
+        pool = [
+            _normalize_code(c)
+            for c in (
+                codes
+                if codes is not None
+                else (getattr(cfg, "stock_codes", None) or [])
+            )
+            if _normalize_code(c)
+        ]
+        sp = dict(cfg.strategy_params or {})
+        cur = self._norm_selection_date_map(sp.get("selection_date_by_code"))
+        incoming = self._norm_selection_date_map(extra_incoming)
+        collected = self._collect_selection_dates_across_strategies(pool)
+        filled_n = 0
+        for c6 in pool:
+            if c6 in cur and cur[c6]:
+                continue
+            ds = incoming.get(c6) or collected.get(c6) or ""
+            if ds:
+                cur[c6] = ds
+                filled_n += 1
+        keep = set(pool)
+        cur = {k: v for k, v in cur.items() if k in keep}
+        sp["selection_date_by_code"] = cur
+        cfg.strategy_params = sp
+        if persist and filled_n:
+            try:
+                save_strategy(cfg)
+            except Exception:
+                pass
+        return dict(cur)
+
     def _save_pool_codes_silent(self) -> bool:
         """静默保存当前策略股票池，不弹成功提示；成功返回 True。"""
         sid = self._get_selected_strategy_id()
@@ -4475,11 +4580,28 @@ class StrategyGeneratorMainWindow(QMainWindow):
         cfg = self._find_strategy_by_id(sid)
         codes = list(self._get_pool_codes_from_list())
         self._pool_clipboard_codes = codes
+        # 一并带上选股日，避免粘到卖出策略后 selection_date_by_code 变空、LU10 挂不出
+        sel_map = {}
+        if cfg is not None:
+            sel_map = self._norm_selection_date_map(
+                (cfg.strategy_params or {}).get("selection_date_by_code")
+            )
+            if codes:
+                filled = self._ensure_pool_selection_dates(
+                    cfg, codes, persist=False
+                )
+                sel_map = {
+                    c: filled[c] for c in codes if c in filled and filled.get(c)
+                }
+        self._pool_clipboard_selection_dates = {
+            c: sel_map[c] for c in codes if c in sel_map and sel_map.get(c)
+        }
         self._pool_clipboard_source_name = (cfg.name if cfg else sid) or sid
+        n_sel = len(self._pool_clipboard_selection_dates or {})
         QMessageBox.information(
             self,
             "复制",
-            f"已复制 {len(codes)} 只股票（来源策略：{self._pool_clipboard_source_name}）。",
+            f"已复制 {len(codes)} 只股票（含选股日 {n_sel} 只；来源策略：{self._pool_clipboard_source_name}）。",
         )
 
     def _on_export_pool_csv(self):
@@ -4562,12 +4684,41 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not self._pool_clipboard_codes:
             QMessageBox.information(self, "粘贴", "当前没有可粘贴的股票池内容，请先在其他策略点击「复制」。")
             return
-        added = self._merge_codes_into_pool(self._pool_clipboard_codes)
+        cfg = self._find_strategy_by_id(sid)
+        if not cfg:
+            QMessageBox.warning(self, "警告", "未找到所选策略。")
+            return
+        incoming_dates = dict(getattr(self, "_pool_clipboard_selection_dates", None) or {})
+        # 即使代码已在池中，也要把剪贴板选股日并入（修复「有票无选股日」）
+        entry_window = _entry_window_trading_days_from_params(cfg.strategy_params or {})
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            try:
+                entry_window = max(1, int(self.param_entry_window_spin.value()))
+            except (TypeError, ValueError):
+                pass
+        added, _new_codes, date_note, _strength_note, _sp = self._merge_codes_into_strategy_pool(
+            cfg,
+            list(self._pool_clipboard_codes),
+            incoming_dates=incoming_dates,
+            entry_window=entry_window,
+        )
+        # 再从其它策略补齐仍缺的选股日
+        self._ensure_pool_selection_dates(
+            cfg, self._get_pool_codes_from_list(), persist=True, extra_incoming=incoming_dates
+        )
+        src = self._pool_clipboard_source_name or "已复制策略"
         if added > 0:
-            src = self._pool_clipboard_source_name or "已复制策略"
-            QMessageBox.information(self, "粘贴", f"已从「{src}」并入 {added} 只股票，并自动保存。")
+            QMessageBox.information(
+                self,
+                "粘贴",
+                f"已从「{src}」并入 {added} 只股票，并自动保存{date_note}。",
+            )
         else:
-            QMessageBox.information(self, "粘贴", "粘贴完成：这些股票已在当前策略股票池中，无新增。")
+            QMessageBox.information(
+                self,
+                "粘贴",
+                f"粘贴完成：这些股票已在当前策略股票池中，无新增{date_note}。",
+            )
 
     def _on_import_pool_codes(self):
         """从 Excel/CSV/TXT 文件导入股票代码（并入现有列表，去重，不清空）。
@@ -5163,11 +5314,21 @@ class StrategyGeneratorMainWindow(QMainWindow):
             wrote = self._prompt_missing_entry_dates(codes)
             self._fill_pool_list(codes, set_original=True, load_task_legs=True)
             self._save_pool_codes_silent()
+            # 同步持仓只带代码；从其它策略（买/卖）把选股日补回，供 LU10 等腿使用
+            cfg2 = self._find_strategy_by_id(self._get_selected_strategy_id())
+            sel_filled = {}
+            if cfg2 is not None:
+                sel_filled = self._ensure_pool_selection_dates(
+                    cfg2, codes, persist=True
+                )
+                self._fill_pool_list(codes, set_original=True, load_task_legs=True)
+            n_sel = sum(1 for c in codes if sel_filled.get(c))
             extra = f"；新补建仓日 {wrote} 只" if wrote else ""
+            extra2 = f"；选股日已补齐 {n_sel}/{len(codes)}" if codes else ""
             QMessageBox.information(
                 self,
                 "同步持仓",
-                f"已按 QMT 持仓重建卖出股票池 {len(codes)} 只并自动保存{extra}。",
+                f"已按 QMT 持仓重建卖出股票池 {len(codes)} 只并自动保存{extra}{extra2}。",
             )
             return
 
@@ -7827,16 +7988,34 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sid = (self._get_selected_strategy_id() or "").strip()
         cfg = self._find_strategy_by_id(sid) if sid else None
         name = (getattr(cfg, "name", "") or "") if cfg else ""
-        if not m.is_mz1_sell_strategy(sid, name):
+        _is_ok = False
+        try:
+            _is_ok = bool(m.is_qmt_sell_fine_strategy(sid, name))
+        except Exception:
+            _is_ok = bool(m.is_mz1_sell_strategy(sid, name))
+        if not _is_ok:
             reply = QMessageBox.question(
                 self,
                 "生成卖出QMT细回测",
-                "当前策略看起来不是「卖：马总逻辑1」。仍按卖腿规则生成脚本吗？",
+                "当前策略看起来不是「卖：马总逻辑1 / 盘中买入次日了结」。仍按卖腿规则生成脚本吗？",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if reply != QMessageBox.Yes:
                 return
+        try:
+            _sell_variant = m.sell_variant_for(sid, name)
+        except Exception:
+            _sell_variant = "mz1"
+        # 盘中次日了结：缺省持有交易日数=1（若界面仍停在旧默认2，按策略参数纠正一次）
+        if _sell_variant == "intraday_next_day" and hasattr(self, "sell_chain_hold_spin"):
+            try:
+                _sp0 = dict(getattr(cfg, "strategy_params", None) or {}) if cfg is not None else {}
+                _pref = int(_sp0.get("entry_window_trading_days") or _sp0.get("sell_hold_from_next_day") or 1)
+                if _pref >= 1 and int(self.sell_chain_hold_spin.value()) == 2 and _pref == 1:
+                    self.sell_chain_hold_spin.setValue(1)
+            except Exception:
+                pass
         segs = list(getattr(self, "_chained_batch_segments", None) or [])
         if not segs:
             QMessageBox.warning(
@@ -7936,8 +8115,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 strategy_run_end_time=tp.get("strategy_run_end_time", "15:00"),
                 first_buy_dates=first_buy,
                 last_buy_dates=last_buy,
+                sell_variant=_sell_variant,
+                strategy_id=sid,
+                strategy_name=name,
+                strategy_code=(getattr(cfg, "strategy_code", None) or "") if cfg is not None else "",
             )
-            out = m.write_qmt_strategy_file(src, also_watch=True)
+            out = m.write_qmt_strategy_file(src, also_watch=True, sell_variant=_sell_variant)
         except Exception as e:
             QMessageBox.critical(self, "生成失败", str(e))
             return
@@ -7961,6 +8144,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             ),
             "持有交易日数：%d | 定时清仓：%s | from_t1=%s" % (hold_n, clear_t, from_t1),
             "前缀：ANT_MZ1_SELL_BT|",
+            "卖腿变体：%s" % _sell_variant,
         ]
         if any(notes):
             meta_bits.append("注入说明：" + " | ".join([n for n in notes if n][:3]))
@@ -8017,6 +8201,50 @@ class StrategyGeneratorMainWindow(QMainWindow):
             QMessageBox.critical(self, "导入失败", str(e))
             return
         self._fill_backtest_trades_table(rows)
+        # 盘中次日了结：额外落一份卖出明细 CSV，便于接续/汇总
+        csv_path = None
+        try:
+            _sid2 = (self._get_selected_strategy_id() or "").strip()
+            _cfg2 = self._find_strategy_by_id(_sid2) if _sid2 else None
+            _name2 = (getattr(_cfg2, "name", "") or "") if _cfg2 else ""
+            _var2 = "mz1"
+            try:
+                _var2 = m.sell_variant_for(_sid2, _name2)
+            except Exception:
+                _var2 = "mz1"
+            if rows and _var2 == "intraday_next_day":
+                import csv as _csv
+                import io as _io
+                hd = m.history_sell_csv_dir(sell_variant=_var2)
+                csv_path = hd / ("回测成交明细_卖出_盘中次日了结_%s.csv" % stamp)
+                headers = [
+                    "日期", "时间", "代码", "选股日", "方向", "价格", "数量", "金额",
+                    "规则名", "腿键", "触发信息", "来源",
+                ]
+                with _io.open(str(csv_path), "w", encoding="utf-8-sig", newline="") as _cf:
+                    _w = _csv.writer(_cf)
+                    _w.writerow(headers)
+                    for r in rows:
+                        _w.writerow([
+                            r.get("date") or "",
+                            r.get("time") or "",
+                            r.get("code") or "",
+                            r.get("选股日") or "",
+                            "卖出",
+                            r.get("price") if r.get("price") is not None else "",
+                            r.get("volume") if r.get("volume") is not None else "",
+                            r.get("amount") if r.get("amount") is not None else "",
+                            r.get("rule_name") or "",
+                            r.get("leg_key") or "",
+                            r.get("trigger_info") or "",
+                            r.get("来源") or "QMT卖出细回测-盘中次日了结",
+                        ])
+        except Exception as _csv_e:
+            csv_path = None
+            try:
+                self.statusBar().showMessage("卖出明细CSV落盘失败：%s" % _csv_e, 8000)
+            except Exception:
+                pass
         summary = result.get("summary") or {}
         errors = result.get("errors") or []
         lines = [
@@ -8035,6 +8263,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
             ),
             "落盘：%s" % out_json,
         ]
+        if csv_path:
+            lines.append("卖出明细CSV：%s" % csv_path)
         if errors:
             lines.append("ERROR：%s" % (errors[:3],))
         self.backtest_result_text.setPlainText("\n".join(lines))
@@ -8163,7 +8393,22 @@ class StrategyGeneratorMainWindow(QMainWindow):
         code = (cfg.strategy_code or "").strip()
         if not code and self._get_selected_strategy_id() == sid and hasattr(self, "logic_code_edit"):
             code = (self.logic_code_edit.toPlainText() or "").strip()
+        # 运行前：股票池缺选股日时从其它策略补齐并落盘（卖出 LU10 等依赖 selection_date_by_code）
+        pool_codes = []
+        try:
+            if self._get_selected_strategy_id() == sid:
+                pool_codes = list(self._get_pool_codes_from_list() or [])
+        except Exception:
+            pool_codes = []
+        if not pool_codes:
+            pool_codes = list(getattr(cfg, "stock_codes", None) or [])
+        sel_map = self._ensure_pool_selection_dates(
+            cfg, pool_codes, persist=True
+        )
         params = self._merge_strategy_params_from_form(cfg.strategy_params or {})
+        if sel_map:
+            # 表单合并不会带上 selection_date_by_code，显式写回本次运行 params
+            params["selection_date_by_code"] = dict(sel_map)
         return code, params
 
     def _tp10_effective_params_hint(self, code: str, params: Dict[str, Any]) -> str:
@@ -8227,6 +8472,23 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 "【马总逻辑1 · QMT细回测】券商 tick 约近1个月：首次在模型交易加载并启动「探针」，"
                 "之后点「生成QMT细回测脚本」即投递 userdata\\mz1_qmt_fine_watch\\current.py 自动重载；"
                 "再「导入QMT细回测结果」回灌成交表。本地「运行回测/批量回测」仍可用，但更早日期常缺 tick。"
+            )
+        try:
+            from strategy_generator_app.backtest.mz1_qmt_sell_fine import (
+                is_intraday_next_day_sell_strategy as _is_ind_sell,
+            )
+        except ImportError:
+            try:
+                from backtest.mz1_qmt_sell_fine import (  # type: ignore
+                    is_intraday_next_day_sell_strategy as _is_ind_sell,
+                )
+            except ImportError:
+                _is_ind_sell = None  # type: ignore
+        if _is_ind_sell and _is_ind_sell(sid, name):
+            lines.append(
+                "【盘中买入次日了结 · 卖出QMT细回测】先「从买入成交明细CSV接续…」，"
+                "持有交易日数默认1、定时清仓14:56；点「生成卖出QMT细回测…」投递同一 watch；"
+                "腿=开盘价-1跳回撤2%全仓 + 09:50封板分支 + 末日清仓（无开盘涨幅/近涨停半仓）。"
             )
         if hasattr(self, "backtest_mode_hint_label"):
             self.backtest_mode_hint_label.setText("\n".join(lines))
@@ -9288,6 +9550,107 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "strategy_run_end_time": "%02d:%02d" % (run_end_t.hour(), run_end_t.minute()),
         }
 
+    def _on_batch_mz_logic2_intraday_buy_from_candidates(self, cfg):
+        """买：马总盘中 — 批量买入回测（读落盘候选 CSV；价=当时最新价+0.01；不滤软门槛）。"""
+        try:
+            from strategy_generator_app.backtest.mz_logic2_intraday_buy_bt import (
+                run_batch_buy_backtest,
+            )
+        except Exception:
+            from backtest.mz_logic2_intraday_buy_bt import run_batch_buy_backtest  # type: ignore
+
+        start_d = self.backtest_start_date.date().toPyDate()
+        end_d = self.backtest_end_date.date().toPyDate()
+        if end_d < start_d:
+            QMessageBox.warning(self, "提示", "回测结束日期不能早于开始日期。")
+            return
+        gen_t = self.backtest_generation_time.time()
+        clock = "%02d:%02d" % (gen_t.hour(), gen_t.minute())
+        cfg.strategy_params = self._merge_strategy_params_from_form(cfg.strategy_params or {})
+        sp = cfg.strategy_params or {}
+        try:
+            amount = float(sp.get("buy_amount_per_stock") or 100000)
+        except (TypeError, ValueError):
+            amount = 100000.0
+        try:
+            min_order = float(sp.get("min_order_amount") or 5000)
+        except (TypeError, ValueError):
+            min_order = 5000.0
+
+        ok = QMessageBox.question(
+            self,
+            "马总盘中 · 批量买入回测",
+            (
+                "策略：%s\n"
+                "区间：%s ~ %s\n"
+                "策略生成时间/落盘档：%s\n"
+                "单股金额：%.0f；最低下单：%.0f\n\n"
+                "将读取 data\\ma_zong_intraday_candidates\\YYYY-MM-DD_HHMM.csv，\n"
+                "按「当时最新价 + 0.01」生成买入成交明细；\n"
+                "不按「满足全部软门槛」过滤（硬门槛落盘行全买）。\n"
+                "本轮仅买入，不做卖出。"
+            )
+            % (
+                getattr(cfg, "name", "") or "",
+                start_d.isoformat(),
+                end_d.isoformat(),
+                clock,
+                amount,
+                min_order,
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if ok != QMessageBox.Yes:
+            return
+
+        self.backtest_result_text.setPlainText("马总盘中批量买入回测运行中…")
+        self.backtest_trades_table.setRowCount(0)
+        self.backtest_batch_file_btn.setEnabled(False)
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            result = run_batch_buy_backtest(
+                start_d,
+                end_d,
+                clock,
+                buy_amount=amount,
+                min_order=min_order,
+            )
+            trades = list(result.trades or [])
+            self._fill_backtest_trades_table(trades)
+            try:
+                self._last_mz2_intraday_buy_csv = result.csv_path or ""
+                self._last_mz2_intraday_buy_fills = trades
+            except Exception:
+                pass
+            msg = (
+                "【买：马总盘中-满足条件单点】批量买入回测完成\n"
+                "区间 %s ~ %s，档位 %s\n\n"
+                % (start_d.isoformat(), end_d.isoformat(), clock)
+                + result.summary_text()
+                + "\n\n提示：可用「导出成交明细(CSV)…」另存；"
+                "已自动写入 history_data\\马总盘中策略\\ 下的买入明细。"
+                "卖出规则/卖出回测尚未接入。"
+            )
+            self.backtest_result_text.setPlainText(msg)
+            self._last_batch_export_bundle = None
+            self._last_batch_bundle_strategy_id = None
+            self._refresh_backtest_export_button()
+            QMessageBox.information(
+                self,
+                "批量买入回测完成",
+                "买入 %d 笔\n明细：%s" % (len(trades), result.csv_path or "（未写文件）"),
+            )
+        except Exception as e:
+            self.backtest_result_text.setPlainText("马总盘中批量买入回测失败：%s" % e)
+            QMessageBox.critical(self, "批量买入回测失败", str(e))
+        finally:
+            self.backtest_batch_file_btn.setEnabled(True)
+
+
     def _on_batch_mz1_qmt_fine_live_align(self, cfg):
         """马总逻辑1 批量回测：回测页起止日期 + 批量导入同款按日建池 → QMT 探针 tick。"""
         m = self._mz1_qmt_fine_mod()
@@ -9651,6 +10014,29 @@ class StrategyGeneratorMainWindow(QMainWindow):
             _is_mz1_batch = False
         if _is_mz1_batch:
             self._on_batch_mz1_qmt_fine_live_align(cfg)
+            return
+        # 马总盘中买：按回测页起止 + 策略生成时间，读落盘候选 CSV → 简化买入明细
+        _is_mz2_batch = False
+        try:
+            from strategy_generator_app.backtest.mz_logic2_intraday_buy_bt import (
+                is_mz_logic2_buy_strategy as _is_mz2_buy,
+            )
+        except Exception:
+            try:
+                from backtest.mz_logic2_intraday_buy_bt import (  # type: ignore
+                    is_mz_logic2_buy_strategy as _is_mz2_buy,
+                )
+            except Exception:
+                _is_mz2_buy = None  # type: ignore
+        if _is_mz2_buy is not None:
+            try:
+                _is_mz2_batch = bool(
+                    _is_mz2_buy(sid, getattr(cfg, "name", "") or "")
+                )
+            except Exception:
+                _is_mz2_batch = False
+        if _is_mz2_batch:
+            self._on_batch_mz_logic2_intraday_buy_from_candidates(cfg)
             return
         path, _ = QFileDialog.getOpenFileName(
             self,

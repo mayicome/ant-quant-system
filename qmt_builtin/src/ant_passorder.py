@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-PASSORDER_VERSION = "20261017.2"
+PASSORDER_VERSION = "20261103.1"
 _SIBLING_MODS = {}
 
 
@@ -191,12 +191,18 @@ def resolve_sell_limit_price(
     last_price: float = 0.0,
     trigger_price: float = 0.0,
     tick_row: Optional[Dict[str, Any]] = None,
+    allow_last_price_fallback: bool = True,
 ) -> float:
-    """卖出限价：优先买一-1跳，否则现价-1跳，否则触发价。"""
+    """卖出限价：优先买一-1跳，否则现价-1跳，否则触发价。
+
+    allow_last_price_fallback=False 时禁止用事件旧现价/触发价静默减一分（闸期内）。
+    """
     tick = _min_tick(stock_code)
     bid = _bid1(tick_row)
     if bid > 0:
         return _round_price(stock_code, max(tick, bid - tick))
+    if not allow_last_price_fallback:
+        return 0.0
     lp = float(last_price or 0)
     if lp > 0:
         return _round_price(stock_code, max(tick, lp - tick))

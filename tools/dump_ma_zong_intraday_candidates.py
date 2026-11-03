@@ -166,6 +166,7 @@ def main(argv: Optional[list] = None) -> int:
         else float(cfg["min_inflow_wan"])
     )
     in_session = is_a_share_intraday_session(now)
+    last_slot_late = False
     is_td = _is_trading_day(now.date())
 
     print(
@@ -191,7 +192,6 @@ def main(argv: Optional[list] = None) -> int:
     # 定时：盘外不落盘（避免把日终文件当成 14:40）
     # Scheduled dumps need intraday session; last slot (e.g. 14:55) gets a short
     # post-close window (~slot+10min / ~15:05) so a slightly late run still writes.
-    last_slot_late = False
     if args.scheduled and not in_session:
         last_slot_late = _allow_last_slot_post_close(now, clock, cfg)
         if not last_slot_late:
@@ -265,10 +265,15 @@ def main(argv: Optional[list] = None) -> int:
             return 2
 
     if not (scan.get("hard_pass_all") or scan.get("candidates")):
-        if err:
+        if err and not args.scheduled:
             print("[dump] no hard-pass rows:", err)
-            return 3 if args.scheduled else 1
-        print("[dump] no hard-pass rows")
+            return 1
+        if err:
+            # Scheduled: still write empty marker so launcher can mark-done via file,
+            # instead of "launched+done" with no CSV (lost 14:55 slots).
+            print("[dump] no hard-pass rows (scheduled, still write marker):", err)
+        else:
+            print("[dump] no hard-pass rows")
         # still write empty file for the day marker? For scheduled yes (avoid re-fire loops on empty markets)
         # For manual, write empty with meta too so path is clear.
 

@@ -235,6 +235,7 @@ def fetch_individual_fund_flow_rows(
     min_inflow_wan: Optional[float] = None,
     then_full: bool = False,
     on_min_subset: Optional[Any] = None,
+    on_page: Optional[Any] = None,
 ) -> Tuple[List[dict], dict]:
     """
     拉取「今日」个股资金流排行（按 f62 主力净流入降序）。
@@ -243,6 +244,7 @@ def fetch_individual_fund_flow_rows(
     - min_inflow_wan >0：先翻到「整页都 < 门槛」得到子集；
       then_full=True 时继续往后补全市场；中途失败则返回已拿到的 >=门槛 子集。
     - on_min_subset(rows, meta)：子集刚齐全时回调（便于先落盘）。
+    - on_page(rows, meta)：每成功一页后回调（当前已拉全部行，便于增量落盘）。
     """
     session = _session()
     pz = max(20, min(int(page_size), 100))
@@ -294,6 +296,29 @@ def fetch_individual_fund_flow_rows(
                 kept += 1
         return len(page_list), kept
 
+    def _emit_page(pn: int) -> None:
+        if not callable(on_page):
+            return
+        meta_cb = {
+            "source": "eastmoney_push2",
+            "total": total,
+            "fetched": len(rows),
+            "pages": pn,
+            "page_size": pz,
+            "min_inflow_wan": thr_wan if want_min else 0.0,
+            "min_done": bool(min_done),
+            "coverage": (
+                "min_inflow_subset"
+                if (want_min and min_done and not then_full)
+                else ("partial" if want_min else "full")
+            ),
+        }
+        try:
+            on_page(list(rows), dict(meta_cb))
+        except Exception as e:
+            # 落盘回调失败不阻断翻页
+            print(f"[资金流] on_page 回调失败 pn={pn}: {type(e).__name__}: {e}")
+
     page_len, page_kept = _extend_page(data.get("diff"))
     pages_ok = 1 if page_len else 0
 
@@ -325,6 +350,7 @@ def fetch_individual_fund_flow_rows(
 
     if pages_ok:
         _maybe_finish_min(1, page_len, page_kept)
+        _emit_page(1)
 
     # 只要还没拿到子集齐全，或需要继续全量，就继续翻页
     pn = 1
@@ -357,6 +383,7 @@ def fetch_individual_fund_flow_rows(
             break
         pages_ok = pn
         just_min = _maybe_finish_min(pn, page_len, page_kept)
+        _emit_page(pn)
         if pause_s > 0:
             time.sleep(pause_s)
         # 旧全量：按 total_pages 走完
@@ -524,6 +551,7 @@ def fetch_individual_fund_flow_df(
     min_inflow_wan: Optional[float] = None,
     then_full: bool = False,
     on_min_subset: Optional[Any] = None,
+    on_page: Optional[Any] = None,
 ) -> Tuple[pd.DataFrame, dict]:
     rows, meta = fetch_individual_fund_flow_rows(
         page_size=page_size,
@@ -531,6 +559,7 @@ def fetch_individual_fund_flow_df(
         min_inflow_wan=min_inflow_wan,
         then_full=then_full,
         on_min_subset=on_min_subset,
+        on_page=on_page,
     )
     df = rows_to_flow_dataframe(rows)
     meta["dataframe_rows"] = len(df)
@@ -546,6 +575,7 @@ def fetch_individual_fund_flow_df_resilient(
     prefer_min_inflow_wan: float = 3000.0,
     then_full: bool = True,
     on_min_subset: Optional[Any] = None,
+    on_page: Optional[Any] = None,
 ) -> Tuple[pd.DataFrame, dict]:
     """东财 push2：先保 >=prefer_min_inflow_wan 子集，再尝试全量；仅 allow_ths=True 时同花顺兜底。"""
     errors: List[str] = []
@@ -558,11 +588,13 @@ def fetch_individual_fund_flow_df_resilient(
                 min_inflow_wan=min_wan,
                 then_full=bool(then_full),
                 on_min_subset=on_min_subset,
+                on_page=on_page,
             )
         else:
             df, meta = fetch_individual_fund_flow_df(
                 page_size=page_size,
                 pause_s=pause_s,
+                on_page=on_page,
             )
         if df is not None and not df.empty:
             # 子集或全量只要非空即成功；全量不足时 coverage 已标 min_inflow_subset

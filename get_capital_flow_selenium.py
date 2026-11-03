@@ -2397,31 +2397,53 @@ if __name__ == "__main__":
             filename = _flow_csv_path(save_date_str, history_dir)
             min_saved = {"ok": False, "rows": 0}
 
+            def _persist_rows(raw_rows, meta_cb, *, label: str) -> int:
+                """把当前已拉行覆盖写日 CSV（子集/每页增量共用）。"""
+                df_cur = rows_to_flow_dataframe(list(raw_rows or []))
+                if df_cur is None or df_cur.empty:
+                    print(f"[资金流] {label}：无行，跳过落盘")
+                    return 0
+                df_cur, st = enrich_and_rank_by_inflow_ratio(df_cur, min_inflow_wan=0.0)
+                df_cur.to_csv(filename, index=False, encoding="utf_8_sig")
+                n = len(df_cur)
+                min_saved["ok"] = True
+                min_saved["rows"] = n
+                print(
+                    f"[资金流] 已落盘 {label}："
+                    f"{filename} rows={n} pages={meta_cb.get('pages')} "
+                    f"fetched={meta_cb.get('fetched')}"
+                )
+                try:
+                    from tools.export_main_flow_to_jsonl import (
+                        write_daily_main_flow_jsonl_shard,
+                    )
+
+                    write_daily_main_flow_jsonl_shard(filename, save_date_str)
+                except Exception as e:
+                    print(f"[main_flow jsonl] {label}写出失败: {e}")
+                return n
+
             def _on_min_subset(raw_rows, meta_min):
                 """子集齐全时先落盘，全量失败也不至于整日空档。"""
                 try:
-                    df_min = rows_to_flow_dataframe(list(raw_rows or []))
-                    if df_min is None or df_min.empty:
-                        print("[资金流] 子集回调：无行，跳过先落盘")
-                        return
-                    df_min, st = enrich_and_rank_by_inflow_ratio(df_min, min_inflow_wan=0.0)
-                    df_min.to_csv(filename, index=False, encoding="utf_8_sig")
-                    min_saved["ok"] = True
-                    min_saved["rows"] = len(df_min)
-                    print(
-                        f"[资金流] 已先落盘 >={min_wan:.0f}万子集："
-                        f"{filename} rows={len(df_min)} pages={meta_min.get('pages')}"
+                    _persist_rows(
+                        raw_rows,
+                        meta_min,
+                        label=f">={min_wan:.0f}万子集",
                     )
-                    try:
-                        from tools.export_main_flow_to_jsonl import (
-                            write_daily_main_flow_jsonl_shard,
-                        )
-
-                        write_daily_main_flow_jsonl_shard(filename, save_date_str)
-                    except Exception as e:
-                        print(f"[main_flow jsonl] 子集写出失败: {e}")
                 except Exception as e:
                     print(f"[资金流] 子集先落盘失败: {e}")
+
+            def _on_page(raw_rows, meta_page):
+                """每成功一页覆盖落盘：中途失败也能保留已翻到的页。"""
+                try:
+                    _persist_rows(
+                        raw_rows,
+                        meta_page,
+                        label=f"第{meta_page.get('pages')}页增量",
+                    )
+                except Exception as e:
+                    print(f"[资金流] 每页落盘失败: {e}")
 
             df, meta = fetch_individual_fund_flow_df_resilient(
                 page_size=args.page_size,
@@ -2430,6 +2452,7 @@ if __name__ == "__main__":
                 prefer_min_inflow_wan=min_wan,
                 then_full=True if min_wan > 0 else True,
                 on_min_subset=_on_min_subset if min_wan > 0 else None,
+                on_page=_on_page,
             )
             fetch_source = str(meta.get("source") or "api")
             if fetch_source == "ths" and not args.allow_ths:

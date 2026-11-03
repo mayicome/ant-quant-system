@@ -1,5 +1,5 @@
 #coding:utf-8
-"""马总逻辑1卖 细回测 · QMT 模型交易动态策略（由蚂蚁量化系统生成）
+"""马总逻辑1卖 / 盘中买入次日了结 细回测 · QMT 模型交易动态策略（由蚂蚁量化系统生成）
 
 推荐：主程序「探针」热加载本文件（写到 userdata/mz1_qmt_fine_watch/current.py）。
 结果：print 到 userdata/log/XtClient_FormulaOutput_YYYYMMDD.log，前缀 ANT_MZ1_SELL_BT|
@@ -388,6 +388,45 @@ def _clamp_px(px, ld, lu):
     return px
 
 
+
+
+def _min_tick_prec(c6):
+    c6 = _code6(c6)
+    # ETF/基金常见 0.001；其余股票 0.01
+    if c6.startswith(("15", "16", "18", "50", "51", "56", "58")):
+        return 0.001, 3
+    return 0.01, 2
+
+
+def _replay_breakthrough_sell(ticks, price, run_start_sec, run_end_sec, after_sec=None):
+    """现价/最低 < 触发价（向下突破）成交。"""
+    if price <= 0 or not ticks:
+        return None
+    for sec, tm, last, hi, lo in ticks:
+        if after_sec is not None and sec < after_sec:
+            continue
+        if run_start_sec is not None and sec < run_start_sec:
+            continue
+        if run_end_sec is not None and sec > run_end_sec:
+            continue
+        use_lo = lo if lo > 0 else last
+        if last + 1e-9 < price or use_lo + 1e-9 < price:
+            return (sec, tm, last if last > 0 else use_lo)
+    return None
+
+
+def _resolve_clear_branch(ticks, branch_sec, limit_up):
+    """到 T 点首个 tick：贴涨停视为封板。返回 (resolved, sealed, after_sec)。"""
+    if not ticks or limit_up <= 0:
+        return True, False, branch_sec
+    for sec, tm, last, hi, lo in ticks:
+        if sec < branch_sec:
+            continue
+        sealed = bool(last + 1e-9 >= float(limit_up) * 0.999)
+        return True, sealed, sec
+    # 整天无 T 后 tick：按未封板处理，允许原清仓（与墙钟补结算口径接近）
+    return True, False, branch_sec
+
 def _weekday_days(start_d, end_d):
     out = []
     d = start_d
@@ -398,30 +437,52 @@ def _weekday_days(start_d, end_d):
     return out
 
 
-def _recent_lu_trigger_from_daily(c6, closes_by_ymd, ymds_ord, as_d):
-    """近10日涨停价（不复权 close 近似）：返回最近一次涨停日的涨停价。"""
-    if not ymds_ord:
+def _recent_lu_trigger_from_daily(c6, closes_by_ymd, highs_by_ymd, ymds_ord, as_d, sel_d, offset=0.01):
+    """选股日涨停板起至昨天：日线最高价最大值减去固定价差。"""
+    if not ymds_ord or sel_d is None:
         return None
     as_s = as_d.strftime("%Y%m%d")
-    prevs = [y for y in ymds_ord if y < as_s]
-    if len(prevs) < 2:
+    if hasattr(sel_d, "strftime"):
+        sel_s = sel_d.strftime("%Y%m%d")
+    else:
+        sel_s = str(sel_d).replace("-", "")[:8]
+    if not sel_s or sel_s >= as_s:
         return None
-    window = prevs[-11:]
+    prevs = [y for y in ymds_ord if y < sel_s]
+    if not prevs:
+        return None
+    y_prev = prevs[-1]
+    if sel_s not in closes_by_ymd:
+        return None
+    prev_c = float(closes_by_ymd.get(y_prev) or 0)
+    cur_c = float(closes_by_ymd.get(sel_s) or 0)
+    if prev_c <= 0 or cur_c <= 0:
+        return None
     lr = _limit_ratio(c6)
-    for i in range(len(window) - 1, 0, -1):
-        y0 = window[i - 1]
-        y1 = window[i]
-        prev_c = float(closes_by_ymd.get(y0) or 0)
-        cur_c = float(closes_by_ymd.get(y1) or 0)
-        if prev_c <= 0 or cur_c <= 0:
-            continue
-        lim = round(prev_c * (1.0 + lr), 2)
-        inc = (cur_c - prev_c) / prev_c
-        if abs(cur_c - lim) < 0.02 or inc >= lr * 0.99:
-            return float(lim)
-    return None
-
-
+    lim = round(prev_c * (1.0 + lr), 2)
+    inc = (cur_c - prev_c) / prev_c
+    if not (abs(cur_c - lim) < 0.02 or inc >= lr * 0.99):
+        return None
+    window = [y for y in ymds_ord if sel_s <= y < as_s]
+    if not window:
+        return None
+    highs = []
+    for y in window:
+        try:
+            h = float(highs_by_ymd.get(y) or 0)
+        except Exception:
+            h = 0.0
+        if h > 0:
+            highs.append(h)
+    if not highs:
+        return None
+    try:
+        off = float(offset)
+    except (TypeError, ValueError):
+        off = 0.01
+    if off < 0:
+        off = 0.0
+    return float(round(max(highs) - off, 2))
 def _daily_maps(ContextInfo, full_code, start_s, end_s):
     payload, err = _get_market(ContextInfo, full_code, "1d", start_s, end_s)
     if err or payload is None:
@@ -683,8 +744,15 @@ def _run_backtest(ContextInfo):
         open_drop = 1.5
     try:
         lu_drop = float(params.get("lu_drop_percent") if params.get("lu_drop_percent") is not None else open_drop)
+        try:
+            lu_high_offset = float(params.get("lu_high_offset") if params.get("lu_high_offset") is not None else 0.01)
+        except (TypeError, ValueError):
+            lu_high_offset = 0.01
+        if lu_high_offset < 0:
+            lu_high_offset = 0.0
     except Exception:
         lu_drop = open_drop
+        lu_high_offset = 0.01
     try:
         thr_clear_main = float(params.get("clear_gain_main") if params.get("clear_gain_main") is not None else 0.10)
     except Exception:
@@ -776,6 +844,7 @@ def _run_backtest(ContextInfo):
         "hold_n_engine": hold_n,
         "ui_n": ui_n,
         "clear_time": clear_time,
+        "sell_variant": str(CFG.get("sell_variant") or "mz1"),
         "unicodedata": _UNICODEDATA_STATUS,
     })
 
@@ -815,11 +884,65 @@ def _run_backtest(ContextInfo):
     skip_no_tick = 0
     filled_legs = set()  # LU10 whole window; OPEN50 keyed by day
 
+    variant = str(CFG.get("sell_variant") or "mz1").strip() or "mz1"
+    sel_map = CFG.get("selection_date_by_code") or {}
+    if not isinstance(sel_map, dict) or not sel_map:
+        _sp_sel = (CFG.get("params") or {}).get("selection_date_by_code") or {}
+        if isinstance(_sp_sel, dict) and _sp_sel:
+            sel_map = _sp_sel
+    if not isinstance(sel_map, dict):
+        sel_map = {}
+    is_ind = variant == "intraday_next_day"
+
     NAME_OPEN50 = "马总1卖-开盘涨幅弹性半仓"
-    NAME_LU10 = "马总1卖-近10日涨停价弹性半仓"
-    NAME_CLEAR_LU = "马总1卖-涨停即清仓"
-    NAME_CLEAR_MAIN = "马总1卖-主板涨幅弹性清仓"
-    NAME_CLEAR_GROWTH = "马总1卖-非主板涨幅弹性清仓"
+    NAME_LU10 = "马总1卖-涨停后最高价下半仓"
+    NAME_OPEN_PULL = "盘中次日了结-开盘价回撤弹性全仓"
+    if is_ind:
+        NAME_CLEAR_LU = "盘中次日了结-涨停即清仓"
+        NAME_CLEAR_MAIN = "盘中次日了结-主板涨幅弹性清仓"
+        NAME_CLEAR_GROWTH = "盘中次日了结-非主板涨幅弹性清仓"
+        sc_prefix = "盘中次日了结"
+    else:
+        NAME_CLEAR_LU = "马总1卖-涨停即清仓"
+        NAME_CLEAR_MAIN = "马总1卖-主板涨幅弹性清仓"
+        NAME_CLEAR_GROWTH = "马总1卖-非主板涨幅弹性清仓"
+        sc_prefix = "马总1卖"
+
+    # 开盘价回撤全仓：优先 open_drop_percent
+    try:
+        open_pull_drop = float(
+            params.get("open_drop_percent")
+            if params.get("open_drop_percent") is not None
+            else (open_drop if open_drop is not None else 2.0)
+        )
+    except Exception:
+        open_pull_drop = 2.0
+    # 允许 0.0：触价即成（与 _replay_best_sell / 实盘 _leg_drop 一致）；负值才回退默认
+    if open_pull_drop < 0:
+        open_pull_drop = 2.0
+
+    branch_at_s = str(
+        CFG.get("clear_branch_at")
+        or params.get("clear_branch_at")
+        or "09:50:00"
+    ).strip() or "09:50:00"
+    branch_sec = _parse_hms(branch_at_s) or (9 * 3600 + 50 * 60)
+
+    # 模板内 clear_drop_* 已读；盘中策略 JSON 别名再兜一层
+    try:
+        if params.get("clear_drop_percent_main") is not None:
+            clear_drop_main = float(params.get("clear_drop_percent_main"))
+    except Exception:
+        pass
+    try:
+        if params.get("clear_drop_percent") is not None and is_ind:
+            clear_drop_growth = float(params.get("clear_drop_percent"))
+    except Exception:
+        pass
+
+    _emit("LOG", "sell_variant=%s is_ind=%s branch_at=%s open_pull_drop=%s" % (
+        variant, is_ind, branch_at_s, open_pull_drop,
+    ))
 
     for day_d in trading_days:
         # inject scheduled buys for this day first
@@ -850,6 +973,8 @@ def _run_backtest(ContextInfo):
 
             maps, yords, _derr = daily_cache.get(c6, ({}, [], ""))
             close_by = (maps or {}).get("close") or {}
+            open_by = (maps or {}).get("open") or {}
+            high_by = (maps or {}).get("high") or {}
             ymd = day_d.strftime("%Y%m%d")
             # prev close: last daily close strictly before today
             prev_close = 0.0
@@ -865,8 +990,9 @@ def _run_backtest(ContextInfo):
                 continue
 
             lr = _limit_ratio(c6)
-            limit_up = round(prev_close * (1.0 + lr), 2)
-            limit_down = round(prev_close * (1.0 - lr), 2)
+            tick_sz, prec = _min_tick_prec(c6)
+            limit_up = round(prev_close * (1.0 + lr), prec)
+            limit_down = round(prev_close * (1.0 - lr), prec)
 
             fc = _full_from_c6(c6)
             ticks, terr = _ticks_for_day(ContextInfo, fc, day_d, run_start_sec, run_end_sec)
@@ -875,101 +1001,195 @@ def _run_backtest(ContextInfo):
                 _emit("SKIP_NO_TICK", {"code": c6, "date": day_d.isoformat(), "err": terr or "empty"})
                 continue
 
-            thr = open_gain_growth if _is_growth_board(c6) else open_gain_main
-            open_ref = _clamp_px(round(prev_close * (1.0 + thr), 2), limit_down, limit_up) if prev_close > 0 else 0.0
-            lu_raw = _recent_lu_trigger_from_daily(c6, close_by, yords, day_d)
-            lu_ref = 0.0
-            if lu_raw is not None and lu_raw > 0:
-                lu_px = round(float(lu_raw), 2)
-                if not (limit_up > 0 and lu_px > limit_up):
-                    lu_ref = _clamp_px(lu_px, limit_down, limit_up)
-
-            leg_open = "%s:OPEN50:%s" % (c6, ymd)
-            leg_lu = "%s:LU10" % c6
-            half = _half_lot(base)
-
-            open_trig = float(open_ref) if (leg_open not in filled_legs and open_ref > 0 and half >= 100) else 0.0
-            lu_trig = float(lu_ref) if (leg_lu not in filled_legs and lu_ref > 0 and half >= 100) else 0.0
-            want_open = open_trig > 0
-            want_lu = lu_trig > 0
-
-            if want_open and want_lu:
-                _a, _b = _half_pair_absorb_dust(base)
-                _open50_filled = any(
-                    str(k) == ("%s:OPEN50" % c6) or str(k).startswith("%s:OPEN50:" % c6)
-                    for k in filled_legs
-                )
-                # remaining half: each leg sizes to full hold; first fill clears; other sees 0
-                if _open50_filled or (_full_lot(hold) > 0 and _full_lot(hold) <= _b):
-                    px_min_o = open_trig * (1.0 - float(open_drop) / 100.0)
-                    px_min_l = lu_trig * (1.0 - float(lu_drop) / 100.0)
-                    open_vol = _fold_dust(hold, hold, px_min_o, min_amt)
-                    lu_vol = _fold_dust(hold, hold, px_min_l, min_amt)
-                else:
-                    open_vol, lu_vol = _a, _b
-                    pair_cap = hold
-                    if open_vol + lu_vol > pair_cap:
-                        open_vol = min(open_vol, pair_cap)
-                        lu_vol = max(0, pair_cap - open_vol)
-                        if lu_vol < 100:
-                            open_vol, lu_vol = pair_cap, 0
-            elif want_open:
-                px_min = open_trig * (1.0 - float(open_drop) / 100.0)
-                open_vol = _fold_dust(half, hold, px_min, min_amt)
-                lu_vol = 0
-            elif want_lu:
-                px_min = lu_trig * (1.0 - float(lu_drop) / 100.0)
-                lu_vol = _fold_dust(half, hold, px_min, min_amt)
-                open_vol = 0
-            else:
-                open_vol, lu_vol = 0, 0
-
-            # intents with fill order: OPEN50 then LU10 then clear-up then scheduled
             day_intents = []
-            if want_open and open_vol >= 100:
-                day_intents.append({
-                    "kind": "best_sell", "name": NAME_OPEN50, "leg": leg_open,
-                    "trigger": open_trig, "drop": open_drop, "volume": int(open_vol),
-                })
-            if want_lu and lu_vol >= 100:
-                day_intents.append({
-                    "kind": "best_sell", "name": NAME_LU10, "leg": leg_lu,
-                    "trigger": lu_trig, "drop": lu_drop, "volume": int(lu_vol),
-                })
 
-            # clear-up branch on avail
-            if avail >= 100 and prev_close > 0:
-                if _is_growth_board(c6):
-                    if thr_clear_growth > 0:
-                        ct = _clamp_px(round(prev_close * (1.0 + thr_clear_growth), 2), limit_down, limit_up)
+            if is_ind:
+                # ---- 盘中买入次日了结：开盘价-1tick 弹性全仓 + T点清仓分支 + 末日定时清仓 ----
+                leg_open_pull = "%s:OPEN_PULL:%s" % (c6, ymd)
+                open_px = 0.0
+                try:
+                    open_px = float(open_by.get(ymd) or 0)
+                except Exception:
+                    open_px = 0.0
+                if open_px <= 0 and ticks:
+                    try:
+                        open_px = float(ticks[0][2] or 0)
+                    except Exception:
+                        open_px = 0.0
+                if leg_open_pull not in filled_legs and open_px > 0 and avail >= 100:
+                    trig = round(float(open_px) - float(tick_sz), prec)
+                    if trig > 0:
+                        trig = _clamp_px(trig, limit_down, limit_up if limit_up > 0 else trig)
+                    if trig > 0:
+                        day_intents.append({
+                            "kind": "best_sell",
+                            "name": NAME_OPEN_PULL,
+                            "leg": leg_open_pull,
+                            "trigger": float(trig),
+                            "drop": float(open_pull_drop),
+                            "volume": int(avail),
+                        })
+
+                # T 点封板分支 → 决定清仓腿形态（仅 T 后可成交）
+                _bres, sealed, after_sec = _resolve_clear_branch(ticks, branch_sec, limit_up)
+                if avail >= 100 and prev_close > 0:
+                    if sealed:
+                        day_intents.append({
+                            "kind": "breakthrough_sell",
+                            "name": NAME_CLEAR_LU + "·开板突破卖",
+                            "leg": "%s:CLEAR_BRK:%s" % (c6, ymd),
+                            "trigger": float(limit_up),
+                            "drop": 0.0,
+                            "volume": int(avail),
+                            "is_clear": True,
+                            "after_sec": after_sec,
+                        })
+                    elif _is_growth_board(c6):
+                        if thr_clear_growth > 0:
+                            ct = _clamp_px(
+                                round(prev_close * (1.0 + thr_clear_growth), prec),
+                                limit_down, limit_up,
+                            )
+                            if ct > 0:
+                                day_intents.append({
+                                    "kind": "best_sell",
+                                    "name": NAME_CLEAR_GROWTH,
+                                    "leg": "%s:CLEAR_G:%s" % (c6, ymd),
+                                    "trigger": float(ct),
+                                    "drop": clear_drop_growth,
+                                    "volume": int(avail),
+                                    "is_clear": True,
+                                    "after_sec": after_sec,
+                                })
+                    elif thr_clear_main > 0:
+                        ct = _clamp_px(
+                            round(prev_close * (1.0 + thr_clear_main), prec),
+                            limit_down, limit_up,
+                        )
                         if ct > 0:
-                            day_intents.append({
-                                "kind": "best_sell", "name": NAME_CLEAR_GROWTH, "leg": "%s:CLEAR_G:%s" % (c6, ymd),
-                                "trigger": float(ct), "drop": clear_drop_growth, "volume": int(avail),
-                                "is_clear": True,
-                            })
-                elif thr_clear_main > 0:
-                    ct = _clamp_px(round(prev_close * (1.0 + thr_clear_main), 2), limit_down, limit_up)
-                    if ct > 0:
-                        lu_imm = abs(float(thr_clear_main) - 0.10) < 1e-9 and float(clear_drop_main) <= 1e-12
-                        if lu_imm:
-                            day_intents.append({
-                                "kind": "single_sell", "name": NAME_CLEAR_LU, "leg": "%s:CLEAR_LU:%s" % (c6, ymd),
-                                "trigger": float(ct), "drop": 0.0, "volume": int(avail),
-                                "is_clear": True,
-                            })
-                        else:
-                            day_intents.append({
-                                "kind": "best_sell", "name": NAME_CLEAR_MAIN, "leg": "%s:CLEAR_M:%s" % (c6, ymd),
-                                "trigger": float(ct), "drop": clear_drop_main, "volume": int(avail),
-                                "is_clear": True,
-                            })
+                            lu_imm = (
+                                abs(float(thr_clear_main) - 0.10) < 1e-9
+                                and float(clear_drop_main) <= 1e-12
+                            )
+                            if lu_imm:
+                                day_intents.append({
+                                    "kind": "single_sell",
+                                    "name": NAME_CLEAR_LU,
+                                    "leg": "%s:CLEAR_LU:%s" % (c6, ymd),
+                                    "trigger": float(ct),
+                                    "drop": 0.0,
+                                    "volume": int(avail),
+                                    "is_clear": True,
+                                    "after_sec": after_sec,
+                                })
+                            else:
+                                day_intents.append({
+                                    "kind": "best_sell",
+                                    "name": NAME_CLEAR_MAIN,
+                                    "leg": "%s:CLEAR_M:%s" % (c6, ymd),
+                                    "trigger": float(ct),
+                                    "drop": clear_drop_main,
+                                    "volume": int(avail),
+                                    "is_clear": True,
+                                    "after_sec": after_sec,
+                                })
+            else:
+                # ---- 马总逻辑1卖：开盘涨幅半仓 + 近10日涨停半仓 + 清仓（无 T 点细模拟，保持旧口径） ----
+                thr = open_gain_growth if _is_growth_board(c6) else open_gain_main
+                open_ref = _clamp_px(round(prev_close * (1.0 + thr), 2), limit_down, limit_up) if prev_close > 0 else 0.0
+                _sel_raw = sel_map.get(c6) or sel_map.get(_full_from_c6(c6))
+                sel_d = _parse_d(_sel_raw) if _sel_raw is not None else None
+                lu_raw = _recent_lu_trigger_from_daily(
+                    c6, close_by, high_by, yords, day_d, sel_d, offset=lu_high_offset
+                )
+                lu_ref = 0.0
+                if lu_raw is not None and lu_raw > 0:
+                    lu_px = round(float(lu_raw), 2)
+                    if not (limit_up > 0 and lu_px > limit_up):
+                        lu_ref = _clamp_px(lu_px, limit_down, limit_up)
+
+                leg_open = "%s:OPEN50:%s" % (c6, ymd)
+                leg_lu = "%s:LU10" % c6
+                half = _half_lot(base)
+
+                open_trig = float(open_ref) if (leg_open not in filled_legs and open_ref > 0 and half >= 100) else 0.0
+                lu_trig = float(lu_ref) if (leg_lu not in filled_legs and lu_ref > 0 and half >= 100) else 0.0
+                want_open = open_trig > 0
+                want_lu = lu_trig > 0
+
+                if want_open and want_lu:
+                    _a, _b = _half_pair_absorb_dust(base)
+                    _open50_filled = any(
+                        str(k) == ("%s:OPEN50" % c6) or str(k).startswith("%s:OPEN50:" % c6)
+                        for k in filled_legs
+                    )
+                    if _open50_filled or (_full_lot(hold) > 0 and _full_lot(hold) <= _b):
+                        px_min_o = open_trig * (1.0 - float(open_drop) / 100.0)
+                        px_min_l = lu_trig * (1.0 - float(lu_drop) / 100.0)
+                        open_vol = _fold_dust(hold, hold, px_min_o, min_amt)
+                        lu_vol = _fold_dust(hold, hold, px_min_l, min_amt)
+                    else:
+                        open_vol, lu_vol = _a, _b
+                        pair_cap = hold
+                        if open_vol + lu_vol > pair_cap:
+                            open_vol = min(open_vol, pair_cap)
+                            lu_vol = max(0, pair_cap - open_vol)
+                            if lu_vol < 100:
+                                open_vol, lu_vol = pair_cap, 0
+                elif want_open:
+                    px_min = open_trig * (1.0 - float(open_drop) / 100.0)
+                    open_vol = _fold_dust(half, hold, px_min, min_amt)
+                    lu_vol = 0
+                elif want_lu:
+                    px_min = lu_trig * (1.0 - float(lu_drop) / 100.0)
+                    lu_vol = _fold_dust(half, hold, px_min, min_amt)
+                    open_vol = 0
+                else:
+                    open_vol, lu_vol = 0, 0
+
+                if want_open and open_vol >= 100:
+                    day_intents.append({
+                        "kind": "best_sell", "name": NAME_OPEN50, "leg": leg_open,
+                        "trigger": open_trig, "drop": open_drop, "volume": int(open_vol),
+                    })
+                if want_lu and lu_vol >= 100:
+                    day_intents.append({
+                        "kind": "best_sell", "name": NAME_LU10, "leg": leg_lu,
+                        "trigger": lu_trig, "drop": lu_drop, "volume": int(lu_vol),
+                    })
+
+                if avail >= 100 and prev_close > 0:
+                    if _is_growth_board(c6):
+                        if thr_clear_growth > 0:
+                            ct = _clamp_px(round(prev_close * (1.0 + thr_clear_growth), 2), limit_down, limit_up)
+                            if ct > 0:
+                                day_intents.append({
+                                    "kind": "best_sell", "name": NAME_CLEAR_GROWTH, "leg": "%s:CLEAR_G:%s" % (c6, ymd),
+                                    "trigger": float(ct), "drop": clear_drop_growth, "volume": int(avail),
+                                    "is_clear": True,
+                                })
+                    elif thr_clear_main > 0:
+                        ct = _clamp_px(round(prev_close * (1.0 + thr_clear_main), 2), limit_down, limit_up)
+                        if ct > 0:
+                            lu_imm = abs(float(thr_clear_main) - 0.10) < 1e-9 and float(clear_drop_main) <= 1e-12
+                            if lu_imm:
+                                day_intents.append({
+                                    "kind": "single_sell", "name": NAME_CLEAR_LU, "leg": "%s:CLEAR_LU:%s" % (c6, ymd),
+                                    "trigger": float(ct), "drop": 0.0, "volume": int(avail),
+                                    "is_clear": True,
+                                })
+                            else:
+                                day_intents.append({
+                                    "kind": "best_sell", "name": NAME_CLEAR_MAIN, "leg": "%s:CLEAR_M:%s" % (c6, ymd),
+                                    "trigger": float(ct), "drop": clear_drop_main, "volume": int(avail),
+                                    "is_clear": True,
+                                })
 
             di = _sell_day_index(st, day_d, trading_days)
             if hold_n is not None and di == int(hold_n) and avail >= 100:
-                clear_px = round(float(limit_up) - 0.01, 2) if limit_up > 0 else 0.0
+                clear_px = round(float(limit_up) - float(tick_sz), prec) if limit_up > 0 else 0.0
                 force = clear_px <= 0
-                nm = "马总1卖-第%d日%s" % (ui_n, "无条件清仓" if force else "涨停外清仓")
+                nm = "%s-第%d日%s" % (sc_prefix, ui_n, "无条件清仓" if force else "涨停外清仓")
                 day_intents.append({
                     "kind": "scheduled_clear", "name": nm, "leg": "%s:SCLEAR:%s" % (c6, ymd),
                     "trigger": float(clear_px), "drop": 0.0, "volume": int(avail),
@@ -988,10 +1208,36 @@ def _run_backtest(ContextInfo):
                     continue
                 kind = intent.get("kind")
                 fill = None
+                after_sec = intent.get("after_sec")
                 if kind == "best_sell":
-                    fill = _replay_best_sell(ticks, float(intent["trigger"]), float(intent["drop"]), run_start_sec, run_end_sec)
+                    # 清仓腿带 after_sec：T 点前不撮合
+                    if after_sec is not None:
+                        # 复用 breakthrough 的 after 过滤：临时截断 ticks
+                        ticks_use = [t for t in ticks if t[0] >= int(after_sec)]
+                        fill = _replay_best_sell(
+                            ticks_use, float(intent["trigger"]), float(intent["drop"]),
+                            run_start_sec, run_end_sec,
+                        )
+                    else:
+                        fill = _replay_best_sell(
+                            ticks, float(intent["trigger"]), float(intent["drop"]),
+                            run_start_sec, run_end_sec,
+                        )
                 elif kind == "single_sell":
-                    fill = _replay_single_sell(ticks, float(intent["trigger"]), run_start_sec, run_end_sec)
+                    if after_sec is not None:
+                        ticks_use = [t for t in ticks if t[0] >= int(after_sec)]
+                        fill = _replay_single_sell(
+                            ticks_use, float(intent["trigger"]), run_start_sec, run_end_sec,
+                        )
+                    else:
+                        fill = _replay_single_sell(
+                            ticks, float(intent["trigger"]), run_start_sec, run_end_sec,
+                        )
+                elif kind == "breakthrough_sell":
+                    fill = _replay_breakthrough_sell(
+                        ticks, float(intent["trigger"]), run_start_sec, run_end_sec,
+                        after_sec=after_sec,
+                    )
                 elif kind == "scheduled_clear":
                     fill = _replay_scheduled_clear(
                         ticks, float(intent.get("trigger") or 0), clear_sec,
@@ -1023,6 +1269,7 @@ def _run_backtest(ContextInfo):
                     "trigger": intent.get("trigger"),
                     "drop": intent.get("drop"),
                     "selection_date": (st.get("entry_date").isoformat() if isinstance(st.get("entry_date"), date) else "") or "",
+                    "variant": variant,
                 }
                 trades.append(row)
                 _emit("TRADE", row)

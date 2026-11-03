@@ -34,6 +34,13 @@ _LAST_WATCH_ERROR = None  # type: Optional[Exception]
 STRATEGY_IDS_MZ1_SELL = (
     "strategy_fd561fb3",
 )
+STRATEGY_IDS_INTRADAY_NEXT_DAY_SELL = (
+    "strategy_c28a378b",
+)
+STRATEGY_IDS_QMT_SELL_FINE = STRATEGY_IDS_MZ1_SELL + STRATEGY_IDS_INTRADAY_NEXT_DAY_SELL
+
+SELL_VARIANT_MZ1 = "mz1"
+SELL_VARIANT_INTRADAY_NEXT_DAY = "intraday_next_day"
 
 
 @dataclass
@@ -188,6 +195,73 @@ def is_mz1_sell_strategy(strategy_id: str = "", name: str = "") -> bool:
             return True
     return ("马总逻辑1" in n) and ("卖" in n)
 
+
+def is_intraday_next_day_sell_strategy(strategy_id: str = "", name: str = "") -> bool:
+    sid = (strategy_id or "").strip()
+    if sid in STRATEGY_IDS_INTRADAY_NEXT_DAY_SELL:
+        return True
+    n = (name or "").strip()
+    return ("盘中买入次日了结" in n) and (("卖" in n) or n.startswith("卖"))
+
+
+def is_qmt_sell_fine_strategy(strategy_id: str = "", name: str = "") -> bool:
+    """马总1卖 或 盘中买入次日了结：共用「生成卖出QMT细回测」入口。"""
+    if is_intraday_next_day_sell_strategy(strategy_id, name):
+        return True
+    if is_mz1_sell_strategy(strategy_id, name):
+        return True
+    sid = (strategy_id or "").strip()
+    return sid in STRATEGY_IDS_QMT_SELL_FINE
+
+
+def sell_variant_for(strategy_id: str = "", name: str = "") -> str:
+    if is_intraday_next_day_sell_strategy(strategy_id, name):
+        return SELL_VARIANT_INTRADAY_NEXT_DAY
+    return SELL_VARIANT_MZ1
+
+
+def parse_strategy_code_drop_constants(strategy_code: str = "") -> Dict[str, float]:
+    """从 strategy_code 解析 DROP_PERCENT_* / CLEAR_GAIN_* 等常量。
+
+    细回测不执行策略 run()，必须显式把代码里的调参常量灌进 CFG.params，
+    否则只会吃到 strategy_params 里过期的 open_drop_percent 等字段。
+    单位：DROP_PERCENT_* 为百分点（2.0=2%）；CLEAR_GAIN_* 为小数（0.10=10%）。
+    """
+    out: Dict[str, float] = {}
+    text = strategy_code or ""
+    if not text.strip():
+        return out
+    patterns = {
+        "open_drop_percent": r"DROP_PERCENT_OPEN_PULL\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "drop_percent": r"DROP_PERCENT_OPEN\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "lu_drop_percent": r"DROP_PERCENT_LU\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "lu_high_offset": r"LU_HIGH_OFFSET\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "clear_drop_percent_main": r"DROP_PERCENT_CLEAR_MAIN\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "clear_drop_percent": r"DROP_PERCENT_CLEAR_GROWTH\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "clear_gain_main": r"CLEAR_GAIN_MAIN\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "clear_gain_growth": r"CLEAR_GAIN_GROWTH\s*=\s*([-+]?\d+(?:\.\d+)?)",
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, text)
+        if not m:
+            continue
+        try:
+            out[key] = float(m.group(1))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def parse_strategy_code_str_constants(strategy_code: str = "") -> Dict[str, str]:
+    """解析 strategy_code 中的字符串常量（如 CLEAR_BRANCH_AT）。"""
+    out: Dict[str, str] = {}
+    text = strategy_code or ""
+    m = re.search(r'CLEAR_BRANCH_AT\s*=\s*["\']([^"\']+)["\']', text)
+    if m:
+        out["clear_branch_at"] = str(m.group(1)).strip()
+    return out
+
+
 def build_qmt_strategy_source(
     *,
     codes: List[str],
@@ -205,6 +279,10 @@ def build_qmt_strategy_source(
     strategy_run_end_time: str = "15:00",
     first_buy_dates: Optional[Dict[str, str]] = None,
     last_buy_dates: Optional[Dict[str, str]] = None,
+    sell_variant: str = "",
+    strategy_id: str = "",
+    strategy_name: str = "",
+    strategy_code: str = "",
 ) -> str:
     """Embed CFG for sell fine BT (continuous multi-day; holdings injected)."""
     pool = []
@@ -273,6 +351,43 @@ def build_qmt_strategy_source(
     sp.setdefault("sell_hold_trading_days", ui_n + 1)
     sp.setdefault("scheduled_clear_time", clear_t)
     sp.setdefault("from_t1", bool(from_t1))
+    # 盘中次日了结 params 别名 → 模板统一字段
+    if "open_drop_percent" in sp and "drop_percent" not in sp:
+        sp["drop_percent"] = sp.get("open_drop_percent")
+    if "clear_drop_percent_main" in sp and "clear_drop_main" not in sp:
+        sp["clear_drop_main"] = sp.get("clear_drop_percent_main")
+    if "clear_drop_percent" in sp and "clear_drop_growth" not in sp:
+        sp["clear_drop_growth"] = sp.get("clear_drop_percent")
+    variant = (sell_variant or "").strip()
+    if not variant:
+        variant = sell_variant_for(strategy_id, strategy_name)
+    if variant not in (SELL_VARIANT_MZ1, SELL_VARIANT_INTRADAY_NEXT_DAY):
+        variant = SELL_VARIANT_MZ1
+    if variant == SELL_VARIANT_INTRADAY_NEXT_DAY:
+        # 细回测以 strategy_code 常量为主（用户改 DROP_PERCENT_OPEN_PULL 必须生效）；
+        # strategy_params.open_drop_percent 常为创建时的 2.0，会盖住代码常量 → 0/3 结果相同。
+        code_drops = parse_strategy_code_drop_constants(strategy_code)
+        code_strs = parse_strategy_code_str_constants(strategy_code)
+        if "open_drop_percent" in code_drops:
+            sp["open_drop_percent"] = float(code_drops["open_drop_percent"])
+            sp["drop_percent"] = float(code_drops["open_drop_percent"])
+        else:
+            sp.setdefault("open_drop_percent", 2.0)
+        if "clear_drop_percent_main" in code_drops:
+            sp["clear_drop_percent_main"] = float(code_drops["clear_drop_percent_main"])
+            sp["clear_drop_main"] = float(code_drops["clear_drop_percent_main"])
+        if "clear_drop_percent" in code_drops:
+            sp["clear_drop_percent"] = float(code_drops["clear_drop_percent"])
+            sp["clear_drop_growth"] = float(code_drops["clear_drop_percent"])
+        if "clear_gain_main" in code_drops:
+            sp["clear_gain_main"] = float(code_drops["clear_gain_main"])
+        if "clear_gain_growth" in code_drops:
+            sp["clear_gain_growth"] = float(code_drops["clear_gain_growth"])
+        if code_strs.get("clear_branch_at"):
+            sp["clear_branch_at"] = code_strs["clear_branch_at"]
+        else:
+            sp.setdefault("clear_branch_at", "09:50:00")
+        # 界面缺省持有1日 → 引擎日序 2；若调用方未传 hold，上面 ui_n 可能仍是2，此处不强行改 ui_n
     fb = {}
     for k, v in (first_buy_dates or {}).items():
         c6 = _code6(k)
@@ -283,6 +398,22 @@ def build_qmt_strategy_source(
         c6 = _code6(k)
         if c6 and v:
             lb[c6] = str(v)[:10]
+    # 近涨停半仓：选股日映射 + 价差（代码常量可灌入 params）
+    code_drops_all = parse_strategy_code_drop_constants(strategy_code)
+    if "lu_high_offset" in code_drops_all:
+        sp["lu_high_offset"] = float(code_drops_all["lu_high_offset"])
+    else:
+        sp.setdefault("lu_high_offset", 0.01)
+    if "lu_drop_percent" in code_drops_all and "lu_drop_percent" not in (params or {}):
+        sp.setdefault("lu_drop_percent", float(code_drops_all["lu_drop_percent"]))
+    sel_map_cfg = {}
+    raw_sel = sp.get("selection_date_by_code") or {}
+    if isinstance(raw_sel, dict):
+        for k, v in raw_sel.items():
+            c6s = _code6(k)
+            if c6s and v:
+                sel_map_cfg[c6s] = str(v)[:10]
+
     cfg = {
         "codes": pool,
         "start": start.isoformat(),
@@ -293,6 +424,7 @@ def build_qmt_strategy_source(
         "from_t1": bool(from_t1),
         "sell_hold_from_next_day": ui_n,
         "scheduled_clear_time": clear_t,
+        "selection_date_by_code": sel_map_cfg,
         "first_buy_dates": fb,
         "last_buy_dates": lb,
         "run_tag": tag,
@@ -300,6 +432,10 @@ def build_qmt_strategy_source(
         "strategy_generation_time": gen_t,
         "strategy_run_start_time": rs_t,
         "strategy_run_end_time": re_t,
+        "sell_variant": variant,
+        "strategy_id": str(strategy_id or ""),
+        "strategy_name": str(strategy_name or ""),
+        "clear_branch_at": str(sp.get("clear_branch_at") or "09:50:00"),
     }
     cfg_json = json.dumps(cfg, ensure_ascii=False, indent=2)
     tmpl = _TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -307,9 +443,24 @@ def build_qmt_strategy_source(
         raise RuntimeError("QMT sell template missing ___CFG_JSON___ placeholder")
     return tmpl.replace("___CFG_JSON___", cfg_json)
 
-def default_out_dir(root: Optional[Path] = None) -> Path:
+def default_out_dir(root: Optional[Path] = None, *, sell_variant: str = "") -> Path:
     root = root or ROOT
-    d = root / "data" / "mz1_qmt_sell_backtest"
+    variant = (sell_variant or "").strip()
+    if variant == SELL_VARIANT_INTRADAY_NEXT_DAY:
+        d = root / "data" / "intraday_nextday_qmt_sell_backtest"
+    else:
+        d = root / "data" / "mz1_qmt_sell_backtest"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def history_sell_csv_dir(root: Optional[Path] = None, *, sell_variant: str = "") -> Path:
+    """卖出明细 CSV 建议目录（与盘中买入明细同树）。"""
+    root = root or ROOT
+    if (sell_variant or "").strip() == SELL_VARIANT_INTRADAY_NEXT_DAY:
+        d = root / "history_data" / "马总盘中策略"
+    else:
+        d = root / "history_data" / "增强选股回测"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -347,14 +498,21 @@ def write_qmt_strategy_file(
     also_gbk_copy: bool = True,
     also_watch: bool = True,
     watch_path: Optional[Path] = None,
+    sell_variant: str = "",
 ) -> Path:
-    """Write timestamped backup under data/mz1_qmt_sell_backtest/, and optionally
+    """Write timestamped backup under data/*_qmt_sell_backtest/, and optionally
     atomic-drop to userdata/mz1_qmt_fine_watch/current.py for the hot-reload probe.
     """
-    out_dir = default_out_dir(root)
+    variant = (sell_variant or "").strip()
+    out_dir = default_out_dir(root, sell_variant=variant)
     if out_path is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = out_dir / ("mz1_qmt_sell_%s.py" % stamp)
+        prefix = (
+            "intraday_nextday_qmt_sell_"
+            if variant == SELL_VARIANT_INTRADAY_NEXT_DAY
+            else "mz1_qmt_sell_"
+        )
+        out_path = out_dir / ("%s%s.py" % (prefix, stamp))
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(source, encoding="utf-8")
@@ -591,7 +749,12 @@ def trades_to_backtest_rows(trades: List[dict]) -> List[dict]:
                 "trigger_info": tip,
                 "start_date": "",
                 "end_date": "",
-                "来源": "QMT卖出细回测",
+                "来源": (
+                    "QMT卖出细回测-盘中次日了结"
+                    if str(t.get("variant") or "") == SELL_VARIANT_INTRADAY_NEXT_DAY
+                    or str(t.get("rule") or "").startswith("盘中次日了结")
+                    else "QMT卖出细回测"
+                ),
             }
         )
     return rows

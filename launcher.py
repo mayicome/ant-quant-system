@@ -1392,6 +1392,7 @@ class AntLauncherWindow(QMainWindow):
                 return
 
         last_hm = slots[-1][0] if slots else ""
+        running = None  # lazy: None=unchecked, True/False after first probe
         for hm, dump_at in slots:
             if self._mz_dump_slot_done(now.date(), hm):
                 continue
@@ -1413,22 +1414,37 @@ class AntLauncherWindow(QMainWindow):
             if now.time() < dump_at:
                 # not yet this slot; later slots are later too
                 break
+            if running is None:
+                try:
+                    running = bool(self._mz_dump_already_running())
+                except Exception:
+                    running = False
+            # Do NOT mark done on launch. Only mark when CSV exists, or when the
+            # window is over AND no dump process is still running (otherwise a
+            # slow 14:50 / failed 14:55 would permanently skip with no file).
             if now > end_dt:
+                if running:
+                    # Keep waiting past grace while a dump is in flight (esp. last slot).
+                    self._append_launcher_log(
+                        "ma_zong_dump: past window %s but dump still running, wait"
+                        % hm
+                    )
+                    return
                 self._append_launcher_log(
-                    "ma_zong_dump: missed window %s(+%s min), mark done"
+                    "ma_zong_dump: missed window %s(+%s min), no output, mark done"
                     % (hm, slot_grace)
                 )
                 self._mark_mz_dump_slot_done(now.date(), hm)
                 continue
             # window [dump_at, dump_at+slot_grace]
-            if self._mz_dump_already_running():
+            if running:
                 self._append_launcher_log(
                     "ma_zong_dump: already running, wait (pending slot %s)" % hm
                 )
                 return
             script = "tools/dump_ma_zong_intraday_candidates.py"
             self._append_launcher_log(
-                "ma_zong_dump: launching scheduled at %s (slot %s, grace %s)"
+                "ma_zong_dump: launching scheduled at %s (slot %s, grace %s; mark done only after file)"
                 % (now.strftime("%H:%M:%S"), hm, slot_grace)
             )
             try:
@@ -1438,7 +1454,8 @@ class AntLauncherWindow(QMainWindow):
             except Exception as exc:
                 self._append_launcher_log("ma_zong_dump: launch failed %s" % exc)
                 return
-            self._mark_mz_dump_slot_done(now.date(), hm)
+            # Intentionally NOT mark done here: next ticks mark via output_exists,
+            # or missed-window once process exits with no file.
             try:
                 self._set_update_status(
                     "已触发马总盘中落候选（%s）" % hm,
