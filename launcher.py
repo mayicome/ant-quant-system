@@ -195,7 +195,7 @@ class _RuntimeIndexWorker(QThread):
 
 
 class _CosFriendSyncWorker(QThread):
-    """朋友机：从 COS 强制同步日线 zip / 选股 xls / 主力净流入。"""
+    """朋友机：从 COS 按需同步日线 zip / 选股 xls / 主力净流入 / 行情（有变化才下）。"""
 
     finished_ok = pyqtSignal(object)
 
@@ -780,7 +780,7 @@ class AntLauncherWindow(QMainWindow):
         )
         self.btn_cos_sync = QPushButton("立即同步 COS", self)
         self.btn_cos_sync.setStyleSheet(cos_btn_style)
-        self.btn_cos_sync.setToolTip("从腾讯云拉取日线 zip、选股结果、主力净流入并覆盖本地")
+        self.btn_cos_sync.setToolTip("立刻检查 COS：有变化才下载日线/选股/资金流/行情，无变化只校验")
         self.btn_cos_sync.clicked.connect(
             lambda: self._start_cos_friend_sync(force=True, manual=True)
         )
@@ -1776,8 +1776,10 @@ class AntLauncherWindow(QMainWindow):
             self.btn_cos_sync.setEnabled(False)
         except Exception:
             pass
+        # force：忽略今晚已 OK / 允许窗口外立刻跑；下载侧按 meta 比较，不再强下大文件
         self._append_launcher_log(
-            "cos sync: start force=%s manual=%s" % (bool(force), bool(manual))
+            "cos sync: start force=%s manual=%s (force=ignore-ok-date/out-of-window)"
+            % (bool(force), bool(manual))
         )
         worker = _CosFriendSyncWorker(
             self._project_root(), force=bool(force), parent=self

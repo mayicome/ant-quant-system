@@ -2,7 +2,7 @@
 """从腾讯云 COS 拉取/发布运行底稿（无密钥公共读）。
 
 启动补齐：股票池 / 板块索引 / 日线近窗 zip（缺才拉，不覆盖完整目录）。
-朋友机同步：按 friend_sync_meta.json 的交易日强制刷新日线 zip、选股 xls、主力净流入 CSV、沪深京行情 txt。
+朋友机同步：按 friend_sync_meta.json 比较交易日/清单/size/uploaded_at，有变化才拉日线 zip、选股 xls、主力净流入 CSV、沪深京行情 txt；force 只表示允许立刻跑，不强制重下。
 主站上传：stage_runtime_for_upload 把上述对象放到 data/cos/runtime/。
 """
 from __future__ import annotations
@@ -783,6 +783,32 @@ def _load_json_file(path: str) -> Optional[Any]:
         return None
 
 
+def _friend_meta_sig(meta: Optional[Dict[str, Any]]) -> str:
+    """远端/本地 meta 可比指纹：交易日、上传时间、各对象清单与 size。"""
+    if not isinstance(meta, dict):
+        return ""
+    payload = {
+        "trade_date": _norm_trade_date(meta.get("trade_date")),
+        "uploaded_at": str(meta.get("uploaded_at") or "").strip(),
+        "daily_cache": meta.get("daily_cache") if isinstance(meta.get("daily_cache"), dict) else {},
+        "stock_filter": meta.get("stock_filter") if isinstance(meta.get("stock_filter"), list) else [],
+        "capital_flow": meta.get("capital_flow") if isinstance(meta.get("capital_flow"), dict) else None,
+        "qmt_hsj_quote": meta.get("qmt_hsj_quote") if isinstance(meta.get("qmt_hsj_quote"), dict) else None,
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _local_size_matches(path: str, expect_size: Any, *, min_size: int = 1) -> bool:
+    if not _file_ok(path, min_size=min_size):
+        return False
+    if expect_size is None:
+        return True
+    try:
+        return os.path.getsize(path) == int(expect_size)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def fetch_friend_sync_meta(
     root: str,
     *,
@@ -835,7 +861,13 @@ def sync_friend_runtime(
     should_abort: Optional[Callable[[], bool]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    """朋友机：按远端 meta 强制覆盖日线/选股/资金流/沪深京行情。"""
+    """朋友机：按远端 meta 与本地比较后按需拉取日线/选股/资金流/沪深京行情。
+
+    force 保留给启动器语义（忽略今晚已 OK、窗口外立刻跑），不再表示无视本地强下大文件。
+    仍会轻量拉取 friend_sync_meta.json；trade_date / uploaded_at / 对象清单与 size
+    未变且本地 verify 已齐时跳过各大数据对象下载。
+    """
+    _ = bool(force)  # API 兼容；下载决策不依赖 force
     result: Dict[str, Any] = {
         "ok": False,
         "fetched": [],
@@ -848,6 +880,8 @@ def sync_friend_runtime(
     }
     if on_progress:
         on_progress("正在检查 COS 同步元数据…")
+    data_dir = project_data_dir(root)
+    prev_meta = _load_json_file(os.path.join(data_dir, FRIEND_SYNC_META_NAME))
     meta, meta_err = fetch_friend_sync_meta(root, should_abort=should_abort)
     if meta_err:
         result["errors"]["meta"] = meta_err
@@ -858,10 +892,14 @@ def sync_friend_runtime(
     result["trade_date"] = td
     stock_meta = meta.get("stock_filter") or []
     expect_stocks = []
+    stock_size_by_name: Dict[str, Any] = {}
     if isinstance(stock_meta, list):
         for item in stock_meta:
             if isinstance(item, dict) and item.get("name"):
-                expect_stocks.append(str(item["name"]))
+                name = str(item["name"])
+                expect_stocks.append(name)
+                if "size" in item:
+                    stock_size_by_name[name] = item.get("size")
             elif isinstance(item, str) and item.strip():
                 expect_stocks.append(item.strip())
     cf_meta = meta.get("capital_flow") if isinstance(meta.get("capital_flow"), dict) else {}
@@ -871,24 +909,55 @@ def sync_friend_runtime(
     quote_meta = meta.get("qmt_hsj_quote") if isinstance(meta.get("qmt_hsj_quote"), dict) else {}
     quote_name = str((quote_meta or {}).get("name") or "").strip() or QMT_HSJ_QUOTE_NAME
 
+    # meta 指纹未变且本地已齐：只耗 meta 流量，大文件全部跳过
+    verify_now = verify_friend_local(root, td, expect_stock_names=expect_stocks or None)
+    meta_unchanged = bool(_friend_meta_sig(prev_meta)) and (
+        _friend_meta_sig(prev_meta) == _friend_meta_sig(meta)
+    )
+    if meta_unchanged and bool(verify_now.get("ok")):
+        result["skipped"].extend(
+            [DAILY_CACHE_ZIP_NAME, "stock_filter", "capital_flow", "qmt_hsj_quote"]
+        )
+        result["verify"] = verify_now
+        result["ok"] = True
+        base = str(verify_now.get("message") or "COS同步成功")
+        result["message"] = base + "（本地已是最新，未重复下载）"
+        return result
+
     local_status, local_sync = local_manifest_sync_info(root)
-    need_daily = bool(force) or _remote_newer_or_missing(local_sync, td)
+    daily_meta = meta.get("daily_cache") if isinstance(meta.get("daily_cache"), dict) else {}
+    remote_daily_sync = _norm_trade_date(
+        (daily_meta or {}).get("sync_trade_date") or td
+    )
+    need_daily = _remote_newer_or_missing(local_sync, remote_daily_sync or td)
     if not need_daily:
         # 同日但未完成 / CSV 不够也要拉
         if str(local_status).lower() != "completed" or daily_cache_missing(root):
             need_daily = True
-    # 选股 / 资金流 / 行情：缺文件或强制 / 远端更新日都要拉
-    need_stock = bool(force) or (not list_local_stock_filter_files(root, td))
-    if expect_stocks and not need_stock:
+    # 选股 / 资金流 / 行情：缺文件、size 与 meta 不符、或交易日更新才拉（不因 force 强下）
+    need_stock = not bool(expect_stocks)
+    if expect_stocks:
+        hd = history_data_dir(root)
         for n in expect_stocks:
-            if not _file_ok(os.path.join(history_data_dir(root), n)):
+            expect_sz = stock_size_by_name.get(n)
+            if not _local_size_matches(
+                os.path.join(hd, n), expect_sz, min_size=1
+            ):
                 need_stock = True
                 break
-    need_cf = bool(force) or (not _file_ok(local_capital_flow_path(root, td), min_size=20))
-    need_quote = bool(force) or (
-        not _file_ok(local_qmt_hsj_quote_path(root), min_size=MIN_QMT_HSJ_QUOTE_SIZE)
+        else:
+            need_stock = False
+    cf_path = os.path.join(capital_flow_dir(root), cf_name)
+    need_cf = not _local_size_matches(
+        cf_path, (cf_meta or {}).get("size"), min_size=20
+    )
+    need_quote = not _local_size_matches(
+        local_qmt_hsj_quote_path(root),
+        (quote_meta or {}).get("size"),
+        min_size=MIN_QMT_HSJ_QUOTE_SIZE,
     )
     if _remote_newer_or_missing(local_sync, td):
+        # 交易日推进时即使旧文件尚在，也按新日清单重拉配套文件
         need_stock = True
         need_cf = True
         need_quote = True
@@ -1016,7 +1085,11 @@ def sync_friend_runtime(
     result["verify"] = verify
     result["ok"] = bool(verify.get("ok")) and not result["errors"]
     if result["ok"]:
-        result["message"] = str(verify.get("message") or "COS同步成功")
+        base = str(verify.get("message") or "COS同步成功")
+        if not result["fetched"]:
+            result["message"] = base + "（本地已是最新，未重复下载）"
+        else:
+            result["message"] = base
     else:
         # 有错误或校验未齐
         err_tip = ""
