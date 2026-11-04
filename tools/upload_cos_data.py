@@ -18,6 +18,7 @@
   python tools/upload_cos_data.py --with-zip
   python tools/upload_cos_data.py --force
   python tools/upload_cos_data.py --runtime-only
+  python tools/upload_cos_data.py --runtime-only --force --trade-date 2026-11-03
 """
 from __future__ import annotations
 
@@ -225,6 +226,10 @@ def sync_cos_tree(
             stats["upload"] += 1
             continue
         try:
+            # runtime 对象必须匿名可读（朋友机无密钥 HTTPS GET）；上传时带 ACL，再 put_acl 兜底。
+            extra = {}
+            if is_runtime_relpath(rel):
+                extra["ACL"] = "public-read"
             client.upload_file(
                 Bucket=bucket,
                 LocalFilePath=str(path),
@@ -232,6 +237,7 @@ def sync_cos_tree(
                 PartSize=8,
                 MAXThread=4,
                 EnableMD5=False,
+                **extra,
             )
             stats["upload"] += 1
             if is_runtime_relpath(rel):
@@ -288,9 +294,14 @@ def main() -> None:
     ap.add_argument(
         "--runtime-only",
         action="store_true",
-        help="只上传 data/cos/runtime/（股票池、板块索引、日线缓存 zip）",
+        help="只上传 data/cos/runtime/（股票池、板块索引、日线缓存 zip、选股/资金流/行情/meta）",
     )
     ap.add_argument("--src", default=str(LOCAL_COS_DIR), help="本地目录，默认 data/cos")
+    ap.add_argument(
+        "--trade-date",
+        default="",
+        help="朋友机同步用的交易日 YYYY-MM-DD；默认取本地 daily_cache manifest",
+    )
     args = ap.parse_args()
 
     cfg = _load_config()
@@ -308,7 +319,8 @@ def main() -> None:
         % (bucket, region, prefix or "(root)", src)
     )
     if Path(args.src).resolve() == LOCAL_COS_DIR.resolve():
-        staged = stage_runtime_for_upload(str(ROOT), str(src))
+        td = str(args.trade_date or "").strip() or None
+        staged = stage_runtime_for_upload(str(ROOT), str(src), trade_date=td)
         print("[runtime] staged=%s" % (",".join(staged) if staged else "(none)"))
         if not args.dry_run and not args.runtime_only:
             refresh_embedded_skill()
@@ -366,6 +378,8 @@ def main() -> None:
         "a_share_universe": prefix_url + "runtime/a_share_universe.json",
         "qmt_sector_index": prefix_url + "runtime/qmt_sector_index.json",
         "daily_cache_zip": prefix_url + "runtime/daily_cache.zip",
+        "friend_sync_meta": prefix_url + "runtime/friend_sync_meta.json",
+        "qmt_hsj_quote": prefix_url + "runtime/qmt_hsj_quote.txt",
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if (summary.get("tree") or {}).get("fail"):

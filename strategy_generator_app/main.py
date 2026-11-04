@@ -2709,7 +2709,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         backtest_btn_row3s = QHBoxLayout()
         self.backtest_mz1_qmt_sell_gen_btn = QPushButton("生成卖出QMT细回测…")
         self.backtest_mz1_qmt_sell_gen_btn.setToolTip(
-            "【马总逻辑1卖 / 盘中买入次日了结】用已载入的买入 CSV/批量接续状态，生成卖出细回测脚本并原子写入\n"
+            "【马总逻辑1卖 / 盘中买入次日了结 / 盘中买入冲高卖出】用已载入的买入 CSV/批量接续状态，生成卖出细回测脚本并原子写入\n"
             "国金 QMT userdata\\mz1_qmt_fine_watch\\current.py（与买腿同一路径，覆盖）。\n"
             "需先「从买入成交明细CSV接续…」或「载入上一轮批量回测→本策略」。\n"
             "结果在 FormulaOutput（ANT_MZ1_SELL_BT|）。不改「下一轮批量」引擎路径。"
@@ -2727,6 +2727,21 @@ class StrategyGeneratorMainWindow(QMainWindow):
         backtest_btn_row3s.addWidget(self.backtest_mz1_qmt_sell_ingest_btn)
         backtest_btn_row3s.addStretch()
         backtest_layout.addLayout(backtest_btn_row3s)
+
+        # 盘中买入冲高卖出 · 日线简化回测（无 tick / 无 QMT 探针）
+        backtest_btn_row3s2 = QHBoxLayout()
+        self.backtest_surge_daily_sell_btn = QPushButton("冲高卖出·日线回测…")
+        self.backtest_surge_daily_sell_btn.setToolTip(
+            "【盘中买入冲高卖出】用已接续的买入成交明细做日线简化卖出回测：\n"
+            "昨收+4/6/8% 当日 high 触价各约三分之一；持有末日剩余按收盘价清仓。\n"
+            "需先「从买入成交明细CSV接续…」或点本按钮后选 CSV。不依赖 tick/QMT 探针。"
+        )
+        self.backtest_surge_daily_sell_btn.clicked.connect(self._on_run_surge_daily_sell_backtest)
+        self.backtest_surge_daily_sell_btn.setMinimumWidth(0)
+        self.backtest_surge_daily_sell_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        backtest_btn_row3s2.addWidget(self.backtest_surge_daily_sell_btn)
+        backtest_btn_row3s2.addStretch()
+        backtest_layout.addLayout(backtest_btn_row3s2)
 
         # 工具：合并买卖成交明细 → 各日选股收益汇总.xlsx
         self.merge_trades_group = QGroupBox("选股收益汇总（合并买卖成交明细）")
@@ -7982,6 +7997,164 @@ class StrategyGeneratorMainWindow(QMainWindow):
             from backtest import mz1_qmt_sell_fine as m  # type: ignore
             return m
 
+
+    def _on_run_surge_daily_sell_backtest(self):
+        """盘中买入冲高卖出：日线简化卖出回测（无 tick / 无 QMT）。"""
+        try:
+            from strategy_generator_app.backtest import intraday_surge_daily_sell_bt as m
+        except ImportError:
+            try:
+                from backtest import intraday_surge_daily_sell_bt as m  # type: ignore
+            except ImportError as e:
+                QMessageBox.critical(self, "冲高日线回测", "无法加载模块：%s" % e)
+                return
+        sid = (self._get_selected_strategy_id() or "").strip()
+        cfg = self._find_strategy_by_id(sid) if sid else None
+        name = (getattr(cfg, "name", "") or "") if cfg else ""
+        if not m.is_intraday_surge_sell_strategy(sid, name):
+            r = QMessageBox.question(
+                self,
+                "冲高卖出·日线回测",
+                "当前策略不像「盘中买入冲高卖出」。仍按冲高三档+收盘清仓规则跑日线回测吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if r != QMessageBox.Yes:
+                return
+        # 以界面「持有交易日数」为准（不再把 UI=2 纠偏回策略缺省，否则改框无效）
+        hold_n = 2
+        if hasattr(self, "sell_chain_hold_spin"):
+            try:
+                hold_n = int(self.sell_chain_hold_spin.value() or 2)
+            except Exception:
+                hold_n = 2
+        hold_n = max(1, int(hold_n))
+        segs = list(getattr(self, "_chained_batch_segments", None) or [])
+        buy_csv = ""
+        seg = None
+        if segs:
+            seg = segs[0] if len(segs) == 1 else self._pick_batch_segment_payload(
+                segs, title="选择接续档", label="冲高日线回测请选一档："
+            )
+            if seg is None and len(segs) > 1:
+                return
+            if isinstance(seg, dict):
+                buy_csv = str(seg.get("source_buy_csv") or "")
+        if not seg or not (seg.get("buy_fills") or buy_csv):
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            hd = os.path.join(root, "history_data", "马总盘中策略")
+            start_dir = hd if os.path.isdir(hd) else (os.path.join(root, "history_data") if os.path.isdir(os.path.join(root, "history_data")) else "")
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择买入成交明细 CSV（冲高日线回测）",
+                start_dir,
+                "CSV (*.csv);;所有文件 (*.*)",
+            )
+            if not path:
+                return
+            buy_csv = path
+            seg = None
+        progress, own_dlg = self._backtest_progress_dialog("冲高卖出·日线回测")
+
+        def _prog(msg, pct=None):
+            try:
+                progress(msg, pct)
+            except Exception:
+                pass
+
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if seg and (seg.get("buy_fills") or []):
+                out, trades, summary = m.run_from_chain_segment(
+                    seg, hold_ui_days=hold_n, root=root, progress=_prog
+                )
+            else:
+                out, trades, summary = m.run_from_buy_csv(
+                    buy_csv, hold_ui_days=hold_n, root=root, progress=_prog
+                )
+        except Exception as e:
+            if own_dlg is not None:
+                try:
+                    own_dlg.close()
+                except Exception:
+                    pass
+            QMessageBox.critical(self, "冲高日线回测失败", str(e))
+            return
+        finally:
+            if own_dlg is not None:
+                try:
+                    own_dlg.close()
+                except Exception:
+                    pass
+        # 回灌下方成交明细表（与「导入卖出QMT结果」同路径：_fill_backtest_trades_table）
+        # 日线模块写出的是中文字段 CSV；表格期望 date/time/code/side/... 英文键
+        rows = []
+        for t in (trades or []):
+            side_raw = str(t.get("方向") or t.get("side") or "卖出").strip()
+            side = "buy" if side_raw in ("买入", "buy", "BUY") else "sell"
+            sell_d = str(t.get("日期") or t.get("date") or "").strip()
+            rows.append({
+                "date": sell_d,
+                "time": t.get("时间") or t.get("time") or "",
+                "code": t.get("代码") or t.get("code") or "",
+                "stock_name": t.get("股票名称") or t.get("stock_name") or "",
+                "选股日": t.get("选股日") or "",
+                "side": side,
+                "price": t.get("价格") if t.get("价格") is not None else t.get("price"),
+                "volume": t.get("数量") if t.get("数量") is not None else t.get("volume"),
+                "amount": t.get("金额") if t.get("金额") is not None else t.get("amount"),
+                "position_after": t.get("position_after") or "",
+                "rule_name": t.get("规则名") or t.get("rule_name") or "",
+                "leg_key": t.get("腿键") or t.get("leg_key") or "",
+                "trigger_info": t.get("触发信息") or t.get("trigger_info") or "",
+                "start_date": t.get("start_date") or "",
+                "end_date": t.get("end_date") or sell_d,
+                "来源": t.get("来源") or "日线回测-盘中冲高卖出",
+            })
+        try:
+            self._fill_backtest_trades_table(rows)
+        except Exception as _fill_e:
+            try:
+                self.statusBar().showMessage("成交明细表回灌失败：%s" % _fill_e, 8000)
+            except Exception:
+                pass
+        sample = []
+        for t in (trades or [])[:8]:
+            sample.append(
+                "%s %s %s px=%s vol=%s | %s"
+                % (t.get("日期"), t.get("代码"), t.get("规则名"), t.get("价格"), t.get("数量"), t.get("触发信息"))
+            )
+        result_lines = [
+            "冲高卖出·日线回测完成",
+            "持有卖出日=%s" % summary.get("hold_ui_days"),
+            "成交 %s 笔（冲高触价 %s / 收盘清仓 %s）" % (
+                summary.get("n_trades"), summary.get("n_surge"), summary.get("n_clear"),
+            ),
+            "跳过 %s" % summary.get("skipped_n"),
+            "输出：%s" % out,
+        ]
+        if sample:
+            result_lines.append("样例：")
+            result_lines.extend(sample)
+        try:
+            self.backtest_result_text.setPlainText("\n".join(result_lines))
+        except Exception:
+            pass
+        msg = (
+            "持有卖出日=%d\n成交 %d 笔（冲高触价 %d / 收盘清仓 %d）\n跳过 %d\n\n输出：\n%s\n\n下方列表已刷新；可用「导出成交明细(CSV)…」。\n\n样例：\n%s"
+            % (
+                summary.get("hold_ui_days"),
+                summary.get("n_trades"),
+                summary.get("n_surge"),
+                summary.get("n_clear"),
+                summary.get("skipped_n"),
+                out,
+                ("\n".join(sample) if sample else "（无成交）"),
+            )
+        )
+        QMessageBox.information(self, "冲高卖出·日线回测完成", msg)
+
+
     def _on_generate_mz1_qmt_sell_fine_script(self):
         """生成马总逻辑1卖 QMT 细回测脚本，写入同一 mz1_qmt_fine_watch/current.py。"""
         m = self._mz1_qmt_sell_fine_mod()
@@ -7997,7 +8170,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 "生成卖出QMT细回测",
-                "当前策略看起来不是「卖：马总逻辑1 / 盘中买入次日了结」。仍按卖腿规则生成脚本吗？",
+                "当前策略看起来不是「卖：马总逻辑1 / 盘中买入次日了结 / 盘中买入冲高卖出」。仍按卖腿规则生成脚本吗？",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -8007,13 +8180,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
             _sell_variant = m.sell_variant_for(sid, name)
         except Exception:
             _sell_variant = "mz1"
-        # 盘中次日了结：缺省持有交易日数=1（若界面仍停在旧默认2，按策略参数纠正一次）
+        # 盘中次日了结缺省持有=1：若界面仍停在通用默认2，按策略参数纠正一次。
+        # 冲高卖出缺省=2（与 spin 默认一致），不再纠偏，避免改「持有交易日数」被盖回。
         if _sell_variant == "intraday_next_day" and hasattr(self, "sell_chain_hold_spin"):
             try:
                 _sp0 = dict(getattr(cfg, "strategy_params", None) or {}) if cfg is not None else {}
                 _pref = int(_sp0.get("entry_window_trading_days") or _sp0.get("sell_hold_from_next_day") or 1)
-                if _pref >= 1 and int(self.sell_chain_hold_spin.value()) == 2 and _pref == 1:
-                    self.sell_chain_hold_spin.setValue(1)
+                if _pref >= 1 and int(self.sell_chain_hold_spin.value()) == 2 and _pref != 2:
+                    self.sell_chain_hold_spin.setValue(int(_pref))
             except Exception:
                 pass
         segs = list(getattr(self, "_chained_batch_segments", None) or [])
@@ -8212,11 +8386,13 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 _var2 = m.sell_variant_for(_sid2, _name2)
             except Exception:
                 _var2 = "mz1"
-            if rows and _var2 == "intraday_next_day":
+            if rows and _var2 in ("intraday_next_day", "intraday_surge"):
                 import csv as _csv
                 import io as _io
                 hd = m.history_sell_csv_dir(sell_variant=_var2)
-                csv_path = hd / ("回测成交明细_卖出_盘中次日了结_%s.csv" % stamp)
+                csv_path = hd / (
+                    ("回测成交明细_卖出_盘中冲高卖出_%s.csv" if _var2 == "intraday_surge" else "回测成交明细_卖出_盘中次日了结_%s.csv") % stamp
+                )
                 headers = [
                     "日期", "时间", "代码", "选股日", "方向", "价格", "数量", "金额",
                     "规则名", "腿键", "触发信息", "来源",
@@ -8237,7 +8413,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                             r.get("rule_name") or "",
                             r.get("leg_key") or "",
                             r.get("trigger_info") or "",
-                            r.get("来源") or "QMT卖出细回测-盘中次日了结",
+                            r.get("来源") or ("QMT卖出细回测-盘中冲高卖出" if _var2 == "intraday_surge" else "QMT卖出细回测-盘中次日了结"),
                         ])
         except Exception as _csv_e:
             csv_path = None
@@ -8476,19 +8652,28 @@ class StrategyGeneratorMainWindow(QMainWindow):
         try:
             from strategy_generator_app.backtest.mz1_qmt_sell_fine import (
                 is_intraday_next_day_sell_strategy as _is_ind_sell,
+                is_intraday_surge_sell_strategy as _is_surge_sell,
             )
         except ImportError:
             try:
                 from backtest.mz1_qmt_sell_fine import (  # type: ignore
                     is_intraday_next_day_sell_strategy as _is_ind_sell,
+                    is_intraday_surge_sell_strategy as _is_surge_sell,
                 )
             except ImportError:
                 _is_ind_sell = None  # type: ignore
-        if _is_ind_sell and _is_ind_sell(sid, name):
+                _is_surge_sell = None  # type: ignore
+        if _is_surge_sell and _is_surge_sell(sid, name):
+            lines.append(
+                "【盘中买入冲高卖出 · 日线回测】先「从买入成交明细CSV接续…」，持有交易日数默认2；同代码多笔买入各自开窗清仓；"
+                "点「冲高卖出·日线回测…」：昨收+4/6/8% 当日high触价各约1/3，末日剩余按收盘清仓；"
+                "输出 history_data/马总盘中策略/回测成交明细_卖出_盘中冲高卖出_*.csv（无 tick/探针）。"
+            )
+        elif _is_ind_sell and _is_ind_sell(sid, name):
             lines.append(
                 "【盘中买入次日了结 · 卖出QMT细回测】先「从买入成交明细CSV接续…」，"
                 "持有交易日数默认1、定时清仓14:56；点「生成卖出QMT细回测…」投递同一 watch；"
-                "腿=开盘价-1跳回撤2%全仓 + 09:50封板分支 + 末日清仓（无开盘涨幅/近涨停半仓）。"
+                "腿=最新价-1跳回撤弹性全仓 + 09:50封板分支 + 末日清仓（无开盘涨幅/近涨停半仓）。"
             )
         if hasattr(self, "backtest_mode_hint_label"):
             self.backtest_mode_hint_label.setText("\n".join(lines))

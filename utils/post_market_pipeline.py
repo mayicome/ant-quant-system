@@ -28,13 +28,19 @@ EXIT_WECHAT_IP_WHITELIST = 64
 
 WECHAT_RETRY_SEC = 60
 
-CAPITAL_FLOW_RETRY_SEC = 60
+CAPITAL_FLOW_RETRY_SEC = 60  # 兼容旧名；提醒间隔参考
+
+# 等待本地主力净流入合格（对齐 wait_daily_cache_ready：默认 30s / 2h）
+
+CAPITAL_FLOW_WAIT_POLL_SEC = 30
+
+CAPITAL_FLOW_WAIT_TIMEOUT_SEC = 7200
 
 # 东财风控拖动验证页（与 eastmoney_fund_flow Referer 一致）
 
 EASTMONEY_ZJLX_URL = "https://data.eastmoney.com/zjlx/detail.html"
 
-# 同一次资金流阻塞重试里默认只弹一次浏览器；距上次打开超过该秒数才允许再弹（防每 60s 刷屏）
+# 同一次资金流阻塞等待里默认只弹一次浏览器；距上次打开超过该秒数才允许再弹
 
 CAPITAL_FLOW_BROWSER_REOPEN_SEC = 30 * 60
 
@@ -180,11 +186,13 @@ def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
 
         PipelineStep("lu_board_rank", "涨停家数排名导出", selectable=True),
 
-        PipelineStep("capital_flow", "主力资金流", selectable=True),
+        PipelineStep("capital_flow", "主力资金流", is_gate=True, selectable=True),
 
         PipelineStep("board_snapshot", "东财板块日快照", selectable=True),
 
         PipelineStep("stock_filter", "选股", selectable=True),
+
+        PipelineStep("cos_upload", "上传腾讯云COS", full_only=True),
 
         PipelineStep("profit_index", "盈亏指数", full_only=True),
 
@@ -202,9 +210,9 @@ def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
 
         PipelineStep("lhb_premium", "龙虎榜溢价复盘", full_only=True),
 
-        PipelineStep("inst_net_rank", "机构榜", full_only=True),
-
         PipelineStep("stock_info_f10", "全A股票信息F10", selectable=True),
+
+        PipelineStep("inst_net_rank", "机构榜", full_only=True),
 
         PipelineStep(
 
@@ -220,9 +228,6 @@ def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
 
         ),
 
-        PipelineStep("cos_upload", "上传腾讯云COS", full_only=True),
-
-        PipelineStep("wechat_draft", "微信公众号草稿", full_only=True),
 
         PipelineStep("market_regime", "市场行情描绘增量", full_only=True),
 
@@ -574,6 +579,293 @@ def _ok_after_run(
 
 
 
+def _local_capital_flow_ready_result(day: date) -> Optional["StepRunResult"]:
+
+    """本地产物经 check_capital_flow 合格则返回成功结果，否则 None。"""
+
+    try:
+
+        from utils.post_market_completeness import check_capital_flow
+
+
+
+        ok, det = check_capital_flow(day)
+
+    except Exception as e:
+
+        print(f"[资金流] 本地产物有效性检查异常（忽略，继续等待）: {e}")
+
+        return None
+
+    if not ok:
+
+        return None
+
+    return StepRunResult(
+
+        ok=True,
+
+        exit_code=0,
+
+        detail=f"{det}（本地产物已合格）",
+
+    )
+
+
+
+
+
+def _wait_capital_flow_qualified(
+
+    day: date,
+
+    *,
+
+    reason: str,
+
+    initial_detail: str = "",
+
+    stop_capital_flow_retry: Optional[Callable[[], bool]] = None,
+
+    notify: bool = True,
+
+    open_browser: bool = True,
+
+    log_prefix: str = "[资金流]",
+
+) -> "StepRunResult":
+
+    """循环等待主力净流入最小合格；不重跑东财抓取。
+
+
+
+    合格标准同 check_capital_flow（全量或已穿越 >=3000 万子集）。
+
+    超时 / 用户停止则失败。等待期间可手动补跑写入 CSV，本循环会检测到并放行。
+
+    """
+
+    from utils.server_chan_notify import notify_alert
+
+
+
+    d = day.strftime("%Y-%m-%d")
+
+    d8 = day.strftime("%Y%m%d")
+
+    poll = float(CAPITAL_FLOW_WAIT_POLL_SEC)
+
+    timeout = float(CAPITAL_FLOW_WAIT_TIMEOUT_SEC)
+
+    t0 = time.time()
+
+    alerted = False
+
+    last_browser_open_at = 0.0
+
+    attempt = 0
+
+    detail0 = (initial_detail or reason or "").strip()
+
+
+
+    print(
+
+        f"{log_prefix} 等待主力净流入合格… 原因={reason}；"
+
+        f"轮询 {int(poll)}s，超时 {int(timeout)}s；"
+
+        f"请手动补跑资金流，合格后将自动继续。"
+
+    )
+
+
+
+    while True:
+
+        attempt += 1
+
+        if stop_capital_flow_retry and stop_capital_flow_retry():
+
+            return StepRunResult(
+
+                ok=False,
+
+                exit_code=1,
+
+                detail="已停止：等待主力净流入合格被取消",
+
+            )
+
+
+
+        ready = _local_capital_flow_ready_result(day)
+
+        if ready is not None:
+
+            print(f"{log_prefix} {ready.detail}")
+
+            return ready
+
+
+
+        elapsed = time.time() - t0
+
+        if elapsed >= timeout:
+
+            msg = (
+
+                f"等待主力净流入合格超时（{int(timeout)}s）；"
+
+                f"原因={reason}；{detail0}"
+
+            ).strip("；")
+
+            print(f"{log_prefix} {msg}")
+
+            if notify:
+
+                notify_alert(
+
+                    title=f"盘后批跑超时 {d} · 主力净流入未合格",
+
+                    content=(
+
+                        f"**日期**：{d}\n"
+
+                        f"**原因**：{reason}\n"
+
+                        f"**详情**：{detail0 or '-'}\n"
+
+                        f"**说明**：已等待 {int(timeout)}s 仍未达到最小合格"
+
+                        f"（全量或 >=3000 万子集）。批跑中止，后续选股未执行。"
+
+                        f"请手动补齐后再点选股/继续。\n"
+
+                        f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+                    ),
+
+                    alert_key=f"capital_flow_wait_timeout_{d8}",
+
+                    cooldown_sec=0,
+
+                )
+
+            return StepRunResult(ok=False, exit_code=1, detail=msg)
+
+
+
+        if notify and not alerted:
+
+            alerted = True
+
+            if open_browser:
+
+                _open_eastmoney_zjlx_for_captcha("等待主力净流入合格")
+
+                last_browser_open_at = time.time()
+
+            notify_alert(
+
+                title=f"盘后批跑暂停 {d} · 等待主力净流入合格",
+
+                content=(
+
+                    f"**日期**：{d}\n"
+
+                    f"**原因**：{reason}\n"
+
+                    f"**详情**：{detail0 or '-'}\n"
+
+                    f"**说明**：批跑停在资金流门禁，每 {int(poll)} 秒检查本地 CSV 是否合格；"
+
+                    f"等待期间不自动反复抓取东财。请手动补跑主力净流入，"
+
+                    f"达到最小合格后将自动继续选股及后续。"
+
+                    f"最长等待 {int(timeout)}s。\n"
+
+                    f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+                ),
+
+                alert_key=f"capital_flow_wait_{d8}",
+
+                cooldown_sec=0,
+
+            )
+
+        elif notify and attempt % 10 == 0:
+
+            notify_alert(
+
+                title=f"盘后批跑仍在等待 {d} · 主力净流入",
+
+                content=(
+
+                    f"已等待约 {int(elapsed)}s 仍未合格（{reason}）。"
+
+                    f"继续每 {int(poll)}s 检查本地产物；可手动补跑资金流。"
+
+                ),
+
+                alert_key=f"capital_flow_wait_remind_{d8}",
+
+                cooldown_sec=0,
+
+            )
+
+            if open_browser and (time.time() - last_browser_open_at) >= CAPITAL_FLOW_BROWSER_REOPEN_SEC:
+
+                _open_eastmoney_zjlx_for_captcha(f"等待提醒#{attempt}")
+
+                last_browser_open_at = time.time()
+
+
+
+        remain = max(0, int(timeout - elapsed))
+
+        print(
+
+            f"{log_prefix} 等待主力净流入合格… "
+
+            f"#{attempt} 已等 {int(elapsed)}s 剩余约 {remain}s "
+
+            f"（{detail0 or reason}）"
+
+        )
+
+
+
+        deadline = time.time() + poll
+
+        while time.time() < deadline:
+
+            if stop_capital_flow_retry and stop_capital_flow_retry():
+
+                return StepRunResult(
+
+                    ok=False,
+
+                    exit_code=1,
+
+                    detail="已停止：等待主力净流入合格被取消",
+
+                )
+
+            ready = _local_capital_flow_ready_result(day)
+
+            if ready is not None:
+
+                print(f"{log_prefix} {ready.detail}")
+
+                return ready
+
+            time.sleep(min(5.0, max(0.1, deadline - time.time())))
+
+
 def run_step(
 
     step_id: str,
@@ -737,15 +1029,13 @@ def run_step(
 
             # 默认仅东财 push2（不同花顺）：先 >=3000 万早停落盘，再尝试全量。
 
-            # 定时/自动：失败 Server酱 + 打开 zjlx 拖验证，每 CAPITAL_FLOW_RETRY_SEC 重试 push2。
+            # 定时/自动：首次抓取失败或产物未合格 → 循环等待本地 CSV 合格（手动补跑），
 
-            # 手动版（capital_flow_selenium_fallback=True）：push2 失败后改走 --selenium（>=3000 早停保底），不发 Server酱；
+            #   等待期间不反复打东财；超时才失败。Server酱提示 + 可选打开 zjlx。
 
-            # 仍不同花顺；Selenium 失败则返回，不再 60s 死循环。
+            # 手动版（capital_flow_selenium_fallback=True）：push2 失败后改走 --selenium
 
-            from utils.server_chan_notify import notify_alert
-
-
+            #   （>=3000 早停保底）；仍失败则同样进入本地等待（若 auto_retry）。
 
             def _run_flow(extra_args: tuple = ()) -> StepRunResult:
 
@@ -765,9 +1055,20 @@ def run_step(
 
 
 
-            # 1) push2
+            # 1) 先看本地是否已合格（避免无意义抓取）
 
-            # push2：--min-amount=3000 表示先保子集再尝试全量（见 get_capital_flow_selenium）
+            ready0 = _local_capital_flow_ready_result(day)
+
+            if ready0 is not None:
+
+                print(f"[资金流] {ready0.detail}（跳过抓取）")
+
+                return ready0
+
+
+
+            # 2) push2 只尝试一次
+
             last = _run_flow(("--min-amount=3000",))
 
             if last.ok:
@@ -780,7 +1081,7 @@ def run_step(
 
 
 
-            # 手动：push2 失败 → 网页 Selenium 按 >=3000 早停保底（--min-amount=3000）
+            # 3) 手动：push2 失败 → Selenium 再试一次
 
             if capital_flow_selenium_fallback:
 
@@ -798,10 +1099,6 @@ def run_step(
 
                 _open_eastmoney_zjlx_for_captcha("push2失败，改用Selenium")
 
-
-                # 手动补跑不发 Server酱，控制台日志即可
-
-
                 print(f"[资金流] push2 失败（{detail}），改用 --selenium 网页翻页（>=3000早停）…")
 
                 sel = _run_flow(("--selenium", "--min-amount=3000"))
@@ -818,25 +1115,43 @@ def run_step(
 
                     )
 
-                return StepRunResult(
+                detail = (
 
-                    ok=False,
+                    f"push2失败后 Selenium 仍失败：{sel.detail or sel.exit_code}"
 
-                    exit_code=sel.exit_code,
-
-                    detail=(
-
-                        f"push2失败后 Selenium 仍失败：{sel.detail or sel.exit_code}"
-
-                        f"；先前 push2：{detail}"
-
-                    ),
+                    f"；先前 push2：{detail}"
 
                 )
 
-            # 定时等：push2 失败后每 CAPITAL_FLOW_RETRY_SEC 重试；
+                if not capital_flow_auto_retry:
 
-            # 等待期间若本地 CSV 已通过齐全校验（手动/其它进程写入），直接放行，不再空转 push2。
+                    return StepRunResult(
+
+                        ok=False,
+
+                        exit_code=sel.exit_code,
+
+                        detail=detail,
+
+                    )
+
+                return _wait_capital_flow_qualified(
+
+                    day,
+
+                    reason="抓取未合格（Selenium仍失败）",
+
+                    initial_detail=detail,
+
+                    stop_capital_flow_retry=stop_capital_flow_retry,
+
+                    notify=True,
+
+                    open_browser=True,
+
+                )
+
+
 
             if not capital_flow_auto_retry:
 
@@ -844,217 +1159,23 @@ def run_step(
 
 
 
-            def _local_capital_flow_ready() -> Optional[StepRunResult]:
+            # 4) 自动批跑：进入等待循环（只验本地产物，不重打东财）
 
-                """本地产物有效才放行：非空 + 有数据行（走 check_capital_flow）。"""
+            return _wait_capital_flow_qualified(
 
-                try:
+                day,
 
-                    from utils.post_market_completeness import check_capital_flow
+                reason="抓取未合格",
 
+                initial_detail=detail,
 
+                stop_capital_flow_retry=stop_capital_flow_retry,
 
-                    ok, det = check_capital_flow(day)
+                notify=True,
 
-                except Exception as e:
+                open_browser=True,
 
-                    print(f"[资金流] 本地产物有效性检查异常（忽略，继续 push2 重试）: {e}")
-
-                    return None
-
-                if not ok:
-
-                    return None
-
-                return StepRunResult(
-
-                    ok=True,
-
-                    exit_code=0,
-
-                    detail=f"{det}（本地产物已有效，跳过 push2 重试）",
-
-                )
-
-
-
-            def _wait_retry_or_local(seconds: float) -> Optional[StepRunResult]:
-
-                """分段等待；期间发现有效本地 CSV 则立即返回成功。"""
-
-                deadline = time.time() + float(seconds)
-
-                poll = 5.0
-
-                while True:
-
-                    if stop_capital_flow_retry and stop_capital_flow_retry():
-
-                        return StepRunResult(
-
-                            ok=False,
-
-                            exit_code=last.exit_code,
-
-                            detail="已停止资金流自动重试",
-
-                        )
-
-                    ready = _local_capital_flow_ready()
-
-                    if ready is not None:
-
-                        print(f"[资金流] {ready.detail}")
-
-                        return ready
-
-                    now = time.time()
-
-                    if now >= deadline:
-
-                        return None
-
-                    time.sleep(min(poll, deadline - now))
-
-
-
-            attempt = 1
-
-            alerted = False
-
-            last_browser_open_at = 0.0
-
-            while True:
-
-                if stop_capital_flow_retry and stop_capital_flow_retry():
-
-                    return StepRunResult(
-
-                        ok=False,
-
-                        exit_code=last.exit_code,
-
-                        detail="已停止资金流自动重试",
-
-                    )
-
-                # 每次重试前先看本地是否已有有效产物（手动补齐）
-
-                ready = _local_capital_flow_ready()
-
-                if ready is not None:
-
-                    print(f"[资金流] {ready.detail}")
-
-                    return ready
-
-
-
-                detail = last.detail or f"exit={last.exit_code}"
-
-                if not alerted:
-
-                    alerted = True
-
-                    _open_eastmoney_zjlx_for_captcha("首次失败")
-
-                    last_browser_open_at = time.time()
-
-                    notify_alert(
-
-                        title=f"盘后批跑暂停 {d} · 主力资金流(东财)",
-
-                        content=(
-
-                            f"**日期**：{d}\n"
-
-                            f"**原因**：{detail}\n"
-
-                            f"**说明**：接口 push2 失败，多为限流/需滑块验证。"
-
-                            f"已尝试打开 {EASTMONEY_ZJLX_URL}，请在网页完成滑块验证后关闭。"
-
-                            f"批跑停在本步骤，每 {CAPITAL_FLOW_RETRY_SEC} 秒自动重试；"
-
-                            f"若手动补齐且本地 CSV 校验通过，将自动继续后续步骤。"
-
-                            f"成功前不会跑后续步骤。\n"
-
-                            f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-                        ),
-
-                        alert_key=f"capital_flow_em_{d8}",
-
-                        cooldown_sec=0,
-
-                    )
-
-                elif attempt % 10 == 0:
-
-                    notify_alert(
-
-                        title=f"盘后批跑仍暂停 {d} · 主力资金流(东财)",
-
-                        content=(
-
-                            f"已连续 {attempt} 次仍失败（{detail}）。"
-
-                            f"仍按每 {CAPITAL_FLOW_RETRY_SEC}s 重试。"
-
-                            f"可自检滑块验证或打开 {EASTMONEY_ZJLX_URL} 再试一次；"
-
-                            f"或手动补齐资金流，定时检测到有效 CSV 后会自动继续。"
-
-                        ),
-
-                        alert_key=f"capital_flow_em_remind_{d8}",
-
-                        cooldown_sec=0,
-
-                    )
-
-                    if (time.time() - last_browser_open_at) >= CAPITAL_FLOW_BROWSER_REOPEN_SEC:
-
-                        _open_eastmoney_zjlx_for_captcha(f"提醒第{attempt}次")
-
-                        last_browser_open_at = time.time()
-
-
-
-                print(
-
-                    f"[资金流] 接口失败（{detail}），"
-
-                    f"{CAPITAL_FLOW_RETRY_SEC}s 内轮询本地有效产物，否则重试 push2"
-
-                    f"（第 {attempt} 次）…"
-
-                )
-
-                waited = _wait_retry_or_local(CAPITAL_FLOW_RETRY_SEC)
-
-                if waited is not None:
-
-                    return waited
-
-                attempt += 1
-
-                last = _run_flow(("--min-amount=3000",))
-
-                if last.ok:
-
-                    return StepRunResult(
-
-                        ok=True,
-
-                        exit_code=0,
-
-                        detail=(last.detail or "") + f"（第{attempt}次成功）",
-
-                    )
-
-
+            )
 
         if step_id == "board_snapshot":
 
@@ -1076,6 +1197,84 @@ def run_step(
 
         if step_id == "stock_filter":
 
+            # 选股依赖主力净流入最小合格；未合格时自动批跑循环等待，合格后再跑选股。
+
+            try:
+
+                from utils.post_market_completeness import check_capital_flow
+
+
+
+                ok_cf, det_cf = check_capital_flow(day)
+
+            except Exception as e:
+
+                return StepRunResult(
+
+                    ok=False,
+
+                    exit_code=1,
+
+                    detail=f"选股前门禁：主力净流入校验异常: {e}",
+
+                )
+
+            if not ok_cf:
+
+                if capital_flow_auto_retry:
+
+                    print(
+
+                        f"[选股] 主力净流入未合格（{det_cf}），"
+
+                        f"等待合格后自动继续选股…"
+
+                    )
+
+                    waited = _wait_capital_flow_qualified(
+
+                        day,
+
+                        reason="选股前门禁未合格",
+
+                        initial_detail=str(det_cf),
+
+                        stop_capital_flow_retry=stop_capital_flow_retry,
+
+                        notify=True,
+
+                        open_browser=False,
+
+                        log_prefix="[选股]",
+
+                    )
+
+                    if not waited.ok:
+
+                        return StepRunResult(
+
+                            ok=False,
+
+                            exit_code=waited.exit_code or 1,
+
+                            detail=f"选股前门禁：{waited.detail}",
+
+                        )
+
+                else:
+
+                    return StepRunResult(
+
+                        ok=False,
+
+                        exit_code=1,
+
+                        detail=f"选股前门禁：主力净流入未合格（{det_cf}）；请先补跑资金流",
+
+                    )
+
+
+
             # 选股已支持 --as-of，勿再 freeze_time：冻钟会导致 xtdata/超时逻辑假死，界面像卡住
 
             args: Tuple[str, ...] = ("--auto-run",)
@@ -1087,8 +1286,6 @@ def run_step(
             rc = run("sector_stock_filter.py", args, freeze=False)
 
             return _ok_after_run(step_id, day, rc)
-
-
 
         gui_map = {
 
@@ -1202,7 +1399,7 @@ def run_step(
 
         if step_id == "cos_upload":
 
-            rc = run("tools/upload_cos_data.py", ("--with-zip",))
+            rc = run("tools/upload_cos_data.py", ("--runtime-only", "--force"))
 
             return _ok_after_run(step_id, day, rc)
 

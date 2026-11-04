@@ -818,10 +818,75 @@ def _wait_table_data_rows(driver, timeout=25, min_rows=5) -> int:
     return last
 
 
+def _active_pager_page(driver) -> int:
+    """Read current 1-based page from #dataview pager active link / data-page."""
+    try:
+        n = driver.execute_script(
+            """
+            var act = document.querySelector('#dataview .pagerbox a.active[data-page]')
+                   || document.querySelector('#dataview .pagerbox .active a[data-page]')
+                   || document.querySelector('#dataview .pagerbox a.active');
+            if (act) {
+              var p = parseInt(act.getAttribute('data-page'), 10);
+              if (!isNaN(p) && p > 0) return p;
+            }
+            try {
+              var dv = window.jQuery && window.jQuery('#dataview').data('dataview');
+              if (dv) {
+                if (dv.pageFrom != null) {
+                  var pf = parseInt(dv.pageFrom, 10);
+                  if (!isNaN(pf) && pf > 0) return Math.floor((pf - 1) / 50) + 1;
+                }
+              }
+            } catch (e) {}
+            return 0;
+            """
+        )
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+def _first_table_seq(driver) -> int:
+    """First row 序号 (ranking index) if present."""
+    try:
+        n = driver.execute_script(
+            """
+            var table = document.querySelector('table#dt_1')
+                    || document.querySelector('#dataview table')
+                    || document.querySelector('table');
+            if (!table) return 0;
+            var tbody = table.querySelector('tbody') || table;
+            var trs = tbody.querySelectorAll('tr');
+            for (var i = 0; i < trs.length; i++) {
+              var tds = trs[i].querySelectorAll('td');
+              if (tds.length < 2) continue;
+              var seq = (tds[0].innerText || '').trim();
+              var code = '';
+              for (var j = 0; j < Math.min(tds.length, 4); j++) {
+                var t = (tds[j].innerText || '').trim();
+                if (/^\\d{6}$/.test(t)) { code = t; break; }
+              }
+              if (code && /^\\d+$/.test(seq)) return parseInt(seq, 10);
+            }
+            return 0;
+            """
+        )
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
 def go_selenium_page(driver, page_num: int, wait_rows: bool = True) -> bool:
-    """Jump to absolute page via emdataview.goPage / pager link; optionally wait for rows."""
+    """Jump to absolute 1-based page via emdataview.goPage / pager link; wait for land+rows.
+
+    Returns True only when the pager active page matches page_num (and rows if wait_rows).
+    Important: a False here must NOT be paired with click_next if goPage already moved
+    the pager — that double-advance skipped whole pages (序号 51-100 hole).
+    """
     page_num = int(page_num)
     pre_code = _first_table_code(driver) if wait_rows else ""
+    pre_page = _active_pager_page(driver)
     try:
         ok = driver.execute_script(
             """
@@ -830,8 +895,13 @@ def go_selenium_page(driver, page_num: int, wait_rows: bool = True) -> bool:
               var dv = window.jQuery && window.jQuery('#dataview').data('dataview');
               if (dv && typeof dv.goPage === 'function') { dv.goPage(pn); return true; }
             } catch (e) {}
-            var a = document.querySelector('#dataview .pagerbox a[data-page="'+pn+'"]');
-            if (a) { a.click(); return true; }
+            // Prefer exact page number link; skip 下一页 which also has data-page=next.
+            var nodes = document.querySelectorAll('#dataview .pagerbox a[data-page="'+pn+'"]');
+            for (var i = 0; i < nodes.length; i++) {
+              var t = (nodes[i].innerText || '').trim();
+              if (t === String(pn) || t === '') { nodes[i].click(); return true; }
+            }
+            if (nodes.length) { nodes[0].click(); return true; }
             return false;
             """,
             page_num,
@@ -842,26 +912,77 @@ def go_selenium_page(driver, page_num: int, wait_rows: bool = True) -> bool:
     if not ok:
         return False
     if not wait_rows:
-        return True
-    # Wait up to ~28s for >=5 code-rows AND (first code changed OR page_num<=1),
-    # requiring 2 consecutive stable polls.
+        # still confirm pager when possible
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            if _active_pager_page(driver) == page_num:
+                return True
+            time.sleep(0.3)
+        return _active_pager_page(driver) == page_num
+
+    # Wait up to ~28s for pager active==page_num AND (>=5 code-rows OR 序号 match),
+    # requiring 2 consecutive stable polls. Pager match is authoritative.
     deadline = time.time() + 28.0
     last_n = 0
     stable = 0
+    expected_seq = (page_num - 1) * 50 + 1
     while time.time() < deadline:
         last_n = _count_table_data_rows(driver)
         first = _first_table_code(driver)
+        cur_page = _active_pager_page(driver)
+        seq = _first_table_seq(driver)
+        page_ok = (cur_page == page_num) or (cur_page == 0 and page_num <= 1)
         code_ok = (page_num <= 1) or (bool(first) and first != pre_code) or (not pre_code and bool(first))
-        if last_n >= 5 and code_ok:
+        seq_ok = (seq == expected_seq) if seq else False
+        rows_ok = last_n >= 5
+        if page_ok and rows_ok and (code_ok or seq_ok or page_num == pre_page):
             stable += 1
             if stable >= 2:
-                print(f"goPage({page_num}) 已有 {last_n} 行")
+                print(f"goPage({page_num}) 已有 {last_n} 行 active={cur_page} seq={seq}")
+                return True
+        elif page_ok and seq_ok and rows_ok:
+            stable += 1
+            if stable >= 2:
+                print(f"goPage({page_num}) 已有 {last_n} 行 active={cur_page} seq={seq}")
                 return True
         else:
             stable = 0
         time.sleep(0.5)
-    print(f"goPage({page_num}) 等待表格数据超时（当前 {last_n} 行）")
+    cur_page = _active_pager_page(driver)
+    seq = _first_table_seq(driver)
+    print(
+        f"goPage({page_num}) 等待超时（行={last_n} active={cur_page} seq={seq} expected_seq={expected_seq}）"
+    )
+    # If pager already on target, treat as success so callers do NOT click_next (skip page).
+    if cur_page == page_num:
+        print(f"  页码已到达 {page_num}，不再点下一页（避免跳页）")
+        return True
     return False
+
+
+def advance_selenium_page(driver, from_page: int, to_page: int) -> bool:
+    """Go to absolute to_page. click_next only if still on from_page after goPage fail."""
+    to_page = int(to_page)
+    from_page = int(from_page)
+    if go_selenium_page(driver, to_page, wait_rows=True):
+        return True
+    cur = _active_pager_page(driver)
+    print(f"advance {from_page}->{to_page}: goPage未确认, active={cur}")
+    if cur == to_page:
+        return True
+    # Only step with 下一页 when we have not left from_page yet.
+    if cur in (0, from_page):
+        if not click_next_page(driver):
+            return False
+        # Absolute re-sync (下一页可能连点过度时再跳回目标)
+        if go_selenium_page(driver, to_page, wait_rows=True):
+            return True
+        cur = _active_pager_page(driver)
+        return cur == to_page
+    # Already moved somewhere else: absolute jump only, never click_next.
+    if go_selenium_page(driver, to_page, wait_rows=True):
+        return True
+    return _active_pager_page(driver) == to_page
 
 
 def get_capital_flow_selenium(min_amount_threshold=3000, save_date_str=None, resume=True, history_dir="history_data"):
@@ -1203,6 +1324,10 @@ def get_capital_flow_selenium(min_amount_threshold=3000, save_date_str=None, res
         page_num = start_page - 1
         empty_fail_streak = 0
         stopped_incomplete = False
+        try:
+            _max_pages_env = int(os.environ.get("SELENIUM_MAX_PAGES") or 0)
+        except ValueError:
+            _max_pages_env = 0
 
         # 续跑且不是第1页：先跳到目标页
         if save_date_str and start_page > 1:
@@ -1219,6 +1344,9 @@ def get_capital_flow_selenium(min_amount_threshold=3000, save_date_str=None, res
         while True:
             page_num += 1
             print(f"\n{'='*60}")
+            if _max_pages_env and page_num > _max_pages_env:
+                print(f"SELENIUM_MAX_PAGES={_max_pages_env} 达到上限，停止")
+                break
             print(f"开始提取第 {page_num} 页数据...")
             print(f"{'='*60}")
 
@@ -1251,6 +1379,35 @@ def get_capital_flow_selenium(min_amount_threshold=3000, save_date_str=None, res
             if df_page is not None and not df_page.empty:
                 empty_fail_streak = 0
                 print(f"✓ 第 {page_num} 页提取成功，共 {len(df_page)} 行数据")
+
+                # 序号连续性校验：第N页首条应为 (N-1)*50+1，否则判定翻页跳号并强制回跳
+                try:
+                    seq_col = None
+                    for col in df_page.columns:
+                        if str(col).strip() == '序号' or '序号' in str(col):
+                            seq_col = col
+                            break
+                    if seq_col is not None and len(df_page) > 0:
+                        first_seq = int(str(df_page.iloc[0][seq_col]).strip())
+                        expected_seq = (page_num - 1) * 50 + 1
+                        if first_seq != expected_seq:
+                            print(
+                                f"⚠ 序号跳号：第{page_num}页首序号={first_seq} 期望={expected_seq}，强制 goPage 重拉本页"
+                            )
+                            if advance_selenium_page(driver, page_num - 1 if page_num > 1 else 1, page_num):
+                                df_page = extract_page_data(driver)
+                                if df_page is not None and not df_page.empty:
+                                    first_seq2 = int(str(df_page.iloc[0][seq_col]).strip()) if seq_col in df_page.columns else -1
+                                    print(f"  重拉后首序号={first_seq2}")
+                                    if first_seq2 != expected_seq:
+                                        print("  重拉后仍跳号，标记 incomplete 并停止")
+                                        stopped_incomplete = True
+                                        if save_date_str and progress_path:
+                                            progress["next_page"] = page_num
+                                            _save_selenium_progress(progress_path, progress)
+                                        break
+                except Exception as _seq_e:
+                    print(f"序号校验异常（可继续）: {_seq_e}")
                 all_dataframes.append(df_page)
 
                 # 一页一存
@@ -1331,7 +1488,7 @@ def get_capital_flow_selenium(min_amount_threshold=3000, save_date_str=None, res
 
                         if last_amount >= min_amount_threshold:
                             print(f"  ✓ 净额 ({last_amount:.2f} 万元) >= 阈值 ({min_amount_threshold} 万元)，继续获取下一页...")
-                            if not (go_selenium_page(driver, page_num + 1) or click_next_page(driver)):
+                            if not advance_selenium_page(driver, page_num, page_num + 1):
                                 print(f"无法继续到下一页，停止提取（已提取 {page_num} 页）")
                                 if save_date_str and progress_path:
                                     progress["next_page"] = page_num + 1
@@ -1344,7 +1501,7 @@ def get_capital_flow_selenium(min_amount_threshold=3000, save_date_str=None, res
                     else:
                         print(f"⚠ 警告：无法解析最后一条数据的净额值: {last_amount_str}")
                         print("  继续尝试获取下一页...")
-                        if not (go_selenium_page(driver, page_num + 1) or click_next_page(driver)):
+                        if not advance_selenium_page(driver, page_num, page_num + 1):
                             print(f"无法继续到下一页，停止提取（已提取 {page_num} 页）")
                             if save_date_str and progress_path:
                                 progress["next_page"] = page_num + 1
@@ -2479,24 +2636,49 @@ if __name__ == "__main__":
                 (df is None or df.empty)
                 and min_saved.get("ok")
             ):
+                # 仅当齐全校验通过（全量或已穿越>=3000）才 exit=0；残缺一页不得假成功
+                try:
+                    from utils.post_market_completeness import check_capital_flow
+
+                    day_cf = datetime.strptime(save_date_str, "%Y%m%d").date()
+                    ok_cf, det_cf = check_capital_flow(day_cf)
+                except Exception as _e:
+                    ok_cf, det_cf = False, str(_e)
+                if ok_cf:
+                    print(
+                        f"[资金流] 最终 df 空但本地已通过齐全校验: {det_cf} "
+                        f"rows={min_saved.get('rows')}，视为成功"
+                    )
+                    sys.exit(0)
                 print(
-                    f"[资金流] 最终 df 空但子集已落盘 rows={min_saved.get('rows')}，视为成功"
+                    f"[资金流] 最终 df 空且子集落盘未通过齐全校验: {det_cf} "
+                    f"rows={min_saved.get('rows')}；不视为成功"
                 )
-                sys.exit(0)
+                sys.exit(1)
         except Exception as e:
             print(f"东财资金流接口失败: {e}")
             import traceback
 
             traceback.print_exc()
-            # 子集若已先落盘，不整日作废
+            # 子集若已先落盘：仅当齐全校验通过（全量或已穿越>=3000）才当成功；
+            # 残缺一页不得 exit=0，否则手动管线进不了 Selenium 兜底。
             try:
                 if os.path.isfile(filename) and os.path.getsize(filename) > 100:
+                    from utils.post_market_completeness import check_capital_flow
+
+                    day = datetime.strptime(save_date_str, "%Y%m%d").date()
+                    ok_cf, det_cf = check_capital_flow(day)
+                    if ok_cf:
+                        print(
+                            f"[资金流] push2 异常但本地已通过齐全校验: {det_cf}，保留: {filename}，exit=0"
+                        )
+                        sys.exit(0)
                     print(
-                        f"[资金流] push2 异常但已有落盘文件，保留: {filename}，exit=0"
+                        f"[资金流] push2 异常且本地 CSV 未通过齐全校验: {det_cf}；"
+                        f"保留文件供续跑但不视为成功"
                     )
-                    sys.exit(0)
-            except Exception:
-                pass
+            except Exception as _cf_e:
+                print(f"[资金流] push2 异常后本地齐全校验失败: {_cf_e}")
             # 批跑路径禁止静默 Selenium/同花顺；由上层每 60s 阻塞重试
             print("[退出] 东财失败且未启用 --selenium/--allow-ths，exit=1（供批跑重试）")
             sys.exit(1)
@@ -2509,7 +2691,8 @@ if __name__ == "__main__":
                 f"  next_page={df.attrs.get('next_page')} "
                 f"total_pages={df.attrs.get('total_pages')}"
             )
-            # 日文件已在每页成功时按「从第1页起连续页」增量合成；这里再刷一次兜底
+            # 日文件已在每页成功时按「从第1页起连续页」增量合成；这里再刷一次兜底。
+            # 未完成不得 exit=0，否则批跑/手动会把残缺当成功并跳过 Selenium 续跑。
             try:
                 page_dir, progress_path, _tpl = _selenium_progress_paths(
                     save_date_str, "history_data"
@@ -2524,9 +2707,9 @@ if __name__ == "__main__":
                         print(df.head(5).to_string(index=False))
                     except Exception:
                         pass
-                    sys.exit(0)
             except Exception as e:
                 print(f"incomplete 兜底合成失败: {e}")
+            print("[退出] Selenium 分页未完成，exit=2（保留 CSV/_pages，可续跑）")
             sys.exit(2)
 
         print(f"\n获取成功！共 {len(df)} 条数据：")

@@ -37,10 +37,18 @@ STRATEGY_IDS_MZ1_SELL = (
 STRATEGY_IDS_INTRADAY_NEXT_DAY_SELL = (
     "strategy_c28a378b",
 )
-STRATEGY_IDS_QMT_SELL_FINE = STRATEGY_IDS_MZ1_SELL + STRATEGY_IDS_INTRADAY_NEXT_DAY_SELL
+STRATEGY_IDS_INTRADAY_SURGE_SELL = (
+    "strategy_33aa1c88",
+)
+STRATEGY_IDS_QMT_SELL_FINE = (
+    STRATEGY_IDS_MZ1_SELL
+    + STRATEGY_IDS_INTRADAY_NEXT_DAY_SELL
+    + STRATEGY_IDS_INTRADAY_SURGE_SELL
+)
 
 SELL_VARIANT_MZ1 = "mz1"
 SELL_VARIANT_INTRADAY_NEXT_DAY = "intraday_next_day"
+SELL_VARIANT_INTRADAY_SURGE = "intraday_surge"
 
 
 @dataclass
@@ -204,8 +212,18 @@ def is_intraday_next_day_sell_strategy(strategy_id: str = "", name: str = "") ->
     return ("盘中买入次日了结" in n) and (("卖" in n) or n.startswith("卖"))
 
 
+def is_intraday_surge_sell_strategy(strategy_id: str = "", name: str = "") -> bool:
+    sid = (strategy_id or "").strip()
+    if sid in STRATEGY_IDS_INTRADAY_SURGE_SELL:
+        return True
+    n = (name or "").strip()
+    return ("盘中买入冲高卖出" in n) and (("卖" in n) or n.startswith("卖"))
+
+
 def is_qmt_sell_fine_strategy(strategy_id: str = "", name: str = "") -> bool:
-    """马总1卖 或 盘中买入次日了结：共用「生成卖出QMT细回测」入口。"""
+    """马总1卖 / 盘中买入次日了结 / 盘中买入冲高卖出：共用「生成卖出QMT细回测」入口。"""
+    if is_intraday_surge_sell_strategy(strategy_id, name):
+        return True
     if is_intraday_next_day_sell_strategy(strategy_id, name):
         return True
     if is_mz1_sell_strategy(strategy_id, name):
@@ -215,6 +233,8 @@ def is_qmt_sell_fine_strategy(strategy_id: str = "", name: str = "") -> bool:
 
 
 def sell_variant_for(strategy_id: str = "", name: str = "") -> str:
+    if is_intraday_surge_sell_strategy(strategy_id, name):
+        return SELL_VARIANT_INTRADAY_SURGE
     if is_intraday_next_day_sell_strategy(strategy_id, name):
         return SELL_VARIANT_INTRADAY_NEXT_DAY
     return SELL_VARIANT_MZ1
@@ -240,6 +260,9 @@ def parse_strategy_code_drop_constants(strategy_code: str = "") -> Dict[str, flo
         "clear_drop_percent": r"DROP_PERCENT_CLEAR_GROWTH\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "clear_gain_main": r"CLEAR_GAIN_MAIN\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "clear_gain_growth": r"CLEAR_GAIN_GROWTH\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "surge_gain_4": r"SURGE_GAIN_4\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "surge_gain_6": r"SURGE_GAIN_6\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "surge_gain_8": r"SURGE_GAIN_8\s*=\s*([-+]?\d+(?:\.\d+)?)",
     }
     for key, pat in patterns.items():
         m = re.search(pat, text)
@@ -361,7 +384,7 @@ def build_qmt_strategy_source(
     variant = (sell_variant or "").strip()
     if not variant:
         variant = sell_variant_for(strategy_id, strategy_name)
-    if variant not in (SELL_VARIANT_MZ1, SELL_VARIANT_INTRADAY_NEXT_DAY):
+    if variant not in (SELL_VARIANT_MZ1, SELL_VARIANT_INTRADAY_NEXT_DAY, SELL_VARIANT_INTRADAY_SURGE):
         variant = SELL_VARIANT_MZ1
     if variant == SELL_VARIANT_INTRADAY_NEXT_DAY:
         # 细回测以 strategy_code 常量为主（用户改 DROP_PERCENT_OPEN_PULL 必须生效）；
@@ -388,6 +411,19 @@ def build_qmt_strategy_source(
         else:
             sp.setdefault("clear_branch_at", "09:50:00")
         # 界面缺省持有1日 → 引擎日序 2；若调用方未传 hold，上面 ui_n 可能仍是2，此处不强行改 ui_n
+    elif variant == SELL_VARIANT_INTRADAY_SURGE:
+        # 冲高卖出：仅灌三档涨幅；不再注入 clear_branch / clear_gain / clear_drop
+        code_drops = parse_strategy_code_drop_constants(strategy_code)
+        for _sk, _ck in (
+            ("surge_gain_4", "surge_gain_4"),
+            ("surge_gain_6", "surge_gain_6"),
+            ("surge_gain_8", "surge_gain_8"),
+        ):
+            if _sk in code_drops:
+                sp[_ck] = float(code_drops[_sk])
+        sp.setdefault("surge_gain_4", 0.04)
+        sp.setdefault("surge_gain_6", 0.06)
+        sp.setdefault("surge_gain_8", 0.08)
     fb = {}
     for k, v in (first_buy_dates or {}).items():
         c6 = _code6(k)
@@ -446,7 +482,9 @@ def build_qmt_strategy_source(
 def default_out_dir(root: Optional[Path] = None, *, sell_variant: str = "") -> Path:
     root = root or ROOT
     variant = (sell_variant or "").strip()
-    if variant == SELL_VARIANT_INTRADAY_NEXT_DAY:
+    if variant == SELL_VARIANT_INTRADAY_SURGE:
+        d = root / "data" / "intraday_surge_qmt_sell_backtest"
+    elif variant == SELL_VARIANT_INTRADAY_NEXT_DAY:
         d = root / "data" / "intraday_nextday_qmt_sell_backtest"
     else:
         d = root / "data" / "mz1_qmt_sell_backtest"
@@ -457,7 +495,7 @@ def default_out_dir(root: Optional[Path] = None, *, sell_variant: str = "") -> P
 def history_sell_csv_dir(root: Optional[Path] = None, *, sell_variant: str = "") -> Path:
     """卖出明细 CSV 建议目录（与盘中买入明细同树）。"""
     root = root or ROOT
-    if (sell_variant or "").strip() == SELL_VARIANT_INTRADAY_NEXT_DAY:
+    if (sell_variant or "").strip() in (SELL_VARIANT_INTRADAY_NEXT_DAY, SELL_VARIANT_INTRADAY_SURGE):
         d = root / "history_data" / "马总盘中策略"
     else:
         d = root / "history_data" / "增强选股回测"
@@ -508,7 +546,9 @@ def write_qmt_strategy_file(
     if out_path is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         prefix = (
-            "intraday_nextday_qmt_sell_"
+            "intraday_surge_qmt_sell_"
+            if variant == SELL_VARIANT_INTRADAY_SURGE
+            else "intraday_nextday_qmt_sell_"
             if variant == SELL_VARIANT_INTRADAY_NEXT_DAY
             else "mz1_qmt_sell_"
         )
@@ -750,7 +790,10 @@ def trades_to_backtest_rows(trades: List[dict]) -> List[dict]:
                 "start_date": "",
                 "end_date": "",
                 "来源": (
-                    "QMT卖出细回测-盘中次日了结"
+                    "QMT卖出细回测-盘中冲高卖出"
+                    if str(t.get("variant") or "") == SELL_VARIANT_INTRADAY_SURGE
+                    or str(t.get("rule") or "").startswith("盘中冲高卖出")
+                    else "QMT卖出细回测-盘中次日了结"
                     if str(t.get("variant") or "") == SELL_VARIANT_INTRADAY_NEXT_DAY
                     or str(t.get("rule") or "").startswith("盘中次日了结")
                     else "QMT卖出细回测"

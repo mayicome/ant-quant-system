@@ -27,6 +27,8 @@ JobStep = Tuple[str, Sequence[str], str]
 EXIT_WECHAT_IP_WHITELIST = 64
 WECHAT_RETRY_SEC = 60
 CAPITAL_FLOW_RETRY_SEC = 60
+CAPITAL_FLOW_WAIT_POLL_SEC = 30
+CAPITAL_FLOW_WAIT_TIMEOUT_SEC = 7200
 
 # 实盘机需要：资金流 / 东财板块 / 选股 / F10 标签（涨停抓取在 main 里单独跑，两边都保留）
 LIVE_JOBS: List[JobStep] = [
@@ -50,7 +52,6 @@ FULL_EXTRA_JOBS: List[JobStep] = [
     ("main_force_net_inflow_gui.py", ("--auto-run",), "主力净流入分析"),
     ("lhb_analysis_gui.py", ("--auto-run",), "龙虎榜分析"),
     ("tools/lhb_premium_daily_verify.py", ("--auto-run",), "龙虎榜溢价复盘"),
-    ("inst_net_rank_gui.py", ("--auto-run",), "机构榜"),
 ]
 
 
@@ -246,7 +247,7 @@ def _notify_daily_batch(
     if note:
         lines.append(f"**说明**：{note}")
     if live_only:
-        lines.append("**COS / 公众号**：已跳过（仅实盘模式）")
+        lines.append("**COS**：已跳过（仅实盘模式）")
     else:
         if cos_status is not None:
             lines.append(f"**COS 上传**：{cos_status}")
@@ -296,65 +297,110 @@ def _run_capital_flow_with_retry(
     live_only: bool = False,
     stop_retry: Optional[Callable[[], bool]] = None,
 ) -> Tuple[int, str]:
-    """仅东财主力资金流；失败则 Server酱并每分钟重试，成功前不进入后续步骤。"""
+    """东财主力资金流：先抓一次；未合格则轮询本地产物直至合格/超时（不反复打东财）。"""
     d8 = today.strftime("%Y%m%d") if hasattr(today, "strftime") else str(today).replace("-", "")[:8]
     today_str = today.strftime("%Y-%m-%d") if hasattr(today, "strftime") else str(today)
-    args = (f"--save-date={d8}",)
+    args = (f"--save-date={d8}", "--min-amount=3000")
     label = _job_label("get_capital_flow_selenium.py", args)
+
+    def _cf_ok() -> Tuple[bool, str]:
+        try:
+            from utils.post_market_completeness import check_capital_flow
+
+            return check_capital_flow(today)
+        except Exception as e:
+            return False, str(e)
+
+    ok0, det0 = _cf_ok()
+    if ok0:
+        print(f"[资金流] 本地已合格，跳过抓取：{det0}")
+        return 0, f"本地已合格：{det0}"
+
+    print("[步骤] 主力资金流（仅东财 push2，尝试 1 次）…")
+    rc = _run_job(script_dir, "get_capital_flow_selenium.py", args)
+    ok_cf, det_cf = _cf_ok()
+    if rc == 0 and ok_cf:
+        return 0, "成功"
+
+    detail = det_cf if not ok_cf else f"exit={rc}"
+    if stop_retry and stop_retry():
+        _alert_step_fail(
+            today,
+            step="主力资金流·已停止",
+            detail=f"{label} 未合格（{detail}）；用户停止，后续步骤未跑。",
+            alert_key=f"capital_flow_stop_{d8}",
+            live_only=live_only,
+        )
+        return rc or 1, f"已停止 exit={rc}"
+
+    _alert_step_fail(
+        today,
+        step="主力资金流·等待本地合格",
+        detail=(
+            f"{label} 未合格（{detail}）。"
+            f"批跑进入等待：每 {CAPITAL_FLOW_WAIT_POLL_SEC}s 检查本地 CSV，"
+            f"最长 {CAPITAL_FLOW_WAIT_TIMEOUT_SEC}s；等待期间不自动反复抓取。"
+            f"请手动补跑主力净流入，合格后将自动继续选股。"
+        ),
+        alert_key=f"capital_flow_wait_{d8}",
+        live_only=live_only,
+    )
+
+    t0 = time.time()
     attempt = 0
-    alerted = False
     while True:
         attempt += 1
-        print(f"[步骤] 主力资金流（仅东财 push2，第 {attempt} 次）…")
-        rc = _run_job(script_dir, "get_capital_flow_selenium.py", args)
-        if rc == 0:
-            status = "成功" if attempt == 1 else f"成功（重试 {attempt} 次后）"
-            if attempt > 1:
-                _send_server_chan(
-                    f"{_mode_title_prefix(live_only)} 主力资金流已恢复 {today_str}",
-                    (
-                        f"{_mode_body_line(live_only)}\n"
-                        f"**日期**：{today_str}\n"
-                        f"**结果**：{status}\n"
-                        f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    ),
-                )
-            return 0, status
         if stop_retry and stop_retry():
             _alert_step_fail(
                 today,
-                step="主力资金流·已停止重试",
-                detail=f"{label} exit={rc}；用户停止自动重试，后续步骤未跑。",
+                step="主力资金流·已停止等待",
+                detail="用户停止等待主力净流入合格，后续步骤未跑。",
                 alert_key=f"capital_flow_stop_{d8}",
                 live_only=live_only,
             )
-            return rc, f"已停止重试 exit={rc}"
-        if not alerted:
-            alerted = True
-            _alert_step_fail(
-                today,
-                step="主力资金流(东财)·批跑已暂停",
-                detail=(
-                    f"{label} exit={rc}。东财 push2 失败。"
-                    f"批跑已停在本步骤，每 {CAPITAL_FLOW_RETRY_SEC} 秒自动重试；"
-                    f"成功前不执行后续步骤。请检查网络/代理。"
+            return 1, "已停止等待"
+        ok_cf, det_cf = _cf_ok()
+        elapsed = int(time.time() - t0)
+        if ok_cf:
+            _send_server_chan(
+                f"{_mode_title_prefix(live_only)} 主力净流入已合格 {today_str}",
+                (
+                    f"{_mode_body_line(live_only)}\n"
+                    f"**日期**：{today_str}\n"
+                    f"**结果**：等待后合格（{det_cf}）\n"
+                    f"**已等**：{elapsed}s\n"
+                    f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 ),
-                alert_key=f"capital_flow_em_{d8}",
-                live_only=live_only,
             )
-        elif attempt % 10 == 0:
+            print(f"[资金流] 本地已合格，继续后续：{det_cf}")
+            return 0, f"等待后合格：{det_cf}"
+        if elapsed >= CAPITAL_FLOW_WAIT_TIMEOUT_SEC:
             _alert_step_fail(
                 today,
-                step="主力资金流(东财)·仍暂停",
-                detail=f"已重试 {attempt} 次仍失败 exit={rc}，继续每分钟重试。",
-                alert_key=f"capital_flow_em_remind_{d8}",
+                step="主力资金流·等待超时",
+                detail=(
+                    f"等待 {CAPITAL_FLOW_WAIT_TIMEOUT_SEC}s 仍未合格（{det_cf}）。"
+                    f"批跑中止，选股未执行。"
+                ),
+                alert_key=f"capital_flow_wait_timeout_{d8}",
                 live_only=live_only,
             )
+            print(f"[资金流] 等待超时仍未合格：{det_cf}")
+            return 1, f"等待超时：{det_cf}"
+        if attempt % 10 == 0:
+            _alert_step_fail(
+                today,
+                step="主力资金流·仍在等待",
+                detail=f"已等待约 {elapsed}s 仍未合格（{det_cf}），继续轮询本地产物。",
+                alert_key=f"capital_flow_wait_remind_{d8}",
+                live_only=live_only,
+            )
+        remain = max(0, CAPITAL_FLOW_WAIT_TIMEOUT_SEC - elapsed)
         print(
-            f"[资金流] 东财失败 exit={rc}，"
-            f"{CAPITAL_FLOW_RETRY_SEC}s 后重试（已尝试 {attempt} 次）…"
+            f"[资金流] 等待主力净流入合格… #{attempt} "
+            f"已等 {elapsed}s 剩余约 {remain}s（{det_cf}）"
         )
-        time.sleep(CAPITAL_FLOW_RETRY_SEC)
+        time.sleep(CAPITAL_FLOW_WAIT_POLL_SEC)
 
 
 def _upload_wechat_draft_with_retry(
@@ -428,18 +474,17 @@ def _upload_wechat_draft_with_retry(
 
 
 def _select_jobs(live_only: bool) -> List[JobStep]:
-    """后续程序列表：实盘精简 = LIVE；全量 = LIVE + 研究 GUI（F10 仍在 LIVE 末尾，与旧顺序一致需重排）。
+    """后续程序列表：实盘精简 = LIVE；全量 = LIVE头 + 研究GUI + F10 + 机构榜。
 
-    旧全量顺序：资金流 → 东财 → 选股 → 研究GUI… → F10。
-    实盘：资金流 → 东财 → 选股 → F10。
-    全量：资金流 → 东财 → 选股 → 研究GUI… → F10（与改造前一致）。
+    实盘：东财 → 选股 → F10。
+    全量：东财 → 选股 → 研究GUI… → F10 → 机构榜。
     """
     if live_only:
         return list(LIVE_JOBS)
-    # FULL: LIVE 前三项 + EXTRA + F10（LIVE 最后一项）
     head = LIVE_JOBS[:-1]
     f10 = LIVE_JOBS[-1]
-    return list(head) + list(FULL_EXTRA_JOBS) + [f10]
+    inst = ("inst_net_rank_gui.py", ("--auto-run",), "机构榜")
+    return list(head) + list(FULL_EXTRA_JOBS) + [f10, inst]
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -598,19 +643,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 live_only=live_only,
             )
 
-        # 5.5) 微信公众号草稿（白名单失败则报警并每分钟重试）
-        print("[步骤] 生成并上传微信公众号 COS 日更草稿…")
-        wx_rc, wechat_draft_status = _upload_wechat_draft_with_retry(
-            script_dir, today, today_str, live_only=live_only
-        )
-        if wx_rc != 0:
-            failed.append(
-                _job_label("tools/upload_cos_wechat_draft.py", ("--date", today_str))
-            )
-            if cos_status and "成功" in str(cos_status):
-                cos_status = f"{cos_status}；公众号草稿失败"
-            elif not cos_status:
-                cos_status = "公众号草稿失败"
+        # 5.5) 微信公众号草稿：已停发，批跑不再执行
+        wechat_draft_status = None
 
         # 6) 市场行情日度描绘增量（本地 CSV，不进 COS）
         print("[步骤] 市场行情日度描绘增量…")
@@ -628,7 +662,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 live_only=live_only,
             )
     else:
-        print("[跳过] 仅实盘模式：盘后量能 / COS / 公众号 / 行情描绘 均未执行")
+        print("[跳过] 仅实盘模式：盘后量能 / COS / 行情描绘 均未执行")
 
     # 7) Server酱终局摘要（保留）
     status = "ok" if not failed else "partial_fail"

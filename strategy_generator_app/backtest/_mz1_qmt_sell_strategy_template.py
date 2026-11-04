@@ -1,5 +1,5 @@
 #coding:utf-8
-"""马总逻辑1卖 / 盘中买入次日了结 细回测 · QMT 模型交易动态策略（由蚂蚁量化系统生成）
+"""马总逻辑1卖 / 盘中买入次日了结 / 盘中买入冲高卖出 细回测 · QMT 模型交易动态策略（由蚂蚁量化系统生成）
 
 推荐：主程序「探针」热加载本文件（写到 userdata/mz1_qmt_fine_watch/current.py）。
 结果：print 到 userdata/log/XtClient_FormulaOutput_YYYYMMDD.log，前缀 ANT_MZ1_SELL_BT|
@@ -365,6 +365,17 @@ def _half_pair_absorb_dust(total):
     return a, b
 
 
+def _thirds_absorb_dust(total):
+    total = _full_lot(total)
+    if total < 100:
+        return 0, 0, 0
+    lots = total // 100
+    a = (lots // 3) * 100
+    b = (lots // 3) * 100
+    c = total - a - b
+    return a, b, c
+
+
 def _fold_dust(sell_vol, hold, price_min, min_amt):
     sell_vol = _full_lot(sell_vol)
     hold = _full_lot(hold)
@@ -577,6 +588,47 @@ def _ticks_for_day(ContextInfo, full_code, day_d, run_start_sec, run_end_sec):
     return out, ""
 
 
+def _px_at_generation(ticks, gen_sec):
+    """对齐实盘：策略生成时刻最新价。
+    生成时间多为 HH:mm → 取该分钟内最后一笔；没有则用之后第一笔。
+    """
+    if not ticks:
+        return 0.0
+    try:
+        g = int(gen_sec) if gen_sec is not None else None
+    except Exception:
+        g = None
+    if g is None:
+        try:
+            return float(ticks[0][2] or 0)
+        except Exception:
+            return 0.0
+    # HH:mm 无秒时 gen_sec 落在整分；窗口含该分钟 0～59 秒
+    g_end = g + 59
+    before = None
+    after = None
+    for sec, tm, last, hi, lo in ticks:
+        try:
+            px = float(last or 0)
+        except Exception:
+            px = 0.0
+        if px <= 0:
+            continue
+        if sec <= g_end:
+            before = px
+        elif after is None:
+            after = px
+            break
+    if before and before > 0:
+        return float(before)
+    if after and after > 0:
+        return float(after)
+    try:
+        return float(ticks[0][2] or 0)
+    except Exception:
+        return 0.0
+
+
 def _apply_buy_fill(state, c6, vol, price, buy_d, blotter_only):
     st = state.setdefault(c6, {
         "volume": 0, "cost": 0.0, "baseline": 0,
@@ -729,6 +781,11 @@ def _run_backtest(ContextInfo):
     clear_sec = _parse_hms(clear_time) or (14 * 3600 + 56 * 60)
     run_start_sec = _parse_hms(CFG.get("strategy_run_start_time") or "09:30") or (9 * 3600 + 30 * 60)
     run_end_sec = _parse_hms(CFG.get("strategy_run_end_time") or "15:00") or (15 * 3600)
+    gen_sec = _parse_hms(CFG.get("strategy_generation_time") or "09:25") or (9 * 3600 + 25 * 60)
+    # tick 需覆盖生成时刻（可早于运行开始），成交仍由 run_start_sec 过滤
+    tick_load_from_sec = run_start_sec
+    if gen_sec is not None and (tick_load_from_sec is None or gen_sec < tick_load_from_sec):
+        tick_load_from_sec = gen_sec
 
     try:
         open_gain_main = float(params.get("open_gain_main") if params.get("open_gain_main") is not None else 0.05)
@@ -893,11 +950,19 @@ def _run_backtest(ContextInfo):
     if not isinstance(sel_map, dict):
         sel_map = {}
     is_ind = variant == "intraday_next_day"
+    is_surge = variant == "intraday_surge"
 
     NAME_OPEN50 = "马总1卖-开盘涨幅弹性半仓"
     NAME_LU10 = "马总1卖-涨停后最高价下半仓"
-    NAME_OPEN_PULL = "盘中次日了结-开盘价回撤弹性全仓"
-    if is_ind:
+    NAME_OPEN_PULL = "盘中次日了结-当前价回撤弹性全仓"
+    NAME_SURGE4 = "盘中冲高卖出-涨幅4%三分之一"
+    NAME_SURGE6 = "盘中冲高卖出-涨幅6%三分之一"
+    NAME_SURGE8 = "盘中冲高卖出-涨幅8%三分之一"
+    if is_surge:
+        # 冲高卖出无涨停即清/弹性清仓腿；仅保留 sc_prefix 供末日定时清仓命名
+        sc_prefix = "盘中冲高卖出"
+        NAME_CLEAR_LU = NAME_CLEAR_MAIN = NAME_CLEAR_GROWTH = ""
+    elif is_ind:
         NAME_CLEAR_LU = "盘中次日了结-涨停即清仓"
         NAME_CLEAR_MAIN = "盘中次日了结-主板涨幅弹性清仓"
         NAME_CLEAR_GROWTH = "盘中次日了结-非主板涨幅弹性清仓"
@@ -908,7 +973,7 @@ def _run_backtest(ContextInfo):
         NAME_CLEAR_GROWTH = "马总1卖-非主板涨幅弹性清仓"
         sc_prefix = "马总1卖"
 
-    # 开盘价回撤全仓：优先 open_drop_percent
+    # 当前价回撤全仓：优先 open_drop_percent（常量名保留）
     try:
         open_pull_drop = float(
             params.get("open_drop_percent")
@@ -935,13 +1000,34 @@ def _run_backtest(ContextInfo):
     except Exception:
         pass
     try:
-        if params.get("clear_drop_percent") is not None and is_ind:
+        if params.get("clear_drop_percent") is not None and (is_ind or is_surge):
             clear_drop_growth = float(params.get("clear_drop_percent"))
     except Exception:
         pass
 
-    _emit("LOG", "sell_variant=%s is_ind=%s branch_at=%s open_pull_drop=%s" % (
-        variant, is_ind, branch_at_s, open_pull_drop,
+    try:
+        surge_g4 = float(params.get("surge_gain_4") if params.get("surge_gain_4") is not None else 0.04)
+    except Exception:
+        surge_g4 = 0.04
+    try:
+        surge_g6 = float(params.get("surge_gain_6") if params.get("surge_gain_6") is not None else 0.06)
+    except Exception:
+        surge_g6 = 0.06
+    try:
+        surge_g8 = float(params.get("surge_gain_8") if params.get("surge_gain_8") is not None else 0.08)
+    except Exception:
+        surge_g8 = 0.08
+    if surge_g4 < 0:
+        surge_g4 = 0.04
+    if surge_g6 < 0:
+        surge_g6 = 0.06
+    if surge_g8 < 0:
+        surge_g8 = 0.08
+
+    _emit("LOG", "sell_variant=%s is_ind=%s is_surge=%s branch_at=%s gen=%s run_start=%s open_pull_drop=%s surge=%s/%s/%s" % (
+        variant, is_ind, is_surge, branch_at_s,
+        CFG.get("strategy_generation_time"), CFG.get("strategy_run_start_time"),
+        open_pull_drop, surge_g4, surge_g6, surge_g8,
     ))
 
     for day_d in trading_days:
@@ -995,7 +1081,7 @@ def _run_backtest(ContextInfo):
             limit_down = round(prev_close * (1.0 - lr), prec)
 
             fc = _full_from_c6(c6)
-            ticks, terr = _ticks_for_day(ContextInfo, fc, day_d, run_start_sec, run_end_sec)
+            ticks, terr = _ticks_for_day(ContextInfo, fc, day_d, tick_load_from_sec, run_end_sec)
             if not ticks:
                 skip_no_tick += 1
                 _emit("SKIP_NO_TICK", {"code": c6, "date": day_d.isoformat(), "err": terr or "empty"})
@@ -1003,21 +1089,102 @@ def _run_backtest(ContextInfo):
 
             day_intents = []
 
-            if is_ind:
-                # ---- 盘中买入次日了结：开盘价-1tick 弹性全仓 + T点清仓分支 + 末日定时清仓 ----
+            if is_surge:
+                # ---- 盘中买入冲高卖出：昨收+4/6/8% 各三分之一单点 + 末日定时清仓（无T点清仓分支） ----
+                leg_specs = [
+                    ("%s:SURGE4" % c6, NAME_SURGE4, surge_g4),
+                    ("%s:SURGE6" % c6, NAME_SURGE6, surge_g6),
+                    ("%s:SURGE8" % c6, NAME_SURGE8, surge_g8),
+                ]
+                v4, v6, v8 = _thirds_absorb_dust(base)
+                base_vols = [v4, v6, v8]
+                pending_idx = []
+                trigs = [0.0, 0.0, 0.0]
+                for i, (lk, _nm, thr) in enumerate(leg_specs):
+                    if lk in filled_legs:
+                        continue
+                    if thr <= 0 or prev_close <= 0:
+                        continue
+                    trig = _clamp_px(
+                        round(prev_close * (1.0 + float(thr)), prec),
+                        limit_down,
+                        limit_up if limit_up > 0 else prev_close * (1.0 + float(thr)),
+                    )
+                    if trig <= 0:
+                        continue
+                    trigs[i] = float(trig)
+                    pending_idx.append(i)
+                sell_vols = [0, 0, 0]
+                if pending_idx:
+                    if len(pending_idx) == 3 and (v4 + v6 + v8) >= 100:
+                        sell_vols = [v4, v6, v8]
+                        pair_cap = hold
+                        if sum(sell_vols) > pair_cap:
+                            rem = pair_cap
+                            for i in (0, 1, 2):
+                                sell_vols[i] = min(sell_vols[i], rem)
+                                sell_vols[i] = _full_lot(sell_vols[i])
+                                rem = max(0, rem - sell_vols[i])
+                    elif len(pending_idx) == 1:
+                        i = pending_idx[0]
+                        sell_vols[i] = _fold_dust(hold, hold, trigs[i], min_amt)
+                    else:
+                        rem_hold = hold
+                        allocated = 0
+                        for j, i in enumerate(pending_idx):
+                            t = base_vols[i] if base_vols[i] >= 100 else _full_lot(base // 3)
+                            if j == len(pending_idx) - 1:
+                                vol = _full_lot(rem_hold - allocated)
+                            else:
+                                vol = min(_full_lot(t), _full_lot(rem_hold - allocated))
+                                if vol < 100:
+                                    vol = 0
+                            sell_vols[i] = vol
+                            allocated += vol
+                        last_i = pending_idx[-1]
+                        if sell_vols[last_i] >= 100:
+                            used = sum(sell_vols[i] for i in pending_idx if i != last_i)
+                            sell_vols[last_i] = _fold_dust(
+                                max(sell_vols[last_i], hold - used),
+                                hold - used,
+                                trigs[last_i],
+                                min_amt,
+                            )
+                    for i in pending_idx:
+                        vol = int(sell_vols[i] or 0)
+                        vol = min(vol, avail, hold)
+                        vol = _full_lot(vol)
+                        if vol < 100 or trigs[i] <= 0:
+                            continue
+                        if len(pending_idx) == 1 or i == pending_idx[-1]:
+                            others = sum(sell_vols[j] for j in pending_idx if j != i)
+                            cap = _full_lot(max(0, hold - others))
+                            vol = _fold_dust(vol, cap if cap >= 100 else hold, trigs[i], min_amt)
+                            vol = _full_lot(min(vol, avail, hold))
+                        if vol < 100:
+                            continue
+                        lk, nm, _thr = leg_specs[i]
+                        day_intents.append({
+                            "kind": "single_sell",
+                            "name": nm,
+                            "leg": lk,
+                            "trigger": float(trigs[i]),
+                            "drop": 0.0,
+                            "volume": int(vol),
+                        })
+
+            elif is_ind:
+                # ---- 盘中买入次日了结：生成时刻最新价-1tick 弹性全仓 + T点清仓分支 + 末日定时清仓 ----
+                # 对齐实盘：触价=策略生成时间的最新价-1跳；运行开始时间只限制何时可成交
                 leg_open_pull = "%s:OPEN_PULL:%s" % (c6, ymd)
-                open_px = 0.0
-                try:
-                    open_px = float(open_by.get(ymd) or 0)
-                except Exception:
-                    open_px = 0.0
-                if open_px <= 0 and ticks:
+                cur_px = _px_at_generation(ticks, gen_sec)
+                if cur_px <= 0:
                     try:
-                        open_px = float(ticks[0][2] or 0)
+                        cur_px = float(open_by.get(ymd) or 0)
                     except Exception:
-                        open_px = 0.0
-                if leg_open_pull not in filled_legs and open_px > 0 and avail >= 100:
-                    trig = round(float(open_px) - float(tick_sz), prec)
+                        cur_px = 0.0
+                if leg_open_pull not in filled_legs and cur_px > 0 and avail >= 100:
+                    trig = round(float(cur_px) - float(tick_sz), prec)
                     if trig > 0:
                         trig = _clamp_px(trig, limit_down, limit_up if limit_up > 0 else trig)
                     if trig > 0:

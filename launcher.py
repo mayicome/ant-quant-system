@@ -105,6 +105,9 @@ def _version_hint() -> str:
 
 # 定时任务一般在 17:30 拉起盘后 bat；启动器晚一分钟看它有没有起来。
 _POST_MARKET_WATCH_AT = dt_time(17, 31)
+# 朋友机 COS 同步：主站盘后常拖到 20 点后才齐
+_COS_FRIEND_SYNC_AT = dt_time(20, 0)
+_COS_FRIEND_SYNC_END = dt_time(23, 30)
 _DEFAULT_POST_MARKET_BAT = r"D:\run_all_if_trading_day.bat"
 
 _DEFAULT_UPDATE_MIRRORS = [
@@ -189,6 +192,76 @@ class _RuntimeIndexWorker(QThread):
             self.finished_ok.emit(result)
         except Exception as e:
             self.finished_ok.emit({"fetched": [], "errors": {"_": str(e)}, "aborted": False})
+
+
+class _CosFriendSyncWorker(QThread):
+    """朋友机：从 COS 强制同步日线 zip / 选股 xls / 主力净流入。"""
+
+    finished_ok = pyqtSignal(object)
+
+    def __init__(self, root: str, *, force: bool = False, parent=None):
+        super().__init__(parent)
+        self.root = root
+        self.force = bool(force)
+
+    def run(self) -> None:
+        try:
+            boot = _load_py_from_disk(
+                "utils/runtime_index_bootstrap.py", "ant_runtime_index_bootstrap"
+            )
+            result = boot.sync_friend_runtime(
+                self.root,
+                force=self.force,
+                should_abort=self.isInterruptionRequested,
+            )
+            self.finished_ok.emit(result if isinstance(result, dict) else {"ok": False})
+        except Exception as e:
+            self.finished_ok.emit(
+                {
+                    "ok": False,
+                    "fetched": [],
+                    "errors": {"_": str(e)},
+                    "message": "COS同步失败：%s" % e,
+                }
+            )
+
+
+class _CosUploadWorker(QThread):
+    """主站：打包并上传 runtime（日线 zip + 选股 + 资金流）。"""
+
+    finished_ok = pyqtSignal(object)
+
+    def __init__(self, root: str, parent=None):
+        super().__init__(parent)
+        self.root = root
+
+    def run(self) -> None:
+        import subprocess
+
+        script = os.path.join(self.root, "tools", "upload_cos_data.py")
+        try:
+            cp = subprocess.run(
+                [sys.executable, script, "--runtime-only", "--force"],
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3600,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            out = ((cp.stdout or "") + "\n" + (cp.stderr or "")).strip()
+            self.finished_ok.emit(
+                {
+                    "ok": int(cp.returncode or 0) == 0,
+                    "exit_code": int(cp.returncode or 0),
+                    "output": out[-4000:],
+                }
+            )
+        except Exception as e:
+            self.finished_ok.emit({"ok": False, "exit_code": -1, "output": str(e)})
+
+
 
 
 class _QmtSetupDialog(QDialog):
@@ -344,10 +417,13 @@ class AntLauncherWindow(QMainWindow):
         self._post_market_settings = self._load_post_market_settings()
         self._update_worker = None
         self._bootstrap_worker = None
+        self._cos_sync_worker = None
+        self._cos_upload_worker = None
         self._setup_icon()
         self._setup_ui()
         self._arm_post_market_watch()
         self._arm_ma_zong_dump_watch()
+        self._arm_cos_friend_sync_watch()
         self._ensure_app_config_ini()
         head = _git_head_short(self._project_root())
         self._append_launcher_log(
@@ -664,17 +740,64 @@ class AntLauncherWindow(QMainWindow):
         main_layout.addSpacing(10)
 
         # 底部小提示（提示主系统启动行为，不放在“小程序工具箱”内部）
-        hint_label = QLabel(
-            "提示：启动子系统后可以把本窗口最小化。"
-            "每天 17:31 会按「盘后批跑」里配置的 bat 补启动（关掉本窗口则不会）。",
-            self,
-        )
+        _live = False
+        try:
+            _live = self._is_live_only_machine()
+        except Exception:
+            _live = False
+        if _live:
+            _hint = (
+                "提示：仅实盘机不跑盘后批跑；每晚 20:00 起自动从 COS 同步日线/选股/资金流。"
+                "也可点「立即同步 COS」。关掉本窗口则不会自动同步。"
+            )
+        else:
+            _hint = (
+                "提示：启动子系统后可以把本窗口最小化。"
+                "每天 17:31 会按「盘后批跑」里配置的 bat 补启动（关掉本窗口则不会）。"
+                "盘后齐了可点「立即上传到 COS」。"
+            )
+        hint_label = QLabel(_hint, self)
         hint_font = QFont()
         hint_font.setPointSize(9)
         hint_label.setFont(hint_font)
         hint_label.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
         hint_label.setStyleSheet("color: #999999;")
         main_layout.addWidget(hint_label)
+
+        cos_row = QHBoxLayout()
+        cos_row.setSpacing(12)
+        self.cos_status = QLabel("COS：未检查", self)
+        self.cos_status.setWordWrap(True)
+        self.cos_status.setStyleSheet("color: #555555;")
+        self.cos_status.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        cos_row.addWidget(self.cos_status, 1)
+        cos_btn_style = (
+            "QPushButton { background-color: #455A64; color: white; border-radius: 6px;"
+            " padding: 6px 14px; font-size: 13px; min-height: 32px; }"
+            "QPushButton:hover { background-color: #546E7A; }"
+            "QPushButton:pressed { background-color: #37474F; }"
+            "QPushButton:disabled { background-color: #90A4AE; }"
+        )
+        self.btn_cos_sync = QPushButton("立即同步 COS", self)
+        self.btn_cos_sync.setStyleSheet(cos_btn_style)
+        self.btn_cos_sync.setToolTip("从腾讯云拉取日线 zip、选股结果、主力净流入并覆盖本地")
+        self.btn_cos_sync.clicked.connect(
+            lambda: self._start_cos_friend_sync(force=True, manual=True)
+        )
+        self.btn_cos_upload = QPushButton("立即上传到 COS", self)
+        self.btn_cos_upload.setStyleSheet(cos_btn_style)
+        self.btn_cos_upload.setToolTip(
+            "打包并上传日线 zip、选股 xls、主力净流入（仅本机有密钥时可用）"
+        )
+        self.btn_cos_upload.clicked.connect(self._start_cos_upload)
+        cos_row.addWidget(self.btn_cos_sync)
+        cos_row.addWidget(self.btn_cos_upload)
+        main_layout.addLayout(cos_row)
+        try:
+            self._refresh_cos_button_visibility()
+            self._refresh_cos_status_from_local()
+        except Exception:
+            pass
 
         # --- 小程序：分析工具箱（从配置读取，便于后续扩展）---
         tools_title = QLabel("常用小工具", self)
@@ -800,6 +923,8 @@ class AntLauncherWindow(QMainWindow):
             "auto_update_check_on_start": True,
             "update_mirrors": list(_DEFAULT_UPDATE_MIRRORS),
             "ma_zong_dump_done_slots": [],
+            "cos_sync_ok_date": "",
+            "cos_sync_fail_notified_date": "",
         }
         if not os.path.isfile(path):
             return data
@@ -813,6 +938,10 @@ class AntLauncherWindow(QMainWindow):
             if bat:
                 data["post_market_bat"] = bat
             data["post_market_watch_date"] = str(raw.get("post_market_watch_date") or "").strip()
+            data["cos_sync_ok_date"] = str(raw.get("cos_sync_ok_date") or "").strip()
+            data["cos_sync_fail_notified_date"] = str(
+                raw.get("cos_sync_fail_notified_date") or ""
+            ).strip()
             if "auto_update_check_on_start" in raw:
                 data["auto_update_check_on_start"] = bool(raw.get("auto_update_check_on_start"))
             mirrors = raw.get("update_mirrors")
@@ -1232,7 +1361,7 @@ class AntLauncherWindow(QMainWindow):
                 self._mz_dump_timer = None
         except Exception:
             pass
-        for attr in ("_bootstrap_worker", "_update_worker"):
+        for attr in ("_bootstrap_worker", "_update_worker", "_cos_sync_worker", "_cos_upload_worker"):
             worker = getattr(self, attr, None)
             if worker is None:
                 continue
@@ -1515,6 +1644,8 @@ class AntLauncherWindow(QMainWindow):
         return False
 
     def _maybe_start_post_market_bat(self) -> None:
+        if self._is_live_only_machine():
+            return
         now = datetime.now()
         if now.time() < _POST_MARKET_WATCH_AT:
             return
@@ -1551,6 +1682,208 @@ class AntLauncherWindow(QMainWindow):
             return
         self._set_bat_watch_status(f"17:31 定时任务未启动，已补启动：{bat_path}")
         self._mark_watch_done_today()
+
+    def _is_live_only_machine(self) -> bool:
+        try:
+            mod = _load_py_from_disk("utils/live_only.py", "ant_live_only")
+            return bool(mod.is_live_only_machine(self._project_root()))
+        except Exception:
+            flag = os.path.join(self._project_root(), "data", "qmt_live_only.flag")
+            return os.path.isfile(flag)
+
+    def _refresh_cos_button_visibility(self) -> None:
+        # 朋友机(live-only)只显示同步；全量机只显示上传。互斥，避免本机误点同步刷 403。
+        live = self._is_live_only_machine()
+        if getattr(self, "btn_cos_sync", None) is not None:
+            self.btn_cos_sync.setVisible(live)
+            self.btn_cos_sync.setEnabled(live)
+        if getattr(self, "btn_cos_upload", None) is not None:
+            self.btn_cos_upload.setVisible(not live)
+            self.btn_cos_upload.setEnabled(not live)
+
+    def _set_cos_status(self, text: str, *, ok=None) -> None:
+        lbl = getattr(self, "cos_status", None)
+        if lbl is None:
+            return
+        msg = str(text or "").strip() or "COS：—"
+        lbl.setText(msg)
+        if ok is True:
+            lbl.setStyleSheet("color: #2E7D32;")
+        elif ok is False:
+            lbl.setStyleSheet("color: #C62828;")
+        else:
+            lbl.setStyleSheet("color: #555555;")
+
+    def _refresh_cos_status_from_local(self) -> None:
+        try:
+            boot = _load_py_from_disk(
+                "utils/runtime_index_bootstrap.py", "ant_runtime_index_bootstrap"
+            )
+            status, sync = boot.local_manifest_sync_info(self._project_root())
+            if not sync:
+                self._set_cos_status("COS：本地日线未就绪", ok=None)
+                return
+            verify = boot.verify_friend_local(self._project_root(), sync)
+            self._set_cos_status(verify.get("message") or "", ok=bool(verify.get("ok")))
+        except Exception as e:
+            self._set_cos_status("COS：本地检查失败 %s" % e, ok=False)
+
+    def _cos_sync_already_ok_today(self) -> bool:
+        return str(self._post_market_settings.get("cos_sync_ok_date") or "") == date.today().isoformat()
+
+    def _mark_cos_sync_ok_today(self, trade_date: str = "") -> None:
+        self._post_market_settings["cos_sync_ok_date"] = date.today().isoformat()
+        if trade_date:
+            self._post_market_settings["cos_sync_trade_date"] = str(trade_date)
+        self._save_post_market_settings()
+
+    def _arm_cos_friend_sync_watch(self) -> None:
+        self._cos_sync_timer = QTimer(self)
+        self._cos_sync_timer.setInterval(60_000)
+        self._cos_sync_timer.timeout.connect(self._maybe_start_cos_friend_sync)
+        self._cos_sync_timer.start()
+        QTimer.singleShot(5000, self._maybe_start_cos_friend_sync)
+
+    def _maybe_start_cos_friend_sync(self) -> None:
+        if not self._is_live_only_machine():
+            return
+        now = datetime.now()
+        if now.time() < _COS_FRIEND_SYNC_AT:
+            return
+        try:
+            self._post_market_settings = self._load_post_market_settings()
+        except Exception:
+            pass
+        if self._cos_sync_already_ok_today():
+            return
+        if now.time() > _COS_FRIEND_SYNC_END:
+            self._notify_cos_sync_fail_once("已过 23:30 仍未同步成功")
+            return
+        self._start_cos_friend_sync(force=False, manual=False)
+
+    def _start_cos_friend_sync(self, *, force: bool = False, manual: bool = False) -> None:
+        # 全量机不拉远端 meta（无 live-only）；按钮已隐藏，这里再挡一层。
+        if not self._is_live_only_machine():
+            if manual:
+                self._set_cos_status("COS：本机是全量机，请用「立即上传到 COS」", ok=None)
+            return
+        if self._cos_sync_worker is not None and self._cos_sync_worker.isRunning():
+            if manual:
+                self._set_cos_status("COS：同步进行中…", ok=None)
+            return
+        self._set_cos_status("COS：正在同步…", ok=None)
+        try:
+            self.btn_cos_sync.setEnabled(False)
+        except Exception:
+            pass
+        self._append_launcher_log(
+            "cos sync: start force=%s manual=%s" % (bool(force), bool(manual))
+        )
+        worker = _CosFriendSyncWorker(
+            self._project_root(), force=bool(force), parent=self
+        )
+        self._cos_sync_worker = worker
+        worker.finished_ok.connect(
+            lambda result, m=bool(manual): self._on_cos_friend_sync_done(result, manual=m)
+        )
+        worker.start()
+
+    def _on_cos_friend_sync_done(self, result, *, manual: bool = False) -> None:
+        self._cos_sync_worker = None
+        try:
+            self.btn_cos_sync.setEnabled(True)
+        except Exception:
+            pass
+        data = result if isinstance(result, dict) else {}
+        ok = bool(data.get("ok"))
+        msg = str(data.get("message") or ("COS同步成功" if ok else "COS同步失败"))
+        self._set_cos_status(msg, ok=ok)
+        self._append_launcher_log(
+            "cos sync: ok=%s trade=%s fetched=%s errors=%s msg=%s"
+            % (
+                ok,
+                data.get("trade_date"),
+                data.get("fetched"),
+                data.get("errors"),
+                msg,
+            )
+        )
+        if ok:
+            self._mark_cos_sync_ok_today(str(data.get("trade_date") or ""))
+        elif (not manual) and datetime.now().time() > _COS_FRIEND_SYNC_END:
+            self._notify_cos_sync_fail_once(msg)
+
+    def _notify_cos_sync_fail_once(self, detail: str) -> None:
+        today = date.today().isoformat()
+        if str(self._post_market_settings.get("cos_sync_fail_notified_date") or "") == today:
+            return
+        if self._cos_sync_already_ok_today():
+            return
+        self._post_market_settings["cos_sync_fail_notified_date"] = today
+        try:
+            self._save_post_market_settings()
+        except Exception:
+            pass
+        try:
+            mod = _load_py_from_disk(
+                "utils/server_chan_notify.py", "ant_server_chan_notify"
+            )
+            body = "朋友机今晚未同步成功。\n%s\n时间：%s" % (
+                detail,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            mod.send_server_chan("蚂蚁量化 COS 同步失败", body)
+            self._append_launcher_log("cos sync: serverchan notified fail")
+        except Exception as e:
+            self._append_launcher_log("cos sync: serverchan failed %s" % e)
+
+    def _start_cos_upload(self) -> None:
+        if self._is_live_only_machine():
+            QMessageBox.information(
+                self,
+                "不可上传",
+                "当前是仅实盘机（data/qmt_live_only.flag），请用「立即同步 COS」拉取数据。",
+            )
+            return
+        if self._cos_upload_worker is not None and self._cos_upload_worker.isRunning():
+            self._set_cos_status("COS：上传进行中…", ok=None)
+            return
+        self._set_cos_status("COS：正在上传…", ok=None)
+        try:
+            self.btn_cos_upload.setEnabled(False)
+        except Exception:
+            pass
+        self._append_launcher_log("cos upload: start --runtime-only --force")
+        worker = _CosUploadWorker(self._project_root(), parent=self)
+        self._cos_upload_worker = worker
+        worker.finished_ok.connect(self._on_cos_upload_done)
+        worker.start()
+
+    def _on_cos_upload_done(self, result) -> None:
+        self._cos_upload_worker = None
+        try:
+            self.btn_cos_upload.setEnabled(True)
+        except Exception:
+            pass
+        data = result if isinstance(result, dict) else {}
+        ok = bool(data.get("ok"))
+        out = str(data.get("output") or "")
+        if ok:
+            msg = "COS上传成功（runtime）"
+            self._set_cos_status(msg, ok=True)
+        else:
+            lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+            tail = lines[-1] if lines else ("exit=%s" % data.get("exit_code"))
+            msg = "COS上传失败：%s" % tail
+            self._set_cos_status(msg, ok=False)
+        self._append_launcher_log("cos upload: ok=%s %s" % (ok, out[-800:]))
+        if not ok:
+            try:
+                QMessageBox.warning(
+                    self, "上传失败", msg + "\n\n详见 logs/launcher_run.log"
+                )
+            except Exception:
+                pass
 
     # --- 启动三个子系统 ---
 

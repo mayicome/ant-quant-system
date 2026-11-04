@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""新机缺失时从腾讯云 COS 拉取股票池 / 板块索引 / 日线近窗底稿（无密钥，公共读）。
+"""从腾讯云 COS 拉取/发布运行底稿（无密钥公共读）。
 
-已有完整本地文件一律不覆盖。策略 / 选股规则 JSON 不在此列。
-日线是整包 zip，不是逐票对象。
+启动补齐：股票池 / 板块索引 / 日线近窗 zip（缺才拉，不覆盖完整目录）。
+朋友机同步：按 friend_sync_meta.json 的交易日强制刷新日线 zip、选股 xls、主力净流入 CSV、沪深京行情 txt。
+主站上传：stage_runtime_for_upload 把上述对象放到 data/cos/runtime/。
 """
 from __future__ import annotations
 
@@ -11,13 +12,23 @@ import os
 import re
 import shutil
 import zipfile
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 UNIVERSE_NAME = "a_share_universe.json"
 INDEX_NAME = "qmt_sector_index.json"
 DAILY_CACHE_ZIP_NAME = "daily_cache.zip"
 DAILY_CACHE_DIR_NAME = "daily_cache"
 RUNTIME_DIR_NAME = "runtime"
+FRIEND_SYNC_META_NAME = "friend_sync_meta.json"
+STOCK_FILTER_GLOB = "选股结果_*_{date}.xls"
+STOCK_FILTER_GLOB_X = "选股结果_*_{date}.xlsx"
+CAPITAL_FLOW_DIR_NAME = "个股主力净流入"
+CAPITAL_FLOW_NAME_TMPL = "个股主力净流入_{date8}.csv"
+QMT_HSJ_QUOTE_NAME = "qmt_hsj_quote.txt"
+MIN_QMT_HSJ_QUOTE_SIZE = 10000
+HISTORY_DATA_DIR_NAME = "history_data"
 
 _DEFAULT_BUCKET = "ant-quant-data-1428892855"
 _DEFAULT_REGION = "ap-guangzhou"
@@ -50,9 +61,10 @@ def public_object_url(filename: str) -> str:
     bucket = (os.environ.get("COS_BUCKET") or _DEFAULT_BUCKET).strip()
     region = (os.environ.get("COS_REGION") or _DEFAULT_REGION).strip()
     prefix = (os.environ.get("COS_PREFIX") or _DEFAULT_PREFIX).strip().strip("/")
-    name = str(filename or "").lstrip("/")
+    name = str(filename or "").lstrip("/").replace("\\", "/")
+    quoted = "/".join(quote(seg, safe="") for seg in name.split("/") if seg != "")
     base = "https://%s.cos.%s.myqcloud.com" % (bucket, region)
-    parts = [p for p in (prefix, RUNTIME_DIR_NAME, name) if p]
+    parts = [p for p in (prefix, RUNTIME_DIR_NAME, quoted) if p]
     return "%s/%s" % (base, "/".join(parts))
 
 
@@ -328,6 +340,7 @@ def _fetch_daily_cache_zip(
     *,
     should_abort: Optional[Callable[[], bool]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
+    force: bool = False,
 ) -> Optional[str]:
     dest_dir = daily_cache_dir(root)
     tmp_path = os.path.join(project_data_dir(root), DAILY_CACHE_ZIP_NAME + ".part")
@@ -340,7 +353,7 @@ def _fetch_daily_cache_zip(
         )
         if dl_err:
             return dl_err
-        if not daily_cache_missing(root):
+        if (not force) and (not daily_cache_missing(root)):
             return None
         return _install_daily_cache_zip(
             tmp_path,
@@ -361,6 +374,13 @@ def stage_daily_cache_zip(project_root: str, cos_dir: str) -> Optional[str]:
     root = os.path.abspath(project_root or ".")
     if daily_cache_missing(root):
         print("[runtime] skip daily_cache.zip: local cache thin or missing")
+        return None
+    status, sync_td = local_manifest_sync_info(root)
+    if str(status or "").lower() != "completed":
+        print("[runtime] skip daily_cache.zip: status=%s (need completed)" % (status or "-"))
+        return None
+    if not sync_td:
+        print("[runtime] skip daily_cache.zip: missing sync_trade_date")
         return None
     cache = daily_cache_dir(root)
     runtime = os.path.join(os.path.abspath(cos_dir), RUNTIME_DIR_NAME)
@@ -498,8 +518,13 @@ def summarize_fetch(result: Dict[str, Any]) -> Tuple[bool, str]:
     return True, ""
 
 
-def stage_runtime_for_upload(project_root: str, cos_dir: str) -> List[str]:
-    """把索引 JSON 和 daily_cache.zip 放到 data/cos/runtime/，供上传；不进离线 zip。"""
+def stage_runtime_for_upload(
+    project_root: str,
+    cos_dir: str,
+    *,
+    trade_date: Optional[str] = None,
+) -> List[str]:
+    """把索引 JSON、daily_cache.zip、选股 xls、主力净流入、沪深京行情 txt、meta 放到 data/cos/runtime/。"""
     copied: List[str] = []
     src_map = dest_paths(project_root)
     runtime = os.path.join(os.path.abspath(cos_dir), RUNTIME_DIR_NAME)
@@ -515,9 +540,490 @@ def stage_runtime_for_upload(project_root: str, cos_dir: str) -> List[str]:
     packed = stage_daily_cache_zip(project_root, cos_dir)
     if packed:
         copied.append(packed)
+    friend_names = stage_friend_payloads(project_root, cos_dir, trade_date=trade_date)
+    copied.extend(friend_names)
     return copied
 
 
 def is_runtime_relpath(rel: str) -> bool:
     norm = str(rel or "").replace("\\", "/").lstrip("/")
     return norm == RUNTIME_DIR_NAME or norm.startswith(RUNTIME_DIR_NAME + "/")
+
+
+def history_data_dir(root: str) -> str:
+    path = os.path.join(os.path.abspath(root or "."), HISTORY_DATA_DIR_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def capital_flow_dir(root: str) -> str:
+    path = os.path.join(history_data_dir(root), CAPITAL_FLOW_DIR_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _norm_trade_date(value: Any) -> str:
+    s = str(value or "").strip().replace("/", "-")
+    if not s:
+        return ""
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) >= 8:
+        return "%s-%s-%s" % (digits[:4], digits[4:6], digits[6:8])
+    return s[:10]
+
+
+def _date8(trade_date: str) -> str:
+    return _norm_trade_date(trade_date).replace("-", "")[:8]
+
+
+def local_manifest_sync_info(root: str) -> Tuple[str, str]:
+    """返回 (status, sync_trade_date YYYY-MM-DD)。"""
+    path = os.path.join(daily_cache_dir(root), "manifest.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return "", ""
+    if not isinstance(payload, dict):
+        return "", ""
+    status = str(payload.get("status") or "").strip()
+    sync = _norm_trade_date(payload.get("sync_trade_date") or payload.get("pending_trade_date"))
+    return status, sync
+
+
+def list_local_stock_filter_files(root: str, trade_date: str) -> List[str]:
+    d = _norm_trade_date(trade_date)
+    if not d:
+        return []
+    hd = history_data_dir(root)
+    names: List[str] = []
+    for pat in (
+        STOCK_FILTER_GLOB.format(date=d),
+        STOCK_FILTER_GLOB_X.format(date=d),
+    ):
+        try:
+            import glob as _glob
+
+            for p in sorted(_glob.glob(os.path.join(hd, pat))):
+                if os.path.isfile(p) and os.path.getsize(p) > 0:
+                    names.append(os.path.basename(p))
+        except Exception:
+            continue
+    return names
+
+
+def local_capital_flow_path(root: str, trade_date: str) -> str:
+    name = CAPITAL_FLOW_NAME_TMPL.format(date8=_date8(trade_date))
+    return os.path.join(capital_flow_dir(root), name)
+
+
+def local_qmt_hsj_quote_path(root: str) -> str:
+    return os.path.join(project_data_dir(root), QMT_HSJ_QUOTE_NAME)
+
+
+def _file_ok(path: str, *, min_size: int = 1) -> bool:
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) >= int(min_size)
+    except OSError:
+        return False
+
+
+def verify_friend_local(
+    root: str,
+    trade_date: str,
+    *,
+    expect_stock_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """朋友机本地是否齐：日线、选股、资金流、沪深京行情 txt。"""
+    td = _norm_trade_date(trade_date)
+    status, sync = local_manifest_sync_info(root)
+    daily_ok = (
+        str(status).lower() == "completed"
+        and sync == td
+        and count_daily_cache_csv(root) >= MIN_DAILY_CACHE_CSV
+    )
+    expect = [str(n).strip() for n in (expect_stock_names or []) if str(n).strip()]
+    if expect:
+        missing = [
+            n for n in expect
+            if not _file_ok(os.path.join(history_data_dir(root), n))
+        ]
+        stock_names = [n for n in expect if n not in missing]
+        stock_ok = not missing
+    else:
+        stock_names = list_local_stock_filter_files(root, td)
+        stock_ok = len(stock_names) >= 1
+    cf_path = local_capital_flow_path(root, td)
+    cf_ok = _file_ok(cf_path, min_size=20)
+    quote_path = local_qmt_hsj_quote_path(root)
+    quote_ok = _file_ok(quote_path, min_size=MIN_QMT_HSJ_QUOTE_SIZE)
+    ok = bool(daily_ok and stock_ok and cf_ok and quote_ok)
+    parts = [
+        "日线=%s(status=%s sync=%s)"
+        % ("OK" if daily_ok else "缺", status or "-", sync or "-"),
+        "选股=%s(%d)" % ("OK" if stock_ok else "缺", len(stock_names)),
+        "资金流=%s" % ("OK" if cf_ok else "缺"),
+        "行情=%s" % ("OK" if quote_ok else "缺"),
+    ]
+    return {
+        "ok": ok,
+        "trade_date": td,
+        "daily_ok": daily_ok,
+        "stock_ok": stock_ok,
+        "capital_flow_ok": cf_ok,
+        "qmt_hsj_quote_ok": quote_ok,
+        "stock_files": stock_names,
+        "capital_flow_file": os.path.basename(cf_path) if cf_ok else "",
+        "qmt_hsj_quote_file": QMT_HSJ_QUOTE_NAME if quote_ok else "",
+        "message": (
+            "COS同步成功 %s：%s" % (td, "；".join(parts))
+            if ok
+            else "COS同步未齐 %s：%s" % (td or "-", "；".join(parts))
+        ),
+    }
+
+
+
+def stage_friend_payloads(
+    project_root: str,
+    cos_dir: str,
+    *,
+    trade_date: Optional[str] = None,
+) -> List[str]:
+    """把当日选股 xls、主力净流入 CSV、沪深京行情 txt、friend_sync_meta.json 放到 runtime/。"""
+    root = os.path.abspath(project_root or ".")
+    runtime = os.path.join(os.path.abspath(cos_dir), RUNTIME_DIR_NAME)
+    os.makedirs(runtime, exist_ok=True)
+    status, sync = local_manifest_sync_info(root)
+    td = _norm_trade_date(trade_date) or sync
+    if not td:
+        td = datetime.now().strftime("%Y-%m-%d")
+    staged: List[str] = []
+    stock_files = list_local_stock_filter_files(root, td)
+    for name in stock_files:
+        src = os.path.join(history_data_dir(root), name)
+        dest = os.path.join(runtime, name)
+        try:
+            shutil.copy2(src, dest)
+            staged.append(name)
+            print("[runtime] staged", dest)
+        except Exception as e:
+            print("[runtime] skip stock_filter", name, e)
+    cf_src = local_capital_flow_path(root, td)
+    cf_name = os.path.basename(cf_src)
+    if _file_ok(cf_src, min_size=20):
+        try:
+            shutil.copy2(cf_src, os.path.join(runtime, cf_name))
+            staged.append(cf_name)
+            print("[runtime] staged", os.path.join(runtime, cf_name))
+        except Exception as e:
+            print("[runtime] skip capital_flow", cf_name, e)
+            cf_name = ""
+    else:
+        print("[runtime] skip capital_flow missing", cf_src)
+        cf_name = ""
+    quote_src = local_qmt_hsj_quote_path(root)
+    quote_name = QMT_HSJ_QUOTE_NAME
+    if _file_ok(quote_src, min_size=MIN_QMT_HSJ_QUOTE_SIZE):
+        try:
+            shutil.copy2(quote_src, os.path.join(runtime, quote_name))
+            staged.append(quote_name)
+            print("[runtime] staged", os.path.join(runtime, quote_name))
+        except Exception as e:
+            print("[runtime] skip qmt_hsj_quote", quote_name, e)
+            quote_name = ""
+    else:
+        print("[runtime] skip qmt_hsj_quote missing", quote_src)
+        quote_name = ""
+    meta = {
+        "version": 1,
+        "trade_date": td,
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "daily_cache": {
+            "object": DAILY_CACHE_ZIP_NAME,
+            "sync_trade_date": sync or td,
+            "status": status or "",
+        },
+        "stock_filter": [
+            {"name": n, "size": int(os.path.getsize(os.path.join(runtime, n)))}
+            for n in stock_files
+            if _file_ok(os.path.join(runtime, n))
+        ],
+        "capital_flow": (
+            {"name": cf_name, "size": int(os.path.getsize(os.path.join(runtime, cf_name)))}
+            if cf_name and _file_ok(os.path.join(runtime, cf_name))
+            else None
+        ),
+        "qmt_hsj_quote": (
+            {
+                "name": quote_name,
+                "size": int(os.path.getsize(os.path.join(runtime, quote_name))),
+            }
+            if quote_name and _file_ok(os.path.join(runtime, quote_name), min_size=MIN_QMT_HSJ_QUOTE_SIZE)
+            else None
+        ),
+    }
+    meta_path = os.path.join(runtime, FRIEND_SYNC_META_NAME)
+    tmp = meta_path + ".part"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    _atomic_place(tmp, meta_path)
+    staged.append(FRIEND_SYNC_META_NAME)
+    print("[runtime] staged", meta_path, "trade_date=%s stocks=%d cf=%s quote=%s" % (
+        td, len(stock_files), cf_name or "-", quote_name or "-"
+    ))
+    return staged
+
+
+def _load_json_file(path: str) -> Optional[Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def fetch_friend_sync_meta(
+    root: str,
+    *,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """下载 friend_sync_meta.json，返回 (meta, err)。"""
+    data_dir = project_data_dir(root)
+    tmp = os.path.join(data_dir, FRIEND_SYNC_META_NAME + ".part")
+    try:
+        url = public_object_url(FRIEND_SYNC_META_NAME)
+        err = _download_url(url, tmp, timeout_sec=60.0, should_abort=should_abort)
+        if err:
+            return None, err
+        payload = _load_json_file(tmp)
+        if not isinstance(payload, dict):
+            return None, "meta 不是 JSON 对象"
+        td = _norm_trade_date(payload.get("trade_date"))
+        if not td:
+            return None, "meta 缺少 trade_date"
+        payload["trade_date"] = td
+        # 落一份本地副本便于排查
+        dest = os.path.join(data_dir, FRIEND_SYNC_META_NAME)
+        try:
+            _atomic_place(tmp, dest)
+        except Exception:
+            pass
+        return payload, None
+    finally:
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _remote_newer_or_missing(local_sync: str, remote_sync: str) -> bool:
+    loc = _date8(local_sync)
+    rem = _date8(remote_sync)
+    if not rem:
+        return False
+    if not loc:
+        return True
+    return rem > loc
+
+
+def sync_friend_runtime(
+    root: str,
+    *,
+    force: bool = False,
+    should_abort: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """朋友机：按远端 meta 强制覆盖日线/选股/资金流/沪深京行情。"""
+    result: Dict[str, Any] = {
+        "ok": False,
+        "fetched": [],
+        "skipped": [],
+        "errors": {},
+        "aborted": False,
+        "trade_date": "",
+        "message": "",
+        "verify": {},
+    }
+    if on_progress:
+        on_progress("正在检查 COS 同步元数据…")
+    meta, meta_err = fetch_friend_sync_meta(root, should_abort=should_abort)
+    if meta_err:
+        result["errors"]["meta"] = meta_err
+        result["message"] = "COS同步失败：无法读取远端 meta（%s）" % meta_err
+        return result
+    assert meta is not None
+    td = _norm_trade_date(meta.get("trade_date"))
+    result["trade_date"] = td
+    stock_meta = meta.get("stock_filter") or []
+    expect_stocks = []
+    if isinstance(stock_meta, list):
+        for item in stock_meta:
+            if isinstance(item, dict) and item.get("name"):
+                expect_stocks.append(str(item["name"]))
+            elif isinstance(item, str) and item.strip():
+                expect_stocks.append(item.strip())
+    cf_meta = meta.get("capital_flow") if isinstance(meta.get("capital_flow"), dict) else {}
+    cf_name = str((cf_meta or {}).get("name") or "").strip()
+    if not cf_name:
+        cf_name = CAPITAL_FLOW_NAME_TMPL.format(date8=_date8(td))
+    quote_meta = meta.get("qmt_hsj_quote") if isinstance(meta.get("qmt_hsj_quote"), dict) else {}
+    quote_name = str((quote_meta or {}).get("name") or "").strip() or QMT_HSJ_QUOTE_NAME
+
+    local_status, local_sync = local_manifest_sync_info(root)
+    need_daily = bool(force) or _remote_newer_or_missing(local_sync, td)
+    if not need_daily:
+        # 同日但未完成 / CSV 不够也要拉
+        if str(local_status).lower() != "completed" or daily_cache_missing(root):
+            need_daily = True
+    # 选股 / 资金流 / 行情：缺文件或强制 / 远端更新日都要拉
+    need_stock = bool(force) or (not list_local_stock_filter_files(root, td))
+    if expect_stocks and not need_stock:
+        for n in expect_stocks:
+            if not _file_ok(os.path.join(history_data_dir(root), n)):
+                need_stock = True
+                break
+    need_cf = bool(force) or (not _file_ok(local_capital_flow_path(root, td), min_size=20))
+    need_quote = bool(force) or (
+        not _file_ok(local_qmt_hsj_quote_path(root), min_size=MIN_QMT_HSJ_QUOTE_SIZE)
+    )
+    if _remote_newer_or_missing(local_sync, td):
+        need_stock = True
+        need_cf = True
+        need_quote = True
+
+    if not need_daily:
+        result["skipped"].append(DAILY_CACHE_ZIP_NAME)
+    if not need_stock:
+        result["skipped"].append("stock_filter")
+    if not need_cf:
+        result["skipped"].append("capital_flow")
+    if not need_quote:
+        result["skipped"].append("qmt_hsj_quote")
+
+    if need_daily:
+        if on_progress:
+            on_progress("正在下载并覆盖日线缓存…")
+        err = _fetch_daily_cache_zip(
+            root,
+            should_abort=should_abort,
+            on_progress=on_progress,
+            force=True,
+        )
+        if err == "aborted":
+            result["aborted"] = True
+            result["message"] = "COS同步已中止"
+            return result
+        if err:
+            result["errors"][DAILY_CACHE_ZIP_NAME] = err
+        else:
+            result["fetched"].append(DAILY_CACHE_ZIP_NAME)
+
+    if need_stock and expect_stocks:
+        hd = history_data_dir(root)
+        for name in expect_stocks:
+            if should_abort and should_abort():
+                result["aborted"] = True
+                result["message"] = "COS同步已中止"
+                return result
+            if on_progress:
+                on_progress("正在获取选股 %s …" % name)
+            tmp = os.path.join(hd, name + ".part")
+            try:
+                url = public_object_url(name)
+                dl_err = _download_url(url, tmp, timeout_sec=180.0, should_abort=should_abort)
+                if dl_err == "aborted":
+                    result["aborted"] = True
+                    result["message"] = "COS同步已中止"
+                    return result
+                if dl_err:
+                    result["errors"][name] = dl_err
+                    continue
+                if not _file_ok(tmp, min_size=20):
+                    result["errors"][name] = "下载为空"
+                    continue
+                _atomic_place(tmp, os.path.join(hd, name))
+                result["fetched"].append(name)
+            except Exception as e:
+                result["errors"][name] = str(e) or type(e).__name__
+            finally:
+                try:
+                    if os.path.isfile(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+    elif need_stock and not expect_stocks:
+        result["errors"]["stock_filter"] = "远端 meta 未声明选股文件"
+
+    if need_cf and cf_name:
+        if on_progress:
+            on_progress("正在获取主力净流入 %s …" % cf_name)
+        dest_dir = capital_flow_dir(root)
+        tmp = os.path.join(dest_dir, cf_name + ".part")
+        try:
+            url = public_object_url(cf_name)
+            dl_err = _download_url(url, tmp, timeout_sec=180.0, should_abort=should_abort)
+            if dl_err == "aborted":
+                result["aborted"] = True
+                result["message"] = "COS同步已中止"
+                return result
+            if dl_err:
+                result["errors"][cf_name] = dl_err
+            elif not _file_ok(tmp, min_size=20):
+                result["errors"][cf_name] = "下载为空"
+            else:
+                _atomic_place(tmp, os.path.join(dest_dir, cf_name))
+                result["fetched"].append(cf_name)
+        except Exception as e:
+            result["errors"][cf_name] = str(e) or type(e).__name__
+        finally:
+            try:
+                if os.path.isfile(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+
+    if need_quote and quote_name:
+        if on_progress:
+            on_progress("正在获取沪深京行情 %s …" % quote_name)
+        dest = local_qmt_hsj_quote_path(root)
+        tmp = dest + ".part"
+        try:
+            url = public_object_url(quote_name)
+            dl_err = _download_url(url, tmp, timeout_sec=180.0, should_abort=should_abort)
+            if dl_err == "aborted":
+                result["aborted"] = True
+                result["message"] = "COS同步已中止"
+                return result
+            if dl_err:
+                result["errors"][quote_name] = dl_err
+            elif not _file_ok(tmp, min_size=MIN_QMT_HSJ_QUOTE_SIZE):
+                result["errors"][quote_name] = "下载过小或为空"
+            else:
+                _atomic_place(tmp, dest)
+                result["fetched"].append(quote_name)
+        except Exception as e:
+            result["errors"][quote_name] = str(e) or type(e).__name__
+        finally:
+            try:
+                if os.path.isfile(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+
+    verify = verify_friend_local(root, td, expect_stock_names=expect_stocks or None)
+    result["verify"] = verify
+    result["ok"] = bool(verify.get("ok")) and not result["errors"]
+    if result["ok"]:
+        result["message"] = str(verify.get("message") or "COS同步成功")
+    else:
+        # 有错误或校验未齐
+        err_tip = ""
+        if result["errors"]:
+            first_k = next(iter(result["errors"]))
+            err_tip = "%s=%s" % (first_k, result["errors"][first_k])
+        base = str(verify.get("message") or "COS同步未齐")
+        result["message"] = ("%s；%s" % (base, err_tip)).strip("；")
+    return result
+

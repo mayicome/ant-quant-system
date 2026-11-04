@@ -219,7 +219,7 @@ class Worker(QThread):
                     and not result.ok
                     and not result.skipped
                 ):
-                    self.log_line.emit("[中止] 日线门禁失败，后续自动步骤不再执行")
+                    self.log_line.emit("[中止] 门禁失败（日线或主力净流入），后续自动步骤不再执行")
                     break
             except Exception as e:
                 self.step_finished.emit(sid, False, 1, str(e))
@@ -331,7 +331,9 @@ class PostMarketWindow(QMainWindow):
         btn_row.addWidget(self.btn_refresh)
         btn_row.addWidget(self.btn_continue)
         btn_row.addWidget(self.btn_retry_fail)
-        btn_row.addWidget(self.btn_stop_wechat)
+        # 已从盘后批跑去掉公众号草稿，按钮保留但默认隐藏
+        self.btn_stop_wechat.setVisible(False)
+        # btn_row.addWidget(self.btn_stop_wechat)
         btn_row.addWidget(self.btn_stop_capital)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -605,9 +607,9 @@ class PostMarketWindow(QMainWindow):
             self._set_status(sid, STATUS_RETRY, "执行中（白名单失败会自动重试）")
         elif sid == "capital_flow":
             if self.scheduled:
-                tip = "执行中（东财失败会每60s自动重试）"
+                tip = "执行中（未合格则等待本地主力净流入合格，不反复抓取）"
             else:
-                tip = "执行中（东财失败后改用网页Selenium翻页，不同花顺）"
+                tip = "执行中（东财失败后改用网页Selenium；仍未合格则等待本地产物）"
             self._set_status(sid, STATUS_RETRY, tip)
         else:
             self._set_status(sid, STATUS_RUNNING)
@@ -618,7 +620,7 @@ class PostMarketWindow(QMainWindow):
             STATUS_OK if ok else STATUS_FAIL,
             detail or f"exit={code}",
         )
-        if sid == "daily_cache" and not ok:
+        if sid in ("daily_cache", "capital_flow") and not ok:
             self.btn_continue.setEnabled(True)
 
     def _on_all_done(self) -> None:
@@ -698,7 +700,7 @@ class PostMarketWindow(QMainWindow):
         self._start_worker(
             self._ordered_ids(wanted),
             use_asof_freeze=not self.scheduled,
-            stop_on_gate_fail=False,
+            stop_on_gate_fail=True,
         )
 
     def _on_retry_failed_row(self) -> None:

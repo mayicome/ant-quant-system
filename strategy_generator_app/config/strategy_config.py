@@ -119,6 +119,10 @@ OPTIONAL_STRATEGY_PARAM_KEYS = (
     "selection_date_by_code",
     "_filled_legs",
     "ex_div_lookback",
+    # 盘中买入冲高卖出三档涨幅（相对昨收）
+    "surge_gain_4",
+    "surge_gain_6",
+    "surge_gain_8",
 )
 
 

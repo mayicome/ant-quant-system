@@ -105,30 +105,46 @@ def _csv_row_count(path: Path) -> int:
 
 
 def _csv_crossed_min_inflow(path: Path, min_inflow_wan: float = 3000.0) -> bool:
-    """CSV 按净流入降序时，若出现 < 门槛的行，则 >=门槛 子集已完整。"""
+    """CSV 按净流入降序时，若出现 < 门槛的行，则 >=门槛 子集已完整。
+
+    使用 csv 模块解析，避免表头字段内换行（如 "今日\n涨跌幅"）导致列错位、误判未穿越。
+    """
+    import csv
     try:
         from utils.main_force_inflow_rank import parse_inflow_to_yuan
     except Exception:
         parse_inflow_to_yuan = None  # type: ignore
     try:
-        with path.open("r", encoding="utf-8-sig", errors="ignore") as f:
-            header = next(f, "")
-            cols = [c.strip().strip('"') for c in header.strip().split(",")]
+        with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as f:
+            reader = csv.reader(f)
+            try:
+                cols = next(reader)
+            except StopIteration:
+                return False
+            cols = [str(c).strip().replace("\n", "") for c in cols]
             inflow_i = None
+            # 优先 push2/ enrichment：今日主力净流入-净额；其次 Selenium 原表：今日主力净流入
             for i, c in enumerate(cols):
-                if "主力净流入" in c and "净额" in c:
+                if "主力净流入" in c and "净额" in c and "占比" not in c:
                     inflow_i = i
                     break
             if inflow_i is None:
+                for i, c in enumerate(cols):
+                    if c == "今日主力净流入" or (
+                        "今日主力净流入" in c and "占比" not in c and "超大" not in c
+                        and "大单" not in c and "中单" not in c and "小单" not in c
+                    ):
+                        inflow_i = i
+                        break
+            if inflow_i is None:
                 return False
             thr = float(min_inflow_wan) * 1e4
-            for line in f:
-                if not line.strip():
+            for parts in reader:
+                if not parts:
                     continue
-                parts = line.strip().split(",")
                 if inflow_i >= len(parts):
                     continue
-                raw = parts[inflow_i].strip().strip('"')
+                raw = str(parts[inflow_i]).strip().strip('"')
                 yuan = None
                 if parse_inflow_to_yuan is not None:
                     try:
@@ -154,13 +170,10 @@ def check_capital_flow(asof: date) -> CheckResult:
     # 全量通常 4000+；>=1000 视为全日可用
     if n >= 1000:
         return True, f"{rel} 全量可用 n={n}"
-    # >=3000 万子集：已穿越门槛，或至少有一定行数
+    # 仅当已穿越 >=3000 万门槛才认子集完整；残缺一页/未穿越不得放行
     if _csv_crossed_min_inflow(p, 3000.0):
         return True, f"{rel} >=3000万子集完整 n={n}"
-    if n >= 50:
-        # 未穿越也可能全是高流入日；有数据则先放行，避免整日卡死
-        return True, f"{rel} 子集可用(未确认穿越) n={n}"
-    return False, f"{rel} 行数过少 n={n}"
+    return False, f"{rel} 未确认>=3000万子集完整 n={n}"
 
 
 def check_board_snapshot(asof: date) -> CheckResult:
