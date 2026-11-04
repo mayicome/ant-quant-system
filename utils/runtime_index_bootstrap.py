@@ -2,7 +2,7 @@
 """从腾讯云 COS 拉取/发布运行底稿（无密钥公共读）。
 
 启动补齐：股票池 / 板块索引 / 日线近窗 zip（缺才拉，不覆盖完整目录）。
-朋友机同步：按 friend_sync_meta.json 比较交易日/清单/size/uploaded_at，有变化才拉日线 zip、选股 xls、主力净流入 CSV、沪深京行情 txt；force 只表示允许立刻跑，不强制重下。
+朋友机同步：按 friend_sync_meta.json 比较交易日/清单/size/uploaded_at，有变化才拉日线 zip、选股 xls（仅增强/马总，不含马新）、主力净流入 CSV、沪深京行情 txt；force 只表示允许立刻跑，不强制重下。
 主站上传：stage_runtime_for_upload 把上述对象放到 data/cos/runtime/。
 """
 from __future__ import annotations
@@ -24,6 +24,11 @@ RUNTIME_DIR_NAME = "runtime"
 FRIEND_SYNC_META_NAME = "friend_sync_meta.json"
 STOCK_FILTER_GLOB = "选股结果_*_{date}.xls"
 STOCK_FILTER_GLOB_X = "选股结果_*_{date}.xlsx"
+# COS 朋友同步只传这两份选股结果（不含「马新选股逻辑-盘后」）
+STOCK_FILTER_COS_RULE_NAMES = (
+    "增强选股逻辑-盘后",
+    "马总选股逻辑-盘后",
+)
 CAPITAL_FLOW_DIR_NAME = "个股主力净流入"
 CAPITAL_FLOW_NAME_TMPL = "个股主力净流入_{date8}.csv"
 QMT_HSJ_QUOTE_NAME = "qmt_hsj_quote.txt"
@@ -591,7 +596,17 @@ def local_manifest_sync_info(root: str) -> Tuple[str, str]:
     return status, sync
 
 
+def _is_cos_stock_filter_name(name: str) -> bool:
+    """是否属于 COS 朋友同步白名单选股文件。"""
+    base = os.path.basename(str(name or ""))
+    for mid in STOCK_FILTER_COS_RULE_NAMES:
+        if base.startswith("选股结果_%s_" % mid):
+            return True
+    return False
+
+
 def list_local_stock_filter_files(root: str, trade_date: str) -> List[str]:
+    """当日选股结果文件名（仅 COS 白名单：增强/马总，不含马新）。"""
     d = _norm_trade_date(trade_date)
     if not d:
         return []
@@ -606,7 +621,9 @@ def list_local_stock_filter_files(root: str, trade_date: str) -> List[str]:
 
             for p in sorted(_glob.glob(os.path.join(hd, pat))):
                 if os.path.isfile(p) and os.path.getsize(p) > 0:
-                    names.append(os.path.basename(p))
+                    bn = os.path.basename(p)
+                    if _is_cos_stock_filter_name(bn):
+                        names.append(bn)
         except Exception:
             continue
     return names
@@ -709,6 +726,22 @@ def stage_friend_payloads(
             print("[runtime] staged", dest)
         except Exception as e:
             print("[runtime] skip stock_filter", name, e)
+    # 清掉 runtime 里不在白名单/本次清单的选股结果（如旧「马新」），避免整树上传统传
+    keep_stocks = set(stock_files)
+    try:
+        for fn in os.listdir(runtime):
+            if not (fn.startswith("选股结果_") and (fn.endswith(".xls") or fn.endswith(".xlsx"))):
+                continue
+            if fn in keep_stocks:
+                continue
+            stale = os.path.join(runtime, fn)
+            try:
+                os.remove(stale)
+                print("[runtime] removed stale stock_filter", fn)
+            except Exception as e:
+                print("[runtime] skip remove stock_filter", fn, e)
+    except Exception as e:
+        print("[runtime] skip purge stock_filter", e)
     cf_src = local_capital_flow_path(root, td)
     cf_name = os.path.basename(cf_src)
     if _file_ok(cf_src, min_size=20):
