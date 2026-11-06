@@ -94,6 +94,11 @@ class StockChartWidget(QWidget):
         self._clear_branch_blink_timer.setInterval(1000)
         self._clear_branch_blink_timer.timeout.connect(self._on_clear_branch_blink_tick)
 
+        # 弹性买卖虚线：悬停节点/虚线联动高亮 + 线旁标价
+        self._highlighted_elastic_rule_id = None  # 当前高亮的 best_buy/best_sell 规则 id
+        self._elastic_dash_metas = []  # [{rule_id, kind, price, line, label}, ...]
+        self._elastic_dash_node_artists = []  # [(rule_id, scatter_artist), ...] 反向点亮节点用
+
         # 已移除闪烁逻辑，改用固定红色显示以提升性能
         
         # 标签点击相关
@@ -6522,7 +6527,211 @@ class StockChartWidget(QWidget):
             
             print(f"已修改网格数量: {rule_name} -> {new_num_grids}格 间距{new_grid_step:.2f}元")
     
+    def _elastic_rule_id(self, rule):
+        """稳定取规则 id，供虚线高亮配对。"""
+        if not isinstance(rule, dict):
+            return ""
+        rid = str(rule.get("id") or "").strip()
+        if rid:
+            return rid
+        # 无 id 时退化为 name+type+trigger，尽量可配对
+        return "|".join(
+            [
+                str(rule.get("type") or ""),
+                str(rule.get("name") or ""),
+                str(rule.get("trigger_price") or ""),
+                str(rule.get("drop_percent") or rule.get("rise_percent") or ""),
+            ]
+        )
+
+    def _clear_elastic_dash_labels(self):
+        for meta in list(getattr(self, "_elastic_dash_metas", None) or []):
+            lab = meta.get("label")
+            if lab is None:
+                continue
+            try:
+                lab.remove()
+            except Exception:
+                pass
+            meta["label"] = None
+
+    def _refresh_elastic_dash_highlight(self, draw=True):
+        """按 _highlighted_elastic_rule_id 调整虚线粗细/透明度，并为高亮线标价。"""
+        metas = getattr(self, "_elastic_dash_metas", None) or []
+        hid = getattr(self, "_highlighted_elastic_rule_id", None)
+        ax = getattr(self, "price_position_ax", None)
+        if ax is None:
+            return
+        try:
+            precision = int(self._get_price_precision())
+        except Exception:
+            precision = 2
+        y_min, y_max = ax.get_ylim()
+        # 价格标在图上方内侧，避免挡住节点
+        label_y = y_max - (y_max - y_min) * 0.04
+        any_hl = bool(hid)
+        for meta in metas:
+            line = meta.get("line")
+            if line is None:
+                continue
+            is_hl = bool(hid) and str(meta.get("rule_id") or "") == str(hid)
+            kind = meta.get("kind") or "yellow"
+            if is_hl:
+                try:
+                    line.set_linewidth(2.2)
+                    line.set_alpha(1.0)
+                    line.set_zorder(95)
+                except Exception:
+                    pass
+                # 高亮时必标价格
+                lab = meta.get("label")
+                price = meta.get("price")
+                if price is not None:
+                    txt = f"{float(price):.{precision}f}"
+                    if lab is None:
+                        try:
+                            lab = ax.annotate(
+                                txt,
+                                xy=(float(price), label_y),
+                                xytext=(4, 0),
+                                textcoords="offset points",
+                                fontsize=8,
+                                fontweight="bold",
+                                color="#ff0000" if kind == "red" else ("#f9a825" if kind == "yellow" else "#555555"),
+                                va="top",
+                                ha="left",
+                                bbox=dict(
+                                    boxstyle="round,pad=0.15",
+                                    facecolor="white",
+                                    edgecolor="#ff0000" if kind == "red" else ("#f9a825" if kind == "yellow" else "#888888"),
+                                    alpha=0.85,
+                                    linewidth=0.8,
+                                ),
+                                zorder=120,
+                                clip_on=True,
+                            )
+                            meta["label"] = lab
+                        except Exception:
+                            meta["label"] = None
+                    else:
+                        try:
+                            lab.set_text(txt)
+                            lab.set_position((float(price), label_y))
+                            lab.set_visible(True)
+                        except Exception:
+                            pass
+            else:
+                # 有高亮时压低其它虚线对比；无高亮恢复默认
+                try:
+                    if kind == "red":
+                        line.set_linewidth(0.8)
+                        line.set_alpha(0.25 if any_hl else 0.7)
+                        line.set_zorder(36)
+                    elif kind == "gray":
+                        line.set_linewidth(0.8)
+                        line.set_alpha(0.2 if any_hl else 0.55)
+                        line.set_zorder(36)
+                    else:
+                        line.set_linewidth(0.8)
+                        line.set_alpha(0.22 if any_hl else 0.6)
+                        line.set_zorder(35)
+                except Exception:
+                    pass
+                lab = meta.get("label")
+                if lab is not None:
+                    try:
+                        lab.set_visible(False)
+                    except Exception:
+                        try:
+                            lab.remove()
+                        except Exception:
+                            pass
+                        meta["label"] = None
+
+        # 反向：高亮对应节点描边加粗
+        for rid, art in list(getattr(self, "_elastic_dash_node_artists", None) or []):
+            try:
+                if hid and str(rid) == str(hid):
+                    art.set_linewidths(2.6)
+                    art.set_edgecolors("#ff6600")
+                    art.set_zorder(110)
+                else:
+                    # 恢复近似默认：黑边 1
+                    art.set_linewidths(1.0)
+                    art.set_edgecolors("black")
+            except Exception:
+                pass
+
+        if draw:
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+
+    def _update_elastic_hover_highlight(self, x, y):
+        """悬停节点或虚线时联动高亮；都不命中则取消。"""
+        try:
+            hover_rule, _, _ = self._find_rule_at_position(x, y, include_executed=True)
+        except Exception:
+            hover_rule = None
+        target = None
+        if hover_rule and hover_rule.get("type") in ("best_buy", "best_sell"):
+            target = hover_rule
+        else:
+            dash = self._find_elastic_dash_at_x(x)
+            if dash is not None:
+                target = dash.get("rule_id")
+        self._set_highlighted_elastic_rule(target, draw=True)
+
+    def _set_highlighted_elastic_rule(self, rule_or_id, draw=True):
+        """设置/清除当前高亮的弹性规则。"""
+        if rule_or_id is None or rule_or_id == "":
+            rid = None
+        elif isinstance(rule_or_id, dict):
+            rid = self._elastic_rule_id(rule_or_id)
+        else:
+            rid = str(rule_or_id).strip() or None
+        if getattr(self, "_highlighted_elastic_rule_id", None) == rid:
+            if draw:
+                self._refresh_elastic_dash_highlight(draw=True)
+            return
+        self._highlighted_elastic_rule_id = rid
+        self._refresh_elastic_dash_highlight(draw=draw)
+
+    def _find_elastic_dash_at_x(self, x):
+        """点击虚线：按价格 X 命中最近一根弹性虚线，返回 meta 或 None。"""
+        if x is None:
+            return None
+        metas = getattr(self, "_elastic_dash_metas", None) or []
+        if not metas:
+            return None
+        ax = getattr(self, "price_position_ax", None)
+        if ax is None:
+            return None
+        try:
+            fig = ax.figure
+            bbox = ax.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+            width_px = bbox.width * fig.dpi
+            x_range = ax.get_xlim()
+            # 约 10 像素容差
+            x_threshold = (x_range[1] - x_range[0]) * 10.0 / max(width_px, 1.0)
+        except Exception:
+            x_threshold = 0.02
+        best = None
+        best_d = None
+        for meta in metas:
+            try:
+                px = float(meta.get("price"))
+            except (TypeError, ValueError):
+                continue
+            d = abs(float(x) - px)
+            if d <= x_threshold and (best_d is None or d < best_d):
+                best = meta
+                best_d = d
+        return best
+
     def _find_rule_at_position(self, x, y, include_executed=False):
+
         """查找指定位置的规则
         
         参数:
@@ -11681,10 +11890,14 @@ class StockChartWidget(QWidget):
         
         # 绘制弹性买入/卖出规则的回弹点虚线
         current_price = self.current_price
+        self._clear_elastic_dash_labels()
+        self._elastic_dash_metas = []
+        self._elastic_dash_node_artists = []
         if current_price > 0:
             _, _, _elastic_cfg_dyn = self._load_elastic_confirm_config()
             # 多档 best_sell 动态红线若价格相同会完全重叠；按「同展示价位」计数微移 X
             best_sell_red_stagger = {}
+            _hl_eid = getattr(self, "_highlighted_elastic_rule_id", None)
             for rule in self.rules:
                 rule_type = rule.get('type')
                 rule_enabled = rule.get('enabled', True)
@@ -11768,16 +11981,59 @@ class StockChartWidget(QWidget):
                         y_min = self.price_position_ax.get_ylim()[0]
                         y_max = self.price_position_ax.get_ylim()[1]
                         
-                        # 绘制竖线虚线：在回弹点位置
-                        self.price_position_ax.plot(
+                        # 绘制竖线虚线：在回弹点位置（支持悬停高亮）
+                        _rid = self._elastic_rule_id(rule)
+                        _is_hl = bool(_hl_eid) and _rid == str(_hl_eid)
+                        _any_hl = bool(_hl_eid)
+                        _lw = 2.2 if _is_hl else 0.8
+                        _al = 1.0 if _is_hl else (0.22 if _any_hl else 0.6)
+                        _zo = 95 if _is_hl else 35
+                        (_bline,) = self.price_position_ax.plot(
                             [rebound_point, rebound_point],
                             [y_min, y_max],
                             color=line_color,
-                            linewidth=0.8,  # 适中的线条粗细
-                            alpha=0.6,  # 透明度：0.0完全透明，1.0完全不透明
-                            linestyle='--',  # 虚线
-                            zorder=35  # zorder在点下方，但在网格线下方
+                            linewidth=_lw,
+                            alpha=_al,
+                            linestyle='--',
+                            zorder=_zo,
                         )
+                        _meta = {
+                            "rule_id": _rid,
+                            "kind": "red" if line_color == "#ff0000" else "yellow",
+                            "price": float(rebound_point),
+                            "line": _bline,
+                            "label": None,
+                        }
+                        self._elastic_dash_metas.append(_meta)
+                        if _is_hl:
+                            try:
+                                _prec = int(self._get_price_precision())
+                            except Exception:
+                                _prec = 2
+                            _ly = y_max - (y_max - y_min) * 0.04
+                            try:
+                                _meta["label"] = self.price_position_ax.annotate(
+                                    f"{float(rebound_point):.{_prec}f}",
+                                    xy=(float(rebound_point), _ly),
+                                    xytext=(4, 0),
+                                    textcoords="offset points",
+                                    fontsize=8,
+                                    fontweight="bold",
+                                    color="#ff0000" if line_color == "#ff0000" else "#f9a825",
+                                    va="top",
+                                    ha="left",
+                                    bbox=dict(
+                                        boxstyle="round,pad=0.15",
+                                        facecolor="white",
+                                        edgecolor="#ff0000" if line_color == "#ff0000" else "#f9a825",
+                                        alpha=0.85,
+                                        linewidth=0.8,
+                                    ),
+                                    zorder=120,
+                                    clip_on=True,
+                                )
+                            except Exception:
+                                _meta["label"] = None
                 
                 # 弹性卖出规则：绘制回落点竖线
                 elif rule_type == 'best_sell':
@@ -11799,22 +12055,64 @@ class StockChartWidget(QWidget):
                         y_min = self.price_position_ax.get_ylim()[0]
                         y_max = self.price_position_ax.get_ylim()[1]
 
-                        # 1) 固定黄色参考线（原始回落线）
-                        self.price_position_ax.plot(
+                        # 1) 固定黄色参考线（原始回落线）——支持悬停高亮 + 线旁标价
+                        _rid = self._elastic_rule_id(rule)
+                        _is_hl = bool(_hl_eid) and _rid == str(_hl_eid)
+                        _any_hl = bool(_hl_eid)
+                        _ylw = 2.2 if _is_hl else 0.8
+                        _yal = 1.0 if _is_hl else (0.22 if _any_hl else 0.6)
+                        _yzo = 95 if _is_hl else 35
+                        (_yline,) = self.price_position_ax.plot(
                             [base_drop_point, base_drop_point],
                             [y_min, y_max],
                             color='#fdd835',  # 黄色：初始参考线
-                            linewidth=0.8,
-                            alpha=0.6,
-                            linestyle='--',  # 虚线
-                            zorder=35  # zorder在点下方，但在网格线下方
+                            linewidth=_ylw,
+                            alpha=_yal,
+                            linestyle='--',
+                            zorder=_yzo,
                         )
+                        _ymeta = {
+                            "rule_id": _rid,
+                            "kind": "yellow",
+                            "price": float(base_drop_point),
+                            "line": _yline,
+                            "label": None,
+                        }
+                        self._elastic_dash_metas.append(_ymeta)
+                        if _is_hl:
+                            try:
+                                _prec = int(self._get_price_precision())
+                            except Exception:
+                                _prec = 2
+                            _ly = y_max - (y_max - y_min) * 0.04
+                            try:
+                                _ymeta["label"] = self.price_position_ax.annotate(
+                                    f"{float(base_drop_point):.{_prec}f}",
+                                    xy=(float(base_drop_point), _ly),
+                                    xytext=(4, 0),
+                                    textcoords="offset points",
+                                    fontsize=8,
+                                    fontweight="bold",
+                                    color="#f9a825",
+                                    va="top",
+                                    ha="left",
+                                    bbox=dict(
+                                        boxstyle="round,pad=0.15",
+                                        facecolor="white",
+                                        edgecolor="#f9a825",
+                                        alpha=0.85,
+                                        linewidth=0.8,
+                                    ),
+                                    zorder=120,
+                                    clip_on=True,
+                                )
+                            except Exception:
+                                _ymeta["label"] = None
 
-                        # 2) 红色动态线：与弹性买入一致——「已突破且未成交且任务运行中」每档必画一根红线。
-                        # 原先仅在 real_target 与 base_drop_point 差值 > 1e-8 时画红，两档规则在最高价仍贴近
-                        # 触发价时动态目标与黄线重合或差值过小，会导致第二根红线不画。
+                        # 2) 红色动态线：已触发且未成交且任务运行中且启用——禁用腿不画幽灵红线
                         active_red = (
                             triggered
+                            and bool(rule_enabled)
                             and (not rule_executed)
                             and self.task_running
                             and (not self.task_paused)
@@ -11834,26 +12132,108 @@ class StockChartWidget(QWidget):
                             best_sell_red_stagger[bucket] = n_dup + 1
                             # 第二根起沿高价方向错开：每多一档约 1 个最小价位，避免多根红线完全叠在一起看不清
                             red_plot_x = red_x + n_dup * tick * 1.0
-                            self.price_position_ax.plot(
+                            _rlw = 2.2 if _is_hl else 0.8
+                            _ral = 1.0 if _is_hl else (0.25 if _any_hl else 0.7)
+                            _rzo = 96 if _is_hl else 36
+                            (_rline,) = self.price_position_ax.plot(
                                 [red_plot_x, red_plot_x],
                                 [y_min, y_max],
                                 color='#ff0000',  # 红色：动态目标线（每档规则各一根）
-                                linewidth=0.8,
-                                alpha=0.7,
+                                linewidth=_rlw,
+                                alpha=_ral,
                                 linestyle='--',
-                                zorder=36,
+                                zorder=_rzo,
                             )
-                        elif real_target is not None and abs(real_target - base_drop_point) > 1e-8:
-                            # 已触发但任务暂停/已结束等：动态与静态不一致时仍显示灰色参考
-                            self.price_position_ax.plot(
+                            _rmeta = {
+                                "rule_id": _rid,
+                                "kind": "red",
+                                "price": float(red_x),  # 标真实目标价，不标错开后的绘制坐标
+                                "line": _rline,
+                                "label": None,
+                            }
+                            self._elastic_dash_metas.append(_rmeta)
+                            if _is_hl:
+                                _ly = y_max - (y_max - y_min) * 0.04
+                                # 红线价签略下移，避免与黄线价签重叠
+                                _ly2 = _ly - (y_max - y_min) * 0.05
+                                try:
+                                    _rmeta["label"] = self.price_position_ax.annotate(
+                                        f"{float(red_x):.{prec}f}",
+                                        xy=(float(red_plot_x), _ly2),
+                                        xytext=(4, 0),
+                                        textcoords="offset points",
+                                        fontsize=8,
+                                        fontweight="bold",
+                                        color="#ff0000",
+                                        va="top",
+                                        ha="left",
+                                        bbox=dict(
+                                            boxstyle="round,pad=0.15",
+                                            facecolor="white",
+                                            edgecolor="#ff0000",
+                                            alpha=0.85,
+                                            linewidth=0.8,
+                                        ),
+                                        zorder=121,
+                                        clip_on=True,
+                                    )
+                                except Exception:
+                                    _rmeta["label"] = None
+                        elif (
+                            bool(rule_enabled)
+                            and real_target is not None
+                            and abs(real_target - base_drop_point) > 1e-8
+                        ):
+                            # 已触发但任务暂停/已结束等：动态与静态不一致时仍显示灰色参考（禁用不画）
+                            _glw = 2.2 if _is_hl else 0.8
+                            _gal = 1.0 if _is_hl else (0.2 if _any_hl else 0.55)
+                            _gzo = 95 if _is_hl else 36
+                            (_gline,) = self.price_position_ax.plot(
                                 [real_target, real_target],
                                 [y_min, y_max],
                                 color='#888888',
-                                linewidth=0.8,
-                                alpha=0.55,
+                                linewidth=_glw,
+                                alpha=_gal,
                                 linestyle='--',
-                                zorder=36,
+                                zorder=_gzo,
                             )
+                            _gmeta = {
+                                "rule_id": _rid,
+                                "kind": "gray",
+                                "price": float(real_target),
+                                "line": _gline,
+                                "label": None,
+                            }
+                            self._elastic_dash_metas.append(_gmeta)
+                            if _is_hl:
+                                try:
+                                    _prec = int(self._get_price_precision())
+                                except Exception:
+                                    _prec = 2
+                                _ly = y_max - (y_max - y_min) * 0.09
+                                try:
+                                    _gmeta["label"] = self.price_position_ax.annotate(
+                                        f"{float(real_target):.{_prec}f}",
+                                        xy=(float(real_target), _ly),
+                                        xytext=(4, 0),
+                                        textcoords="offset points",
+                                        fontsize=8,
+                                        fontweight="bold",
+                                        color="#555555",
+                                        va="top",
+                                        ha="left",
+                                        bbox=dict(
+                                            boxstyle="round,pad=0.15",
+                                            facecolor="white",
+                                            edgecolor="#888888",
+                                            alpha=0.85,
+                                            linewidth=0.8,
+                                        ),
+                                        zorder=120,
+                                        clip_on=True,
+                                    )
+                                except Exception:
+                                    _gmeta["label"] = None
                 
                 # 笼子买入/笼子卖出：壁厚>0 时绘制有效内区间两条竖线虚线，仅在矩形内部
                 elif rule_type in ['cage_buy', 'cage_sell']:
@@ -12096,6 +12476,28 @@ class StockChartWidget(QWidget):
                         alpha=alpha, marker=marker, edgecolors=edgecolors, linewidths=linewidth,
                         zorder=circle_zorder,
                     )
+                    # 弹性节点：记录 scatter 以便点选虚线时反亮节点
+                    if draggable:
+                        try:
+                            _hid = getattr(self, "_highlighted_elastic_rule_id", None)
+                            for _r in (self.rules or []):
+                                _rt = _r.get("type")
+                                if _rt not in ("best_buy", "best_sell"):
+                                    continue
+                                _tp = float(_r.get("trigger_price", 0) or 0)
+                                _vol = float(_r.get("volume", 0) or 0)
+                                if _rt == "best_sell":
+                                    _vol = -_vol
+                                if abs(_tp - float(raw_price)) < 1e-8 and abs(_vol - float(volume)) < 1e-6:
+                                    _rid = self._elastic_rule_id(_r)
+                                    self._elastic_dash_node_artists.append((_rid, line))
+                                    if _hid and _rid == str(_hid):
+                                        line.set_linewidths(2.6)
+                                        line.set_edgecolors("#ff6600")
+                                        line.set_zorder(max(circle_zorder, 110))
+                                    break
+                        except Exception:
+                            pass
                     # pending clear-branch: blink via set_visible (labels never touched)
                     if isinstance(node_style, dict) and node_style.get("clear_branch_pending"):
                         try:
@@ -12837,6 +13239,9 @@ class StockChartWidget(QWidget):
             self.last_mouse_position = None
             # 恢复所有标签的zorder
             self._reset_label_zorders()
+            # 离开价格-仓位图时取消弹性虚线悬停高亮
+            if getattr(self, "_highlighted_elastic_rule_id", None):
+                self._set_highlighted_elastic_rule(None, draw=True)
             return
         
         # 注意：ydata/xdata 可能为 0（恰在价格轴或成交量 0 处），不能用 if not xdata
@@ -12845,6 +13250,11 @@ class StockChartWidget(QWidget):
         
         # 检测鼠标是否在某个节点附近或直接悬停在标签上，如果是，提高对应标签的zorder
         self._handle_label_hover(event.xdata, event.ydata, event)
+
+        # 悬停联动高亮：弹性节点或对应虚线 → 高亮黄/红线并标价；移开取消
+        # 拖动规则时不抢高亮，避免拖动过程闪烁
+        if not self.dragging and not self.adding_rule:
+            self._update_elastic_hover_highlight(event.xdata, event.ydata)
         
         # 如果处于添加模式，显示价格提示（包括拖动时）
         if self.add_mode:
