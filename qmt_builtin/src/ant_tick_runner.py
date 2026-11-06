@@ -196,14 +196,24 @@ class ShadowTickRunner:
         new_sig = self._tasks_signature()
         tasks_changed = new_sig != old_sig
         codes_changed = old_codes != new_codes
-        # 清理已不存在的弹性任务状态
+        # 弹性状态：同票其它未成交腿在姐妹腿成交/sync 后必须保留峰值。
+        # 仅当该 tid 已不在武装列表，且其股票也已完全离开订阅时才丢弃
+        # （整票暂停/卸武装仍可按现有语义清空）。
         live_ids = {str(t.get("task_id") or "") for t in self.tasks}
         for tid in list(self._best_sell.keys()):
-            if tid and tid not in live_ids:
-                self._best_sell.pop(tid, None)
+            if not tid or tid in live_ids:
+                continue
+            code = str((self._best_sell.get(tid) or {}).get("stock_code") or "").strip().upper()
+            if code and code in new_codes:
+                continue
+            self._best_sell.pop(tid, None)
         for tid in list(self._best_buy.keys()):
-            if tid and tid not in live_ids:
-                self._best_buy.pop(tid, None)
+            if not tid or tid in live_ids:
+                continue
+            code = str((self._best_buy.get(tid) or {}).get("stock_code") or "").strip().upper()
+            if code and code in new_codes:
+                continue
+            self._best_buy.pop(tid, None)
         for tid in list(self._cage.keys()):
             if tid and tid not in live_ids:
                 self._cage.pop(tid, None)
@@ -211,15 +221,20 @@ class ShadowTickRunner:
             base = str(ekey).split("@g")[0]
             if base and base not in live_ids:
                 self._early.pop(ekey, None)
-        # 从武装任务回填 cage_entered
+        # 从武装任务回填 cage_entered，并合并导出的弹性运行态（不降峰值、不清已触发）
         for t in self.tasks:
             tid = str(t.get("task_id") or "")
-            if not tid or str(t.get("rule_type") or "") not in ("cage_buy", "cage_sell"):
+            if not tid:
                 continue
-            if bool(t.get("cage_entered")):
+            rtype = str(t.get("rule_type") or "")
+            if rtype in ("cage_buy", "cage_sell") and bool(t.get("cage_entered")):
                 st = self._cage_state(tid)
                 st["entered"] = True
-                st["kind"] = str(t.get("rule_type") or "")
+                st["kind"] = rtype
+            if rtype == "best_sell":
+                self._merge_best_sell_from_task(tid, t)
+            elif rtype == "best_buy":
+                self._merge_best_buy_from_task(tid, t)
         return tasks_changed, codes_changed
 
     def hydrate_elastic_states(self, states: Optional[Dict[str, Any]]) -> None:
@@ -235,23 +250,9 @@ class ShadowTickRunner:
                 else:
                     kind = "best_sell"
             if kind == "best_buy":
-                self._best_buy[str(tid)] = {
-                    "kind": "best_buy",
-                    "triggered": bool(st.get("triggered")),
-                    "lowest_price": st.get("lowest_price"),
-                    "tick_idx": int(st.get("tick_idx") or 0),
-                    "lowest_tick_idx": int(st.get("lowest_tick_idx") or 0),
-                    "rebound_hit_count": int(st.get("rebound_hit_count") or 0),
-                }
+                self._merge_best_buy_state(str(tid), st)
             else:
-                self._best_sell[str(tid)] = {
-                    "kind": "best_sell",
-                    "triggered": bool(st.get("triggered")),
-                    "highest_price": st.get("highest_price"),
-                    "tick_idx": int(st.get("tick_idx") or 0),
-                    "highest_tick_idx": int(st.get("highest_tick_idx") or 0),
-                    "pullback_hit_count": int(st.get("pullback_hit_count") or 0),
-                }
+                self._merge_best_sell_state(str(tid), st)
 
     def dump_elastic_states(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
@@ -290,6 +291,129 @@ class ShadowTickRunner:
                     st.done_task_ids.add(t)
                 except Exception:
                     pass
+
+    @staticmethod
+    def _as_float_or_none(val: Any) -> Optional[float]:
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    def _merge_best_sell_state(self, tid: str, incoming: Dict[str, Any], stock_code: str = "") -> None:
+        """合并弹性卖状态：已触发不回退，最高价只升不降。"""
+        if not tid or not isinstance(incoming, dict):
+            return
+        cur = self._best_sell.get(tid)
+        if cur is None:
+            cur = {
+                "kind": "best_sell",
+                "triggered": False,
+                "highest_price": None,
+                "tick_idx": 0,
+                "highest_tick_idx": 0,
+                "pullback_hit_count": 0,
+            }
+            self._best_sell[tid] = cur
+        code = str(stock_code or incoming.get("stock_code") or cur.get("stock_code") or "").strip().upper()
+        if code:
+            cur["stock_code"] = code
+        if bool(incoming.get("triggered")) or bool(cur.get("triggered")):
+            cur["triggered"] = True
+        in_high = self._as_float_or_none(incoming.get("highest_price"))
+        cur_high = self._as_float_or_none(cur.get("highest_price"))
+        if in_high is not None and (cur_high is None or in_high > cur_high):
+            cur["highest_price"] = in_high
+            try:
+                cur["highest_tick_idx"] = int(incoming.get("highest_tick_idx") or cur.get("highest_tick_idx") or 0)
+            except (TypeError, ValueError):
+                pass
+        try:
+            in_tick = int(incoming.get("tick_idx") or 0)
+            if in_tick > int(cur.get("tick_idx") or 0):
+                cur["tick_idx"] = in_tick
+        except (TypeError, ValueError):
+            pass
+        try:
+            in_pb = int(incoming.get("pullback_hit_count") or 0)
+            if in_pb > int(cur.get("pullback_hit_count") or 0):
+                cur["pullback_hit_count"] = in_pb
+        except (TypeError, ValueError):
+            pass
+
+    def _merge_best_buy_state(self, tid: str, incoming: Dict[str, Any], stock_code: str = "") -> None:
+        """合并弹性买状态：已触发不回退，最低价只降不升。"""
+        if not tid or not isinstance(incoming, dict):
+            return
+        cur = self._best_buy.get(tid)
+        if cur is None:
+            cur = {
+                "kind": "best_buy",
+                "triggered": False,
+                "lowest_price": None,
+                "tick_idx": 0,
+                "lowest_tick_idx": 0,
+                "rebound_hit_count": 0,
+            }
+            self._best_buy[tid] = cur
+        code = str(stock_code or incoming.get("stock_code") or cur.get("stock_code") or "").strip().upper()
+        if code:
+            cur["stock_code"] = code
+        if bool(incoming.get("triggered")) or bool(cur.get("triggered")):
+            cur["triggered"] = True
+        in_low = self._as_float_or_none(incoming.get("lowest_price"))
+        cur_low = self._as_float_or_none(cur.get("lowest_price"))
+        if in_low is not None and (cur_low is None or in_low < cur_low):
+            cur["lowest_price"] = in_low
+            try:
+                cur["lowest_tick_idx"] = int(incoming.get("lowest_tick_idx") or cur.get("lowest_tick_idx") or 0)
+            except (TypeError, ValueError):
+                pass
+        try:
+            in_tick = int(incoming.get("tick_idx") or 0)
+            if in_tick > int(cur.get("tick_idx") or 0):
+                cur["tick_idx"] = in_tick
+        except (TypeError, ValueError):
+            pass
+        try:
+            in_rb = int(incoming.get("rebound_hit_count") or 0)
+            if in_rb > int(cur.get("rebound_hit_count") or 0):
+                cur["rebound_hit_count"] = in_rb
+        except (TypeError, ValueError):
+            pass
+
+    def _merge_best_sell_from_task(self, tid: str, task: Dict[str, Any]) -> None:
+        if not isinstance(task, dict):
+            return
+        self._merge_best_sell_state(
+            tid,
+            {
+                "triggered": bool(task.get("triggered")),
+                "highest_price": task.get("highest_price"),
+                "highest_tick_idx": task.get("highest_tick_idx"),
+                "tick_idx": task.get("tick_idx"),
+                "pullback_hit_count": task.get("pullback_hit_count"),
+                "stock_code": task.get("stock_code"),
+            },
+            stock_code=str(task.get("stock_code") or ""),
+        )
+
+    def _merge_best_buy_from_task(self, tid: str, task: Dict[str, Any]) -> None:
+        if not isinstance(task, dict):
+            return
+        self._merge_best_buy_state(
+            tid,
+            {
+                "triggered": bool(task.get("triggered")),
+                "lowest_price": task.get("lowest_price"),
+                "lowest_tick_idx": task.get("lowest_tick_idx"),
+                "tick_idx": task.get("tick_idx"),
+                "rebound_hit_count": task.get("rebound_hit_count"),
+                "stock_code": task.get("stock_code"),
+            },
+            stock_code=str(task.get("stock_code") or ""),
+        )
 
     def _best_buy_state(self, tid: str) -> Dict[str, Any]:
         st = self._best_buy.get(tid)
@@ -1163,9 +1287,15 @@ class ShadowTickRunner:
 
                 # 图表：严格 < 触发价开始追踪
                 if lp < trig:
+                    bbt["stock_code"] = code
                     if not triggered:
+                        seed = lp
+                        for cand in (bbt.get("lowest_price"), task.get("lowest_price")):
+                            fv = self._as_float_or_none(cand)
+                            if fv is not None and fv > 0 and (seed is None or fv < seed):
+                                seed = fv
                         bbt["triggered"] = True
-                        bbt["lowest_price"] = lp
+                        bbt["lowest_price"] = seed
                         bbt["lowest_tick_idx"] = int(bbt["tick_idx"])
                         bbt["rebound_hit_count"] = 0
                         events.append(
@@ -1260,9 +1390,16 @@ class ShadowTickRunner:
                     highest_price = None
 
                 if lp > trig:
+                    bst["stock_code"] = code
                     if not triggered:
+                        # 假重装时保留已跟踪峰值（姐妹腿成交 sync 后常见）
+                        seed = lp
+                        for cand in (highest_price, task.get("highest_price"), bst.get("highest_price")):
+                            fv = self._as_float_or_none(cand)
+                            if fv is not None and fv > seed:
+                                seed = fv
                         bst["triggered"] = True
-                        bst["highest_price"] = lp
+                        bst["highest_price"] = seed
                         bst["highest_tick_idx"] = int(bst["tick_idx"])
                         bst["pullback_hit_count"] = 0
                         events.append(

@@ -228,6 +228,30 @@ def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
             out["band_accept_low"] = float(out["accept_band_low"])
         except (TypeError, ValueError):
             pass
+    # 弹性运行态：重载时保峰值，避免姐妹腿成交后假重装
+    if bool(raw.get("triggered")):
+        out["triggered"] = True
+    for key in (
+        "highest_price",
+        "lowest_price",
+        "highest_tick_idx",
+        "lowest_tick_idx",
+        "tick_idx",
+        "pullback_hit_count",
+        "rebound_hit_count",
+    ):
+        if raw.get(key) is None:
+            continue
+        if key.endswith("price"):
+            try:
+                out[key] = float(raw.get(key))
+            except (TypeError, ValueError):
+                pass
+        else:
+            try:
+                out[key] = int(raw.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
     return out
 
 

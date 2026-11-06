@@ -178,6 +178,33 @@ def _clamp_night_trigger_for_session(
         return float(trigger)
 
 
+
+def _elastic_runtime_export(rule: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    """把图表/任务里已跟踪的弹性运行态带进武装任务，供 QMT 重载保峰值。"""
+    if not isinstance(rule, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    if bool(rule.get("triggered")):
+        out["triggered"] = True
+    if kind == "best_sell":
+        for key in ("highest_price", "highest_tick_idx", "tick_idx", "pullback_hit_count"):
+            if key not in rule:
+                continue
+            val = rule.get(key)
+            if val is None:
+                continue
+            out[key] = val
+    else:
+        for key in ("lowest_price", "lowest_tick_idx", "tick_idx", "rebound_hit_count"):
+            if key not in rule:
+                continue
+            val = rule.get(key)
+            if val is None:
+                continue
+            out[key] = val
+    return out
+
+
 def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
     """将运行中的单点买卖、突破买卖规则导出为 armed tasks。"""
     from core.trading_config import (
@@ -455,28 +482,26 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                 )
                 continue
             if rule_type == "best_sell":
-                armed.append(
-                    normalize_armed_task(
-                        {
-                            "task_id": f"{task_id}:{rule_id}",
-                            "stock_code": stock_code,
-                            "rule_type": "best_sell",
-                            "strategy_name": str(task.get("strategy") or "弹性卖出"),
-                            "trigger_price": trigger,
-                            "drop_percent": float(rule.get("drop_percent") or 2.5),
-                            "room_blend_start": rule.get("room_blend_start"),
-                            "pullback_price": rule.get("pullback_price"),
-                            "confirm_ticks": rule.get("confirm_ticks"),
-                            "cooldown_after_extreme_ticks": rule.get(
-                                "cooldown_after_extreme_ticks"
-                            ),
-                            "dynamic_thresholds": rule.get("dynamic_thresholds"),
-                            "enabled": not _rule_executed(rule),
-                            "max_volume": volume,
-                            "metadata": _rule_meta(task_id, rule),
-                        }
-                    )
-                )
+                best_sell_row = {
+                    "task_id": f"{task_id}:{rule_id}",
+                    "stock_code": stock_code,
+                    "rule_type": "best_sell",
+                    "strategy_name": str(task.get("strategy") or "弹性卖出"),
+                    "trigger_price": trigger,
+                    "drop_percent": float(rule.get("drop_percent") or 2.5),
+                    "room_blend_start": rule.get("room_blend_start"),
+                    "pullback_price": rule.get("pullback_price"),
+                    "confirm_ticks": rule.get("confirm_ticks"),
+                    "cooldown_after_extreme_ticks": rule.get(
+                        "cooldown_after_extreme_ticks"
+                    ),
+                    "dynamic_thresholds": rule.get("dynamic_thresholds"),
+                    "enabled": not _rule_executed(rule),
+                    "max_volume": volume,
+                    "metadata": _rule_meta(task_id, rule),
+                }
+                best_sell_row.update(_elastic_runtime_export(rule, "best_sell"))
+                armed.append(normalize_armed_task(best_sell_row))
                 continue
             if rule_type == "best_buy":
                 best_buy_row = {
@@ -499,6 +524,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                     "metadata": _rule_meta(task_id, rule),
                 }
                 best_buy_row.update(buy_extras)
+                best_buy_row.update(_elastic_runtime_export(rule, "best_buy"))
                 armed.append(normalize_armed_task(best_buy_row))
                 continue
             if rule_type == "breakthrough_sell":

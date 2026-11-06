@@ -2012,7 +2012,13 @@ class BuiltinPricePoller(QObject):
                 kind = "best_sell"
         changed = False
         new_trig = bool(st.get("triggered"))
-        if bool(rule.get("triggered")) != new_trig:
+        # 只升不降：快照未触发时不要把图表已武装状态清掉（姐妹腿 sync 期间常见空窗）
+        if new_trig and not bool(rule.get("triggered")):
+            rule["triggered"] = True
+            changed = True
+        elif (not new_trig) and bool(rule.get("triggered")):
+            pass
+        elif bool(rule.get("triggered")) != new_trig:
             rule["triggered"] = new_trig
             changed = True
         if kind == "best_buy":
@@ -2045,16 +2051,19 @@ class BuiltinPricePoller(QObject):
                 old = rule.get(key)
                 if key.endswith("price"):
                     try:
-                        if abs(float(old or 0) - float(val or 0)) > 1e-9 or (
-                            old is None and val is not None
-                        ):
-                            rule[key] = float(val) if val is not None else None
+                        new_v = float(val) if val is not None else None
+                        old_v = float(old) if old is not None else None
+                        # 最高价只升不降，避免 sync 空窗把峰值打低
+                        if new_v is None:
+                            continue
+                        if old_v is None or new_v > old_v + 1e-9:
+                            rule[key] = new_v
                             changed = True
                     except (TypeError, ValueError):
                         pass
                 else:
                     try:
-                        if int(old or 0) != int(val or 0):
+                        if int(val or 0) > int(old or 0):
                             rule[key] = int(val or 0)
                             changed = True
                     except (TypeError, ValueError):
