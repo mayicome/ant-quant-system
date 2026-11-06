@@ -62,12 +62,7 @@ def _persist_snapshot(as_of: date) -> None:
         out_p = flow_csv_path(as_of.strftime("%Y%m%d"), str(ROOT / "history_data"))
         ranked.to_csv(out_p, index=False, encoding="utf-8-sig")
         print("  wrote", out_p)
-        try:
-            from tools.export_main_flow_to_jsonl import write_daily_main_flow_jsonl_shard
-
-            write_daily_main_flow_jsonl_shard(out_p, as_of.strftime("%Y%m%d"))
-        except Exception as e:
-            print("  main_flow jsonl fail:", e)
+        # 已停写 cos/main_flow jsonl（不再调用 export_main_flow_to_jsonl）
 
     print("persist: board ranks …")
     os.makedirs(BOARD_DIR, exist_ok=True)

@@ -3053,6 +3053,33 @@ def _periodic_sync_body(ContextInfo):
     except Exception as e:
         print("[交易核心] 撤单请求错误: %s" % e)
 
+    # seal structure: at most 1 per cycle; live-only still allowed inside module
+    n_seal = 0
+    try:
+        import ant_seal_request as _seal_req
+
+        n_seal = _seal_req.process_pending_seals(ContextInfo, max_items=1)
+        if n_seal:
+            _flush_results_to_disk(force=True)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        print("[交易核心] 封单结构请求错误: %s" % e)
+
+    # recommendation: at most 1 per cycle, only when seal idle this cycle; never handlebar
+    # live-only still allowed inside module (_BUSY + max_items=1)
+    if not n_seal:
+        try:
+            import ant_rec_request as _rec_req
+
+            n_rec = _rec_req.process_pending_recs(ContextInfo, max_items=1)
+            if n_rec:
+                _flush_results_to_disk(force=True)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print("[交易核心] 推荐值请求错误: %s" % e)
+
 
 def _maybe_sync_account_snapshot(ContextInfo) -> None:
     """周期性将模型交易账户资金/持仓写入 results.json。"""

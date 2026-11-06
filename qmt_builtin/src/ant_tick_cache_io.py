@@ -525,8 +525,11 @@ def xtdata_service_status(xtdata=None):
     # type: (Any) -> Tuple[bool, str]
     """检测外挂 xtquant 能否连上已启动的 QMT（投研端/miniQMT）。
 
+    大 QMT-only 默认直接返回失败，避免 get_client() 连 58610 弹非法IP。
     返回 (ok, detail)。失败时 detail 以「无法连接行情服务」开头。
     """
+    if not ENABLE_XTDATA_TICK_DOWNLOAD and xtdata is None:
+        return False, "无法连接行情服务: MiniQMT/xtdata 已停用（仅 ContextInfo 内置行情）"
     xt = xtdata
     if xt is None:
         try:
@@ -906,16 +909,16 @@ def fetch_tick_from_qmt(
         else bool(allow_xtdata_download)
     )
 
-    xt = xtdata
-    if xt is None:
-        try:
-            import xtquant.xtdata as xt  # type: ignore
-        except ImportError:
-            xt = None
+    # 默认绝不自动 import xtquant.xtdata（会连 MiniQMT 127.0.0.1:58610 弹非法IP）。
+    # 仅当调用方显式传入 xtdata 且允许 download 旁路时才走 xt。
+    xt = xtdata if (do_dl and xtdata is not None) else None
+    if do_dl and xt is None:
+        # 显式旁路仍关闭：保持 ENABLE_XTDATA_TICK_DOWNLOAD=False 的大 QMT-only 策略
+        xt = None
 
     if do_dl and xt is not None:
         try:
-            # 旁路：xtdata 走 58610；download 用 YYYYMMDD
+            # 旁路：xtdata 走 58610；download 用 YYYYMMDD（仅显式传入时）
             xt.download_history_data(full_code, "tick", ymd, ymd)
             time_module.sleep(0.05)
         except Exception:

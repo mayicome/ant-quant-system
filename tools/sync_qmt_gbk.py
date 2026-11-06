@@ -28,6 +28,9 @@ PY_FILES = (
     "ant_position_entry_dates.py",
     "ant_filled_legs.py",
     "ant_cancel_request.py",
+    "ant_tick_cache_io.py",
+    "ant_seal_request.py",
+    "ant_rec_request.py",
     "ant_result_log.py",
     "蚂蚁量化规则.py",
 )

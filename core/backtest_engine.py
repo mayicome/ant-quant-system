@@ -1,9 +1,27 @@
 import pandas as pd
 from datetime import datetime, timedelta
-from xtquant import xtdata
 import logging
 import time
 import os
+
+# MiniQMT 已停用：模块导入时绝不连 xtdata/58610。仅 mini 模式且显式需要时再懒加载。
+xtdata = None
+
+def _get_xtdata():
+    global xtdata
+    if xtdata is not None:
+        return xtdata
+    try:
+        from utils.qmt_execution_config import get_qmt_mode
+        if get_qmt_mode() != 'mini':
+            raise RuntimeError('builtin/standalone 已禁用 MiniQMT xtdata（避免 58610 非法IP）')
+    except RuntimeError:
+        raise
+    except Exception:
+        raise RuntimeError('builtin/standalone 已禁用 MiniQMT xtdata（避免 58610 非法IP）')
+    from xtquant import xtdata as _xt
+    xtdata = _xt
+    return xtdata
 
 class BacktestEngine:
     """回测引擎"""
@@ -52,7 +70,7 @@ class BacktestEngine:
             
             # 下载历史数据
             try:
-                xtdata.download_history_data(self.stock_code, 'tick', startdate, enddate)
+                _get_xtdata().download_history_data(self.stock_code, 'tick', startdate, enddate)
                 time.sleep(0.05)  # 减少等待时间，提高效率
             except Exception as e:
                 self.logger.error(f"下载历史数据失败：{str(e)}")
@@ -60,7 +78,7 @@ class BacktestEngine:
             
             # 获取历史行情数据
             try:
-                df = xtdata.get_market_data_ex([], [self.stock_code], period='tick', 
+                df = _get_xtdata().get_market_data_ex([], [self.stock_code], period='tick', 
                                              start_time=startdate, 
                                              end_time=enddate, 
                                              count=-1)

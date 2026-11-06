@@ -71,7 +71,7 @@ def emit(kind, obj):
     if not payload:
         return
     # armed 带多个 parent uuid 很容易超过 240；过短会静默丢回执
-    max_len = 1200 if str(kind) == "armed" else 240
+    max_len = 1200 if str(kind) == "armed" else (280 if str(kind) == "rec" else 240)
     line = "ANTRES %s %s" % (kind, payload)
     if len(line) > max_len and isinstance(obj, dict):
         slim = dict(obj)
@@ -523,6 +523,130 @@ def emit_last_buy(code, day):
 
 _LAST_CX = {}
 
+
+
+_LAST_SEAL = {}
+_LAST_REC = {}
+
+
+def emit_seal(row):
+    """Seal-structure one-stock result. Dedup by id+st+msg. Length capped by emit() 240."""
+    if not isinstance(row, dict):
+        return
+    rid = str(row.get("id") or "").strip()[:16]
+    st = str(row.get("st") or "").strip()[:16]
+    if not rid or not st:
+        return
+    sig = st + "|" + str(row.get("msg") or "")[:80]
+    if _LAST_SEAL.get(rid) == sig:
+        return
+    _LAST_SEAL[rid] = sig
+    payload = {"id": rid, "st": st}
+    float_keys = {"ca": 4, "ty": 2, "sr": 4, "rr": 4, "vc": 3}
+    int_keys = ("ts", "sh", "ri", "sa", "ss", "n")
+    for key in ("d", "c", "at", "msg", "ca", "ty", "sr", "rr", "vc", "ts", "tl", "sh", "ri", "sa", "ss", "sl", "n"):
+        if key not in row:
+            continue
+        val = row.get(key)
+        if val is None or val == "":
+            continue
+        if key in ("msg", "tl", "sl"):
+            payload[key] = str(val)[: (48 if key == "msg" else 10)]
+        elif key in ("d", "c", "at"):
+            payload[key] = str(val)[: (19 if key == "at" else 10)]
+        elif key in float_keys:
+            try:
+                payload[key] = round(float(val), float_keys[key])
+            except Exception:
+                continue
+        elif key in int_keys:
+            try:
+                payload[key] = int(val)
+            except Exception:
+                continue
+        else:
+            payload[key] = val
+    emit("seal", payload)
+
+
+def emit_sealx(row):
+    if not isinstance(row, dict):
+        return
+    rid = str(row.get("id") or "").strip()[:16]
+    st = str(row.get("st") or "x").strip()[:16] or "x"
+    payload = {"id": rid, "st": st}
+    if row.get("msg"):
+        payload["msg"] = str(row.get("msg"))[:80]
+    if row.get("at"):
+        payload["at"] = str(row.get("at"))[:19]
+    emit("sealx", payload)
+
+
+
+def emit_rec(row):
+    """Recommendation one-stock package (sell+buy). Dedup by id+st+msg. Cap ~280."""
+    if not isinstance(row, dict):
+        return
+    rid = str(row.get("id") or "").strip()[:16]
+    st = str(row.get("st") or "").strip()[:16]
+    if not rid or not st:
+        return
+    sig = st + "|" + str(row.get("msg") or "")[:80]
+    if _LAST_REC.get(rid) == sig:
+        return
+    _LAST_REC[rid] = sig
+    payload = {"id": rid, "st": st}
+    float1 = ("s1", "s2", "b1", "b2")
+    float2 = ("s1r", "s1p", "s1d", "s2r", "s2p", "s2d", "b1r", "b1s", "b1d", "b2r", "b2s", "b2d")
+    int_keys = ("n", "nd")
+    for key in (
+        "c", "at", "msg",
+        "s1", "s1r", "s1p", "s1d",
+        "s2", "s2r", "s2p", "s2d",
+        "b1", "b1r", "b1s", "b1d",
+        "b2", "b2r", "b2s", "b2d",
+        "n", "nd",
+    ):
+        if key not in row:
+            continue
+        val = row.get(key)
+        if val is None or val == "":
+            continue
+        if key in ("msg",):
+            payload[key] = str(val)[:24]
+        elif key in ("c", "at"):
+            payload[key] = str(val)[: (19 if key == "at" else 10)]
+        elif key in float1:
+            try:
+                payload[key] = round(float(val), 1)
+            except Exception:
+                continue
+        elif key in float2:
+            try:
+                payload[key] = round(float(val), 2)
+            except Exception:
+                continue
+        elif key in int_keys:
+            try:
+                payload[key] = int(val)
+            except Exception:
+                continue
+        else:
+            payload[key] = val
+    emit("rec", payload)
+
+
+def emit_recx(row):
+    if not isinstance(row, dict):
+        return
+    rid = str(row.get("id") or "").strip()[:16]
+    st = str(row.get("st") or "x").strip()[:16] or "x"
+    payload = {"id": rid, "st": st}
+    if row.get("msg"):
+        payload["msg"] = str(row.get("msg"))[:80]
+    if row.get("at"):
+        payload["at"] = str(row.get("at"))[:19]
+    emit("recx", payload)
 
 def emit_cancel(req_id, sysid, code="", status="", msg="", at=""):
     """撤单处理结果。同一请求、同一状态不重复打。"""

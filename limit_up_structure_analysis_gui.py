@@ -10,7 +10,7 @@
 2) 指定股票列表文件：txt/csv 每行或首列为代码
 3) 直接输入代码：逗号分隔
 
-Tick 优先读本地 data/ticks；缺失时再尝试大 QMT（xtdata），不以 miniQMT 为默认依赖。
+封单结构经大 QMT 探针一次一只计算，结果走 ANTRES seal；外层不再拉 tick/写盘。
 """
 
 import csv
@@ -52,10 +52,7 @@ warnings.filterwarnings(
     message=r".*sipPyTypeDict.*",
 )
 
-try:
-    import xtquant.xtdata as xtdata
-except Exception:
-    xtdata = None
+xtdata = None  # MiniQMT 已停用；封单走探针 ANTRES seal，勿 import xtdata
 
 
 def _to_full_stock_code(stock_code_6: str) -> str:
@@ -1895,60 +1892,111 @@ class TodayLimitUpFinderThread(QThread):
                 self.finished.emit(rows, [], [], limitup_date, debug_msg, "list_only", {})
                 return
 
-            # 第2步：逐只读 tick（本地 cache 优先；大 QMT 可选兜底，不以 miniQMT 为必需）
-            if xtdata is not None:
+            # 第2步：逐只经 QMT 探针算封单结构（一次一只，ANTRES seal 回传；不外传 tick）
+            streak_metric_rows: List[dict] = []
+            last_tick_rows: List[dict] = []
+            missing_tick = 0
+            try:
+                from utils.seal_structure_request import request_seal
+                from utils import qmt_formula_result_log as _formula_log
+            except Exception as e:
+                self.error.emit("封单结构 RPC 模块导入失败: %s" % e)
+                return
+
+            def _poll_formula():
                 try:
-                    xtdata.enable_hello = False
+                    _formula_log.poll()
                 except Exception:
                     pass
 
-            tick_preview_limit = 200
-            last_tick_rows: List[dict] = []
-            streak_metric_rows: List[dict] = []
-            missing_tick = 0
             for idx, (code, name) in enumerate(rows, start=1):
-                tick_headers: List[str] = []
-                tick_rows: List[List[str]] = []
+                self.debug_info.emit(
+                    f"{debug_msg}；探针进度={idx}/{len(rows)}；提交 {code} {name or ''} ..."
+                )
+                payload = None
                 try:
-                    tick_df = _load_or_fetch_tick_df(code, limitup_date)
-                    tick_headers, tick_rows = _extract_tick_preview_rows(tick_df, limit_n=tick_preview_limit)
-                except Exception:
-                    tick_headers, tick_rows = [], []
-                    tick_df = None
-                if not tick_rows:
-                    missing_tick += 1
+                    payload = request_seal(
+                        limitup_date,
+                        code,
+                        timeout_sec=180.0,
+                        poll_fn=_poll_formula,
+                    )
+                except Exception as e:
+                    payload = {"st": "error", "msg": "%s:%s" % (type(e).__name__, e), "c": code, "d": limitup_date}
 
-                last_tick_rows = [{"tick_index": r[0]} for r in tick_rows]  # 占位，兼容 finished 旧签名
-                close_amt_yi = _calc_close_order_amount_yi(tick_df)
-                day_turnover_yuan = _calc_day_turnover_yuan(tick_df)
-                float_cap_yuan = _calc_float_market_cap_yuan(code, tick_df)
-                seal_ratio = None
-                seal_hardness = ""
-                if close_amt_yi is not None and day_turnover_yuan is not None and day_turnover_yuan > 0:
-                    # 封板硬度 = 封单金额 / 当日成交额（比值）
-                    seal_ratio = (close_amt_yi * 1e8) / day_turnover_yuan
-                    seal_hardness = f"{seal_ratio * 100.0:.2f}%"
-                rush_ratio = None
-                rush_intensity = ""
-                if close_amt_yi is not None and float_cap_yuan is not None and float_cap_yuan > 0:
-                    # 抢筹烈度 = 封单金额 / 流通市值（比值）
-                    rush_ratio = (close_amt_yi * 1e8) / float_cap_yuan
-                    rush_intensity = f"{rush_ratio * 100.0:.2f}%"
-                order_stability = ""
-                stability_score = None
-                vol_coeff = _calc_order_volatility_coeff(tick_df)
-                if vol_coeff is not None:
-                    stability_label, stability_score = _classify_order_stability(vol_coeff)
-                    order_stability = stability_label
-                order_trend = ""
-                trend_score = None
-                order_trend, trend_score = _calc_order_trend_and_score(tick_df)
-                # 综合得分：前3项新规则 + 稳定性分 + 趋势分
-                score_hard = _score_seal_hardness(seal_ratio)
-                score_rush = _score_rush_intensity(rush_ratio)
-                score_amt = _score_close_order_amount(close_amt_yi)
-                score_stability = int(stability_score or 0)
-                score_trend = int(trend_score or 0)
+                if not isinstance(payload, dict) or str(payload.get("st") or "") != "ok":
+                    missing_tick += 1
+                    msg = ""
+                    if isinstance(payload, dict):
+                        msg = str(payload.get("msg") or payload.get("st") or "timeout")
+                    else:
+                        msg = "timeout"
+                    streak_metric_rows.append(
+                        {
+                            "code": code,
+                            "name": name or "",
+                            "close_order_amount_yi": "",
+                            "seal_hardness": "",
+                            "rush_intensity": "",
+                            "order_stability": "",
+                            "order_trend": "",
+                            "order_rating": "",
+                            "rating_score": 0,
+                            "confidence_tag": "",
+                            "_close_amt_yi": None,
+                            "_seal_ratio": None,
+                            "_rush_ratio": None,
+                            "_stability_score": 0,
+                            "_trend_score": 0,
+                            "_base_total_score": 0,
+                            "_total_score": 0,
+                            "_rpc_msg": msg,
+                        }
+                    )
+                    self.debug_info.emit(
+                        f"{debug_msg}；探针进度={idx}/{len(rows)}；{code} 失败: {msg}"
+                    )
+                    self.tick_preview.emit(code, name or "", {"headers": ["rpc"], "rows": [[msg]]})
+                    continue
+
+                close_amt_yi = payload.get("ca")
+                try:
+                    close_amt_yi = float(close_amt_yi) if close_amt_yi is not None else None
+                except Exception:
+                    close_amt_yi = None
+                seal_ratio = payload.get("sr")
+                try:
+                    seal_ratio = float(seal_ratio) if seal_ratio is not None else None
+                except Exception:
+                    seal_ratio = None
+                rush_ratio = payload.get("rr")
+                try:
+                    rush_ratio = float(rush_ratio) if rush_ratio is not None else None
+                except Exception:
+                    rush_ratio = None
+                seal_hardness = f"{seal_ratio * 100.0:.2f}%" if seal_ratio is not None else ""
+                rush_intensity = f"{rush_ratio * 100.0:.2f}%" if rush_ratio is not None else ""
+                tl = str(payload.get("tl") or "")
+                sl = str(payload.get("sl") or "")
+                trend_map = {
+                    "up": "趋势持续加强",
+                    "down": "趋势持续减弱",
+                    "mild_up": "震荡小幅加强",
+                    "mild_down": "震荡小幅减弱",
+                    "flat": "封单整体平稳",
+                }
+                stab_map = {
+                    "stable": "封单相对稳定",
+                    "mild": "封单波动平缓",
+                    "choppy": "封单波动较大",
+                }
+                order_trend = trend_map.get(tl, tl)
+                order_stability = stab_map.get(sl, sl)
+                score_stability = int(payload.get("ss") or 0)
+                score_trend = int(payload.get("ts") or 0)
+                score_hard = int(payload.get("sh") or 0)
+                score_rush = int(payload.get("ri") or 0)
+                score_amt = int(payload.get("sa") or 0)
                 total_score_val = _calc_weighted_total_score(
                     score_hard,
                     score_rush,
@@ -1977,15 +2025,30 @@ class TodayLimitUpFinderThread(QThread):
                         "_total_score": total_score_val,
                     }
                 )
+                n_ticks = payload.get("n")
                 self.debug_info.emit(
-                    f"{debug_msg}；tick进度={idx}/{len(rows)}；{code} {name or ''}；tick条数={len(tick_rows)}；字段数={len(tick_headers)}"
+                    f"{debug_msg}；探针进度={idx}/{len(rows)}；{code} {name or ''}；st=ok；tick条数={n_ticks}"
                 )
-                self.tick_preview.emit(code, name or "", {"headers": tick_headers, "rows": tick_rows})
+                self.tick_preview.emit(
+                    code,
+                    name or "",
+                    {
+                        "headers": ["field", "value"],
+                        "rows": [
+                            ["ca", str(payload.get("ca"))],
+                            ["sr", str(payload.get("sr"))],
+                            ["rr", str(payload.get("rr"))],
+                            ["vc", str(payload.get("vc"))],
+                            ["tl", order_trend],
+                            ["n", str(n_ticks)],
+                        ],
+                    },
+                )
 
             if missing_tick == len(rows) and len(rows) > 0:
                 self.debug_info.emit(
-                    f"{debug_msg}；警告：全部 {missing_tick} 只均无 tick"
-                    f"（本地 data/ticks/{limitup_date} 与 QMT 均未取到）"
+                    f"{debug_msg}；警告：全部 {missing_tick} 只均无有效封单结果"
+                    f"（需 QMT 策略已部署 ant_seal_request 并在跑；见 ANTRES seal）"
                 )
 
             _apply_cross_sectional_score_adjustment(streak_metric_rows)
@@ -1997,6 +2060,7 @@ class TodayLimitUpFinderThread(QThread):
                 r.pop("_trend_score", None)
                 r.pop("_base_total_score", None)
                 r.pop("_total_score", None)
+                r.pop("_rpc_msg", None)
 
             # tick_only：UI 不再套用首板/连板统计渲染逻辑
             self.finished.emit(rows, last_tick_rows, streak_metric_rows, limitup_date, debug_msg, "tick_only", {})

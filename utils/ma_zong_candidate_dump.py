@@ -90,12 +90,16 @@ def parse_dump_times(raw: Any) -> List[str]:
 
 
 def load_dump_config(root: Optional[Path] = None) -> Dict[str, Any]:
-    """读取 [MaZongIntradayDump]；优先 dump_times，兼容旧 dump_time。"""
+    """读取 [MaZongIntradayDump]；优先 dump_times，兼容旧 dump_time。
+
+    文件不存在或没有该段时 enabled=False（不跑）；不把缺省段写回 ini。
+    有段时按 enabled 键决定；未写 enabled 也视为不启用。
+    """
     root = root or project_root()
     path = root / "data" / "config.ini"
     default_times = list(DEFAULT_DUMP_TIMES)
     cfg: Dict[str, Any] = {
-        "enabled": True,
+        "enabled": False,
         "dump_times": default_times,
         "dump_time": default_times[0],
         "dump_time_obj": parse_dump_time(default_times[0]),

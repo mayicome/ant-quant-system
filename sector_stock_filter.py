@@ -129,12 +129,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import traceback
 import re
 
-# 尽早导入 xtdata 并关闭连接成功提示（必须在首次建立连接前设置，否则会打印“设置xtdata.enable_hello = False可隐藏此消息”）
-try:
-    import xtquant.xtdata as _xtdata_early
-    _xtdata_early.enable_hello = False
-except Exception:
-    pass
+# MiniQMT/xtdata 已停用：禁止启动时 import（会连 127.0.0.1:58610）。
+# 交易日历/日线优先本地缓存与 akshare；缺数时不再主动连 MiniQMT。
 
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTableWidget, QTableWidgetItem, QLabel, QMessageBox,
@@ -1375,7 +1371,7 @@ class SectorStockFilterThread(QThread):
             daily_data = load_daily_dataframe(
                 stock_code,
                 through_date=end_date,
-                allow_xtdata_fallback=True,
+                allow_xtdata_fallback=False,
                 allow_on_demand=allow_on_demand,
                 on_demand_timeout_sec=on_demand_timeout_sec,
             )

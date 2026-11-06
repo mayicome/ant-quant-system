@@ -11,7 +11,8 @@ from PyQt5.QtWidgets import QApplication
 from ui.custom_text_edit import AutoScrollTextEdit
 from .backtest_window import Ui_MainWindow  # 改用 backtest_window
 import time
-from xtquant import xtdata
+# from xtquant import xtdata  # 已禁用：避免启动/导入时连 MiniQMT 58610
+xtdata = None
 from core.backtest_manager import BacktestManager
 import json
 from utils.logger import Logger

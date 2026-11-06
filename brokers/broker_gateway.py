@@ -141,6 +141,13 @@ class BrokerGateway:
                         return {"stock_code": code, "lastPrice": val, "last_price": val}
                 except (TypeError, ValueError):
                     pass
+        # builtin/standalone：禁止 xtdata.get_full_tick（MiniQMT 58610 / 非法IP）
+        try:
+            from utils.qmt_execution_config import use_builtin_price_feed
+            if use_builtin_price_feed():
+                return None
+        except Exception:
+            return None
         try:
             from xtquant import xtdata
 

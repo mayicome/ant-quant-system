@@ -1446,7 +1446,7 @@ class AntLauncherWindow(QMainWindow):
 
     def _load_mz_dump_schedule(self):
         """返回 (enabled, [(HH:MM, time), ...], grace_minutes)。"""
-        enabled = True
+        enabled = False
         slots = [("14:40", dt_time(14, 40))]
         grace = 4
         try:
@@ -1454,7 +1454,7 @@ class AntLauncherWindow(QMainWindow):
             from utils.ma_zong_candidate_dump import load_dump_config
 
             cfg = load_dump_config(_Path(self._project_root()))
-            enabled = bool(cfg.get("enabled", True))
+            enabled = bool(cfg.get("enabled", False))
             times = list(cfg.get("dump_times") or [])
             objs = list(cfg.get("dump_time_objs") or [])
             if times and objs and len(times) == len(objs):

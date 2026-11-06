@@ -722,7 +722,7 @@ def load_tick_data(
     trade_date: TradeDateInput,
     *,
     use_memory_cache: bool = True,
-    allow_xtdata_fallback: bool = True,
+    allow_xtdata_fallback: bool = False,
     allow_on_demand: bool = True,
     on_demand_timeout_sec: Optional[float] = None,
 ) -> Optional[Any]:
@@ -795,7 +795,7 @@ def load_ticks_for_codes(
     *,
     use_memory_cache: bool = True,
     allow_on_demand: bool = True,
-    allow_xtdata_fallback: bool = True,
+    allow_xtdata_fallback: bool = False,
 ) -> Dict[str, Any]:
     """批量加载：先统一读缓存；allow_on_demand/allow_xtdata_fallback 为 False 时本地缺失即跳过。"""
     result: Dict[str, Any] = {}

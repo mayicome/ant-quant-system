@@ -551,9 +551,14 @@ def startup_catch_up(ContextInfo):
 
 
 def after_hours_volume_rank(ContextInfo):
-    """旧盘后定时名。不再加载排名模块。"""
-    del ContextInfo
-    return False
+    """盘后定时：一次处理最多 1 只封单结构请求（live-only 仍放行）。"""
+    try:
+        import ant_seal_request as _seal_req
+
+        return bool(_seal_req.process_pending_seals(ContextInfo, max_items=1))
+    except Exception as e:
+        print("[入口] after_hours seal 错误: %s" % e)
+        return False
 
 
 def tick_full_sync(ContextInfo):

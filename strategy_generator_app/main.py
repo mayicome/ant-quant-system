@@ -2041,7 +2041,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.pool_list.setAlternatingRowColors(True)
         self.pool_list.verticalHeader().setVisible(False)
-        self.pool_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # 选股日列可手改（买卖池均为第 3 列）；其它列在填表时去掉可编辑标志
+        self.pool_list.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.SelectedClicked
+        )
         hdr = self.pool_list.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -2050,6 +2055,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(6, QHeaderView.Stretch)
+        self.pool_list.itemChanged.connect(self._on_pool_item_changed)
         pool_tab_layout.addWidget(self.pool_list)
         pool_btn_row = QHBoxLayout()
         self.pool_import_btn = QPushButton("导入…")
@@ -2069,7 +2075,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_import_positions_btn = QPushButton("一键导入持仓")
         self.pool_import_positions_btn.setToolTip(
             "买入策略：持仓代码并入股票池。\n"
-            "卖出策略：以 QMT 当前持仓为准重建股票池，并核对/补全建仓日（无建仓日须补记）。"
+            "卖出策略：以 QMT 当前持仓为准重建股票池，并核对/补全建仓日（无建仓日须补记）；"
+            "选股日从持久库/其它策略自动补齐，也可在表格中手改。"
         )
         self.pool_import_positions_btn.clicked.connect(self._on_import_positions)
         self.pool_sort_btn = QPushButton("按代码排序")
@@ -3138,14 +3145,26 @@ class StrategyGeneratorMainWindow(QMainWindow):
         )
 
     def _refresh_pool_column_headers(self) -> None:
-        """买入池：选股日/入场；卖出池：建仓日/持有。"""
+        """买入池：选股日/入场；卖出池：选股日+建仓日/持有。"""
         if not getattr(self, "pool_list", None):
             return
+        t = self.pool_list
         if self._current_strategy_is_sell_pool():
-            labels = ["选", "代码", "名称", "建仓日", "持有进度", "窗口", "已执行分支"]
+            labels = ["选", "代码", "名称", "选股日", "建仓日", "持有进度", "窗口", "已执行分支"]
         else:
             labels = ["选", "代码", "名称", "选股日", "入场进度", "窗口", "已执行分支"]
-        self.pool_list.setHorizontalHeaderLabels(labels)
+        if t.columnCount() != len(labels):
+            t.setColumnCount(len(labels))
+        t.setHorizontalHeaderLabels(labels)
+        hdr = t.horizontalHeader()
+        try:
+            for i in range(len(labels)):
+                if i in (2, len(labels) - 1):
+                    hdr.setSectionResizeMode(i, QHeaderView.Stretch)
+                else:
+                    hdr.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        except Exception:
+            pass
 
     def _pool_hold_progress(
         self,
@@ -3453,6 +3472,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         progress_cache: Optional[Dict[str, Tuple[str, str]]] = None,
         sell_mode: bool = False,
         hold_anchor_map: Optional[Dict[str, str]] = None,
+        selection_date_map: Optional[Dict[str, str]] = None,
     ) -> None:
         code_6 = _normalize_code(code)
         if not code_6:
@@ -3481,6 +3501,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
                             c6 = _normalize_code(k)
                             if c6:
                                 sel_map[c6] = str(v or "").strip()[:10]
+            if selection_date_map is None:
+                if sell_mode:
+                    raw_sel = sp.get("selection_date_by_code") or {}
+                    selection_date_map = self._norm_selection_date_map(raw_sel)
+                else:
+                    selection_date_map = dict(sel_map or {})
             if entry_window is None:
                 if getattr(self, "param_entry_window_spin", None) is not None:
                     entry_window = max(1, int(self.param_entry_window_spin.value()))
@@ -3489,27 +3515,36 @@ class StrategyGeneratorMainWindow(QMainWindow):
             if filled_by_code is None:
                 filled_by_code = self._pool_filled_legs_by_code([code_6])
 
+        if selection_date_map is None:
+            selection_date_map = {} if sell_mode else dict(sel_map or {})
+
         raw_sel = (sel_map or {}).get(code_6) or ""
         sel_key = str(raw_sel or "").strip()[:10]
         anchor_key = str((hold_anchor_map or {}).get(code_6) or sel_key or "").strip()[:10]
         cache_key = ("S:" if sell_mode else "B:") + sel_key + "|" + anchor_key
         if progress_cache is not None and sel_key and cache_key in progress_cache:
             prog, win = progress_cache[cache_key]
-            sel_s = sel_key
+            prog_date_s = sel_key
         else:
             if sell_mode:
-                sel_s, prog, win = self._pool_hold_progress(
+                prog_date_s, prog, win = self._pool_hold_progress(
                     code_6,
                     sel_map or {},
                     int(entry_window or 1),
                     anchor_map=hold_anchor_map,
                 )
             else:
-                sel_s, prog, win = self._pool_entry_progress(
+                prog_date_s, prog, win = self._pool_entry_progress(
                     code_6, sel_map or {}, int(entry_window or 1)
                 )
-            if progress_cache is not None and sel_s:
+            if progress_cache is not None and prog_date_s:
                 progress_cache[cache_key] = (prog, win)
+
+        sel_date_s = str((selection_date_map or {}).get(code_6) or "").strip()[:10]
+        if not sell_mode and not sel_date_s:
+            # 买入池：进度函数返回的选股日可作为展示回退
+            sel_date_s = str(prog_date_s or "").strip()[:10]
+        entry_disp = str(prog_date_s or "").strip()[:10] if sell_mode else ""
 
         legs = sorted((filled_by_code or {}).get(code_6) or [])
         leg_txt = ",".join(legs) if legs else "—"
@@ -3522,6 +3557,20 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 name = ""
         else:
             name = self._pool_stock_name(code_6)
+
+        def _readonly_item(text: str, code: Optional[str] = None) -> "QTableWidgetItem":
+            it = QTableWidgetItem(str(text or ""))
+            if code:
+                it.setData(Qt.UserRole, code)
+            it.setFlags((it.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable) & ~Qt.ItemIsEditable)
+            return it
+
+        def _editable_item(text: str, code: Optional[str] = None) -> "QTableWidgetItem":
+            it = QTableWidgetItem(str(text or ""))
+            if code:
+                it.setData(Qt.UserRole, code)
+            it.setFlags(it.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+            return it
 
         t = self.pool_list
         if row is None:
@@ -3537,14 +3586,19 @@ class StrategyGeneratorMainWindow(QMainWindow):
         chk.setCheckState(Qt.Checked if checked else Qt.Unchecked)
         chk.setData(Qt.UserRole, code_6)
         t.setItem(r, 0, chk)
-        code_item = QTableWidgetItem(code_6)
-        code_item.setData(Qt.UserRole, code_6)
-        t.setItem(r, 1, code_item)
-        t.setItem(r, 2, QTableWidgetItem(str(name or "")))
-        t.setItem(r, 3, QTableWidgetItem(sel_s or "—"))
-        t.setItem(r, 4, QTableWidgetItem(prog))
-        t.setItem(r, 5, QTableWidgetItem(win))
-        t.setItem(r, 6, QTableWidgetItem(leg_txt))
+        t.setItem(r, 1, _readonly_item(code_6, code_6))
+        t.setItem(r, 2, _readonly_item(str(name or "")))
+        # 选股日：可空、可手改
+        t.setItem(r, 3, _editable_item(sel_date_s, code_6))
+        if sell_mode:
+            t.setItem(r, 4, _readonly_item(entry_disp or "—"))
+            t.setItem(r, 5, _readonly_item(prog))
+            t.setItem(r, 6, _readonly_item(win))
+            t.setItem(r, 7, _readonly_item(leg_txt))
+        else:
+            t.setItem(r, 4, _readonly_item(prog))
+            t.setItem(r, 5, _readonly_item(win))
+            t.setItem(r, 6, _readonly_item(leg_txt))
 
     def _fill_pool_list(self, codes, set_original=True, load_task_legs: bool = True):
         """用代码列表填充股票池状态表，每行可勾选。
@@ -3569,15 +3623,30 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sell_mode = self._current_strategy_is_sell_pool()
         sel_map: Dict[str, str] = {}
         hold_anchor_map: Dict[str, str] = {}
+        selection_date_map: Dict[str, str] = {}
         if sell_mode:
             try:
                 from utils.position_entry_dates import load_all, load_last_buy_all
 
+                # 卖池进度仍用建仓日；选股日单独一列，勿混用
                 sel_map = dict(load_all(self._project_root()) or {})
                 hold_anchor_map = dict(load_last_buy_all(self._project_root()) or {})
             except Exception:
                 sel_map = {}
                 hold_anchor_map = {}
+            if cfg is not None and norm_codes:
+                try:
+                    selection_date_map = self._ensure_pool_selection_dates(
+                        cfg, norm_codes, persist=True
+                    )
+                except Exception:
+                    selection_date_map = self._norm_selection_date_map(
+                        sp.get("selection_date_by_code")
+                    )
+            else:
+                selection_date_map = self._norm_selection_date_map(
+                    sp.get("selection_date_by_code")
+                )
         else:
             raw_map = sp.get("selection_date_by_code") or {}
             if isinstance(raw_map, dict):
@@ -3585,6 +3654,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     c6 = _normalize_code(k)
                     if c6:
                         sel_map[c6] = str(v or "").strip()[:10]
+            selection_date_map = dict(sel_map)
         # 入场/持有窗口：旋钮优先（加载策略时已先写入旋钮再填表）
         entry_window = _entry_window_trading_days_from_params(sp)
         if getattr(self, "param_entry_window_spin", None) is not None:
@@ -3600,7 +3670,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
 
         t = self.pool_list
         t.setUpdatesEnabled(False)
+        self._pool_filling = True
         try:
+            t.blockSignals(True)
             t.setRowCount(len(norm_codes))
             for r, code_6 in enumerate(norm_codes):
                 self._append_pool_table_row(
@@ -3613,13 +3685,135 @@ class StrategyGeneratorMainWindow(QMainWindow):
                     progress_cache=progress_cache,
                     sell_mode=sell_mode,
                     hold_anchor_map=hold_anchor_map if sell_mode else None,
+                    selection_date_map=selection_date_map,
                 )
         finally:
+            t.blockSignals(False)
+            self._pool_filling = False
             t.setUpdatesEnabled(True)
 
     def _on_pool_refresh_status(self):
         codes = self._get_pool_codes_from_list()
         self._fill_pool_list(codes, set_original=False)
+
+    def _on_pool_item_changed(self, item) -> None:
+        """手改股票池「选股日」列：写回策略 selection_date_by_code + 持久库。"""
+        if getattr(self, "_pool_filling", False):
+            return
+        if item is None:
+            return
+        try:
+            col = int(item.column())
+        except Exception:
+            return
+        # 买卖池选股日都在第 3 列
+        if col != 3:
+            return
+        t = self.pool_list
+        row = int(item.row())
+        code_item = t.item(row, 1) or t.item(row, 0)
+        code_6 = ""
+        if code_item is not None:
+            code_6 = _normalize_code(code_item.data(Qt.UserRole) or code_item.text())
+        if not code_6:
+            return
+        raw = str(item.text() or "").strip()
+        if raw in ("—", "-", "无", "None", "nan"):
+            raw = ""
+        ds = raw[:10] if raw else ""
+        if ds and len(ds) < 10:
+            # 非法日期：恢复旧值
+            sid = self._get_selected_strategy_id()
+            cfg = self._find_strategy_by_id(sid) if sid else None
+            old = ""
+            if cfg is not None:
+                old = self._norm_selection_date_map(
+                    (cfg.strategy_params or {}).get("selection_date_by_code")
+                ).get(code_6, "")
+            self._pool_filling = True
+            try:
+                t.blockSignals(True)
+                item.setText(old)
+            finally:
+                t.blockSignals(False)
+                self._pool_filling = False
+            return
+        if ds:
+            try:
+                from datetime import date as _date
+
+                _date.fromisoformat(ds)
+            except Exception:
+                sid = self._get_selected_strategy_id()
+                cfg = self._find_strategy_by_id(sid) if sid else None
+                old = ""
+                if cfg is not None:
+                    old = self._norm_selection_date_map(
+                        (cfg.strategy_params or {}).get("selection_date_by_code")
+                    ).get(code_6, "")
+                self._pool_filling = True
+                try:
+                    t.blockSignals(True)
+                    item.setText(old)
+                finally:
+                    t.blockSignals(False)
+                    self._pool_filling = False
+                return
+
+        sid = self._get_selected_strategy_id()
+        if not sid:
+            return
+        cfg = self._find_strategy_by_id(sid)
+        if not cfg:
+            return
+        sp = dict(cfg.strategy_params or {})
+        cur = self._norm_selection_date_map(sp.get("selection_date_by_code"))
+        prev = cur.get(code_6, "")
+        if ds:
+            if prev == ds:
+                # 仍同步持久库，防止库里缺失
+                try:
+                    from utils.code_selection_dates import set_selection_date
+
+                    set_selection_date(
+                        code_6, ds, overwrite=True, project_root=self._project_root()
+                    )
+                except Exception:
+                    pass
+                return
+            cur[code_6] = ds
+        else:
+            if code_6 not in cur:
+                try:
+                    from utils.code_selection_dates import clear_selection_date
+
+                    clear_selection_date(code_6, project_root=self._project_root())
+                except Exception:
+                    pass
+                return
+            cur.pop(code_6, None)
+        # 只保留当前池
+        keep = {_normalize_code(c) for c in self._get_pool_codes_from_list() if _normalize_code(c)}
+        cur = {k: v for k, v in cur.items() if k in keep}
+        sp["selection_date_by_code"] = cur
+        cfg.strategy_params = sp
+        try:
+            save_strategy(cfg)
+        except Exception:
+            pass
+        try:
+            from utils.code_selection_dates import set_selection_date, clear_selection_date
+
+            if ds:
+                set_selection_date(
+                    code_6, ds, overwrite=True, project_root=self._project_root()
+                )
+            else:
+                clear_selection_date(code_6, project_root=self._project_root())
+        except Exception:
+            pass
+        self._dirty_sections.discard("pool")
+        self._refresh_dirty_ui()
 
     def _clear_time_str_from_qtime(self, time_edit: QTimeEdit) -> str:
         t = time_edit.time()
@@ -4450,7 +4644,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         QMessageBox.information(self, "完成", "已放弃本次修改，已恢复为上次保存的状态。")
 
     def _prune_selection_date_map_for_pool(self, cfg, codes: Optional[List[str]] = None) -> None:
-        """股票池删除后同步裁剪 params.selection_date_by_code，避免残留幽灵选股日。"""
+        """股票池删除后同步裁剪 params.selection_date_by_code，避免残留幽灵选股日。
+
+        裁剪前把现有映射归档到 data/code_selection_dates.json，供卖池同步持仓/ensure 回填。
+        """
         if cfg is None:
             return
         sp = cfg.strategy_params if isinstance(cfg.strategy_params, dict) else {}
@@ -4458,11 +4655,19 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not isinstance(raw, dict) or not raw:
             return
         keep = {_normalize_code(c) for c in (codes if codes is not None else (cfg.stock_codes or [])) if _normalize_code(c)}
+        try:
+            from utils.code_selection_dates import archive_before_prune
+
+            archive_before_prune(raw, keep, project_root=self._project_root())
+        except Exception:
+            pass
         new_map: Dict[str, str] = {}
         for k, v in raw.items():
             c6 = _normalize_code(k)
             if c6 and c6 in keep:
-                new_map[c6] = str(v or "").strip()[:10]
+                ds = str(v or "").strip()[:10]
+                if len(ds) >= 10:
+                    new_map[c6] = ds
         sp["selection_date_by_code"] = new_map
         cfg.strategy_params = sp
 
@@ -4529,9 +4734,9 @@ class StrategyGeneratorMainWindow(QMainWindow):
     ) -> Dict[str, str]:
         """Ensure params.selection_date_by_code covers pool codes.
 
-        Existing dates win; missing ones are filled from extra_incoming then
-        from other strategies' selection_date_by_code. Empty remains skipped
-        (LU10 still needs a real selection date).
+        Existing strategy dates win. Missing ones fill from:
+        extra_incoming → data/code_selection_dates.json → other strategies.
+        Never use position_entry_dates (建仓日) as 选股日.
         """
         if cfg is None:
             return {}
@@ -4547,12 +4752,21 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sp = dict(cfg.strategy_params or {})
         cur = self._norm_selection_date_map(sp.get("selection_date_by_code"))
         incoming = self._norm_selection_date_map(extra_incoming)
+        persistent: Dict[str, str] = {}
+        try:
+            from utils.code_selection_dates import load_all as _load_sel_dates
+
+            persistent = self._norm_selection_date_map(
+                _load_sel_dates(self._project_root())
+            )
+        except Exception:
+            persistent = {}
         collected = self._collect_selection_dates_across_strategies(pool)
         filled_n = 0
         for c6 in pool:
             if c6 in cur and cur[c6]:
                 continue
-            ds = incoming.get(c6) or collected.get(c6) or ""
+            ds = incoming.get(c6) or persistent.get(c6) or collected.get(c6) or ""
             if ds:
                 cur[c6] = ds
                 filled_n += 1
@@ -4560,6 +4774,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
         cur = {k: v for k, v in cur.items() if k in keep}
         sp["selection_date_by_code"] = cur
         cfg.strategy_params = sp
+        # 策略里已有的选股日也回写持久库，保持两边一致
+        if cur:
+            try:
+                from utils.code_selection_dates import upsert_many
+
+                upsert_many(cur, overwrite=True, project_root=self._project_root())
+            except Exception:
+                pass
         if persist and filled_n:
             try:
                 save_strategy(cfg)
@@ -4879,6 +5101,14 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 entry_window=entry_window,
             )
             sp["selection_date_by_code"] = merged_dates
+            try:
+                from utils.code_selection_dates import upsert_many
+
+                upsert_many(
+                    merged_dates, overwrite=True, project_root=self._project_root()
+                )
+            except Exception:
+                pass
             if refreshed_codes:
                 sp["_filled_legs"] = _drop_filled_legs_for_codes(
                     sp.get("_filled_legs"), refreshed_codes

@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
-"""从 QMT 行情页导出沪深京A股，写成当天股票池和日线用的行情表。
+# -*- coding: gbk -*-
+"""�� QMT ����ҳ�������A�ɣ�д�ɵ����Ʊ�غ������õ��������
 
-产物：data/qmt_hsj_quote.txt、data/qmt_hsj_quote.meta.json、data/a_share_universe.json。
-不点买入、卖出、撤单、清仓。只在行情表的右键菜单里点「导出数据」。
-用法：
+���data/qmt_hsj_quote.txt��data/qmt_hsj_quote.meta.json��data/a_share_universe.json��
+�������롢��������������֡�ֻ����������Ҽ��˵���㡸�������ݡ���
+�÷���
   python tools/export_qmt_hsj_quote.py
   python tools/export_qmt_hsj_quote.py --from-file D:\\path\\quote.txt --date 2026-10-15
 """
@@ -23,18 +23,20 @@ from utils.post_market_pipeline import resolve_asof_day  # noqa: E402
 from utils.qmt_hsj_quote import QUOTE_PATH, install_table, read_table  # noqa: E402
 
 _INCOMING = QUOTE_PATH.with_name("qmt_hsj_quote.incoming.txt")
-_FORBIDDEN = ("买入", "卖出", "撤单", "清仓", "闪电买", "闪电卖")
-_LOGIN_HINT = "请先打开并登录国金 QMT 客户端（保持运行即可；脚本会自动切到「行情 → 沪深京A股」）。"
+_FORBIDDEN = ("����", "����", "����", "���", "������", "������")
+_LOGIN_HINT = "���ȴ򿪲���¼���� QMT �ͻ��ˣ��������м��ɣ��ű����Զ��е������� �� ���A�ɡ�����"
 
-# 自动控制前倒计时秒数：无人值守到点自动继续；点取消则中止。
+# �Զ�����ǰ����ʱ����������ֵ�ص����Զ���������ȡ������ֹ��
 _CONTROL_WARN_SECONDS = 12
+# True=ʧ��ʱ����С�����������ۿ���ƫ�����ɹ�����С����ȡ�����Ͳ���С����
+_NO_MINIMIZE_ON_FAIL = False
 
 
 def _prompt_before_control(seconds: int | None = None) -> bool:
-    """即将 SendInput 控制 QMT 前提示用户停手。
+    """���� SendInput ���� QMT ǰ��ʾ�û�ͣ�֡�
 
-    点「确定」或倒计时结束返回 True；点「取消」返回 False。
-    盘后批跑无人值守时依赖倒计时自动继续，避免 MessageBox 无限挂死。
+    �㡸ȷ�����򵹼�ʱ�������� True���㡸ȡ�������� False��
+    �̺���������ֵ��ʱ��������ʱ�Զ����������� MessageBox ���޹�����
     """
     if seconds is None:
         seconds = _CONTROL_WARN_SECONDS
@@ -42,20 +44,20 @@ def _prompt_before_control(seconds: int | None = None) -> bool:
     try:
         import tkinter as tk
     except Exception:
-        # 无 tkinter 时退回系统 MessageBox（无倒计时，需人工点）
+        # �� tkinter ʱ�˻�ϵͳ MessageBox���޵���ʱ�����˹��㣩
         import ctypes
 
         ret = ctypes.windll.user32.MessageBoxW(
             0,
-            "即将自动控制国金 QMT 客户端导出行情。\n请暂时不要动鼠标和键盘。\n\n确定=开始，取消=中止导出。",
-            "行情导出 - 即将控制 QMT",
+            "�����Զ����ƹ��� QMT �ͻ��˵������顣\n����ʱ��Ҫ�����ͼ��̡�\n\nȷ��=��ʼ��ȡ��=��ֹ������",
+            "���鵼�� - �������� QMT",
             0x00000031,  # MB_OKCANCEL | MB_ICONWARNING
         )
         return ret == 1  # IDOK
 
     result = {"ok": False}
     root = tk.Tk()
-    root.title("行情导出 - 即将控制 QMT")
+    root.title("���鵼�� - �������� QMT")
     root.attributes("-topmost", True)
     root.resizable(False, False)
     remaining = {"n": seconds}
@@ -63,9 +65,9 @@ def _prompt_before_control(seconds: int | None = None) -> bool:
     tk.Label(
         root,
         text=(
-            "即将自动控制国金 QMT 客户端导出行情。\n"
-            "请暂时不要动鼠标和键盘。\n\n"
-            "倒计时结束将自动开始；点取消则中止导出。"
+            "�����Զ����ƹ��� QMT �ͻ��˵������顣\n"
+            "����ʱ��Ҫ�����ͼ��̡�\n\n"
+            "����ʱ�������Զ���ʼ����ȡ������ֹ������"
         ),
         justify="left",
         padx=18,
@@ -86,14 +88,14 @@ def _prompt_before_control(seconds: int | None = None) -> bool:
         if n <= 0:
             finish(True)
             return
-        status.config(text=f"{n} 秒后自动开始…")
+        status.config(text=f"{n} ����Զ���ʼ��")
         remaining["n"] = n - 1
         root.after(1000, tick)
 
     bf = tk.Frame(root)
     bf.pack(pady=(4, 12))
-    tk.Button(bf, text="确定，开始", width=12, command=lambda: finish(True)).pack(side="left", padx=6)
-    tk.Button(bf, text="取消", width=12, command=lambda: finish(False)).pack(side="left", padx=6)
+    tk.Button(bf, text="ȷ������ʼ", width=12, command=lambda: finish(True)).pack(side="left", padx=6)
+    tk.Button(bf, text="ȡ��", width=12, command=lambda: finish(False)).pack(side="left", padx=6)
 
     root.update_idletasks()
     w, h = root.winfo_width(), root.winfo_height()
@@ -108,7 +110,7 @@ def _prompt_before_control(seconds: int | None = None) -> bool:
 
 
 def _minimize_qmt(main=None) -> None:
-    """导出控制结束后把国金 QMT 主窗最小化（成功或失败都调用）。"""
+    """�������ƽ�����ѹ��� QMT ������С�����ɹ���ʧ�ܶ����ã���"""
     import win32con
     import win32gui
 
@@ -130,9 +132,9 @@ def _minimize_qmt(main=None) -> None:
         pass
     try:
         win32gui.ShowWindow(main, win32con.SW_MINIMIZE)
-        print("[行情导出] 已最小化 QMT 客户端", flush=True)
+        print("[���鵼��] ����С�� QMT �ͻ���", flush=True)
     except Exception as exc:
-        print(f"[行情导出] 最小化 QMT 失败: {exc}", flush=True)
+        print(f"[���鵼��] ��С�� QMT ʧ��: {exc}", flush=True)
 
 
 
@@ -148,7 +150,7 @@ def _find_live_qmt():
         if win32gui.GetClassName(hwnd) != "Qt5QWindowIcon":
             return
         title = win32gui.GetWindowText(hwnd) or ""
-        if "国金证券QMT交易端" in title and "模拟" not in title:
+        if "����֤ȯQMT���׶�" in title and "ģ��" not in title:
             found.append(hwnd)
 
     win32gui.EnumWindows(top, None)
@@ -197,7 +199,7 @@ def _press_escape() -> None:
 
 
 def _virtual_screen():
-    """多屏虚拟桌面原点与宽高（SendInput 绝对坐标用）。"""
+    """������������ԭ������ߣ�SendInput ���������ã���"""
     import ctypes
 
     user32 = ctypes.windll.user32
@@ -210,7 +212,7 @@ def _virtual_screen():
 
 
 def _send_input_click(x: int, y: int, right: bool = False) -> None:
-    """用 SendInput 绝对坐标点击。双屏下 mouse_event 经常点不出 Qt 右键菜单。"""
+    """�� SendInput ������������˫���� mouse_event �����㲻�� Qt �Ҽ��˵���"""
     import ctypes
     from ctypes import wintypes
 
@@ -274,7 +276,7 @@ def _left_click(x: int, y: int) -> None:
 
 
 def _menu_bands(hwnd):
-    """右键菜单没有控件文字。按亮字行数定位，第 6 行才是「导出数据」。"""
+    """�Ҽ��˵�û�пؼ����֡�������������λ���� 6 �в��ǡ��������ݡ���"""
     import ctypes
     import win32gui
     import win32ui
@@ -333,10 +335,10 @@ def _click_hwnd(hwnd) -> None:
 def _set_save_path(dialog, path: Path) -> bool:
     import win32gui
 
-    # 现代「另存为」对话框里 Enum 到的 Edit 往往有两个：文件名框 + 地址栏。
-    # 旧逻辑用 edit[-1]，会把路径写进地址栏，文件名仍为空，点保存后对话框不关、文件不落盘。
+    # �ִ�������Ϊ���Ի����� Enum ���� Edit �������������ļ����� + ��ַ����
+    # ���߼��� edit[-1]�����·��д����ַ�����ļ�����Ϊ�գ��㱣���Ի��򲻹ء��ļ������̡�
     target = None
-    for ctrl_id in (0x047C, 0x0480):  # cmb13 文件名组合框 / edt1
+    for ctrl_id in (0x047C, 0x0480):  # cmb13 �ļ�����Ͽ� / edt1
         try:
             hwnd = win32gui.GetDlgItem(dialog, ctrl_id)
         except Exception:
@@ -346,7 +348,7 @@ def _set_save_path(dialog, path: Path) -> bool:
         if win32gui.GetClassName(hwnd) == "Edit":
             target = hwnd
             break
-        # ComboBox：取其内部 Edit
+        # ComboBox��ȡ���ڲ� Edit
         inner = []
 
         def combo_child(ch, _):
@@ -371,7 +373,7 @@ def _set_save_path(dialog, path: Path) -> bool:
         win32gui.EnumChildWindows(dialog, child, None)
         if not edit:
             return False
-        # 回退：取第一个 Edit（文件名），不要最后一个（地址栏）
+        # ���ˣ�ȡ��һ�� Edit���ļ���������Ҫ���һ������ַ����
         target = edit[0]
 
     win32gui.SendMessage(target, 0x000C, 0, str(path))  # WM_SETTEXT
@@ -383,7 +385,7 @@ def _set_save_path(dialog, path: Path) -> bool:
 
     win32gui.EnumChildWindows(dialog, buttons_of, None)
     for text, hwnd in buttons:
-        if text.startswith("保存"):
+        if text.startswith("����"):
             _click_hwnd(hwnd)
             return True
     return False
@@ -400,7 +402,7 @@ def _confirm_overwrite() -> None:
             if not win32gui.IsWindowVisible(hwnd):
                 return
             title = win32gui.GetWindowText(hwnd) or ""
-            if "确认" in title or "另存为" in title:
+            if "ȷ��" in title or "����Ϊ" in title:
                 found.append(hwnd)
 
         win32gui.EnumWindows(top, None)
@@ -409,7 +411,7 @@ def _confirm_overwrite() -> None:
 
             def child(child_hwnd, _):
                 text = win32gui.GetWindowText(child_hwnd) or ""
-                if text.startswith("是"):
+                if text.startswith("��"):
                     buttons.append(child_hwnd)
 
             win32gui.EnumChildWindows(hwnd, child, None)
@@ -421,7 +423,7 @@ def _confirm_overwrite() -> None:
 
 
 def _send_unicode(text: str) -> None:
-    """向当前焦点控件输入 Unicode 文本（用于板块搜索框）。"""
+    """��ǰ����ؼ����� Unicode �ı������ڰ�������򣩡�"""
     import ctypes
 
     PUL = ctypes.POINTER(ctypes.c_ulong)
@@ -500,7 +502,7 @@ def _press_enter() -> None:
 
 
 def _ensure_qmt_foreground(main) -> tuple:
-    """恢复并前置主窗，返回 (left, top, right, bottom)。"""
+    """�ָ���ǰ������������ (left, top, right, bottom)��"""
     import win32con
     import win32gui
 
@@ -515,7 +517,7 @@ def _ensure_qmt_foreground(main) -> tuple:
     return win32gui.GetWindowRect(main)
 
 
-_NAV_MODE = "AB"  # legacy|A|B|AB；盘后默认 AB=Maximize + 比例单点「行情」
+_NAV_MODE = "AB"  # legacy|A|B|AB���̺�Ĭ�� AB=Maximize + �������㡸���项
 _DEBUG_DIR = ROOT / "data" / "export_nav_debug"
 
 
@@ -558,22 +560,103 @@ def _screen_grab(left: int, top: int, right: int, bottom: int):
         win32gui.ReleaseDC(hwnd, hdc)
 
 
+def _window_state_info(main) -> dict:
+    """�������� / IsZoomed / �ͻ���������� maximize У����ʧ�� dump��"""
+    import win32gui
+
+    left, top, right, bottom = win32gui.GetWindowRect(main)
+    w, h = right - left, bottom - top
+    zoomed = False
+    try:
+        zoomed = bool(win32gui.IsZoomed(main))
+    except Exception:
+        pass
+    iconic = False
+    try:
+        iconic = bool(win32gui.IsIconic(main))
+    except Exception:
+        pass
+    client_area = 0
+    try:
+        cl, ct, cr, cb = win32gui.GetClientRect(main)
+        client_area = max(0, cr - cl) * max(0, cb - ct)
+    except Exception:
+        pass
+    return {
+        "rect": (left, top, right, bottom),
+        "size": (w, h),
+        "IsZoomed": zoomed,
+        "IsIconic": iconic,
+        "client_area": client_area,
+    }
+
+
+def _dump_window_state(main, tag: str) -> dict:
+    info = _window_state_info(main)
+    print(
+        f"[���鵼��] {tag}: rect={info['rect']} size={info['size']} "
+        f"IsZoomed={info['IsZoomed']} IsIconic={info['IsIconic']} "
+        f"client_area={info['client_area']}",
+        flush=True,
+    )
+    return info
+
+
+def _looks_maximized(info: dict) -> bool:
+    if info.get("IsZoomed"):
+        return True
+    w, h = info.get("size") or (0, 0)
+    # δ�� IsZoomed ʱ��������ף�Լ��������1097x649 ����ָ�̬����ʧ��
+    if w >= 1500 and h >= 850:
+        return True
+    if int(info.get("client_area") or 0) >= 1_200_000:
+        return True
+    return False
+
+
 def _maximize_qmt(main) -> tuple:
+    """Maximize ��У�� IsZoomed/�ͻ�����ʧ���� RESTORE �� MAXIMIZE��"""
     import win32con
     import win32gui
 
-    win32gui.ShowWindow(main, win32con.SW_MAXIMIZE)
-    time.sleep(0.45)
-    try:
-        win32gui.SetForegroundWindow(main)
-    except Exception:
-        pass
-    time.sleep(0.2)
-    return win32gui.GetWindowRect(main)
+    before = _dump_window_state(main, "maximizeǰ")
+
+    def _apply_maximize(label: str) -> dict:
+        win32gui.ShowWindow(main, win32con.SW_MAXIMIZE)
+        time.sleep(0.55)
+        try:
+            win32gui.SetForegroundWindow(main)
+        except Exception:
+            pass
+        time.sleep(0.25)
+        return _dump_window_state(main, label)
+
+    after = _apply_maximize("maximize��")
+    if not _looks_maximized(after):
+        print(
+            "[���鵼��] maximizeδ��ס��ShowWindow(SW_RESTORE) ���� SW_MAXIMIZE",
+            flush=True,
+        )
+        win32gui.ShowWindow(main, win32con.SW_RESTORE)
+        time.sleep(0.7)  # restore��maximize �ӳ��ȴ�
+        try:
+            win32gui.SetForegroundWindow(main)
+        except Exception:
+            pass
+        time.sleep(0.35)
+        after = _apply_maximize("maximize���Ժ�")
+        if not _looks_maximized(after):
+            print(
+                "[���鵼��] ����: ���Ժ��Բ������ "
+                f"(before={before['size']} after={after['size']} "
+                f"IsZoomed={after['IsZoomed']})",
+                flush=True,
+            )
+    return after["rect"]
 
 
 def _match_rail_label_y(rail_img, label: str):
-    """在左侧栏截图里找文字标签，返回 (y_rel, score)；失败 y_rel=None。"""
+    """���������ͼ�������ֱ�ǩ������ (y_rel, score)��ʧ�� y_rel=None��"""
     import numpy as np
     from PIL import Image, ImageDraw, ImageFont
 
@@ -619,14 +702,14 @@ def _match_rail_label_y(rail_img, label: str):
 
 
 def _click_quote_rail_A(main, left: int, top: int, right: int, bottom: int) -> dict:
-    """方案 A：左侧栏截图匹配「行情」，只点一次；失败用客户区比例第2格兜底。"""
+    """���� A���������ͼƥ�䡸���项��ֻ��һ�Σ�ʧ���ÿͻ���������2�񶵵ס�"""
     _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     height = max(1, bottom - top)
     rail_w = min(100, max(60, (right - left) // 18))
     img = _screen_grab(left, top, left + rail_w, bottom)
     stamp = time.strftime("%H%M%S")
     img.save(_DEBUG_DIR / f"rail_A_{stamp}.png")
-    y_rel, score = _match_rail_label_y(img, "行情")
+    y_rel, score = _match_rail_label_y(img, "����")
     method = "template"
     if y_rel is None:
         y_rel = int(height * 0.17)
@@ -656,13 +739,13 @@ def _click_quote_rail_legacy(left: int, top: int) -> None:
 
 
 def _navigate_to_hsj_a_shares(main) -> None:
-    """从任意页（含模型交易）切到左侧栏「行情」，再搜索「沪深京A股」。
+    """������ҳ����ģ�ͽ��ף��е�����������项�������������A�ɡ���
 
-    试验模式 _NAV_MODE：
-      legacy — 原固定 top+118/130/150 三连点
-      A — 左侧栏模板匹配「行情」只点一次（比例兜底）
-      B — 先 Maximize，再走 legacy
-      AB — 先 Maximize，再走 A
+    ����ģʽ _NAV_MODE��
+      legacy �� ԭ�̶� top+118/130/150 ������
+      A �� �����ģ��ƥ�䡸���项ֻ��һ�Σ��������ף�
+      B �� �� Maximize������ legacy
+      AB �� �� Maximize������ A
     """
     import win32con
     import win32gui
@@ -676,6 +759,7 @@ def _navigate_to_hsj_a_shares(main) -> None:
 
     width = max(1, right - left)
     height = max(1, bottom - top)
+    _dump_window_state(main, f"�������ǰ mode={mode}")
 
     try:
         win32gui.SetWindowPos(
@@ -705,7 +789,7 @@ def _navigate_to_hsj_a_shares(main) -> None:
     time.sleep(0.35)
     _ctrl_a()
     time.sleep(0.08)
-    _send_unicode("沪深京A股")
+    _send_unicode("���A��")
     time.sleep(0.4)
     _press_enter()
     time.sleep(1.0)
@@ -726,7 +810,7 @@ def _navigate_to_hsj_a_shares(main) -> None:
 
 
 def _probe_quote_table_menu(main) -> dict:
-    """导航后右键行情表，返回菜单尺寸，用于判断是否真的进了行情页。"""
+    """�������Ҽ�����������ز˵��ߴ磬�����ж��Ƿ���Ľ�������ҳ��"""
     import win32gui
 
     left, top, right, bottom = win32gui.GetWindowRect(main)
@@ -765,7 +849,7 @@ def _probe_quote_table_menu(main) -> dict:
 
 
 def _popup_screenshot(hwnd):
-    """截右键弹出菜单，供找「导出数据」行。"""
+    """���Ҽ������˵������ҡ��������ݡ��С�"""
     import ctypes
     import win32gui
     import win32ui
@@ -796,7 +880,7 @@ def _popup_screenshot(hwnd):
 
 
 def _match_label_y(img, label: str):
-    """在菜单截图里模板匹配中文标签，返回相对菜单顶的 y 中心。"""
+    """�ڲ˵���ͼ��ģ��ƥ�����ı�ǩ��������Բ˵����� y ���ġ�"""
     from pathlib import Path as _Path
 
     import numpy as np
@@ -818,7 +902,7 @@ def _match_label_y(img, label: str):
         tmp = Image.new("RGB", (1, 1))
         bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font)
         tw, th = bbox[2] - bbox[0] + 6, bbox[3] - bbox[1] + 6
-        # 深色菜单：深底浅字；浅色菜单：浅底深字（国金 2.1 常见浅色右键）
+        # ��ɫ�˵������ǳ�֣�ǳɫ�˵���ǳ�����֣����� 2.1 ����ǳɫ�Ҽ���
         themes = (
             ((30, 30, 30), (230, 230, 230)),
             ((245, 245, 245), (20, 20, 20)),
@@ -845,20 +929,20 @@ def _match_label_y(img, label: str):
 
 
 def _click_export_menu_item(popup) -> bool:
-    """点右键菜单里的「导出数据」。先模板匹配，失败再按亮行启发式。"""
+    """���Ҽ��˵���ġ��������ݡ�����ģ��ƥ�䣬ʧ���ٰ���������ʽ��"""
     import win32gui
 
     img = _popup_screenshot(popup)
-    y_rel = _match_label_y(img, "导出数据")
+    y_rel = _match_label_y(img, "��������")
     left, top, right, bottom = win32gui.GetWindowRect(popup)
     if y_rel is None:
-        # 浅色菜单亮带检测会糊成一条，不能靠 bands。
-        # 菜单顺序：调整列宽、定制列、导出数据… → 第 3 项约在高度 12%~18%
+        # ǳɫ�˵������������һ�������ܿ� bands��
+        # �˵�˳�򣺵����п��������С��������ݡ� �� �� 3 ��Լ�ڸ߶� 12%~18%
         left0, top0, right0, bottom0 = left, top, right, bottom
         height = max(1, bottom0 - top0)
         bands = _menu_bands(popup)
         if len(bands) >= 6:
-            # 深色菜单条目带清晰时，第 3 项
+            # ��ɫ�˵���Ŀ������ʱ���� 3 ��
             y_rel = bands[2]
         else:
             y_rel = int(height * 0.145)
@@ -873,20 +957,25 @@ def export_via_ui(dest: Path) -> None:
     main = _find_live_qmt()
     if not main:
         raise RuntimeError(
-            "未检测到国金证券 QMT 交易端窗口。请先打开并登录 QMT 客户端，然后再跑本导出。"
+            "δ��⵽����֤ȯ QMT ���׶˴��ڡ����ȴ򿪲���¼ QMT �ͻ��ˣ�Ȼ�����ܱ�������"
         )
     if not _prompt_before_control():
-        raise RuntimeError("用户取消：未开始控制 QMT")
+        raise RuntimeError("�û�ȡ����δ��ʼ���� QMT")
+    succeeded = False
     try:
         _export_via_ui_controlled(dest, main)
+        succeeded = True
     finally:
-        _minimize_qmt(main)
+        if succeeded or not _NO_MINIMIZE_ON_FAIL:
+            _minimize_qmt(main)
+        else:
+            print("[���鵼��] ʧ���� --no-minimize-on-fail������ QMT ���ڱ��ں˶�", flush=True)
 
 
 def _export_via_ui_controlled(dest: Path, main) -> None:
     import win32gui
 
-    # 自动：行情 → 搜索「沪深京A股」（用户只需保证客户端开着）
+    # �Զ������� �� ���������A�ɡ����û�ֻ�豣֤�ͻ��˿��ţ�
     _navigate_to_hsj_a_shares(main)
     import win32con
     try:
@@ -899,7 +988,7 @@ def _export_via_ui_controlled(dest: Path, main) -> None:
         pass
     time.sleep(0.25)
     left, top, right, bottom = win32gui.GetWindowRect(main)
-    # 点行情表中部，避开左侧板块树和上下工具条
+    # ��������в����ܿ�������������¹�����
     x = left + int((right - left) * 0.55)
     y = top + int((bottom - top) * 0.45)
     popup = None
@@ -918,7 +1007,7 @@ def _export_via_ui_controlled(dest: Path, main) -> None:
                 if "Popup" in cls:
                     left2, top2, right2, bottom2 = win32gui.GetWindowRect(hwnd)
                     w2, h2 = right2 - left2, bottom2 - top2
-                    # 行情表右键「导出数据」菜单很高；模型交易短菜单通常 <200，直接丢弃
+                    # ������Ҽ����������ݡ��˵��ܸߣ�ģ�ͽ��׶̲˵�ͨ�� <200��ֱ�Ӷ���
                     if 40 <= w2 <= 600 and 200 <= h2 <= 900:
                         popup = hwnd
                         break
@@ -927,7 +1016,7 @@ def _export_via_ui_controlled(dest: Path, main) -> None:
         time.sleep(0.3)
 
     if not popup:
-        # 仍停在模型交易等页时，再导航一次后重试右键
+        # ��ͣ��ģ�ͽ��׵�ҳʱ���ٵ���һ�κ������Ҽ�
         _navigate_to_hsj_a_shares(main)
         try:
             win32gui.SetWindowPos(
@@ -964,18 +1053,20 @@ def _export_via_ui_controlled(dest: Path, main) -> None:
             time.sleep(0.25)
     if not popup:
         _press_escape()
-        raise RuntimeError("行情表没有弹出右键菜单")
+        _dump_window_state(main, "�Ҽ��˵�ʧ��ʱ����")
+        raise RuntimeError("�����û�е����Ҽ��˵�")
     before_save = _visible_windows()
     if not _click_export_menu_item(popup):
         _press_escape()
-        raise RuntimeError("右键菜单里找不到「导出数据」")
+        _dump_window_state(main, "�����˵����ʧ��ʱ����")
+        raise RuntimeError("�Ҽ��˵����Ҳ������������ݡ�")
     dialog = None
     deadline = time.time() + 4.0
     while time.time() < deadline and dialog is None:
         time.sleep(0.15)
         for hwnd in _visible_windows() - before_save:
             title = win32gui.GetWindowText(hwnd) or ""
-            if "另存为" in title or "导出" in title or win32gui.GetClassName(hwnd) == "#32770":
+            if "����Ϊ" in title or "����" in title or win32gui.GetClassName(hwnd) == "#32770":
                 dialog = hwnd
                 break
     if not dialog:
@@ -987,7 +1078,7 @@ def _export_via_ui_controlled(dest: Path, main) -> None:
             )
         except Exception:
             pass
-        raise RuntimeError("没有出现导出保存框")
+        raise RuntimeError("û�г��ֵ��������")
     try:
         win32gui.SetWindowPos(
             main, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
@@ -1000,45 +1091,68 @@ def _export_via_ui_controlled(dest: Path, main) -> None:
         dest.unlink()
     if not _set_save_path(dialog, dest):
         _press_escape()
-        raise RuntimeError("保存框里没有文件名或保存按钮")
+        raise RuntimeError("�������û���ļ����򱣴水ť")
     _confirm_overwrite()
     deadline = time.time() + 20.0
     while time.time() < deadline and not dest.is_file():
         time.sleep(0.2)
     if not dest.is_file() or dest.stat().st_size < 1000:
         dest.unlink(missing_ok=True)
-        raise RuntimeError("导出文件没有写出来")
+        raise RuntimeError("�����ļ�û��д����")
     rows = read_table(dest)
-    if not rows or "代码" not in rows[0] or "今开" not in rows[0]:
+    if not rows or "����" not in rows[0] or "��" not in rows[0]:
         dest.unlink(missing_ok=True)
-        raise RuntimeError("导出的不是行情表（缺少代码或今开）")
+        raise RuntimeError("�����Ĳ����������ȱ�ٴ����񿪣�")
+
+
+def _log_quote_artifact(tag: str, path: Path | None = None) -> None:
+    """��ӡĿ�������ļ��Ƿ���ڼ� mtime������;� qmt_hsj_quote.txt ������"""
+    p = path or QUOTE_PATH
+    try:
+        if p.is_file():
+            st = p.stat()
+            mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"[���鵼��] {tag}: ���� {p} size={st.st_size} mtime={mtime}",
+                flush=True,
+            )
+        else:
+            print(f"[���鵼��] {tag}: ������ {p}", flush=True)
+    except Exception as exc:
+        print(f"[���鵼��] {tag}: ��ȡ {p} ʧ��: {exc}", flush=True)
 
 
 def main() -> int:
-    global _NAV_MODE, _CONTROL_WARN_SECONDS
-    ap = argparse.ArgumentParser(description="导出 QMT 沪深京A股行情表")
-    ap.add_argument("--from-file", default="", help="用已经导出的表格，不再去点 QMT")
-    ap.add_argument("--click", action="store_true", help="自动切到行情页「沪深京A股」后右键导出（只需 QMT 已打开登录）")
-    ap.add_argument("--date", default="", help="交易日 YYYY-MM-DD，默认按收盘时间")
+    global _NAV_MODE, _CONTROL_WARN_SECONDS, _NO_MINIMIZE_ON_FAIL
+    ap = argparse.ArgumentParser(description="���� QMT ���A�������")
+    ap.add_argument("--from-file", default="", help="���Ѿ������ı��񣬲���ȥ�� QMT")
+    ap.add_argument("--click", action="store_true", help="�Զ��е�����ҳ�����A�ɡ����Ҽ�������ֻ�� QMT �Ѵ򿪵�¼��")
+    ap.add_argument("--date", default="", help="������ YYYY-MM-DD��Ĭ�ϰ�����ʱ��")
     ap.add_argument(
         "--nav-mode",
         default="AB",
         choices=["legacy", "A", "B", "AB", "a", "b", "ab"],
-        help="导航：legacy|A|B|AB；默认 AB（Maximize+比例单点行情）",
+        help="������legacy|A|B|AB��Ĭ�� AB��Maximize+�����������飩",
     )
     ap.add_argument(
         "--nav-probe",
         action="store_true",
-        help="只测导航（行情右键长菜单），不导出文件",
+        help="ֻ�⵼���������Ҽ����˵������������ļ�",
     )
     ap.add_argument(
         "--control-wait",
         type=int,
         default=None,
-        help="控制前提示倒计时秒数（默认 12；0=立即开始）",
+        help="����ǰ��ʾ����ʱ������Ĭ�� 12��0=������ʼ��",
+    )
+    ap.add_argument(
+        "--no-minimize-on-fail",
+        action="store_true",
+        help="����/����ʧ��ʱ����С�� QMT���ɹ�����С����ȡ�����Ͳ���С����",
     )
     args = ap.parse_args()
     _NAV_MODE = str(args.nav_mode).upper()
+    _NO_MINIMIZE_ON_FAIL = bool(args.no_minimize_on_fail)
     if args.control_wait is not None:
         _CONTROL_WARN_SECONDS = max(0, int(args.control_wait))
     if args.date:
@@ -1046,42 +1160,66 @@ def main() -> int:
     else:
         day = resolve_asof_day()
     day_s = day.isoformat()
+    wrote_new = False
     try:
         if args.from_file:
             count = install_table(Path(args.from_file), day_s, "file")
+            wrote_new = True
         elif args.nav_probe:
             _ensure_dpi_aware()
             main_hwnd = _find_live_qmt()
             if not main_hwnd:
-                raise RuntimeError("未检测到国金证券 QMT 交易端窗口。")
+                raise RuntimeError("δ��⵽����֤ȯ QMT ���׶˴��ڡ�")
             if not _prompt_before_control():
-                print("[nav-probe] 用户取消：未开始控制 QMT", flush=True)
+                print("[nav-probe] �û�ȡ����δ��ʼ���� QMT", flush=True)
                 return 1
             print(f"[nav-probe] mode={_NAV_MODE}", flush=True)
+            probe_ok = False
             try:
                 _navigate_to_hsj_a_shares(main_hwnd)
                 probe = _probe_quote_table_menu(main_hwnd)
+                probe_ok = bool(probe.get("ok"))
                 print(f"[nav-probe] done ok={probe.get('ok')} mode={_NAV_MODE}", flush=True)
-                return 0 if probe.get("ok") else 2
+                if not probe_ok:
+                    _dump_window_state(main_hwnd, "nav-probeʧ��ʱ����")
+                return 0 if probe_ok else 2
             finally:
-                _minimize_qmt(main_hwnd)
+                if probe_ok or not _NO_MINIMIZE_ON_FAIL:
+                    _minimize_qmt(main_hwnd)
+                else:
+                    print(
+                        "[nav-probe] ʧ���� --no-minimize-on-fail������ QMT ���ڱ��ں˶�",
+                        flush=True,
+                    )
         elif args.click:
+            _log_quote_artifact("����ǰĿ���ļ�", QUOTE_PATH)
             export_via_ui(_INCOMING)
+            _log_quote_artifact("UI��д�� incoming", _INCOMING)
             count = install_table(_INCOMING, day_s, "qmt_ui")
+            wrote_new = True
+            _log_quote_artifact("�Ѱ�װΪ��ʽ�����", QUOTE_PATH)
         else:
             from utils.qmt_hsj_quote import file_covers_day, read_table, universe_codes
 
             if not file_covers_day(day_s):
                 raise RuntimeError(
-                    "还没有当天的沪深京行情表。请打开 QMT 后运行: python tools/export_qmt_hsj_quote.py --click"
+                    "��û�е���Ļ������������ QMT ������: python tools/export_qmt_hsj_quote.py --click"
                 )
             count = len(universe_codes(read_table(QUOTE_PATH)))
+            _log_quote_artifact("ʹ�����������", QUOTE_PATH)
     except Exception as exc:
-        print(f"[行情导出] 失败: {exc}", flush=True)
+        print(f"[���鵼��] ʧ��: {exc}", flush=True)
+        print("[���鵼��] ����δд���������ļ����������Կ����Ǿ��ļ���", flush=True)
+        _log_quote_artifact("ʧ�ܺ�Ŀ���ļ�", QUOTE_PATH)
+        _log_quote_artifact("ʧ�ܺ� incoming", _INCOMING)
         if not args.from_file:
-            print(f"[行情导出] {_LOGIN_HINT}", flush=True)
+            print(f"[���鵼��] {_LOGIN_HINT}", flush=True)
         return 1
-    print(f"[行情导出] {day_s} 代码={count} -> {QUOTE_PATH.name}", flush=True)
+    if wrote_new:
+        print(f"[���鵼��] ������д������װ������: {day_s} ����={count} -> {QUOTE_PATH}", flush=True)
+        _log_quote_artifact("�ɹ���Ŀ���ļ�", QUOTE_PATH)
+    else:
+        print(f"[���鵼��] {day_s} ����={count} -> {QUOTE_PATH.name}", flush=True)
     return 0
 
 

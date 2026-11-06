@@ -181,7 +181,7 @@ def main(argv: Optional[list] = None) -> int:
         )
     )
 
-    if args.scheduled and not bool(cfg.get("enabled", True)):
+    if args.scheduled and not bool(cfg.get("enabled", False)):
         print("[dump] skip: config MaZongIntradayDump.enabled=0")
         return 0
 

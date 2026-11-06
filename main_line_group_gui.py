@@ -363,80 +363,146 @@ class MainLineGroupDialog(QDialog):
         finally:
             self.run_btn.setEnabled(True)
 
+    @staticmethod
+    def _tech_metrics_from_close(close: pd.Series) -> Dict[str, float]:
+        """由收盘价序列计算连板/趋势指标（与原先 xtdata 路径一致）。"""
+        close = pd.to_numeric(close, errors="coerce").dropna()
+        close = close[close > 0]
+        if close.empty:
+            return {}
+        ret = close.pct_change().fillna(0.0) * 100.0
+        ret_tail = ret.tail(20)
+        cont_board = 0
+        for x in reversed(ret_tail.tolist()):
+            if x >= 9.8:
+                cont_board += 1
+            else:
+                break
+        board_count_10d = float((ret.tail(10) >= 9.8).sum())
+
+        chg_5d = 0.0
+        if len(close) >= 6 and close.iloc[-6] != 0:
+            chg_5d = (close.iloc[-1] / close.iloc[-6] - 1.0) * 100.0
+
+        ma5 = close.rolling(5).mean().iloc[-1] if len(close) >= 5 else close.iloc[-1]
+        ma10 = close.rolling(10).mean().iloc[-1] if len(close) >= 10 else ma5
+        ma20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else ma10
+        last = close.iloc[-1]
+        ma_align = 0.0
+        ma_align += 1.0 if last > ma5 else 0.0
+        ma_align += 1.0 if ma5 > ma10 else 0.0
+        ma_align += 1.0 if ma10 > ma20 else 0.0
+
+        drawdown_10d = 0.0
+        c10 = close.tail(10)
+        if len(c10) >= 2:
+            peak = c10.cummax()
+            dd = (c10 / peak - 1.0) * 100.0
+            drawdown_10d = float(abs(dd.min()))
+
+        return {
+            "cont_board": float(cont_board),
+            "board_count_10d": board_count_10d,
+            "board_count_20d": float((ret.tail(20) >= 9.8).sum()),
+            "chg_5d": float(chg_5d),
+            "ma_align": float(ma_align),
+            "drawdown_10d": float(drawdown_10d),
+            "ret_today": float(ret.iloc[-1]) if len(ret) >= 1 else 0.0,
+            "ret_yday": float(ret.iloc[-2]) if len(ret) >= 2 else 0.0,
+        }
+
+    def _load_close_for_tech(self, code: str, start_date: str, end_date: str) -> Optional[pd.Series]:
+        """优先本地 daily_cache；无数据时仅只读 get_market_data_ex（不 download）。"""
+        # 1) 本地日线
+        try:
+            from utils.daily_cache_reader import load_daily_from_cache, load_daily_bars
+
+            df = load_daily_from_cache(code)
+            if df is None or getattr(df, "empty", True) or "close" not in getattr(df, "columns", []):
+                df = load_daily_bars(code)
+            if df is not None and not getattr(df, "empty", True) and "close" in df.columns:
+                local = df
+                if "date" in local.columns:
+                    try:
+                        d0 = datetime.strptime(start_date, "%Y%m%d").date()
+                        dates = pd.to_datetime(local["date"], errors="coerce").dt.date
+                        local = local.loc[dates >= d0]
+                    except Exception:
+                        pass
+                if local is not None and not local.empty:
+                    close = pd.to_numeric(local["close"], errors="coerce").dropna()
+                    close = close[close > 0]
+                    if not close.empty:
+                        return close.reset_index(drop=True)
+        except Exception as e:
+            print(f"[main_line] 本地日线读取失败 {code}: {e}", flush=True)
+
+        # 2) xtdata 只读本地已有数据，绝不 download_history_data（无 QMT 时会挂死）
+        if xtdata is None:
+            return None
+        full_code = self._to_xt_code(code)
+        if not full_code:
+            return None
+        try:
+            data = xtdata.get_market_data_ex(
+                [],
+                [full_code],
+                period="1d",
+                start_time=start_date,
+                end_time=end_date,
+                count=-1,
+            )
+            if not data or full_code not in data or data[full_code] is None or data[full_code].empty:
+                return None
+            df = data[full_code]
+            if "close" not in df.columns:
+                return None
+            close = pd.to_numeric(df["close"], errors="coerce").dropna()
+            close = close[close > 0]
+            if close.empty:
+                return None
+            return close
+        except Exception as e:
+            print(f"[main_line] xtdata 只读失败 {code}: {e}", flush=True)
+            return None
+
     def _fetch_tech_metrics(self, stock_codes: List[str]) -> Dict[str, Dict[str, float]]:
         """
-        通过 xtdata 拉取日线，构建连板/趋势指标。
-        若 xtdata 不可用，返回空指标（后续按 0 处理）。
+        构建连板/趋势指标：优先本地 daily_cache/daily_bars，
+        不再调用 xtdata.download_history_data（无 QMT 时会阻塞 UI）。
         """
-        metrics: Dict[str, Dict[str, float]] = {c: {} for c in stock_codes}
-        if xtdata is None or (not stock_codes):
+        # 去重保序（一票多概念会重复）
+        uniq: List[str] = []
+        seen = set()
+        for c in stock_codes or []:
+            s = str(c or "").strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            uniq.append(s)
+
+        metrics: Dict[str, Dict[str, float]] = {c: {} for c in uniq}
+        if not uniq:
             return metrics
 
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=80)).strftime("%Y%m%d")
-
-        for code in stock_codes:
+        n = len(uniq)
+        hit = 0
+        for i, code in enumerate(uniq, 1):
+            if i == 1 or i == n or i % 20 == 0:
+                print(f"[main_line] tech metrics {i}/{n} {code}", flush=True)
             try:
-                full_code = self._to_xt_code(code)
-                if not full_code:
+                close = self._load_close_for_tech(code, start_date, end_date)
+                if close is None or close.empty:
                     continue
-                try:
-                    xtdata.download_history_data(full_code, "1d", start_date, end_date)
-                except Exception:
-                    pass
-                data = xtdata.get_market_data_ex([], [full_code], period="1d", start_time=start_date, end_time=end_date, count=-1)
-                if not data or full_code not in data or data[full_code] is None or data[full_code].empty:
-                    continue
-                df = data[full_code]
-                if "close" not in df.columns:
-                    continue
-                close = pd.to_numeric(df["close"], errors="coerce").dropna()
-                close = close[close > 0]
-                if close.empty:
-                    continue
-
-                ret = close.pct_change().fillna(0.0) * 100.0
-                ret_tail = ret.tail(20)
-                cont_board = 0
-                for x in reversed(ret_tail.tolist()):
-                    if x >= 9.8:
-                        cont_board += 1
-                    else:
-                        break
-                board_count_10d = float((ret.tail(10) >= 9.8).sum())
-
-                chg_5d = 0.0
-                if len(close) >= 6 and close.iloc[-6] != 0:
-                    chg_5d = (close.iloc[-1] / close.iloc[-6] - 1.0) * 100.0
-
-                ma5 = close.rolling(5).mean().iloc[-1] if len(close) >= 5 else close.iloc[-1]
-                ma10 = close.rolling(10).mean().iloc[-1] if len(close) >= 10 else ma5
-                ma20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else ma10
-                last = close.iloc[-1]
-                ma_align = 0.0
-                ma_align += 1.0 if last > ma5 else 0.0
-                ma_align += 1.0 if ma5 > ma10 else 0.0
-                ma_align += 1.0 if ma10 > ma20 else 0.0
-
-                drawdown_10d = 0.0
-                c10 = close.tail(10)
-                if len(c10) >= 2:
-                    peak = c10.cummax()
-                    dd = (c10 / peak - 1.0) * 100.0
-                    drawdown_10d = float(abs(dd.min()))
-
-                metrics[code] = {
-                    "cont_board": float(cont_board),
-                    "board_count_10d": board_count_10d,
-                    "board_count_20d": float((ret.tail(20) >= 9.8).sum()),
-                    "chg_5d": float(chg_5d),
-                    "ma_align": float(ma_align),
-                    "drawdown_10d": float(drawdown_10d),
-                    "ret_today": float(ret.iloc[-1]) if len(ret) >= 1 else 0.0,
-                    "ret_yday": float(ret.iloc[-2]) if len(ret) >= 2 else 0.0,
-                }
+                m = self._tech_metrics_from_close(close)
+                if m:
+                    metrics[code] = m
+                    hit += 1
             except Exception:
                 continue
+        print(f"[main_line] tech metrics done: {hit}/{n} with local/readonly data", flush=True)
         return metrics
 
     def _build_candidate_dataframe(self, rank_df: pd.DataFrame, latest_d8: str) -> Tuple[Optional[pd.DataFrame], str]:

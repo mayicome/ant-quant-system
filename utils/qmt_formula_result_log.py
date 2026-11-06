@@ -4,7 +4,7 @@
 策略只 print，不写文件。本模块在交易界面进程里跟着当天的
 XtClient_FormulaOutput_YYYYMMDD.log 往下读，只认 ANTRES 开头的短行。
 leg / legx / ent / lbu / posx 会合并进 filled_legs 和两个建仓日文件。
-cx 会把撤单结果写回 cancel_requests.json。
+cx 会把撤单结果写回 cancel_requests.json；seal/sealx 写回封单结构请求；rec/recx 写回推荐值请求。
 """
 from __future__ import annotations
 
@@ -264,6 +264,12 @@ def _accept_line(line: str) -> None:
         return
     if kind == "cx":
         _apply_cancel(payload)
+        return
+    if kind in ("seal", "sealx"):
+        _apply_seal(payload)
+        return
+    if kind in ("rec", "recx"):
+        _apply_rec(payload)
         return
 
 
@@ -560,6 +566,33 @@ def _apply_cancel(payload: dict) -> None:
             msg=str(payload.get("msg") or ""),
             processed_at=str(payload.get("at") or ""),
         )
+    except Exception:
+        pass
+
+
+def _apply_seal(payload: dict) -> None:
+    rid = str(payload.get("id") or "").strip()
+    status = str(payload.get("st") or "").strip()
+    if not rid or not status:
+        return
+    try:
+        from utils.seal_structure_request import note_seal_result
+
+        note_seal_result(payload)
+    except Exception:
+        pass
+
+
+
+def _apply_rec(payload: dict) -> None:
+    rid = str(payload.get("id") or "").strip()
+    status = str(payload.get("st") or "").strip()
+    if not rid or not status:
+        return
+    try:
+        from utils.recommendation_request import note_rec_result
+
+        note_rec_result(payload)
     except Exception:
         pass
 

@@ -73,7 +73,11 @@ def _ensure_live_today_open(result_row: Dict[str, Any], full_code: str) -> None:
 
     ensure_repo_root_on_sys_path()
     try:
-        import xtquant.xtdata as xtdata
+        from strategy_generator_app.qmt_mode_config import get_qmt_mode
+        if get_qmt_mode() != 'mini':
+            xtdata = None
+        else:
+            import xtquant.xtdata as xtdata
     except Exception:
         xtdata = None
     if xtdata is None:
@@ -133,6 +137,9 @@ def get_prices(stock_codes_6: List[str]) -> Dict[str, Dict[str, float]]:
 
     try:
         ensure_repo_root_on_sys_path()
+        from strategy_generator_app.qmt_mode_config import get_qmt_mode
+        if get_qmt_mode() != 'mini':
+            return result
         import xtquant.xtdata as xtdata
     except Exception:
         return result

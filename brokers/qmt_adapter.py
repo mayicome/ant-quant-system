@@ -1,14 +1,24 @@
-# miniQMT / xtquant 已停用。内置模式下单走大 QMT passorder，这里不再在导入时加载 xtquant。
+# miniQMT / xtquant 已停用。builtin/standalone 绝不 import xtdata（会连 127.0.0.1:58610 弹非法IP）。
+xttrader = None
+StockAccount = None
+xtdata = None
+XtQuantTraderCallback = object
 try:
-    import xtquant.xttrader as xttrader
-    from xtquant.xttype import StockAccount
-    import xtquant.xtdata as xtdata
-    from xtquant.xttrader import XtQuantTraderCallback
-except ImportError:
-    xttrader = None
-    StockAccount = None
-    xtdata = None
-    XtQuantTraderCallback = object
+    from utils.qmt_execution_config import get_qmt_mode
+    _mode = get_qmt_mode()
+except Exception:
+    _mode = 'builtin'
+if _mode == 'mini':
+    try:
+        import xtquant.xttrader as xttrader
+        from xtquant.xttype import StockAccount
+        import xtquant.xtdata as xtdata
+        from xtquant.xttrader import XtQuantTraderCallback
+    except ImportError:
+        xttrader = None
+        StockAccount = None
+        xtdata = None
+        XtQuantTraderCallback = object
 
 from brokers.order_side import FIX_PRICE, SH_MARKET, STOCK_BUY, STOCK_SELL, SZ_MARKET
 
