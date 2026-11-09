@@ -77,17 +77,27 @@ def _strip_inbox_meta(task: Dict[str, Any]) -> Dict[str, Any]:
 def _merge_rules(
     old_rules: List[Dict[str, Any]],
     new_rules: List[Dict[str, Any]],
+    *,
+    prune_missing_hold_clear: bool = True,
 ) -> List[Dict[str, Any]]:
     try:
         from strategy_generator_app.task_builder import _merge_rules_replace_by_identity
 
-        return _merge_rules_replace_by_identity(old_rules, new_rules)
+        return _merge_rules_replace_by_identity(
+            old_rules,
+            new_rules,
+            prune_missing_hold_clear=prune_missing_hold_clear,
+        )
     except Exception:
         pass
     try:
         from task_builder import _merge_rules_replace_by_identity  # type: ignore
 
-        return _merge_rules_replace_by_identity(old_rules, new_rules)
+        return _merge_rules_replace_by_identity(
+            old_rules,
+            new_rules,
+            prune_missing_hold_clear=prune_missing_hold_clear,
+        )
     except Exception:
         # 极简回退：新规则追加，同 name 后者覆盖
         out = [dict(r) for r in (old_rules or []) if isinstance(r, dict)]
@@ -133,7 +143,9 @@ def merge_task_lists(
             old = final[idx]
             old_rules = list((old.get("params") or {}).get("rules") or [])
             new_rules = list((st.get("params") or {}).get("rules") or [])
-            old.setdefault("params", {})["rules"] = _merge_rules(old_rules, new_rules)
+            old.setdefault("params", {})["rules"] = _merge_rules(
+                old_rules, new_rules, prune_missing_hold_clear=True
+            )
         else:
             code_to_idx[c] = len(final)
             final.append(st)
@@ -160,7 +172,12 @@ def merge_task_lists(
                     for r in new_rules
                     if (r.get("type") or "").strip() != "scheduled_clear"
                 ]
-            merged_rules = _merge_rules(old_rules, new_rules)
+            # drop_clear=True（买入策略）：绝不能顺带撤掉箱内已有第 N 日清仓
+            merged_rules = _merge_rules(
+                old_rules,
+                new_rules,
+                prune_missing_hold_clear=not bool(drop_clear),
+            )
             old_params["rules"] = merged_rules
             old["params"] = old_params
             # 用新任务补缺字段（名称/数量等），保留旧 task_id

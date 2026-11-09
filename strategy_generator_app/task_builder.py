@@ -313,12 +313,18 @@ def _is_hold_day_scheduled_clear(rule: Dict[str, Any]) -> bool:
 def _merge_rules_replace_by_identity(
     old_rules: List[Dict[str, Any]],
     new_rules: List[Dict[str, Any]],
+    *,
+    prune_missing_hold_clear: bool = True,
 ) -> List[Dict[str, Any]]:
     """合并规则：同 leg_key / 同 type+name 用新规则覆盖旧规则，并保留旧执行态。
 
     未出现在新列表中的旧规则默认保留（如手工加的其它腿）。
     例外：第 N 日清仓若本次生成未再挂出，则撤掉旧的未执行清仓
     （末笔买入顺延后，不应残留按旧锚定日挂出的「今日清仓」）。
+
+    prune_missing_hold_clear:
+      True（默认）：卖出策略重生成时，未再挂出的第 N 日清仓要撤掉。
+      False：买入等非清仓策略并入时保留已有第 N 日清仓（避免把刚生成的定时清仓冲掉）。
     """
     old_list = [r for r in (old_rules or []) if isinstance(r, dict)]
     new_list = [r for r in (new_rules or []) if isinstance(r, dict)]
@@ -344,7 +350,8 @@ def _merge_rules_replace_by_identity(
             continue
         # 本次未挂第 N 日清仓 → 撤掉旧的未执行第 N 日清仓（允许末笔买入顺延）
         if (
-            not new_has_hold_clear
+            prune_missing_hold_clear
+            and not new_has_hold_clear
             and _is_hold_day_scheduled_clear(r)
             and not _truthy_flag(r.get("scheduled_clear_executed"))
         ):
