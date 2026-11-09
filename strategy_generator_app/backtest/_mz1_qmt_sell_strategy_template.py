@@ -45,6 +45,8 @@ def _ensure_unicodedata():
 
 
 _UNICODEDATA_STATUS = _ensure_unicodedata()
+# 同一 run_tag 只跑一次，避免探针重复触发把 QMT 打崩
+_DONE_RUN_TAGS = set()
 
 
 def _log(msg):
@@ -459,10 +461,11 @@ def _recent_lu_trigger_from_daily(c6, closes_by_ymd, highs_by_ymd, ymds_ord, as_
         sel_s = str(sel_d).replace("-", "")[:8]
     if not sel_s or sel_s >= as_s:
         return None
-    prevs = [y for y in ymds_ord if y < sel_s]
+    prevs = [y for y in ymds_ord if y and y < sel_s]
     if not prevs:
         return None
-    y_prev = prevs[-1]
+    # QMT 日线可能升序或降序；取严格小于选股日的最近一日
+    y_prev = max(prevs)
     if sel_s not in closes_by_ymd:
         return None
     prev_c = float(closes_by_ymd.get(y_prev) or 0)
@@ -494,68 +497,168 @@ def _recent_lu_trigger_from_daily(c6, closes_by_ymd, highs_by_ymd, ymds_ord, as_
     if off < 0:
         off = 0.0
     return float(round(max(highs) - off, 2))
+def _row_get(row, *names):
+    for n in names:
+        try:
+            if hasattr(row, "get"):
+                if n in row:
+                    return row.get(n)
+            elif hasattr(row, "__contains__") and n in row:
+                return row[n]
+        except Exception:
+            pass
+        try:
+            return row[n]
+        except Exception:
+            pass
+    return None
+
+
 def _daily_maps(ContextInfo, full_code, start_s, end_s):
     payload, err = _get_market(ContextInfo, full_code, "1d", start_s, end_s)
     if err or payload is None:
         return {}, [], err or "no_daily"
-    times = _series(payload, "time", "stamp")
-    closes = _series(payload, "close", "Close", "lastPrice", "last")
-    opens = _series(payload, "open", "Open")
-    highs = _series(payload, "high", "High")
-    lows = _series(payload, "low", "Low")
-    ymds = _as_ymd_list(times)
     close_by = {}
     open_by = {}
     high_by = {}
     low_by = {}
+    preclose_by = {}
     ord_ymds = []
-    n = min(len(ymds), len(closes) if closes else 0)
-    if not closes:
-        n = len(ymds)
-    for i in range(len(ymds)):
-        y = ymds[i]
-        if not y:
-            continue
-        ord_ymds.append(y)
+
+    # DataFrame：按行取，避免 time/close 两列错位；并读 preClose
+    if hasattr(payload, "iterrows"):
         try:
-            if closes and i < len(closes):
-                close_by[y] = float(closes[i] or 0)
+            for idx, row in payload.iterrows():
+                y = _tick_ymd(idx)
+                if not y:
+                    y = _tick_ymd(_row_get(row, "time", "stamp", "stime"))
+                if not y:
+                    continue
+                ord_ymds.append(y)
+                try:
+                    close_by[y] = float(_row_get(row, "close", "Close", "lastPrice", "last") or 0)
+                except Exception:
+                    pass
+                try:
+                    open_by[y] = float(_row_get(row, "open", "Open") or 0)
+                except Exception:
+                    pass
+                try:
+                    high_by[y] = float(_row_get(row, "high", "High") or 0)
+                except Exception:
+                    pass
+                try:
+                    low_by[y] = float(_row_get(row, "low", "Low") or 0)
+                except Exception:
+                    pass
+                try:
+                    pc = _row_get(row, "preClose", "lastClose", "pre_close", "PreClose")
+                    if pc is not None:
+                        preclose_by[y] = float(pc or 0)
+                except Exception:
+                    pass
         except Exception:
-            pass
-        try:
-            if opens and i < len(opens):
-                open_by[y] = float(opens[i] or 0)
-        except Exception:
-            pass
-        try:
-            if highs and i < len(highs):
-                high_by[y] = float(highs[i] or 0)
-        except Exception:
-            pass
-        try:
-            if lows and i < len(lows):
-                low_by[y] = float(lows[i] or 0)
-        except Exception:
-            pass
+            ord_ymds = []
+
+    if not ord_ymds:
+        times = _series(payload, "time", "stamp", "stime")
+        closes = _series(payload, "close", "Close", "lastPrice", "last")
+        opens = _series(payload, "open", "Open")
+        highs = _series(payload, "high", "High")
+        lows = _series(payload, "low", "Low")
+        precloses = _series(payload, "preClose", "lastClose", "pre_close", "PreClose")
+        ymds = _as_ymd_list(times)
+        for i in range(len(ymds)):
+            y = ymds[i]
+            if not y:
+                continue
+            ord_ymds.append(y)
+            try:
+                if closes and i < len(closes):
+                    close_by[y] = float(closes[i] or 0)
+            except Exception:
+                pass
+            try:
+                if opens and i < len(opens):
+                    open_by[y] = float(opens[i] or 0)
+            except Exception:
+                pass
+            try:
+                if highs and i < len(highs):
+                    high_by[y] = float(highs[i] or 0)
+            except Exception:
+                pass
+            try:
+                if lows and i < len(lows):
+                    low_by[y] = float(lows[i] or 0)
+            except Exception:
+                pass
+            try:
+                if precloses and i < len(precloses):
+                    preclose_by[y] = float(precloses[i] or 0)
+            except Exception:
+                pass
+
+    # QMT 返回顺序不保证升序；统一成升序去重，供 prev_close / LU10 窗口使用
+    seen = set()
+    uniq = []
+    for y in ord_ymds:
+        if y and y not in seen:
+            seen.add(y)
+            uniq.append(y)
+    ord_ymds = sorted(uniq)
     return {
         "close": close_by,
         "open": open_by,
         "high": high_by,
         "low": low_by,
+        "preclose": preclose_by,
     }, ord_ymds, ""
 
 
 def _ticks_for_day(ContextInfo, full_code, day_d, run_start_sec, run_end_sec):
     day_s = day_d.strftime("%Y%m%d")
     payload, err = _get_market(ContextInfo, full_code, "tick", day_s, day_s)
+    meta = {"pre_close": 0.0, "limit_up": 0.0, "limit_down": 0.0}
     if err or payload is None or _nrows(payload) <= 0:
-        return [], err or "no_tick"
+        return [], err or "no_tick", meta
     times = _series(payload, "time", "stamp")
     lasts = _series(payload, "lastPrice", "last", "close", "Close")
     highs = _series(payload, "high", "High")
     lows = _series(payload, "low", "Low")
+    precloses = _series(payload, "lastClose", "preClose", "pre_close", "last_close")
+    limit_ups = _series(payload, "highLimit", "upperLimit", "limitUp", "HighLimit")
+    limit_dns = _series(payload, "lowLimit", "lowerLimit", "limitDown", "LowLimit")
     if not times or not lasts:
-        return [], "empty_tick_fields"
+        return [], "empty_tick_fields", meta
+    # 昨收/涨停只扫前几十笔，避免整天 tick 上重复解析把内存打爆
+    if precloses:
+        for i in range(min(64, len(precloses))):
+            try:
+                pc = float(precloses[i] or 0)
+            except Exception:
+                pc = 0.0
+            if pc > 0:
+                meta["pre_close"] = pc
+                break
+    if limit_ups:
+        for i in range(min(64, len(limit_ups))):
+            try:
+                lu = float(limit_ups[i] or 0)
+            except Exception:
+                lu = 0.0
+            if lu > 0:
+                meta["limit_up"] = lu
+                break
+    if limit_dns:
+        for i in range(min(64, len(limit_dns))):
+            try:
+                ld = float(limit_dns[i] or 0)
+            except Exception:
+                ld = 0.0
+            if ld > 0:
+                meta["limit_down"] = ld
+                break
     out = []
     n = min(len(times), len(lasts))
     for i in range(n):
@@ -585,7 +688,7 @@ def _ticks_for_day(ContextInfo, full_code, day_d, run_start_sec, run_end_sec):
         except Exception:
             pass
         out.append((sec, times[i], last, hi, lo))
-    return out, ""
+    return out, "", meta
 
 
 def _px_at_generation(ticks, gen_sec):
@@ -629,11 +732,82 @@ def _px_at_generation(ticks, gen_sec):
         return 0.0
 
 
+def _ensure_lots(st):
+    """兼容旧仓位：无 lots 时按 entry/last_buy 合成一批。"""
+    lots = st.get("lots")
+    if isinstance(lots, list):
+        return lots
+    lots = []
+    vol = int(st.get("volume") or 0)
+    if vol > 0:
+        ed = st.get("entry_date")
+        if isinstance(ed, str):
+            ed = _parse_d(ed)
+        ld = st.get("last_buy_date")
+        if isinstance(ld, str):
+            ld = _parse_d(ld)
+        # 无分笔信息时整笔记在最早买入日，避免「末日加仓」锁死先买仓
+        bd = ed or ld
+        if bd is not None:
+            lots.append({"date": bd, "volume": int(vol)})
+    st["lots"] = lots
+    return lots
+
+
+def _add_lot(st, buy_d, vol):
+    vol = int(vol)
+    if vol <= 0 or buy_d is None:
+        return
+    lots = _ensure_lots(st)
+    for lot in lots:
+        ld = lot.get("date")
+        if isinstance(ld, str):
+            ld = _parse_d(ld)
+            lot["date"] = ld
+        if ld == buy_d:
+            lot["volume"] = int(lot.get("volume") or 0) + vol
+            return
+    lots.append({"date": buy_d, "volume": vol})
+
+
+def _consume_available_lots(st, vol, day_d, from_t1):
+    """卖出时按 T+1 可卖批次 FIFO 扣减 lots，并同步 volume。"""
+    vol = _full_lot(int(vol))
+    if vol < 100:
+        return 0
+    lots = _ensure_lots(st)
+    left = vol
+    for lot in lots:
+        if left < 100:
+            break
+        ld = lot.get("date")
+        if isinstance(ld, str):
+            ld = _parse_d(ld)
+            lot["date"] = ld
+        if from_t1 and (ld is None or not (ld < day_d)):
+            continue
+        have = _full_lot(int(lot.get("volume") or 0))
+        if have < 100:
+            continue
+        take = min(have, left)
+        take = _full_lot(take)
+        if take < 100:
+            continue
+        lot["volume"] = int(lot.get("volume") or 0) - take
+        left -= take
+    st["lots"] = [x for x in lots if int(x.get("volume") or 0) > 0]
+    taken = vol - left
+    st["volume"] = max(0, int(st.get("volume") or 0) - taken)
+    return taken
+
+
 def _apply_buy_fill(state, c6, vol, price, buy_d, blotter_only):
     st = state.setdefault(c6, {
         "volume": 0, "cost": 0.0, "baseline": 0,
         "entry_date": None, "last_buy_date": None,
+        "lots": [],
     })
+    _ensure_lots(st)
     vol = int(vol)
     if vol <= 0:
         return
@@ -641,6 +815,9 @@ def _apply_buy_fill(state, c6, vol, price, buy_d, blotter_only):
         # already in initial_positions; only refresh last_buy if older missing
         if st.get("last_buy_date") is None:
             st["last_buy_date"] = buy_d
+        # 补记批次（若初始仓尚未按日拆分）
+        if buy_d is not None and not st.get("lots"):
+            _add_lot(st, buy_d, int(st.get("volume") or 0))
         return
     old_v = int(st.get("volume") or 0)
     old_c = float(st.get("cost") or 0)
@@ -652,6 +829,7 @@ def _apply_buy_fill(state, c6, vol, price, buy_d, blotter_only):
     if st.get("entry_date") is None:
         st["entry_date"] = buy_d
     st["last_buy_date"] = buy_d
+    _add_lot(st, buy_d, vol)
 
 
 def _available_qty(st, day_d, from_t1):
@@ -660,17 +838,17 @@ def _available_qty(st, day_d, from_t1):
         return 0
     if not from_t1:
         return hold
-    lb = st.get("last_buy_date")
-    if lb is None:
-        return hold
-    if isinstance(lb, str):
-        lb = _parse_d(lb)
-    if lb is None:
-        return hold
-    # T+1: last buy day strictly before today
-    if lb < day_d:
-        return hold
-    return 0
+    # T+1：按买入批次，仅「买入日 < 今日」的仓可卖（当日加仓不锁死先买仓）
+    lots = _ensure_lots(st)
+    avail = 0
+    for lot in lots:
+        ld = lot.get("date")
+        if isinstance(ld, str):
+            ld = _parse_d(ld)
+        if ld is None or not (ld < day_d):
+            continue
+        avail += _full_lot(int(lot.get("volume") or 0))
+    return _full_lot(min(hold, avail))
 
 
 def _sell_day_index(st, day_d, trading_days):
@@ -856,6 +1034,7 @@ def _run_backtest(ContextInfo):
             "baseline": vol,
             "entry_date": ed,
             "last_buy_date": ld,
+            "lots": [{"date": ed or ld, "volume": vol}] if (ed or ld) else [],
         }
 
     fb_cfg = CFG.get("first_buy_dates") or {}
@@ -865,6 +1044,12 @@ def _run_backtest(ContextInfo):
             st["entry_date"] = _parse_d(fb_cfg.get(c6))
         if st.get("last_buy_date") is None and lb_cfg.get(c6):
             st["last_buy_date"] = _parse_d(lb_cfg.get(c6))
+        _ensure_lots(st)
+        # 若只有总量、lots 空：按最早买入日记一批，避免末日加仓锁仓
+        if int(st.get("volume") or 0) > 0 and not st.get("lots"):
+            bd = st.get("entry_date") or st.get("last_buy_date")
+            if bd is not None:
+                st["lots"] = [{"date": bd, "volume": int(st.get("volume") or 0)}]
 
     fills_by_day = {}
     for f in CFG.get("scheduled_buy_fills") or []:
@@ -1061,31 +1246,72 @@ def _run_backtest(ContextInfo):
             close_by = (maps or {}).get("close") or {}
             open_by = (maps or {}).get("open") or {}
             high_by = (maps or {}).get("high") or {}
+            preclose_by = (maps or {}).get("preclose") or {}
             ymd = day_d.strftime("%Y%m%d")
-            # prev close: last daily close strictly before today
-            prev_close = 0.0
-            for y in reversed(yords or []):
-                if y < ymd:
-                    try:
-                        prev_close = float(close_by.get(y) or 0)
-                    except Exception:
-                        prev_close = 0.0
-                    break
-            if prev_close <= 0:
-                _log("SKIP_NO_PREV_CLOSE|%s|%s" % (c6, ymd))
-                continue
-
             lr = _limit_ratio(c6)
             tick_sz, prec = _min_tick_prec(c6)
-            limit_up = round(prev_close * (1.0 + lr), prec)
-            limit_down = round(prev_close * (1.0 - lr), prec)
 
             fc = _full_from_c6(c6)
-            ticks, terr = _ticks_for_day(ContextInfo, fc, day_d, tick_load_from_sec, run_end_sec)
+            ticks, terr, tick_meta = _ticks_for_day(
+                ContextInfo, fc, day_d, tick_load_from_sec, run_end_sec
+            )
             if not ticks:
                 skip_no_tick += 1
                 _emit("SKIP_NO_TICK", {"code": c6, "date": day_d.isoformat(), "err": terr or "empty"})
                 continue
+            if not isinstance(tick_meta, dict):
+                tick_meta = {}
+
+            # 昨收优先级：当日 tick.lastClose > 当日日线 preClose > 严格前日 close
+            prev_close = 0.0
+            prev_src = ""
+            try:
+                prev_close = float(tick_meta.get("pre_close") or 0)
+                if prev_close > 0:
+                    prev_src = "tick_lastClose"
+            except Exception:
+                prev_close = 0.0
+            if prev_close <= 0:
+                try:
+                    prev_close = float(preclose_by.get(ymd) or 0)
+                    if prev_close > 0:
+                        prev_src = "daily_preClose"
+                except Exception:
+                    prev_close = 0.0
+            if prev_close <= 0:
+                prev_candidates = [y for y in (yords or []) if y and y < ymd]
+                if prev_candidates:
+                    prev_ymd = max(prev_candidates)
+                    try:
+                        prev_close = float(close_by.get(prev_ymd) or 0)
+                        if prev_close > 0:
+                            prev_src = "daily_close[%s]" % prev_ymd
+                    except Exception:
+                        prev_close = 0.0
+            if prev_close <= 0:
+                _log("SKIP_NO_PREV_CLOSE|%s|%s" % (c6, ymd))
+                continue
+
+            limit_up = 0.0
+            limit_down = 0.0
+            try:
+                limit_up = float(tick_meta.get("limit_up") or 0)
+            except Exception:
+                limit_up = 0.0
+            try:
+                limit_down = float(tick_meta.get("limit_down") or 0)
+            except Exception:
+                limit_down = 0.0
+            if limit_up <= 0:
+                limit_up = round(prev_close * (1.0 + lr), prec)
+            if limit_down <= 0:
+                limit_down = round(prev_close * (1.0 - lr), prec)
+            # 仅异常昨收来源打日志，避免 FormulaOutput 刷屏拖垮 QMT
+            if prev_src and prev_src != "tick_lastClose":
+                _log(
+                    "PREV|%s|%s|src=%s|prev=%.4f|lu=%.4f"
+                    % (c6, ymd, prev_src, prev_close, limit_up)
+                )
 
             day_intents = []
 
@@ -1415,12 +1641,16 @@ def _run_backtest(ContextInfo):
                 sec, tm, px = fill
                 if px <= 0:
                     continue
+                taken = _consume_available_lots(st, vol, day_d, from_t1)
+                if taken < 100:
+                    continue
+                vol = taken
                 amount = round(float(px) * vol, 2)
-                st["volume"] = int(st.get("volume") or 0) - vol
                 # baseline 不降（与实盘注释一致）
-                if st["volume"] < 100:
+                if int(st.get("volume") or 0) < 100:
                     st["volume"] = 0
                     st["baseline"] = 0
+                    st["lots"] = []
                 leg = str(intent.get("leg") or "")
                 filled_legs.add(leg)
                 row = {
@@ -1452,10 +1682,16 @@ def _run_backtest(ContextInfo):
         "days": len(trading_days),
         "elapsed_sec": round(time.time() - t0, 2),
     })
+    if run_tag:
+        _DONE_RUN_TAGS.add(str(run_tag))
 
 
 def run_backtest(ContextInfo):
     """Entry for hot-reload probe (探针); also used by init for one-shot paste."""
+    tag = str(CFG.get("run_tag") or "")
+    if tag and tag in _DONE_RUN_TAGS:
+        _log("SKIP_ALREADY_DONE|%s" % tag)
+        return
     try:
         _run_backtest(ContextInfo)
     except Exception as e:

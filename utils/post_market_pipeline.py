@@ -923,23 +923,29 @@ def run_step(
     try:
 
         if step_id == "qmt_quote":
-
-            rc = run(
-
+            # 批跑无人值守：跳过「即将控制 QMT」倒计时；捕获输出以便区分「未找到窗口」和 UI 失败
+            rc, out = _run_plain_capture(
+                root,
                 "tools/export_qmt_hsj_quote.py",
-
-                ("--date", d, "--click"),
-
+                ("--date", d, "--click", "--control-wait", "0"),
             )
-
             if rc != 0:
-
-                detail = "请先打开并登录国金 QMT 客户端（保持运行即可；脚本会自动切到「行情 → 沪深京A股」）。产物：data/qmt_hsj_quote.txt"
-
+                tail = ""
+                for line in reversed((out or "").splitlines()):
+                    s = line.strip()
+                    if s:
+                        tail = s[:240]
+                        break
+                detail = (
+                    "沪深京行情导出失败。"
+                    "请确认国金 QMT 交易端已打开并登录（可最小化，勿关进程；多屏无妨）。"
+                    "脚本会自动恢复窗口并切到「行情 → 沪深京A股」。"
+                    "产物：data/qmt_hsj_quote.txt"
+                )
+                if tail:
+                    detail = detail + " | " + tail
             else:
-
                 detail = "写出 data/qmt_hsj_quote.txt（及 .meta.json、a_share_universe.json）"
-
             return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
 
 

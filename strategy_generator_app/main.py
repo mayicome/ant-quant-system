@@ -2511,6 +2511,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "导入买入导出 JSON 后会按本值自动填回测起止日期。"
         )
         self.sell_chain_hold_spin.valueChanged.connect(self._refresh_chained_window_dates_on_form)
+        self.sell_chain_hold_spin.valueChanged.connect(self._sync_merge_hold_spin_from_chain)
         self.sell_chain_from_t1_cb.stateChanged.connect(self._refresh_chained_window_dates_on_form)
         self.sell_chain_run_btn = QPushButton("运行下一轮批量回测")
         self.sell_chain_run_btn.setEnabled(False)
@@ -2819,22 +2820,22 @@ class StrategyGeneratorMainWindow(QMainWindow):
         mark_row = QHBoxLayout()
         self.merge_hold_spin = QSpinBox()
         self.merge_hold_spin.setRange(1, 120)
-        # 优先用买入策略「运行交易日数」作默认（常为10）；勿默认同接续卖出的2日
+        # 与「下一轮接续→持有交易日数」对齐；否则才用买入「运行交易日数」
         try:
-            if hasattr(self, "param_entry_window_spin"):
-                _def_hold = int(self.param_entry_window_spin.value())
-            elif hasattr(self, "sell_chain_hold_spin"):
+            if hasattr(self, "sell_chain_hold_spin"):
                 _def_hold = int(self.sell_chain_hold_spin.value())
+            elif hasattr(self, "param_entry_window_spin"):
+                _def_hold = int(self.param_entry_window_spin.value())
             else:
-                _def_hold = 10
+                _def_hold = 2
         except Exception:
-            _def_hold = 10
+            _def_hold = 2
         self.merge_hold_spin.setValue(max(1, _def_hold))
         self.merge_hold_spin.setToolTip(
             "【汇总专用】持有交易日数（买入次日=第1日），用来算「计划持仓结束日」。\n"
+            "默认与上方「下一轮接续→持有交易日数」同步；改接续框会跟着改。\n"
             "有第二腿时从末笔买入日次日起算。\n"
-            "汇总前会按该结束日截断卖出（去掉买入前/窗外的 live_align 错挂），避免卖出多于买入。\n"
-            "不要和回测「运行交易日数」搞混——以本框为准。\n"
+            "不要和回测「运行交易日数」搞混。\n"
             "已清仓不盯市；已到结束日→按结束日收盘；未到结束日→按今天临时估值"
             "（盯市类型=未到期临时，计划结束日仍是第N日）。"
         )
@@ -6320,6 +6321,21 @@ class StrategyGeneratorMainWindow(QMainWindow):
         )
         return "\n".join(parts)
 
+    def _sync_merge_hold_spin_from_chain(self, *_args) -> None:
+        """接续「持有交易日数」→ 汇总「持有N日」，避免汇总 Excel 永远写成默认1。"""
+        if not hasattr(self, "sell_chain_hold_spin") or not hasattr(self, "merge_hold_spin"):
+            return
+        try:
+            n = max(1, int(self.sell_chain_hold_spin.value() or 1))
+            if int(self.merge_hold_spin.value()) != n:
+                self.merge_hold_spin.blockSignals(True)
+                try:
+                    self.merge_hold_spin.setValue(n)
+                finally:
+                    self.merge_hold_spin.blockSignals(False)
+        except Exception:
+            pass
+
     def _refresh_chained_window_dates_on_form(self, *_args) -> str:
         """按当前接续档 + 持有天数，自动改回测起止日期控件。"""
         segs = getattr(self, "_chained_batch_segments", None) or []
@@ -9721,8 +9737,19 @@ class StrategyGeneratorMainWindow(QMainWindow):
         use_last = bool(
             getattr(self, "merge_last_avail_cb", None) and self.merge_last_avail_cb.isChecked()
         ) and (not use_nth)
+        # 接续卖出：汇总持有天数必须跟「下一轮接续→持有交易日数」一致，
+        # 否则改接续框、汇总框仍停在默认1，Excel「持有交易日数」会永远是1。
         try:
-            hold_from_next = int(self.merge_hold_spin.value()) if getattr(self, "merge_hold_spin", None) else 2
+            if hasattr(self, "sell_chain_hold_spin"):
+                hold_from_next = int(self.sell_chain_hold_spin.value() or 2)
+                if getattr(self, "merge_hold_spin", None) is not None:
+                    try:
+                        if int(self.merge_hold_spin.value()) != hold_from_next:
+                            self.merge_hold_spin.setValue(hold_from_next)
+                    except Exception:
+                        pass
+            else:
+                hold_from_next = int(self.merge_hold_spin.value()) if getattr(self, "merge_hold_spin", None) else 2
         except Exception:
             hold_from_next = 2
         hold_from_next = max(1, hold_from_next)
