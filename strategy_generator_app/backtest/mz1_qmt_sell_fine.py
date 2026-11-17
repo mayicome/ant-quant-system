@@ -32,7 +32,8 @@ DEFAULT_WATCH_PATH = DEFAULT_WATCH_DIR / "current.py"
 _LAST_WATCH_PATH = None  # type: Optional[Path]
 _LAST_WATCH_ERROR = None  # type: Optional[Exception]
 STRATEGY_IDS_MZ1_SELL = (
-    "strategy_fd561fb3",
+    "strategy_5a1fa73f",  # 开盘涨幅弹性半仓+近涨停弹性半仓
+    "strategy_fd561fb3",  # 同上 + T点封板分支
 )
 STRATEGY_IDS_INTRADAY_NEXT_DAY_SELL = (
     "strategy_c28a378b",

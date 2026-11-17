@@ -333,8 +333,8 @@ def append_trade_day(day: str, prev: str, workers: int = 16) -> int:
 
     universe = len(already) + len(targets)
     covered = len(already) + ok
-    # 追加阶段已有 day 的也算覆盖
-    success = universe > 0 and covered >= int(universe * 0.8)
+    # 追加阶段已有 day 的也算覆盖；齐全门槛 99%
+    success = universe > 0 and covered >= int(universe * 0.99)
     if success:
         top = max(sources, key=sources.get) if sources else ""
         _update_manifest(day, covered, miss, top)

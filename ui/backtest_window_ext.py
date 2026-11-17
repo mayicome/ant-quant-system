@@ -796,9 +796,34 @@ class BacktestWindowExt(Ui_MainWindow):
             
             # 填充数据
             for row, stock_data in enumerate(positions_list):
-                # 计算持仓比例，避免除以0
-                if asset and asset.get('total_asset', 0) > 0:
-                    position_ratio = int(stock_data['volume'] * stock_data['open_price'] / asset['total_asset'] * 100)
+                # 仓位比例：持仓市值 / 账户总资产（QMT market_value = 数量×最新价），避免除以0
+                total_asset = 0.0
+                if asset:
+                    try:
+                        total_asset = float(asset.get("total_asset") or 0)
+                    except (TypeError, ValueError):
+                        total_asset = 0.0
+                try:
+                    market_value = float(stock_data.get("market_value") or 0)
+                except (TypeError, ValueError):
+                    market_value = 0.0
+                if market_value <= 0:
+                    try:
+                        vol = float(stock_data.get("volume") or 0)
+                    except (TypeError, ValueError):
+                        vol = 0.0
+                    px = 0.0
+                    for _k in ("last_price", "lastPrice", "price"):
+                        try:
+                            px = float(stock_data.get(_k) or 0)
+                        except (TypeError, ValueError):
+                            px = 0.0
+                        if px > 0:
+                            break
+                    if vol > 0 and px > 0:
+                        market_value = vol * px
+                if total_asset > 0 and market_value > 0:
+                    position_ratio = int(market_value / total_asset * 100)
                 else:
                     position_ratio = 0
                 

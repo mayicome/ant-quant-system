@@ -19,12 +19,13 @@
 生成汇总前会按该结束日**截断卖出**（丢弃早于该腿买入日、或晚于结束日的 live_align 错挂），
 避免「卖出数量多于买入」。CSV 卖出明细里的 end_date 仅作参考，汇总时会被上述规则覆盖。
 
-未清仓盯市：默认用该票 **持仓结束日（end_date）** 收盘价；已清仓不写盯市日。
+未清仓盯市：默认用该票 **持仓结束日（end_date）** 的不复权收盘价（与冲高日线回测同一口径）；已清仓不写盯市日。
 若结束日晚于今天（或本地尚无该日K线），则按「今天及之前最近交易日」做**临时盯市**，
 备注标明「持仓未到期…计划结束日=…」；end_date 列仍保留计划清仓日。
+精确日缺失时，可用该日之前最近一根不复权收盘，但「盯市日期」必须写成实际 K 线日，不得把更早收盘冒充计划日价。
 可选：选股日后第 N 日，或「最后可得收盘」（数据排查用）。
 
-拉取收盘价优先用本地 daily_cache；缺数据时再尝试 data_provider / xtquant（未开 QMT 也可生成汇总）。
+拉取收盘价优先用本地不复权 daily_cache；缺数据时再尝试 data_provider / xtquant（未开 QMT 也可生成汇总）。
 
 用法:
   python tools/merge_backtest_trades_by_selection.py \\
@@ -48,15 +49,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 def _fill_adjust() -> str:
-    """盯市/撮合收盘价复权口径（与 BACKTEST_FILL_ADJUST 对齐，默认 qfq）。"""
+    """盯市/撮合收盘价复权口径（与冲高日线回测 get_daily_ohlc_for_codes 对齐，默认 none 不复权）。"""
     import os
 
     try:
         from utils.daily_adjust_paths import normalize_adjust
 
-        return normalize_adjust(os.environ.get("BACKTEST_FILL_ADJUST") or "qfq")
+        return normalize_adjust(os.environ.get("BACKTEST_FILL_ADJUST") or "none")
     except Exception:
-        raw = (os.environ.get("BACKTEST_FILL_ADJUST") or "qfq").strip().lower()
+        raw = (os.environ.get("BACKTEST_FILL_ADJUST") or "none").strip().lower()
         return "qfq" if raw in ("qfq", "front", "前复权") else "none"
 
 SEL_RE = re.compile(r"\[选股日\s*(\d{4}-\d{2}-\d{2})\]")
@@ -453,6 +454,39 @@ def apply_end_date_from_trading_calendar(
     return warns
 
 
+_SURGE_CLEAR_HOLD_RE = re.compile(r"第\s*(\d+)\s*日收盘清仓")
+
+
+def infer_hold_days_from_sell_csv(sell_path: Path) -> Optional[int]:
+    """从卖出成交明细规则名推断当次冲高日线回测的持有交易日数。
+
+    识别「盘中冲高卖出-第N日收盘清仓」等规则名；同一文件出现多个 N 时取出现次数最多者，并列取较大值。
+    读不到则返回 None。
+    """
+    path = Path(sell_path)
+    if not path.is_file():
+        return None
+    counts: Dict[int, int] = {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rule = str((row or {}).get("规则名") or (row or {}).get("rule_name") or "")
+                m = _SURGE_CLEAR_HOLD_RE.search(rule)
+                if not m:
+                    continue
+                n = int(m.group(1))
+                if n >= 1:
+                    counts[n] = counts.get(n, 0) + 1
+    except Exception:
+        return None
+    if not counts:
+        return None
+    max_cnt = max(counts.values())
+    cands = [n for n, c in counts.items() if c == max_cnt]
+    return max(cands)
+
+
 def apply_hold_end_date_from_buy(
     rows: List[dict],
     *,
@@ -698,12 +732,38 @@ def _fetch_last_available_closes(
     return out, warn
 
 
-def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, float], str]:
-    """
-    返回 ({code: close}, error_msg)。error_msg 非空表示整体失败或部分说明。
+def _coerce_bar_date(v) -> Optional[date]:
+    """把日线 date 列（date / datetime / Timestamp / 字符串）收成 date。"""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    if hasattr(v, "to_pydatetime"):
+        try:
+            v2 = v.to_pydatetime()
+            if isinstance(v2, datetime):
+                return v2.date()
+        except Exception:
+            pass
+    if hasattr(v, "date") and not isinstance(v, date):
+        try:
+            d = v.date()
+            if isinstance(d, date):
+                return d
+        except Exception:
+            pass
+    return _parse_row_date(v)
 
-    优先 daily_cache（与 builtin / 均线回填一致），缺的再尝试 data_provider，
-    最后才回退 xtquant（无 QMT 时不会拖垮整次汇总）。
+
+def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, Tuple[date, float]], str]:
+    """
+    返回 ({code: (实际K线日, close)}, error_msg)。error_msg 非空表示整体失败或部分说明。
+
+    优先不复权 daily_cache 的 as_of 当日收盘；精确日缺失时可用 as_of 及之前最近一根，
+    但必须带回该根的真实日期，不得把更早收盘冒充 as_of。
+    缺的再尝试 data_provider，最后才回退 xtquant（无 QMT 时不会拖垮整次汇总）。
     """
     codes_6 = [_norm_code_6(c) for c in codes_6 if (c or "").strip()]
     codes_6 = list(dict.fromkeys(codes_6))
@@ -721,15 +781,17 @@ def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, floa
         try:
             if "date" not in df.columns or "close" not in df.columns:
                 return None
-            m = df[df["date"] == day]
-            if m is None or len(m) == 0:
-                return None
-            v = float(m.iloc[-1]["close"])
-            return v if v > 0 else None
+            for _, row in df.iterrows():
+                d = _coerce_bar_date(row["date"])
+                if d != day:
+                    continue
+                v = float(row["close"])
+                return v if v > 0 else None
+            return None
         except Exception:
             return None
 
-    # 1) daily_cache：先精确日；没有则退化为 through_date 内最后一根（数据不全时）
+    # 1) daily_cache：先精确日；没有则用 through_date 内最后一根，并记录该根真实日期
     try:
         from utils.daily_cache_reader import load_daily_from_cache
     except Exception:
@@ -744,12 +806,12 @@ def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, floa
                 df = None
             px = _close_on_date(df, as_of)
             if px is not None:
-                out[c] = px
+                out[c] = (as_of, px)
             else:
-                # 停牌等：用 as_of 及之前最后一根收盘（through_date 已截断）
+                # 停牌/缺日：用 as_of 及之前最后一根，盯市日必须用该根日期
                 _md, last_px = _df_last_bar(df)
-                if last_px is not None and float(last_px) > 0:
-                    out[c] = float(last_px)
+                if _md is not None and last_px is not None and float(last_px) > 0 and _md <= as_of:
+                    out[c] = (_md, float(last_px))
                 else:
                     missing.append(c)
     else:
@@ -769,7 +831,7 @@ def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, floa
                     p = (raw.get(c) or {}).get("current") or (raw.get(c) or {}).get("最新价")
                     try:
                         if p is not None and float(p) > 0:
-                            out[c] = float(p)
+                            out[c] = (as_of, float(p))
                             continue
                     except Exception:
                         pass
@@ -828,7 +890,7 @@ def _fetch_close_prices(codes_6: List[str], as_of: date) -> Tuple[Dict[str, floa
                     if close is None or float(close) <= 0:
                         still2.append(c6)
                         continue
-                    out[c6] = float(close)
+                    out[c6] = (as_of, float(close))
                 except Exception:
                     still2.append(c6)
             missing = still2
@@ -1292,14 +1354,28 @@ def _lookup_mark_price(
 ) -> Tuple[Optional[date], float]:
     """在 prices_by_mark 中取某代码收盘。
 
-    preferred 有值时只取该日（持仓结束日/第N日/未到期临时日），禁止回退到其它盯市日
-    （否则会把无关的「最后可得」日误当成目标盯市）。
+    preferred 有值时先取该日；若该日无此代码（精确日缺失，价格存在更早真实 K 线日），
+    则取 preferred 及之前、且带有该代码的最近一日，并把该日作为盯市日期返回。
+    不得把更早收盘假装成 preferred 当日价。
     preferred 为空时才扫表（最后可得模式）。
     """
     if preferred is not None:
         px = float((prices_by_mark.get(preferred) or {}).get(code) or 0)
         if px > 0:
             return preferred, px
+        cands = []
+        for md, m in (prices_by_mark or {}).items():
+            if md is None or md > preferred:
+                continue
+            try:
+                v = float((m or {}).get(code) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v > 0:
+                cands.append(md)
+        if cands:
+            actual = max(cands)
+            return actual, float((prices_by_mark.get(actual) or {}).get(code) or 0)
         return None, 0.0
     for md in sorted(prices_by_mark.keys(), reverse=True):
         px = float((prices_by_mark.get(md) or {}).get(code) or 0)
@@ -1364,8 +1440,18 @@ def _build_prices_by_mark_date(
     warns: List[str] = []
     for md in sorted(by_mark.keys()):
         codes = list(dict.fromkeys(by_mark[md]))
-        pm, err = _fetch_close_prices(codes, md)
-        prices_by_mark[md] = pm
+        fetched, err = _fetch_close_prices(codes, md)
+        for code, item in (fetched or {}).items():
+            if not item:
+                continue
+            bar_d, px = item[0], item[1]
+            try:
+                px_f = float(px)
+            except (TypeError, ValueError):
+                continue
+            if bar_d is None or px_f <= 0:
+                continue
+            prices_by_mark.setdefault(bar_d, {})[code] = px_f
         if err:
             warns.append(f"{md}: {err}")
     summary = "; ".join(warns)
@@ -1462,6 +1548,11 @@ def apply_mark_and_returns(
 
         r["盯市日期"] = mark_d.strftime("%Y-%m-%d")
         note = base_note or f"未清仓，余{rem}股"
+        if preferred is not None and mark_d != preferred:
+            note = (
+                (note + "；" if note else "")
+                + f"计划盯市日{preferred.isoformat()}无K线，改用{mark_d.isoformat()}收盘"
+            )
         if use_last_available:
             r["盯市类型"] = "最后可得"
             if "最后可得收盘盯市" not in note:

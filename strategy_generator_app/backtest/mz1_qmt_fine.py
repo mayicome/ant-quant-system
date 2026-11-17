@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -33,6 +34,9 @@ _LAST_WATCH_PATH = None  # type: Optional[Path]
 _LAST_WATCH_ERROR = None  # type: Optional[Exception]
 STRATEGY_IDS_MZ1_BUY = (
     "strategy_mz1_ma1020_half",
+)
+STRATEGY_IDS_MZ1_SINGLE_BUY = (
+    "strategy_dacdcef1",
 )
 
 
@@ -178,12 +182,87 @@ def load_mz1_strategy_params(root: Optional[Path] = None) -> Dict[str, Any]:
     return dict(sp)
 
 
-def is_mz1_buy_strategy(strategy_id: str = "", name: str = "") -> bool:
+def load_mz1_strategy_code(root: Optional[Path] = None) -> str:
+    """读取马总逻辑1（跌破MA10/20各1/2）策略 JSON 中的 strategy_code。"""
+    root = root or ROOT
+    path = (
+        root
+        / "strategy_generator_app"
+        / "config"
+        / "strategies"
+        / "strategy_mz1_ma1020_half.json"
+    )
+    if not path.is_file():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return str((data or {}).get("strategy_code") or "")
+
+
+def parse_rise_percent_from_strategy_code(code: str, default: float = 0.0) -> float:
+    """解析策略代码前部模块级常量 RISE_PERCENT；缺省或无法解析时返回 default。"""
+    text = code or ""
+    try:
+        tree = ast.parse(text)
+        for node in tree.body:
+            names = []
+            value = None
+            if isinstance(node, ast.Assign):
+                names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                value = node.value
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names = [node.target.id]
+                value = node.value
+            if "RISE_PERCENT" in names and value is not None:
+                return float(ast.literal_eval(value))
+    except Exception:
+        pass
+    m = re.search(
+        r"(?m)^RISE_PERCENT\s*=\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?:#.*)?$",
+        text,
+    )
+    if m:
+        try:
+            return float(m.group(1))
+        except (TypeError, ValueError):
+            return float(default)
+    return float(default)
+
+
+def _mz1_name_matches_ma_buy(name: str = "") -> bool:
+    n = str(name or "")
+    return ("马总逻辑1" in n) and ("MA10/20" in n or "MA10" in n) and ("买" in n)
+
+
+def is_mz1_single_buy_strategy(strategy_id: str = "", name: str = "") -> bool:
+    """马总逻辑1 单点买入（single_buy：第一次最新价 <= 触发价即买）。"""
     sid = str(strategy_id or "").strip()
+    if sid in STRATEGY_IDS_MZ1_SINGLE_BUY:
+        return True
+    if sid in STRATEGY_IDS_MZ1_BUY:
+        return False
+    n = str(name or "")
+    return ("单点" in n) and _mz1_name_matches_ma_buy(n)
+
+
+def is_mz1_buy_strategy(strategy_id: str = "", name: str = "") -> bool:
+    """马总逻辑1 弹性买入（best_buy / 破后从最低价反弹）。不含单点。"""
+    sid = str(strategy_id or "").strip()
+    if sid in STRATEGY_IDS_MZ1_SINGLE_BUY:
+        return False
     if sid in STRATEGY_IDS_MZ1_BUY:
         return True
     n = str(name or "")
-    return ("马总逻辑1" in n) and ("MA10/20" in n or "MA10" in n) and ("买" in n)
+    if "单点" in n:
+        return False
+    return _mz1_name_matches_ma_buy(n)
+
+
+def is_mz1_qmt_buy_strategy(strategy_id: str = "", name: str = "") -> bool:
+    """弹性或单点均可走 QMT 细回测脚本生成 / 批量回测路径。"""
+    return is_mz1_single_buy_strategy(strategy_id, name) or is_mz1_buy_strategy(strategy_id, name)
 
 
 def build_qmt_strategy_source(
@@ -196,6 +275,7 @@ def build_qmt_strategy_source(
     buy_amount_per_stock: float = 50000.0,
     min_order_amount: float = 5000.0,
     rise_percent: float = 0.0,
+    fill_mode: str = "best_buy",
     from_t1: bool = True,
     run_tag: str = "",
     daily_pools: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -264,6 +344,9 @@ def build_qmt_strategy_source(
     gen_t = _norm_hm(strategy_generation_time, "09:25")
     rs_t = _norm_hm(strategy_run_start_time, "09:30")
     re_t = _norm_hm(strategy_run_end_time, "15:00")
+    mode = str(fill_mode or "best_buy").strip() or "best_buy"
+    if mode not in ("best_buy", "single_buy"):
+        mode = "best_buy"
     cfg = {
         "codes": pool,
         "selection_date_by_code": sel,
@@ -272,7 +355,7 @@ def build_qmt_strategy_source(
         "entry_window_trading_days": int(entry_window),
         "buy_amount_per_stock": float(buy_amount_per_stock),
         "min_order_amount": float(min_order_amount),
-        "rise_percent": float(rise_percent),
+        "fill_mode": mode,
         "from_t1": bool(from_t1),
         "run_tag": tag,
         "result_prefix": RESULT_PREFIX,
@@ -280,6 +363,8 @@ def build_qmt_strategy_source(
         "strategy_run_start_time": rs_t,
         "strategy_run_end_time": re_t,
     }
+    if mode == "best_buy":
+        cfg["rise_percent"] = float(rise_percent)
     if pools_out:
         cfg["daily_pools"] = pools_out
     cfg_json = json.dumps(cfg, ensure_ascii=False, indent=2)

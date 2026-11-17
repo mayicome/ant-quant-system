@@ -67,6 +67,11 @@ OPEN_GAIN_GROWTH = 0.08  # 非主板（创业/科创/北交等）
 CLEAR_GAIN_MAIN = 0.10     # 主板默认 10%（配合回落 0 → 涨停即清·单点卖）
 CLEAR_GAIN_GROWTH = 0.13   # 非主板默认 13%
 
+# 是否以市价单卖出：只作用于「涨停即清仓」和「定时清仓」。
+# True = 市价（沪/北：最优五档即时成交剩转限价；深：最优五档即时成交剩余撤销）
+# False = 维持原来的限价（优先买一减 1 跳）
+USE_MARKET_ORDER_FOR_CLEAR = False
+
 def run(codes, prices, get_name, account, params):
     result = []
     params = params or {}
@@ -708,6 +713,7 @@ def run(codes, prices, get_name, account, params):
                             "name": NAME_CLEAR_LU,
                             "price": float(clear_trig),
                             "volume": int(avail),
+                            "use_market_order": bool(USE_MARKET_ORDER_FOR_CLEAR),
                         })
                     else:
                         result.append({
@@ -791,6 +797,7 @@ def run(codes, prices, get_name, account, params):
                         "scheduled_clear_force": False,
                         "scheduled_clear_on_hold_day": True,
                         "scheduled_clear_sell_day_index": int(hold_n),
+                        "use_market_order": bool(USE_MARKET_ORDER_FOR_CLEAR),
                     })
                 else:
                     result.append({
@@ -804,6 +811,7 @@ def run(codes, prices, get_name, account, params):
                         "scheduled_clear_force": True,
                         "scheduled_clear_on_hold_day": True,
                         "scheduled_clear_sell_day_index": int(hold_n),
+                        "use_market_order": bool(USE_MARKET_ORDER_FOR_CLEAR),
                     })
 
     return result

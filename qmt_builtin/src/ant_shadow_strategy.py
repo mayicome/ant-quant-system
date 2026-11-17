@@ -1356,6 +1356,70 @@ def _finalize_no_cash_skip(
 _CASH_WAIT_LOG_AT = {}  # tid -> unix ts
 
 
+
+def _flag_true(v) -> bool:
+    if v is True:
+        return True
+    if v is False or v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+
+def _task_or_event_names(ev, tid: str) -> str:
+    parts = []
+    if isinstance(ev, dict):
+        parts.append(str(ev.get("strategy_name") or ev.get("name") or ""))
+        meta = ev.get("metadata") if isinstance(ev.get("metadata"), dict) else {}
+        parts.append(str(meta.get("rule_name") or ""))
+    t = _find_runner_task(tid)
+    if isinstance(t, dict):
+        parts.append(str(t.get("strategy_name") or t.get("name") or ""))
+        meta = t.get("metadata") if isinstance(t.get("metadata"), dict) else {}
+        parts.append(str(meta.get("rule_name") or ""))
+    return " ".join(parts)
+
+
+def _want_market_clear_sell(ev, ev_type: str, tid: str) -> bool:
+    """仅涨停即清仓(single_sell_hit)与定时清仓走市价；开板突破卖保持限价。"""
+    if ev_type not in ("single_sell_hit", "scheduled_clear_hit"):
+        return False
+    if "开板突破卖" in _task_or_event_names(ev, tid):
+        return False
+    if isinstance(ev, dict) and _flag_true(ev.get("use_market_order")):
+        return True
+    t = _find_runner_task(tid)
+    return bool(isinstance(t, dict) and _flag_true(t.get("use_market_order")))
+
+
+def _tick_bid1(tick_row) -> float:
+    if not isinstance(tick_row, dict):
+        return 0.0
+    raw = tick_row.get("bidPrice")
+    try:
+        if isinstance(raw, (list, tuple)) and raw:
+            v = float(raw[0])
+            return v if v > 0 else 0.0
+        if raw is not None:
+            v = float(raw)
+            return v if v > 0 else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0
+
+
+def _market_sell_risk_block(code: str, last_px: float, tick_row) -> bool:
+    """对齐交易系统 risk_control「中止市价卖出」：买一低于最新价 90% 则不下市价单。"""
+    bid = _tick_bid1(tick_row)
+    try:
+        last = float(last_px or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    if bid <= 0 or last <= 0:
+        return False
+    return bid < last * 0.90
+
+
 def _find_runner_task(tid: str):
     if not tid or _RUNNER is None:
         return None
@@ -2510,28 +2574,6 @@ def _handle_order_events(ContextInfo, events, datas, quote_gate: bool = False) -
                     if _lp > 0:
                         last_px = _lp
                         break
-            sell_px = po.resolve_sell_limit_price(
-                code,
-                last_price=last_px,
-                trigger_price=trig,
-                tick_row=tick_dict,
-                allow_last_price_fallback=True,
-            )
-            if quote_gate and float(sell_px or 0) <= 0:
-                _unlock_order_task(code, tid, gi_raw, ev_type)
-                _quote_gate_log(
-                    "nobook:%s" % code,
-                    "[交易核心] stale_quote_block %s 无可用卖出价 → 跳过等下一拍" % code,
-                    every_sec=5.0,
-                )
-                ev["order"] = {
-                    "ok": False,
-                    "price": float(last_px or 0),
-                    "volume": int(vol or 0),
-                    "status": "stale_quote_block",
-                    "msg": "stale_quote_no_book",
-                }
-                continue
             if ev_type == "best_sell_hit":
                 strategy_name = "蚂蚁-弹性卖出"
                 side_tag = "弹性卖"
@@ -2550,14 +2592,87 @@ def _handle_order_events(ContextInfo, events, datas, quote_gate: bool = False) -
             else:
                 strategy_name = "蚂蚁-单点卖出"
                 side_tag = "单点卖"
-            ok, reason, record = po.place_limit_sell(
-                ContextInfo,
-                code,
-                sell_px,
-                vol,
-                strategy_name=strategy_name,
-                user_order_id=uid,
-            )
+            use_mkt = _want_market_clear_sell(ev, ev_type, tid)
+            if use_mkt:
+                if quote_gate and _tick_bid1(tick_dict) <= 0:
+                    _unlock_order_task(code, tid, gi_raw, ev_type)
+                    _quote_gate_log(
+                        "nobook:%s" % code,
+                        "[交易核心] stale_quote_block %s 无买一，市价卖出等待下一拍" % code,
+                        every_sec=5.0,
+                    )
+                    ev["order"] = {
+                        "ok": False,
+                        "price": float(last_px or 0),
+                        "volume": int(vol or 0),
+                        "status": "stale_quote_block",
+                        "msg": "stale_quote_no_book",
+                    }
+                    continue
+                if _market_sell_risk_block(code, last_px, tick_dict):
+                    bid = _tick_bid1(tick_dict)
+                    _unlock_order_task(code, tid, gi_raw, ev_type)
+                    print(
+                        "[交易核心] 中止市价卖出 %s 买1=%s 最新=%s 阈值=0.90"
+                        % (code, bid, last_px)
+                    )
+                    ev["order"] = {
+                        "ok": False,
+                        "price": float(last_px or 0),
+                        "volume": int(vol or 0),
+                        "status": "risk_block",
+                        "msg": "中止市价卖出",
+                    }
+                    continue
+                if not hasattr(po, "place_market_sell"):
+                    print("[交易核心] 缺少 place_market_sell，拒绝用限价冒充市价 %s" % code)
+                    ev["order"] = {
+                        "ok": False,
+                        "price": float(last_px or 0),
+                        "volume": int(vol or 0),
+                        "status": "error",
+                        "msg": "place_market_sell_missing",
+                    }
+                    continue
+                ok, reason, record = po.place_market_sell(
+                    ContextInfo,
+                    code,
+                    vol,
+                    strategy_name=strategy_name,
+                    user_order_id=uid,
+                    ref_price=float(last_px or trig or 0),
+                )
+            else:
+                sell_px = po.resolve_sell_limit_price(
+                    code,
+                    last_price=last_px,
+                    trigger_price=trig,
+                    tick_row=tick_dict,
+                    allow_last_price_fallback=True,
+                )
+                if quote_gate and float(sell_px or 0) <= 0:
+                    _unlock_order_task(code, tid, gi_raw, ev_type)
+                    _quote_gate_log(
+                        "nobook:%s" % code,
+                        "[交易核心] stale_quote_block %s 无可用卖出价 → 跳过等下一拍" % code,
+                        every_sec=5.0,
+                    )
+                    ev["order"] = {
+                        "ok": False,
+                        "price": float(last_px or 0),
+                        "volume": int(vol or 0),
+                        "status": "stale_quote_block",
+                        "msg": "stale_quote_no_book",
+                    }
+                    continue
+                ok, reason, record = po.place_limit_sell(
+                    ContextInfo,
+                    code,
+                    sell_px,
+                    vol,
+                    strategy_name=strategy_name,
+                    user_order_id=uid,
+                )
         elif ev_type == "tb_pass":
             buy_px = po.resolve_buy_limit_price(
                 code,

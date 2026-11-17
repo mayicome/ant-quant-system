@@ -60,8 +60,18 @@ def check_daily_cache(asof: date) -> CheckResult:
     status = str(m.get("status") or "").strip().lower()
     sync = str(m.get("sync_trade_date") or "").strip().replace("-", "")[:8]
     want = asof.strftime("%Y%m%d")
-    ok = status == "completed" and sync == want
-    return ok, f"status={status} sync={sync or '-'} 期望={want}"
+    if not (status == "completed" and sync == want):
+        return False, f"status={status} sync={sync or '-'} 期望={want}"
+    # manifest 完成后仍可能有分片空洞（有上一日无目标日）
+    try:
+        from utils.daily_cache_day_verify import coverage_ok_for_check
+
+        cov_ok, cov_det = coverage_ok_for_check(asof)
+    except Exception as e:
+        return False, f"manifest 已完成但覆盖扫描异常: {e}"
+    if not cov_ok:
+        return False, f"manifest 已完成但目标日有空洞: {cov_det}"
+    return True, f"status=completed sync={want} {cov_det}"
 
 
 def check_limit_up(asof: date) -> CheckResult:

@@ -7753,13 +7753,40 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 return c
         return ""
 
+    def _mz1_rise_percent_from_strategy_code(self, m, cfg=None) -> float:
+        """反弹百分比以策略代码前部 RISE_PERCENT 为准（不读参数表/JSON params）。"""
+        code = ""
+        if cfg is not None:
+            code = str(getattr(cfg, "strategy_code", "") or "")
+            sid = str(getattr(cfg, "id", "") or "").strip()
+            try:
+                if sid and self._get_selected_strategy_id() == sid and hasattr(self, "logic_code_edit"):
+                    edit = (self.logic_code_edit.toPlainText() or "").strip()
+                    if edit:
+                        code = edit
+            except Exception:
+                pass
+        if not str(code or "").strip():
+            try:
+                code = m.load_mz1_strategy_code() or ""
+            except Exception:
+                code = ""
+        try:
+            return float(m.parse_rise_percent_from_strategy_code(code, 0.0))
+        except Exception:
+            return 0.0
+
     def _on_generate_mz1_qmt_fine_script(self):
         """生成马总逻辑1 QMT 模型交易细回测脚本（3b）。"""
         m = self._mz1_qmt_fine_mod()
         sid = (self._get_selected_strategy_id() or "").strip()
         cfg = self._find_strategy_by_id(sid) if sid else None
         name = (getattr(cfg, "name", "") or "") if cfg else ""
-        if not m.is_mz1_buy_strategy(sid, name):
+        is_mz1_single = bool(
+            getattr(m, "is_mz1_single_buy_strategy", lambda *_: False)(sid, name)
+        )
+        is_mz1_elastic = bool(m.is_mz1_buy_strategy(sid, name))
+        if not is_mz1_elastic and not is_mz1_single:
             reply = QMessageBox.question(
                 self,
                 "生成QMT细回测脚本",
@@ -7824,7 +7851,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         sp_disk = m.load_mz1_strategy_params()
         amount = float(sp_disk.get("buy_amount_per_stock") or 50000)
         min_order = float(sp_disk.get("min_order_amount") or 5000)
-        rise = float(sp_disk.get("rise_percent") or 0)
+        # 单点无 RISE_PERCENT，不得回落到弹性策略代码而当成 0% 反弹
+        rise = 0.0
+        if not is_mz1_single:
+            rise = self._mz1_rise_percent_from_strategy_code(m, cfg)
         if cfg is not None:
             sp = self._merge_strategy_params_from_form(cfg.strategy_params or {})
             try:
@@ -7833,10 +7863,6 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 pass
             try:
                 min_order = float(sp.get("min_order_amount") or min_order)
-            except Exception:
-                pass
-            try:
-                rise = float(sp.get("rise_percent") or rise)
             except Exception:
                 pass
         sel_days = []
@@ -7859,6 +7885,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         else:
             cr = m.clamp_range(start_d, end_d)
         try:
+            _mz1_fill_mode = "single_buy" if is_mz1_single else "best_buy"
             src = m.build_qmt_strategy_source(
                 codes=codes,
                 selection_date_by_code=sel_map,
@@ -7868,6 +7895,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 buy_amount_per_stock=amount,
                 min_order_amount=min_order,
                 rise_percent=rise,
+                fill_mode=_mz1_fill_mode,
                 from_t1=from_t1,
                 strategy_generation_time=self._backtest_page_time_params()["strategy_generation_time"],
                 strategy_run_start_time=self._backtest_page_time_params()["strategy_run_start_time"],
@@ -8383,6 +8411,15 @@ class StrategyGeneratorMainWindow(QMainWindow):
             result_lines.append("样例：")
             result_lines.extend(sample)
         try:
+            self._last_surge_daily_hold_n = int(summary.get("hold_ui_days") or hold_n or 0)
+            self._last_surge_daily_sell_csv = os.path.normpath(os.path.abspath(out)) if out else ""
+        except Exception:
+            try:
+                self._last_surge_daily_hold_n = int(hold_n or 0) if hold_n else None
+            except Exception:
+                self._last_surge_daily_hold_n = None
+            self._last_surge_daily_sell_csv = ""
+        try:
             self.backtest_result_text.setPlainText("\n".join(result_lines))
         except Exception:
             pass
@@ -8879,16 +8916,22 @@ class StrategyGeneratorMainWindow(QMainWindow):
             from backtest.preflight import backtest_preflight_hint_lines  # type: ignore
         lines = list(backtest_preflight_hint_lines() or [])
         try:
-            from strategy_generator_app.backtest.mz1_qmt_fine import is_mz1_buy_strategy
+            from strategy_generator_app.backtest.mz1_qmt_fine import is_mz1_qmt_buy_strategy as _is_mz1_qmt
         except ImportError:
             try:
-                from backtest.mz1_qmt_fine import is_mz1_buy_strategy  # type: ignore
+                from backtest.mz1_qmt_fine import is_mz1_qmt_buy_strategy as _is_mz1_qmt  # type: ignore
             except ImportError:
-                is_mz1_buy_strategy = None  # type: ignore
+                try:
+                    from strategy_generator_app.backtest.mz1_qmt_fine import is_mz1_buy_strategy as _is_mz1_qmt
+                except ImportError:
+                    try:
+                        from backtest.mz1_qmt_fine import is_mz1_buy_strategy as _is_mz1_qmt  # type: ignore
+                    except ImportError:
+                        _is_mz1_qmt = None  # type: ignore
         sid = (self._get_selected_strategy_id() or "").strip()
         cfg = self._find_strategy_by_id(sid) if sid else None
         name = (getattr(cfg, "name", "") or "") if cfg else ""
-        mz1 = bool(is_mz1_buy_strategy and is_mz1_buy_strategy(sid, name))
+        mz1 = bool(_is_mz1_qmt and _is_mz1_qmt(sid, name))
         if mz1:
             lines.append(
                 "【马总逻辑1 · QMT细回测】券商 tick 约近1个月：首次在模型交易加载并启动「探针」，"
@@ -8899,16 +8942,19 @@ class StrategyGeneratorMainWindow(QMainWindow):
             from strategy_generator_app.backtest.mz1_qmt_sell_fine import (
                 is_intraday_next_day_sell_strategy as _is_ind_sell,
                 is_intraday_surge_sell_strategy as _is_surge_sell,
+                is_mz1_sell_strategy as _is_mz1_sell,
             )
         except ImportError:
             try:
                 from backtest.mz1_qmt_sell_fine import (  # type: ignore
                     is_intraday_next_day_sell_strategy as _is_ind_sell,
                     is_intraday_surge_sell_strategy as _is_surge_sell,
+                    is_mz1_sell_strategy as _is_mz1_sell,
                 )
             except ImportError:
                 _is_ind_sell = None  # type: ignore
                 _is_surge_sell = None  # type: ignore
+                _is_mz1_sell = None  # type: ignore
         if _is_surge_sell and _is_surge_sell(sid, name):
             lines.append(
                 "【盘中买入冲高卖出 · 日线回测】先「从买入成交明细CSV接续…」，持有交易日数默认2；同代码多笔买入各自开窗清仓；"
@@ -8920,6 +8966,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 "【盘中买入次日了结 · 卖出QMT细回测】先「从买入成交明细CSV接续…」，"
                 "持有交易日数默认1、定时清仓14:56；点「生成卖出QMT细回测…」投递同一 watch；"
                 "腿=最新价-1跳回撤弹性全仓 + 09:50封板分支 + 末日清仓（无开盘涨幅/近涨停半仓）。"
+            )
+        elif _is_mz1_sell and _is_mz1_sell(sid, name):
+            lines.append(
+                "【马总逻辑1卖 · 卖出QMT细回测】先「从买入成交明细CSV接续…」，确认持有交易日数与起止日后，"
+                "点「生成卖出QMT细回测…」（QMT 内 download tick 回放，不依赖本地 data/ticks）；"
+                "探针跑完再「导入卖出QMT结果」。「运行下一轮批量回测」仍走本机 tick，近几日常缺会无成交。"
             )
         if hasattr(self, "backtest_mode_hint_label"):
             self.backtest_mode_hint_label.setText("\n".join(lines))
@@ -9737,22 +9789,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         use_last = bool(
             getattr(self, "merge_last_avail_cb", None) and self.merge_last_avail_cb.isChecked()
         ) and (not use_nth)
-        # 接续卖出：汇总持有天数必须跟「下一轮接续→持有交易日数」一致，
-        # 否则改接续框、汇总框仍停在默认1，Excel「持有交易日数」会永远是1。
-        try:
-            if hasattr(self, "sell_chain_hold_spin"):
-                hold_from_next = int(self.sell_chain_hold_spin.value() or 2)
-                if getattr(self, "merge_hold_spin", None) is not None:
-                    try:
-                        if int(self.merge_hold_spin.value()) != hold_from_next:
-                            self.merge_hold_spin.setValue(hold_from_next)
-                    except Exception:
-                        pass
-            else:
-                hold_from_next = int(self.merge_hold_spin.value()) if getattr(self, "merge_hold_spin", None) else 2
-        except Exception:
-            hold_from_next = 2
-        hold_from_next = max(1, hold_from_next)
+        # 持有天数在导入汇总模块后解析：优先当次卖出明细/刚跑完的冲高日线回测 N，
+        # 不要在点击时用接续框当前值覆盖（先跑 3 天再改框跑 2 天，合并 3 天文件会误用 2）。
+        hold_from_next = 2
+        hold_n_source = "默认"
         if not buy_path or not os.path.isfile(buy_path):
             QMessageBox.warning(self, "提示", "请先选择有效的「买入明细」CSV。")
             return
@@ -9779,6 +9819,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 aggregate_with_hold_sell_filter,
                 build_position_corrected_ledger,
                 apply_hold_end_date_from_buy,
+                infer_hold_days_from_sell_csv,
                 _build_prices_by_mark_date,
                 apply_mark_and_returns,
                 apply_selection_file_fields,
@@ -9788,6 +9829,43 @@ class StrategyGeneratorMainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "无法运行", f"导入汇总模块失败：{e}")
             return
+
+        try:
+            if getattr(self, "merge_hold_spin", None) is not None:
+                hold_from_next = int(self.merge_hold_spin.value() or 2)
+                hold_n_source = "汇总持有交易日数"
+        except Exception:
+            hold_from_next = 2
+            hold_n_source = "默认"
+        inferred_n = None
+        try:
+            inferred_n = infer_hold_days_from_sell_csv(Path(sell_path))
+        except Exception:
+            inferred_n = None
+        if inferred_n:
+            hold_from_next = int(inferred_n)
+            hold_n_source = "卖出明细第N日收盘清仓"
+        else:
+            try:
+                last_csv = getattr(self, "_last_surge_daily_sell_csv", "") or ""
+                last_n = getattr(self, "_last_surge_daily_hold_n", None)
+                if (
+                    last_n
+                    and last_csv
+                    and os.path.normpath(os.path.abspath(sell_path))
+                    == os.path.normpath(os.path.abspath(last_csv))
+                ):
+                    hold_from_next = int(last_n)
+                    hold_n_source = "当次冲高日线回测"
+            except Exception:
+                pass
+        hold_from_next = max(1, int(hold_from_next or 2))
+        try:
+            if getattr(self, "merge_hold_spin", None) is not None:
+                if int(self.merge_hold_spin.value()) != hold_from_next:
+                    self.merge_hold_spin.setValue(hold_from_next)
+        except Exception:
+            pass
 
         try:
             rows, sell_filt_st = aggregate_with_hold_sell_filter(
@@ -9907,7 +9985,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 msg += "\n盯市：未清仓按日线最后可得收盘（排查模式）"
             else:
                 msg += (
-                    f"\n盯市：本次持有交易日数={hold_from_next}（买入次日起算）；"
+                    f"\n盯市：本次持有交易日数={hold_from_next}（买入次日起算，来源={hold_n_source}）；"
                     "未到期临时估值时「盯市日期」会是最近交易日，请看「计划持仓结束日」和「盯市类型」"
                 )
                 # 抽查：列出未清仓行的计划结束日，便于核对是否真用了10日
@@ -10139,10 +10217,18 @@ class StrategyGeneratorMainWindow(QMainWindow):
             except Exception:
                 entry_w = 10
 
+        sid_live = str(getattr(cfg, "id", "") or "").strip()
+        name_live = str(getattr(cfg, "name", "") or "")
+        is_mz1_single = bool(
+            getattr(m, "is_mz1_single_buy_strategy", lambda *_: False)(sid_live, name_live)
+        )
+        _mz1_fill_mode = "single_buy" if is_mz1_single else "best_buy"
         sp_disk = m.load_mz1_strategy_params()
         amount = float(sp_disk.get("buy_amount_per_stock") or 50000)
         min_order = float(sp_disk.get("min_order_amount") or 5000)
-        rise = float(sp_disk.get("rise_percent") or 0)
+        rise = 0.0
+        if _mz1_fill_mode == "best_buy":
+            rise = self._mz1_rise_percent_from_strategy_code(m, cfg)
         if cfg is not None:
             sp = self._merge_strategy_params_from_form(cfg.strategy_params or {})
             try:
@@ -10151,10 +10237,6 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 pass
             try:
                 min_order = float(sp.get("min_order_amount") or min_order)
-            except Exception:
-                pass
-            try:
-                rise = float(sp.get("rise_percent") or rise)
             except Exception:
                 pass
 
@@ -10356,6 +10438,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 buy_amount_per_stock=amount,
                 min_order_amount=min_order,
                 rise_percent=rise,
+                fill_mode=_mz1_fill_mode,
                 from_t1=from_t1,
                 daily_pools=daily_pools,
                 strategy_generation_time=_tparams["strategy_generation_time"],
@@ -10451,7 +10534,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         try:
             _mz1m = self._mz1_qmt_fine_mod()
             _mz1_name = (getattr(cfg, "name", "") or "")
-            _is_mz1_batch = bool(_mz1m.is_mz1_buy_strategy(sid, _mz1_name))
+            _is_fn = getattr(_mz1m, "is_mz1_qmt_buy_strategy", _mz1m.is_mz1_buy_strategy)
+            _is_mz1_batch = bool(_is_fn(sid, _mz1_name))
         except Exception:
             _is_mz1_batch = False
         if _is_mz1_batch:

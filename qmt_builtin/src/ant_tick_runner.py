@@ -850,6 +850,7 @@ class ShadowTickRunner:
                     continue
                 trigger = float(task.get("trigger_price") or 0)
                 vol = int(task.get("max_volume") or 0)
+                want_mkt = self._task_wants_market_clear(task)
                 if trigger <= 0 or vol <= 0:
                     continue
                 from datetime import datetime as _dt
@@ -887,6 +888,7 @@ class ShadowTickRunner:
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
+                            use_market_order=want_mkt,
                             detail="overdue elapsed=%ds" % int(elapsed),
                         )
                     )
@@ -903,6 +905,7 @@ class ShadowTickRunner:
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
+                            use_market_order=want_mkt,
                             detail="lp=%.4f < trig=%.4f" % (lp, trigger),
                         )
                     )
@@ -917,6 +920,7 @@ class ShadowTickRunner:
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
+                            use_market_order=want_mkt,
                             detail="price_not_met lp=%.4f >= trig=%.4f" % (lp, trigger),
                         )
                     )
@@ -1192,6 +1196,7 @@ class ShadowTickRunner:
             # 单点卖出：现价 >= 触发价（与主程序图表一致）
             if rule_type == "single_sell":
                 vol = int(task.get("max_volume") or 0)
+                want_mkt = self._task_wants_market_clear(task)
                 early_ev, skip_hit = self._early_eval(
                     code=code,
                     tid=tid,
@@ -1220,6 +1225,7 @@ class ShadowTickRunner:
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
+                            use_market_order=want_mkt,
                         )
                     )
                     if tid:
@@ -1783,6 +1789,7 @@ class ShadowTickRunner:
         max_volume: int = 0,
         executed_endpoint: str = "",
         grid_index: Optional[int] = None,
+        use_market_order: bool = False,
     ) -> Dict[str, Any]:
         ev: Dict[str, Any] = {
             "stock_code": code,
@@ -1819,4 +1826,22 @@ class ShadowTickRunner:
                     "ratio_cond3",
                 )
             }
+        if use_market_order:
+            ev["use_market_order"] = True
         return ev
+
+    @staticmethod
+    def _task_wants_market_clear(task: Any) -> bool:
+        """武装任务是否要求涨停即清仓/定时清仓走市价。开板突破卖除外。"""
+        if not isinstance(task, dict):
+            return False
+        if not task.get("use_market_order"):
+            return False
+        rtype = str(task.get("rule_type") or "")
+        if rtype not in ("single_sell", "scheduled_clear"):
+            return False
+        meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        names = "%s %s" % (task.get("strategy_name") or "", meta.get("rule_name") or "")
+        if "开板突破卖" in names:
+            return False
+        return True

@@ -45,6 +45,15 @@ def _parse_date(val: Any) -> Optional[date]:
             return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
         except Exception:
             return None
+    # Excel 另存 CSV 常见：2026/11/5、2026/11/05
+    if "/" in s:
+        parts = s.split("/")
+        if len(parts) >= 3:
+            try:
+                y, m, d = int(parts[0]), int(parts[1]), int(str(parts[2]).split()[0])
+                return date(y, m, d)
+            except (TypeError, ValueError):
+                return None
     return None
 
 
@@ -109,11 +118,26 @@ def load_buy_fills_from_trades_csv(path: str) -> Tuple[List[dict], str]:
         raise FileNotFoundError("找不到买入成交明细：%s" % path)
     fills: List[dict] = []
     skipped = 0
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            raise ValueError("CSV 无表头")
-        for raw in reader:
+    last_err: Optional[Exception] = None
+    raw_rows: Optional[List[dict]] = None
+    # 与 mz_logic2_intraday_buy_bt.load_candidate_rows 同一顺序：先程序导出的 utf-8-sig
+    for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "cp936"):
+        try:
+            with open(path, "r", encoding=enc, newline="") as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    raise ValueError("CSV 无表头")
+                raw_rows = [dict(r) for r in reader]
+            last_err = None
+            break
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    if raw_rows is None:
+        if last_err is not None:
+            raise last_err
+        raise ValueError("无法读取买入成交明细：%s" % path)
+    for raw in raw_rows:
             if not _is_buy_side(_row_get(raw, "方向", "side", "买卖", "买卖方向")):
                 skipped += 1
                 continue

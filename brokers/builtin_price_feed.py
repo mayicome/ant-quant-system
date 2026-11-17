@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -112,7 +113,7 @@ class BuiltinPricePoller(QObject):
                 self.logger.debug("[builtin_price] 策略日志读取失败: %s" % exc)
 
     def _note_formula_heartbeat(self) -> None:
-        """早盘见过心跳后再停 90 秒才报。午后：13:00 后未见心跳则从 13:00 起 30 秒报；已有墙钟心跳（含空 t）按 90 秒超时。"""
+        """早盘：有 09:15 之后的心跳按真实心跳做 90 秒超时；否则从 09:15 起算 90 秒。午后：13:00 后未见心跳则从 13:00 起 30 秒报；已有墙钟心跳（含空 t）按 90 秒超时。"""
         try:
             from utils.qmt_formula_result_log import (
                 current,
@@ -136,9 +137,14 @@ class BuiltinPricePoller(QObject):
 
         start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         hb = float(heartbeat_at() or 0)
-        if hb < start.timestamp():
+        if hb >= start.timestamp():
+            self._raise_heartbeat_stop(now, hb, heartbeat_subscribe, limit_sec=90.0)
             return
-        self._raise_heartbeat_stop(now, hb, heartbeat_subscribe, limit_sec=90.0)
+        # 开盘前心跳（如 08:52 重启未登录）先不报；
+        # 09:15 之后仍无新心跳，从 09:15 起算 90 秒超时。
+        self._raise_heartbeat_stop(
+            now, start.timestamp(), heartbeat_subscribe, limit_sec=90.0
+        )
 
     def _in_afternoon_push_watch(self, now: Optional[datetime] = None) -> bool:
         now = now or datetime.now()
@@ -242,6 +248,10 @@ class BuiltinPricePoller(QObject):
             if self.logger:
                 self.logger.debug("[大QMT健康] 策略心跳推送失败: %s" % exc)
 
+    @staticmethod
+    def _health_alert_signature(msg: str) -> str:
+        return re.sub(r"(停约|无心跳约|超过|持续约)\d+秒", r"\1N秒", str(msg or "").strip())
+
     def _set_health_alert(self, msg: str) -> None:
         """更新健康告警；变化时刷新状态栏，并节流打日志/音效/Server酱。"""
         msg = str(msg or "").strip()
@@ -266,7 +276,8 @@ class BuiltinPricePoller(QObject):
                     pass
             return
 
-        if msg != prev:
+        same_kind = self._health_alert_signature(msg) == self._health_alert_signature(prev)
+        if not same_kind:
             self._health_alert_since_ts = now
             # 告警出现刷状态栏
             try:
@@ -287,10 +298,31 @@ class BuiltinPricePoller(QObject):
                     pass
             return
 
+        # 同一类告警（可能只是「停约 N 秒」在变）：刷状态栏，计时不重置
+        if msg != prev:
+            try:
+                if self.main_window is not None and hasattr(self.main_window, "update_status_bar"):
+                    self.main_window.update_status_bar()
+            except Exception:
+                pass
+            if self.logger and now - float(self._health_last_log_ts or 0) >= 60.0:
+                self._health_last_log_ts = now
+                self.logger.warning(f"[大QMT健康] {msg}")
+            if now - float(self._health_last_sound_ts or 0) >= 120.0:
+                self._health_last_sound_ts = now
+                try:
+                    mw = self.main_window
+                    if mw is not None and getattr(mw, "sound_enabled", False) and hasattr(mw, "play_trade_sound"):
+                        mw.play_trade_sound()
+                except Exception:
+                    pass
+
         # 同一告警持续：满 sustain 秒再推微信（闪断不推）
         self._maybe_push_health_server_chan(msg, now)
 
     def _maybe_push_health_server_chan(self, msg: str, now: Optional[float] = None) -> None:
+        if self._hb_notified:
+            return
         now = float(now if now is not None else time.time())
         since = float(getattr(self, "_health_alert_since_ts", 0) or 0)
         need = float(getattr(self, "_health_sct_sustain_sec", 120) or 120)

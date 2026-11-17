@@ -8,24 +8,23 @@ from utils.logger import Logger
 
 
 class PositionBarWidget(QWidget):
-    """100% 灰色框固定宽度，框内从左对齐绘制绿(可用)/红(不可用)，各行总宽一致便于百分比对齐"""
+    """灰色框随列宽伸缩，框内从左对齐绘制绿(可用)/红(不可用)；有色长度按仓位比例。"""
     def __init__(self, can_use_volume=0, total_volume=0, total_ratio_pct=0, full_width=0, parent=None):
         super().__init__(parent)
         self.can_use = max(0, int(can_use_volume))
         self.total_vol = max(0, int(total_volume))
         self.total_ratio_pct = max(0.0, min(100.0, float(total_ratio_pct)))
-        self.full_width = max(0, int(full_width))  # 100% 灰色框宽度，每行统一
+        self.full_width = max(0, int(full_width))  # 仅兼容旧调用，实际按当前控件宽度绘制
         self.setMinimumHeight(20)
         self.setMinimumWidth(0)
-        self.setFixedWidth(self.full_width)
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-    def set_bar_data(self, can_use_volume, total_volume, total_ratio_pct, full_width):
+    def set_bar_data(self, can_use_volume, total_volume, total_ratio_pct, full_width=0):
         self.can_use = max(0, int(can_use_volume))
         self.total_vol = max(0, int(total_volume))
         self.total_ratio_pct = max(0.0, min(100.0, float(total_ratio_pct)))
-        self.full_width = max(0, int(full_width))
-        self.setFixedWidth(self.full_width)
+        self.full_width = max(0, int(full_width or 0))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.update()
 
     def paintEvent(self, event):
@@ -36,23 +35,24 @@ class PositionBarWidget(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, False)
-        # 先画满灰色框（100% 参考）
+        # 灰框铺满单元格，有色部分从左按仓位比例绘制
         painter.fillRect(QRect(0, 0, w, h), QColor('#e0e0e0'))
-        if self.total_vol <= 0:
-            painter.end()
-            return
-        # 框内从左开始：有色部分总长 = 总仓位% * 框宽，其中绿=可用/持仓、红=不可用/持仓
-        colored_w = int(w * self.total_ratio_pct / 100.0)
-        if colored_w <= 0:
-            painter.end()
-            return
-        frac = min(1.0, max(0.0, self.can_use / self.total_vol))
-        green_w = int(colored_w * frac)
-        red_w = colored_w - green_w
-        if green_w > 0:
-            painter.fillRect(QRect(0, 0, green_w, h), QColor('#4CAF50'))
-        if red_w > 0:
-            painter.fillRect(QRect(green_w, 0, red_w, h), QColor('#f44336'))
+        if self.total_vol > 0 and self.total_ratio_pct > 0:
+            colored_w = int(w * self.total_ratio_pct / 100.0)
+            if colored_w > 0:
+                frac = min(1.0, max(0.0, self.can_use / self.total_vol))
+                green_w = int(colored_w * frac)
+                red_w = colored_w - green_w
+                if green_w > 0:
+                    painter.fillRect(QRect(0, 0, green_w, h), QColor('#4CAF50'))
+                if red_w > 0:
+                    painter.fillRect(QRect(green_w, 0, red_w, h), QColor('#f44336'))
+        font = painter.font()
+        font.setFamily("Microsoft YaHei")
+        font.setPointSize(12)
+        painter.setFont(font)
+        painter.setPen(QColor("#333333"))
+        painter.drawText(QRect(0, 0, max(0, w - 6), h), Qt.AlignRight | Qt.AlignVCenter, "%d%%" % int(self.total_ratio_pct))
         painter.end()
 
 
@@ -118,6 +118,14 @@ class PositionManager:
         
         # 重写resizeEvent来确保市值列的最小宽度
         original_resize_event = table.resizeEvent
+        def _refresh_position_bars():
+            # 列宽变化后按当前单元格宽度重绘仓位比例
+            for row in range(table.rowCount()):
+                cell = table.cellWidget(row, 0)
+                if cell is not None:
+                    cell.updateGeometry()
+                    cell.update()
+
         def custom_resize_event(event):
             original_resize_event(event)
             # 在resize后检查市值列宽度，如果小于150则调整
@@ -128,8 +136,12 @@ class PositionManager:
                     header.setSectionResizeMode(table._market_value_col, header.Fixed)
                     table.setColumnWidth(table._market_value_col, table._market_value_min_width)
                     header.setSectionResizeMode(table._market_value_col, header.Stretch)
+            _refresh_position_bars()
         
         table.resizeEvent = custom_resize_event
+        if not getattr(table, "_position_bar_resize_hooked", False):
+            header.sectionResized.connect(lambda *args: _refresh_position_bars())
+            table._position_bar_resize_hooked = True
         
         # 禁用默认的最后一列拉伸（我们已经手动设置了）
         header.setStretchLastSection(False)
@@ -185,16 +197,38 @@ class PositionManager:
             # 设置表格行数
             table.setRowCount(len(positions_list))
             
-            # 100% 灰框宽度：在循环外只算一次，保证每行一致
-            col_w = max(50, table.columnWidth(0))
-            full_width = max(col_w, 200)
-            
             # 填充数据
             for row, stock_data in enumerate(positions_list):
-                # 计算总仓位、可用仓位比例（占账户总资产%），避免除以0
-                if asset and asset.get('total_asset', 0) > 0:
-                    total_ratio = stock_data['volume'] * stock_data['open_price'] / asset['total_asset'] * 100
-                    available_ratio = stock_data['can_use_volume'] * stock_data['open_price'] / asset['total_asset'] * 100
+                # 仓位比例：持仓市值 / 账户总资产（QMT market_value = 数量×最新价），避免除以0
+                total_asset = 0.0
+                if asset:
+                    try:
+                        total_asset = float(asset.get("total_asset") or 0)
+                    except (TypeError, ValueError):
+                        total_asset = 0.0
+                try:
+                    market_value = float(stock_data.get("market_value") or 0)
+                except (TypeError, ValueError):
+                    market_value = 0.0
+                vol_for_ratio = int(stock_data.get("volume", 0) or 0)
+                can_use_for_ratio = int(stock_data.get("can_use_volume", 0) or 0)
+                if market_value <= 0 and vol_for_ratio > 0:
+                    px = 0.0
+                    for _k in ("last_price", "lastPrice", "price"):
+                        try:
+                            px = float(stock_data.get(_k) or 0)
+                        except (TypeError, ValueError):
+                            px = 0.0
+                        if px > 0:
+                            market_value = vol_for_ratio * px
+                            break
+                if total_asset > 0 and market_value > 0:
+                    total_ratio = market_value / total_asset * 100
+                    available_ratio = (
+                        market_value * (can_use_for_ratio / vol_for_ratio) / total_asset * 100
+                        if vol_for_ratio > 0
+                        else 0.0
+                    )
                     total_ratio_int = int(total_ratio)
                     available_ratio_int = int(available_ratio)
                 else:
@@ -203,35 +237,16 @@ class PositionManager:
                     total_ratio_int = 0
                     available_ratio_int = 0
                 
-                # 仓位条：统一宽度的 100% 灰框（full_width 在循环外已统一），框内左对齐画绿/红
+                # 仓位条：灰框铺满本列，百分比画在框内
                 vol = int(stock_data.get('volume', 0) or 0)
                 can_use = int(stock_data.get('can_use_volume', 0) or 0)
                 bar_widget = PositionBarWidget(
                     can_use_volume=can_use,
                     total_volume=vol if vol > 0 else 1,
                     total_ratio_pct=total_ratio,
-                    full_width=full_width
                 )
-                bar_widget.setStyleSheet("border: 1px solid #ccc; border-radius: 3px;")
-                bar_container = QWidget()
-                bar_container.setFixedWidth(full_width + 10)  # 固定宽度，避免因右侧百分比字数不同被压缩成不同宽
-                bar_layout = QHBoxLayout(bar_container)
-                bar_layout.setContentsMargins(5, 0, 5, 0)
-                bar_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                bar_layout.addWidget(bar_widget)
-
-                percent_label = QLabel(f"{total_ratio_int}%")
-                percent_label.setStyleSheet("font-size: 12pt;")
-                position_container = QWidget()
-                position_layout = QHBoxLayout(position_container)
-                position_layout.setContentsMargins(0, 0, 5, 0)
-                position_layout.setSpacing(8)
-                position_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                position_layout.addWidget(bar_container)
-                position_layout.addWidget(percent_label)
-                
-                # 设置仓位条到表格
-                table.setCellWidget(row, 0, position_container)
+                bar_widget.setStyleSheet("border: 1px solid #ccc;")
+                table.setCellWidget(row, 0, bar_widget)
                 
                 # 填充其他数据
                 # 去掉股票代码后缀，只显示6位数字

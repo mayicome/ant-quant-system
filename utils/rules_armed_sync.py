@@ -106,6 +106,18 @@ def _armed_buy_extras(rule: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _armed_market_clear_flag(rule: Dict[str, Any]) -> Dict[str, Any]:
+    """只把市价清仓开关带到 single_sell / scheduled_clear 武装任务。"""
+    if not isinstance(rule, dict):
+        return {}
+    if not rule.get("use_market_order"):
+        return {}
+    rname = str(rule.get("name") or "")
+    if "开板突破卖" in rname:
+        return {}
+    return {"use_market_order": True}
+
+
 def _rule_early_order_enabled(rule: dict, global_default: bool) -> bool:
     """规则级提前下单快照；缺字段时用全局默认（兼容旧规则）。"""
     if isinstance(rule, dict) and "early_order_enabled" in rule:
@@ -314,24 +326,22 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                         )
                     except Exception:
                         eff = datetime.now().strftime("%Y-%m-%d")
-                armed.append(
-                    normalize_armed_task(
-                        {
-                            "task_id": f"{task_id}:{rule_id}",
-                            "stock_code": stock_code,
-                            "rule_type": "scheduled_clear",
-                            "strategy_name": str(
-                                task.get("strategy") or "定时清仓"
-                            ),
-                            "trigger_price": trigger,
-                            "scheduled_clear_time": time_str,
-                            "scheduled_clear_effective_date": eff,
-                            "enabled": True,
-                            "max_volume": volume,
-                            "metadata": _rule_meta(task_id, rule),
-                        }
-                    )
-                )
+                sc_row = {
+                    "task_id": f"{task_id}:{rule_id}",
+                    "stock_code": stock_code,
+                    "rule_type": "scheduled_clear",
+                    "strategy_name": str(
+                        task.get("strategy") or "定时清仓"
+                    ),
+                    "trigger_price": trigger,
+                    "scheduled_clear_time": time_str,
+                    "scheduled_clear_effective_date": eff,
+                    "enabled": True,
+                    "max_volume": volume,
+                    "metadata": _rule_meta(task_id, rule),
+                }
+                sc_row.update(_armed_market_clear_flag(rule))
+                armed.append(normalize_armed_task(sc_row))
                 continue
             if rule_type in ("grid_buy", "grid_sell"):
                 start_price = float(rule.get("start_price") or 0)
@@ -463,23 +473,21 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                 eo = _rule_early_order_enabled(rule, early_default)
                 if "early_order_enabled" not in rule:
                     rule["early_order_enabled"] = eo
-                armed.append(
-                    normalize_armed_task(
-                        {
-                            "task_id": f"{task_id}:{rule_id}",
-                            "stock_code": stock_code,
-                            "rule_type": "single_sell",
-                            "strategy_name": strategy_name,
-                            "trigger_price": trigger,
-                            "require_break_below": False,
-                            "break_below_trigger_done": False,
-                            "enabled": not _rule_executed(rule),
-                            "max_volume": volume,
-                            "early_order_enabled": eo,
-                            "metadata": _rule_meta(task_id, rule),
-                        }
-                    )
-                )
+                ss_row = {
+                    "task_id": f"{task_id}:{rule_id}",
+                    "stock_code": stock_code,
+                    "rule_type": "single_sell",
+                    "strategy_name": strategy_name,
+                    "trigger_price": trigger,
+                    "require_break_below": False,
+                    "break_below_trigger_done": False,
+                    "enabled": not _rule_executed(rule),
+                    "max_volume": volume,
+                    "early_order_enabled": eo,
+                    "metadata": _rule_meta(task_id, rule),
+                }
+                ss_row.update(_armed_market_clear_flag(rule))
+                armed.append(normalize_armed_task(ss_row))
                 continue
             if rule_type == "best_sell":
                 best_sell_row = {

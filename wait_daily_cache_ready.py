@@ -84,7 +84,21 @@ def main() -> int:
         now = datetime.now().strftime("%H:%M:%S")
         print(f"[{now}] #{attempt} 已等 {elapsed}s | {detail}")
         if ok:
-            print("[就绪] daily_cache 今日同步已完成，可以开始选股。")
+            print("[就绪] daily_cache 今日同步已完成；开始目标日空洞检验/补齐…")
+            try:
+                from utils.daily_cache_day_verify import verify_and_repair_trade_day
+
+                cov_ok, cov_det, _rep, _repair = verify_and_repair_trade_day(
+                    today, repair=True, notify=True
+                )
+                print(f"[日线检验] {cov_det}")
+                if not cov_ok:
+                    print("[失败] 日线目标日仍有硬缺口，中止后续。")
+                    return 1
+            except Exception as e:
+                print(f"[失败] 日线检验/补齐异常: {e}")
+                return 1
+            print("[就绪] 日线覆盖合格，可以开始选股。")
             return 0
         if elapsed >= timeout:
             print(

@@ -170,6 +170,8 @@ def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
         out["fill_at_limit_up"] = bool(raw.get("fill_at_limit_up"))
     if "open_buy_ask" in raw:
         out["open_buy_ask"] = bool(raw.get("open_buy_ask"))
+    if raw.get("use_market_order"):
+        out["use_market_order"] = True
     if raw.get("cash_wait_active"):
         out["cash_wait_active"] = True
         try:

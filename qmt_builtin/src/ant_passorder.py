@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""大 QMT 内置 passorder 封装（股票/ETF 限价买入/卖出）。"""
+"""大 QMT 内置 passorder 封装（股票/ETF 限价买入/卖出，以及清仓用的市价卖出）。"""
 import math
 import os
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-PASSORDER_VERSION = "20261103.1"
+PASSORDER_VERSION = "20261117.1"
 _SIBLING_MODS = {}
 
 
@@ -52,6 +52,9 @@ OP_STOCK_BUY = 23
 OP_STOCK_SELL = 24
 ORDER_TYPE_SHARES = 1101  # 单股单账号按股数
 PR_LIMIT = 11  # 指定价
+# A 股市价申报类型（与 xtconstant / passorder prType 编号一致，不是限价 11）
+PR_SH_CONVERT_5_LIMIT = 43  # 沪市/北交所：最优五档即时成交剩转限价
+PR_SZ_CONVERT_5_CANCEL = 47  # 深市：最优五档即时成交剩余撤销
 
 
 _CANCEL = None
@@ -162,6 +165,47 @@ def _bid1(tick_row: Optional[Dict[str, Any]]) -> float:
     except (TypeError, ValueError):
         return 0.0
     return 0.0
+
+
+def _exchange_of(stock_code: str) -> str:
+    """根据代码后缀或数字前缀判断交易所：SH / SZ / BJ。"""
+    c = str(stock_code or "").strip().upper()
+    if "." in c:
+        suf = c.rsplit(".", 1)[-1]
+        if suf in ("SH", "SZ", "BJ"):
+            return suf
+        c = c.split(".", 1)[0]
+    digits = "".join(ch for ch in c if ch.isdigit())[:6]
+    if digits.startswith(("6", "5", "9")):
+        return "SH"
+    if digits.startswith(("8", "4")):
+        return "BJ"
+    return "SZ"
+
+
+def resolve_market_sell_pr_type(stock_code: str) -> int:
+    """清仓市价卖出的交易所申报类型。
+
+    沪市/北交所：43 最优五档即时成交剩转限价（剩余转为限价，避免残量悄无声息消失）。
+    深市无五档剩转限价：47 最优五档即时成交剩余撤销。
+    不是限价 11，也不是用跌停价伪装的市价。
+    """
+    if _exchange_of(stock_code) == "SZ":
+        return PR_SZ_CONVERT_5_CANCEL
+    return PR_SH_CONVERT_5_LIMIT
+
+
+def market_pr_type_name(pr_type: int) -> str:
+    mapping = {
+        PR_SH_CONVERT_5_LIMIT: "最优五档即时成交剩转限价",
+        PR_SZ_CONVERT_5_CANCEL: "最优五档即时成交剩余撤销",
+        PR_LIMIT: "指定价",
+    }
+    try:
+        pt = int(pr_type)
+    except (TypeError, ValueError):
+        return "未知"
+    return mapping.get(pt, "prType=%s" % pt)
 
 
 def resolve_buy_limit_price(
@@ -393,6 +437,98 @@ def place_limit_sell(
     except Exception as e:
         record["msg"] = "%s: %s" % (type(e).__name__, e)
         print("[下单] 卖出失败 %s: %s" % (code, record["msg"]))
+        return False, record["msg"], record
+
+def place_market_sell(
+    ContextInfo,
+    stock_code: str,
+    volume: int,
+    *,
+    strategy_name: str = "蚂蚁-市价卖出",
+    user_order_id: str = "",
+    quick_trade: int = 1,
+    ref_price: float = 0.0,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    交易所市价卖出。返回 (ok, reason, record)。
+    ok=True 表示已调用 passorder（不代表一定成交）。
+    价格参数传 0（市价申报由交易所按盘口成交）；ref_price 仅写入记录便于对照。
+    """
+    code = str(stock_code or "").strip().upper()
+    vol = _norm_volume(int(volume or 0))
+    pr_type = resolve_market_sell_pr_type(code)
+    try:
+        ref_px = float(ref_price or 0)
+    except (TypeError, ValueError):
+        ref_px = 0.0
+    record: Dict[str, Any] = {
+        "side": "sell",
+        "stock_code": code,
+        "price": 0.0,
+        "ref_price": ref_px,
+        "volume": vol,
+        "pr_type": int(pr_type),
+        "pr_type_name": market_pr_type_name(pr_type),
+        "order_price_type": "market",
+        "strategy_name": str(strategy_name or "蚂蚁-市价卖出"),
+        "user_order_id": str(user_order_id or ""),
+        "at": _now_iso(),
+        "status": "error",
+        "msg": "",
+    }
+    if not code or vol <= 0:
+        record["msg"] = "bad_params"
+        return False, record["msg"], record
+    if int(pr_type) == int(PR_LIMIT):
+        record["msg"] = "refused_limit_prtype"
+        return False, record["msg"], record
+    if ContextInfo is None:
+        record["msg"] = "no_context"
+        return False, record["msg"], record
+    fn = _PASSORDER
+    if not callable(fn):
+        try:
+            import builtins
+
+            fn = getattr(builtins, "passorder", None)
+        except Exception:
+            fn = None
+    if not callable(fn):
+        record["msg"] = "passorder_unbound"
+        return False, record["msg"], record
+    aid = _resolve_account_id(ContextInfo)
+    if not aid:
+        record["msg"] = "no_account_id"
+        return False, record["msg"], record
+    record["account_id"] = aid
+    raw_uid = str(user_order_id or "")
+    pass_uid = raw_uid[-32:] if len(raw_uid) > 32 else raw_uid
+    record["user_order_id"] = raw_uid
+    record["pass_uid"] = pass_uid
+    try:
+        fn(
+            OP_STOCK_SELL,
+            ORDER_TYPE_SHARES,
+            aid,
+            code,
+            int(pr_type),
+            0.0,
+            int(vol),
+            str(strategy_name or "蚂蚁-市价卖出"),
+            int(quick_trade),
+            pass_uid,
+            ContextInfo,
+        )
+        record["status"] = "submitted"
+        record["msg"] = "passorder_called"
+        print(
+            "[下单] 市价卖出 %s prType=%s(%s) vol=%s account=%s uid=%s"
+            % (code, pr_type, market_pr_type_name(pr_type), vol, aid, user_order_id)
+        )
+        return True, "ok", record
+    except Exception as e:
+        record["msg"] = "%s: %s" % (type(e).__name__, e)
+        print("[下单] 市价卖出失败 %s: %s" % (code, record["msg"]))
         return False, record["msg"], record
 
 

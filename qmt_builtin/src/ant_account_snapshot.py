@@ -4,11 +4,12 @@ import os
 import time
 from datetime import datetime, timedelta, date, time as dt_time
 
-ACCOUNT_SNAPSHOT_VERSION = "20261017.2"
+ACCOUNT_SNAPSHOT_VERSION = "20261116.1"
 
 _CACHED_ACCOUNT = None
 _CACHED_POSITIONS = {}
 _CACHED_ORDERS = {}  # order_sysid -> parsed
+_APPLIED_DEAL_KEYS = set()  # 已计入成交：id|成交号 或 fp|合同号|时间|价|量
 _BOUND_ACCOUNT_ID = ""
 _DIAG_DONE = False
 
@@ -141,6 +142,16 @@ _KNOWN_DETAIL_ATTRS = (
     "m_nInsertDate",
     "m_strTradeTime",
     "m_nTradeTime",
+    "m_strTradeID",
+    "m_nTradeID",
+    "m_strDealID",
+    "m_nDealID",
+    "m_strExecID",
+    "m_strTradeKey",
+    "trade_id",
+    "deal_id",
+    "TradeID",
+    "DealID",
     "m_nOffsetFlag",
     "m_nDirection",
     "m_strOptName",
@@ -243,6 +254,15 @@ def _object_row(item):
         ("m_nInsertTime", "order_time"),
         ("m_strTradeTime", "order_time"),
         ("m_nTradeTime", "order_time"),
+        ("m_strTradeID", "deal_id"),
+        ("m_nTradeID", "deal_id"),
+        ("m_strDealID", "deal_id"),
+        ("m_nDealID", "deal_id"),
+        ("m_strExecID", "deal_id"),
+        ("m_strTradeKey", "deal_id"),
+        ("TradeID", "deal_id"),
+        ("DealID", "deal_id"),
+        ("trade_id", "deal_id"),
         ("m_strInsertDate", "order_date"),
         ("m_strOrderDate", "order_date"),
         ("m_nOrderDate", "order_date"),
@@ -1031,14 +1051,90 @@ def _is_session_order_rec(rec):
 
 def _prune_cached_orders():
     """清理内存中跨日委托缓存。"""
-    global _CACHED_ORDERS
+    global _CACHED_ORDERS, _APPLIED_DEAL_KEYS
     if not _CACHED_ORDERS:
         return
     keep = {}
     for sid, rec in list((_CACHED_ORDERS or {}).items()):
         if _is_session_order_rec(rec):
             keep[sid] = rec
+    if len(keep) != len(_CACHED_ORDERS):
+        _APPLIED_DEAL_KEYS = set()
     _CACHED_ORDERS = keep
+
+
+
+def _qty_int(val):
+    try:
+        n = int(float(val or 0))
+    except (TypeError, ValueError):
+        return 0
+    return n
+
+
+def _cap_traded_to_order_volume(row):
+    """已成或成交量超过委托量时，把 traded_volume 限制在 volume 内，纠正吹大的缓存。"""
+    if not isinstance(row, dict):
+        return False
+    vol = _qty_int(row.get("volume") or row.get("order_volume"))
+    tv = _qty_int(row.get("traded_volume"))
+    if vol > 0 and tv > vol:
+        row["traded_volume"] = vol
+        return True
+    return False
+
+
+_DEAL_ID_KEYS = (
+    "deal_id",
+    "trade_id",
+    "m_strTradeID",
+    "m_strDealID",
+    "m_strExecID",
+    "m_strTradeKey",
+    "m_nTradeID",
+    "m_nDealID",
+    "TradeID",
+    "DealID",
+    "tradeID",
+)
+
+
+def _deal_id_text(row):
+    if not isinstance(row, dict):
+        return ""
+    for k in _DEAL_ID_KEYS:
+        if k not in row:
+            continue
+        s = str(row.get(k) or "").strip()
+        if s and s not in ("0", "0.0"):
+            return s
+    return ""
+
+
+def _deal_row_key(raw, parsed=None):
+    """唯一成交号，或 (合同号, 成交时间, 价, 量) 指纹。"""
+    did = _deal_id_text(raw) or _deal_id_text(parsed or {})
+    if did:
+        return "id|" + did
+    rec = parsed or raw or {}
+    if not isinstance(rec, dict):
+        rec = {}
+    sid = str(rec.get("order_sysid") or "").strip()
+    t = str(
+        rec.get("order_time")
+        or rec.get("order_at")
+        or rec.get("m_strTradeTime")
+        or ""
+    ).strip()
+    try:
+        px = float(rec.get("traded_price") or rec.get("price") or rec.get("m_dPrice") or 0)
+    except (TypeError, ValueError):
+        px = 0.0
+    fill_src = rec.get("traded_volume")
+    if fill_src in (None, ""):
+        fill_src = rec.get("m_nVolume") or rec.get("volume")
+    fill = _qty_int(fill_src)
+    return "fp|%s|%s|%.4f|%s" % (sid, t, px, fill)
 
 
 def _prefer_richer_order(old, new):
@@ -1089,6 +1185,7 @@ def _prefer_richer_order(old, new):
     ot, nt = _pos_int(old.get("traded_volume")), _pos_int(new.get("traded_volume"))
     if ot or nt:
         out["traded_volume"] = max(ot, nt)
+    _cap_traded_to_order_volume(out)
 
     return out
 
@@ -1518,6 +1615,8 @@ def merge_broker_orders_into_results(results, broker_orders):
     if not isinstance(results, dict):
         return False
     broker_orders = [bo for bo in list(broker_orders or []) if _is_session_order_rec(bo)]
+    for bo in broker_orders:
+        _cap_traded_to_order_volume(bo)
     results["broker_orders"] = broker_orders
     local = results.get("orders")
     if not isinstance(local, list):
@@ -1573,6 +1672,8 @@ def merge_broker_orders_into_results(results, broker_orders):
                     if loc.get(k) != val:
                         loc[k] = val
                         changed = True
+                if _cap_traded_to_order_volume(loc):
+                    changed = True
                 st = int(bo.get("broker_status") or 255)
                 if st == 56:
                     internal = "filled"
@@ -1623,6 +1724,8 @@ def merge_broker_orders_into_results(results, broker_orders):
             if loc.get(k) != val:
                 loc[k] = val
                 changed = True
+        if _cap_traded_to_order_volume(loc):
+            changed = True
         # 柜台缺时间时用本地 passorder 记录时间回填，并写回 broker 行供 UI 展示
         # 注意：有柜台 order_time 时不要用本地旧 at 覆盖
         broker_ot = _normalize_order_time(bo.get("order_time") or "")
@@ -1662,8 +1765,13 @@ def merge_broker_orders_into_results(results, broker_orders):
 
 
 
-def apply_deals_to_results(results, deal_raw, account_id=""):
-    """Apply DEAL rows into broker_orders; do not let fill legs set order volume."""
+
+def apply_deals_to_results(results, deal_raw, account_id="", incremental=False):
+    """把成交明细写入 broker_orders，不让成交腿覆盖委托量。
+
+    全量 DEAL 查询按本批去重成交之和（或未吹大的柜台已成交量）覆盖，
+    不对已计入成交做 base+add。增量相加只用于带唯一成交号的新回调。
+    """
     if not isinstance(results, dict):
         return False
     deal_rows = _rows(deal_raw)
@@ -1671,14 +1779,21 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
         return False
     like_orders = []
     for row in deal_rows:
-        parsed = _parse_order_row(row, account_id)
-        tv = _pick(row, "traded_volume", "m_nVolume", "volume", default=parsed.get("traded_volume") or 0)
+        raw = row if isinstance(row, dict) else _object_row(row)
+        parsed = _parse_order_row(raw, account_id)
+        tv = _pick(
+            raw,
+            "traded_volume",
+            "m_nVolume",
+            "volume",
+            default=parsed.get("traded_volume") or 0,
+        )
         try:
             parsed["traded_volume"] = int(float(tv or 0))
         except (TypeError, ValueError):
             parsed["traded_volume"] = int(parsed.get("traded_volume") or 0)
         parsed.pop("volume", None)
-        tp = _pick(row, "traded_price", "m_dPrice", "m_dTradePrice", "price", default=0)
+        tp = _pick(raw, "traded_price", "m_dPrice", "m_dTradePrice", "price", default=0)
         try:
             parsed["traded_price"] = float(tp or 0)
             if not parsed.get("price"):
@@ -1687,9 +1802,9 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
             pass
         parsed["broker_status"] = 56
         parsed["broker_status_text"] = "已成"
+        parsed["_deal_key"] = _deal_row_key(raw, parsed)
         like_orders.append(parsed)
     existing = list(results.get("broker_orders") or [])
-    by_sys = {}
 
     def _bo_key(bo):
         sid = str(bo.get("order_sysid") or "").strip()
@@ -1698,6 +1813,7 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
         return "tmp|%s|%s|%s" % (bo.get("stock_code"), bo.get("price"), bo.get("volume"))
 
     existing_map = {}
+    by_sys = {}
     for bo in existing:
         if not isinstance(bo, dict):
             continue
@@ -1705,36 +1821,73 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
         existing_map[key] = dict(bo)
         by_sys[key] = dict(bo)
 
-    batch_tv = {}
+    unique_legs = []
+    seen_batch = set()
     for leg in like_orders:
         if not isinstance(leg, dict):
             continue
+        dk = str(leg.get("_deal_key") or "").strip() or _deal_row_key({}, leg)
+        leg["_deal_key"] = dk
+        if dk in seen_batch:
+            continue
+        seen_batch.add(dk)
+        unique_legs.append(leg)
         key = _bo_key(leg)
-        try:
-            fill = int(float(leg.get("traded_volume") or 0))
-        except (TypeError, ValueError):
-            fill = 0
-        if fill > 0:
-            batch_tv[key] = int(batch_tv.get(key) or 0) + fill
         by_sys[key] = _prefer_richer_order(by_sys.get(key), leg)
 
-    for key, add in batch_tv.items():
-        row = by_sys.get(key)
-        if not isinstance(row, dict):
-            continue
-        try:
-            base = int(float((existing_map.get(key) or {}).get("traded_volume") or 0))
-        except (TypeError, ValueError):
-            base = 0
-        if len(like_orders) <= 1:
-            merged_tv = base + add
-        else:
-            merged_tv = max(base, add)
-        try:
-            cur = int(float(row.get("traded_volume") or 0))
-        except (TypeError, ValueError):
-            cur = 0
-        row["traded_volume"] = max(merged_tv, cur)
+    if incremental:
+        adds = {}
+        for leg in unique_legs:
+            dk = str(leg.get("_deal_key") or "")
+            if not dk or not dk.startswith("id|"):
+                # 无唯一成交号：不增量相加，留给全量快照
+                continue
+            if dk in _APPLIED_DEAL_KEYS:
+                continue
+            fill = _qty_int(leg.get("traded_volume"))
+            if fill <= 0:
+                continue
+            key = _bo_key(leg)
+            adds[key] = int(adds.get(key) or 0) + fill
+            _APPLIED_DEAL_KEYS.add(dk)
+        for key, add in adds.items():
+            row = by_sys.get(key)
+            if not isinstance(row, dict):
+                continue
+            # 以已有委托记录为基数，避免 prefer_richer 已写入本笔成交后再加一次
+            base = _qty_int((existing_map.get(key) or {}).get("traded_volume"))
+            vol = _qty_int(row.get("volume") or row.get("order_volume"))
+            if vol > 0 and base > vol:
+                base = vol
+            row["traded_volume"] = base + add
+            _cap_traded_to_order_volume(row)
+    else:
+        batch_tv = {}
+        for leg in unique_legs:
+            fill = _qty_int(leg.get("traded_volume"))
+            if fill > 0:
+                key = _bo_key(leg)
+                batch_tv[key] = int(batch_tv.get(key) or 0) + fill
+            dk = str(leg.get("_deal_key") or "")
+            if dk:
+                _APPLIED_DEAL_KEYS.add(dk)
+        for key, add in batch_tv.items():
+            row = by_sys.get(key)
+            if not isinstance(row, dict):
+                continue
+            vol = _qty_int(row.get("volume") or row.get("order_volume"))
+            base = _qty_int((existing_map.get(key) or {}).get("traded_volume"))
+            # 已吹大的缓存不能再参与比较；未超过委托量的柜台已成交量可与本批去重之和取大
+            if vol > 0 and base > vol:
+                base = 0
+            row["traded_volume"] = max(add, base)
+            _cap_traded_to_order_volume(row)
+
+    for row in by_sys.values():
+        if isinstance(row, dict):
+            row.pop("_deal_key", None)
+            _cap_traded_to_order_volume(row)
+
     try:
         _upsert_cached_orders(list(by_sys.values()))
     except Exception:
@@ -1743,7 +1896,7 @@ def apply_deals_to_results(results, deal_raw, account_id=""):
 
 
 def apply_deal_callback_to_results(results, dealInfo, account_id=""):
-    return apply_deals_to_results(results, dealInfo, account_id)
+    return apply_deals_to_results(results, dealInfo, account_id, incremental=True)
 
 
 def on_order_callback(ContextInfo, orderInfo):
@@ -2204,7 +2357,7 @@ _BOUND_ACCOUNT_ID = ""
 
 def _clear_account_caches_if_switched(aid: str) -> bool:
     """换账号后清掉旧号资金/持仓缓存，避免继续写回 results.json。"""
-    global _CACHED_ACCOUNT, _CACHED_POSITIONS, _BOUND_ACCOUNT_ID, _CACHED_ORDERS
+    global _CACHED_ACCOUNT, _CACHED_POSITIONS, _BOUND_ACCOUNT_ID, _CACHED_ORDERS, _APPLIED_DEAL_KEYS
     new_aid = str(aid or "").strip()
     old_aid = str(_BOUND_ACCOUNT_ID or "").strip()
     if not new_aid:
@@ -2216,6 +2369,7 @@ def _clear_account_caches_if_switched(aid: str) -> bool:
             _CACHED_ORDERS = {}
         except Exception:
             pass
+        _APPLIED_DEAL_KEYS = set()
         print("[账户] 已切换 %s → %s，已清空旧持仓缓存" % (old_aid, new_aid))
         _BOUND_ACCOUNT_ID = new_aid
         return True

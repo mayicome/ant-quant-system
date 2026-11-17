@@ -26,7 +26,7 @@ PREFERRED_ID = "strategy_mz1_ma1020_half"
 
 STRATEGY_CODE = r'''# 买：马总选股逻辑1 — 涨停后第一次跌破 MA10/MA20 各买 1/2
 # - 触发价 = 均线重合点（行情字段「10日」「20日」）；不买 MA5
-# - 规则类型 best_buy：须先跌破触发价；rise_percent 默认 0 ≈ 跌破后即可买
+# - 规则类型 best_buy：须先跌破触发价；反弹比例见下方 RISE_PERCENT（0 ≈ 跌破后即可买）
 # - halt_on_open_gain：相对昨收涨幅超限则停买（主板5%/其它10%）
 # - 首次跌破：生成时用日线查选股日之后～今天之前，挂单窗内是否已有 low<=早盘MA；
 #   已破过的腿不再挂（不落盘记状态；缺日线无法判定则仍挂）
@@ -39,9 +39,12 @@ STRATEGY_CODE = r'''# 买：马总选股逻辑1 — 涨停后第一次跌破 MA1
 #   → 本票停止一切买入（即使已成交 1 腿，剩余腿也不再挂）
 # - 注意：批量回测有 entry_window 时仿真长度=窗口；「持有」留给下一轮卖出
 #
-# params：buy_amount_per_stock, min_order_amount, rise_percent(=0),
+# params：buy_amount_per_stock, min_order_amount,
 #         entry_window_trading_days(=10), selection_date_by_code, _filled_legs,
 #         ex_div_lookback(=20)
+
+# 反弹百分比（改这里即可）：跌破 MA 后从最低价再反弹到该比例才买；0 表示不再创新低即可买。
+RISE_PERCENT = 0.0
 
 LEG_SPECS = (
     ("MA10", "10日", "马总1-跌破MA10", 10),
@@ -55,7 +58,7 @@ def run(codes, prices, get_name, account, params):
     amount_per = float(params.get("buy_amount_per_stock", 50000) or 50000)
     min_order = float(params.get("min_order_amount", 5000) or 5000)
     try:
-        rise_pct = float(params.get("rise_percent", 0) or 0)
+        rise_pct = float(RISE_PERCENT)
     except (TypeError, ValueError):
         rise_pct = 0.0
     try:

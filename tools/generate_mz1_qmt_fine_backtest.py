@@ -30,7 +30,9 @@ from strategy_generator_app.backtest.mz1_qmt_fine import (
     default_watch_path,
     last_watch_path,
     last_watch_write_error,
+    load_mz1_strategy_code,
     load_mz1_strategy_params,
+    parse_rise_percent_from_strategy_code,
     parse_formula_output_file,
     parse_ymd,
     tick_window_bounds,
@@ -111,7 +113,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     entry_w = int(args.entry_window or sp.get("entry_window_trading_days") or 10)
     amount = float(args.amount or sp.get("buy_amount_per_stock") or 50000)
     min_order = float(sp.get("min_order_amount") or 5000)
-    rise = float(sp.get("rise_percent") or 0)
+    rise = parse_rise_percent_from_strategy_code(load_mz1_strategy_code(ROOT), 0.0)
     from_t1 = not args.no_from_t1
 
     codes = _parse_codes(args.codes or "")

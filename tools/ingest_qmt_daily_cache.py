@@ -34,6 +34,9 @@ from utils.qmt_daily_probe import (  # noqa: E402
 CACHE = ROOT / "data" / "daily_cache"
 MANIFEST = CACHE / "manifest.json"
 
+# Stock-only coverage vs universe_count required to mark manifest completed.
+COMPLETED_COVERAGE_RATIO = 0.99
+
 
 def _fmt_px(value: float) -> str:
     text = f"{float(value):.4f}".rstrip("0").rstrip(".")
@@ -220,9 +223,9 @@ def _count_codes_with_day(day: str, *, stocks_only: bool = True) -> int:
 
 
 def _update_manifest(day: str, ok: int, miss: int, universe: int) -> None:
-    """Mark completed only when coverage reaches 80% of full universe_count.
+    """Mark completed only when coverage reaches 99% of full universe_count.
 
-    Shard SUMMARY.total is typically ~100 and must NOT satisfy the 80% gate.
+    Shard SUMMARY.total is typically ~100 and must NOT satisfy the 99% gate.
     Mid-run writes status=running (and clears a premature completed for the same day).
     """
     if not MANIFEST.is_file():
@@ -243,7 +246,7 @@ def _update_manifest(day: str, ok: int, miss: int, universe: int) -> None:
     else:
         base = max(job_total, 1)
 
-    need = max(1, int(base * 0.8))
+    need = max(1, int(base * COMPLETED_COVERAGE_RATIO))
     success = covered >= need
 
     data["ok_count"] = covered

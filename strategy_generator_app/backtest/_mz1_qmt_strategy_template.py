@@ -428,22 +428,29 @@ def _tick_tod_sec(tm):
 
 
 def _first_break_price(times, lasts, lows, trigger, rise_pct, run_start_hms=None, run_end_hms=None):
-    """First MA break inside [run_start, run_end] (inclusive). Ticks before run_start are ignored."""
+    """与实盘 / 「运行回测」best_buy 一致（只用 lastPrice，不用 tick low）：
+    先等 last 严格跌破触发价，再追踪破后最低价；当 last 回升到
+    最低价*(1+rise_pct/100) 且高于最低价时买入。
+    rise_pct=0：不再创新低（出现高于最低价的 tick）即买。
+    只在 [run_start, run_end] 内看 tick（含端点）；窗口前的 tick 忽略。
+    lows 保留参数以兼容调用，不参与判定。
+    """
     if trigger is None or trigger <= 0:
         return None, None
-    thr = float(trigger) * (1.0 - float(rise_pct or 0) / 100.0)
+    trigger = float(trigger)
+    rise = float(rise_pct or 0)
     n = min(len(lasts), len(times))
-    use_low = bool(lows) and len(lows) >= n
     start_sec = _hms_to_sec(run_start_hms)
     end_sec = _hms_to_sec(run_end_hms)
+    triggered = False
+    lowest = 0.0
     for i in range(n):
         try:
             last = float(lasts[i])
-            px = float(lows[i]) if use_low else last
         except Exception:
             continue
         # QMT tick often has 0 placeholders before auction; never treat as touch
-        if last <= 0 or px <= 0:
+        if last <= 0:
             continue
         if start_sec is not None or end_sec is not None:
             tod = _tick_tod_sec(times[i])
@@ -453,7 +460,47 @@ def _first_break_price(times, lasts, lows, trigger, rise_pct, run_start_hms=None
                 continue
             if end_sec is not None and tod > end_sec:
                 continue
-        if px <= thr:
+        if not triggered:
+            # 与实盘 ant_tick_runner / simulator 一致：严格 < 才算跌破
+            if last < trigger:
+                triggered = True
+                lowest = last
+            continue
+        if last < lowest or lowest <= 0:
+            lowest = last
+            continue
+        target = lowest * (1.0 + rise / 100.0)
+        if last >= target and last > lowest:
+            return last, times[i]
+    return None, None
+
+
+def _first_touch_price(times, lasts, lows, trigger, run_start_hms=None, run_end_hms=None):
+    """与实盘 / 「运行回测」single_buy 一致（只用 lastPrice，不用 tick low）：
+    运行窗口内第一次 last <= 触发价即买。lows 保留参数以兼容调用，不参与判定。
+    """
+    if trigger is None or trigger <= 0:
+        return None, None
+    trigger = float(trigger)
+    n = min(len(lasts), len(times))
+    start_sec = _hms_to_sec(run_start_hms)
+    end_sec = _hms_to_sec(run_end_hms)
+    for i in range(n):
+        try:
+            last = float(lasts[i])
+        except Exception:
+            continue
+        if last <= 0:
+            continue
+        if start_sec is not None or end_sec is not None:
+            tod = _tick_tod_sec(times[i])
+            if tod is None:
+                continue
+            if start_sec is not None and tod < start_sec:
+                continue
+            if end_sec is not None and tod > end_sec:
+                continue
+        if last <= trigger:
             return last, times[i]
     return None, None
 
@@ -594,11 +641,31 @@ def _run_backtest(ContextInfo):
     amount_per = float(CFG.get("buy_amount_per_stock") or 50000)
     min_order = float(CFG.get("min_order_amount") or 5000)
     rise_pct = float(CFG.get("rise_percent") or 0)
+    fill_mode = str(CFG.get("fill_mode") or "best_buy").strip() or "best_buy"
+    if fill_mode != "single_buy":
+        fill_mode = "best_buy"
     from_t1 = bool(CFG.get("from_t1", True))
     run_start_hms = _parse_hms(CFG.get("strategy_run_start_time") or "09:30")
     run_end_hms = _parse_hms(CFG.get("strategy_run_end_time") or "15:00")
     gen_hms = _parse_hms(CFG.get("strategy_generation_time") or "09:25")
     half = amount_per / 2.0
+    if fill_mode == "single_buy":
+        leg_ma10 = "马总1单点-跌破MA10"
+        leg_ma20 = "马总1单点-跌破MA20"
+    else:
+        leg_ma10 = "马总1-跌破MA10"
+        leg_ma20 = "马总1-跌破MA20"
+
+    def _fill_leg(times, lasts, lows, trigger):
+        if fill_mode == "single_buy":
+            return _first_touch_price(
+                times, lasts, lows, trigger,
+                run_start_hms=run_start_hms, run_end_hms=run_end_hms,
+            )
+        return _first_break_price(
+            times, lasts, lows, trigger, rise_pct,
+            run_start_hms=run_start_hms, run_end_hms=run_end_hms,
+        )
 
     if start_d is None or end_d is None:
         _emit("ERROR", {"msg": "bad start/end"})
@@ -615,6 +682,7 @@ def _run_backtest(ContextInfo):
         "n_codes": len(codes),
         "n_daily_pools": len(daily_pools) if isinstance(daily_pools, dict) else 0,
         "mode": "daily_pools" if daily_pools else "static_pool",
+        "fill_mode": fill_mode,
         "strategy_generation_time": CFG.get("strategy_generation_time") or "09:25",
         "strategy_run_start_time": CFG.get("strategy_run_start_time") or "09:30",
         "strategy_run_end_time": CFG.get("strategy_run_end_time") or "15:00",
@@ -721,8 +789,8 @@ def _run_backtest(ContextInfo):
                     continue
 
                 for leg, ma_px, leg_name, ma_period in (
-                    ("MA10", ma10, "马总1-跌破MA10", 10),
-                    ("MA20", ma20, "马总1-跌破MA20", 20),
+                    ("MA10", ma10, leg_ma10, 10),
+                    ("MA20", ma20, leg_ma20, 20),
                 ):
                     key = "%s:%s" % (c6, leg)
                     if key in filled:
@@ -736,10 +804,7 @@ def _run_backtest(ContextInfo):
                         skip["no_ma"] += 1
                         continue
                     skip["days_checked"] += 1
-                    fill_px, fill_tm = _first_break_price(
-                        t_times, t_last, t_low, ma_px, rise_pct,
-                        run_start_hms=run_start_hms, run_end_hms=run_end_hms,
-                    )
+                    fill_px, fill_tm = _fill_leg(t_times, t_last, t_low, ma_px)
                     if fill_px is None:
                         skip["no_break"] += 1
                         continue
@@ -796,8 +861,8 @@ def _run_backtest(ContextInfo):
                     continue
 
                 for leg, ma_px, leg_name, ma_period in (
-                    ("MA10", ma10, "马总1-跌破MA10", 10),
-                    ("MA20", ma20, "马总1-跌破MA20", 20),
+                    ("MA10", ma10, leg_ma10, 10),
+                    ("MA20", ma20, leg_ma20, 20),
                 ):
                     key = "%s:%s" % (c6, leg)
                     if key in filled:
@@ -811,10 +876,7 @@ def _run_backtest(ContextInfo):
                         skip["no_ma"] += 1
                         continue
                     skip["days_checked"] += 1
-                    fill_px, fill_tm = _first_break_price(
-                        t_times, t_last, t_low, ma_px, rise_pct,
-                        run_start_hms=run_start_hms, run_end_hms=run_end_hms,
-                    )
+                    fill_px, fill_tm = _fill_leg(t_times, t_last, t_low, ma_px)
                     if fill_px is None:
                         skip["no_break"] += 1
                         continue

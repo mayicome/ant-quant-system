@@ -133,6 +133,8 @@ def _apply_open_sell_branch(rule: dict, limit_up: float) -> None:
     rule["limit_up"] = round(float(limit_up), 4)
     orig_name = str(cb.get("orig_name") or rule.get("name") or "清仓").strip()
     rule["name"] = f"{orig_name}·开板突破卖"
+    # 开板突破卖条件不同，不沿用「涨停即清仓」的市价开关，保持限价。
+    rule.pop("use_market_order", None)
     cb["resolved"] = True
     cb["choice"] = CHOICE_OPEN_SELL
     cb["sealed_at_T"] = True

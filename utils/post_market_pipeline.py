@@ -953,6 +953,7 @@ def run_step(
         if step_id == "daily_cache":
             # 仅实盘（data/qmt_live_only.flag / --live-only）：外源东财/腾讯/同花顺（原路径）
             # 全量机：国金 QMT 探针分片（需模型交易里日线探针在跑）
+            # 同步后统一做目标日空洞检验；缺失则外源补齐，硬缺口告警并失败
             from utils.live_only import is_live_only_machine
             from utils.trading_day import previous_tradeday
 
@@ -963,30 +964,44 @@ def run_step(
                     "tools/append_daily_cache_external.py",
                     ("--date", d, "--prev", prev),
                 )
-                detail = (
+                sync_detail = (
                     "仅实盘→外源日线(+ETF自2025-01-01)：追加+目标日校对+上回补；"
                     "覆盖需多源一致或半截K"
                 )
-                return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
+            else:
+                rc = run(
+                    "tools/run_qmt_daily_cache.py",
+                    (
+                        "--date",
+                        d,
+                        "--shard-size",
+                        "100",
+                        "--shard-interval",
+                        "3",
+                    ),
+                    freeze=False,
+                )
+                sync_detail = (
+                    "全量→QMT探针日线分片(shard=100,interval=3s)->daily_cache；"
+                    "请保持国金QMT模型交易探针运行；失败可手工改跑 append_daily_cache_external"
+                )
 
-            rc = run(
-                "tools/run_qmt_daily_cache.py",
-                (
-                    "--date",
-                    d,
-                    "--shard-size",
-                    "100",
-                    "--shard-interval",
-                    "3",
-                ),
-                freeze=False,
-            )
-            detail = (
-                "全量→QMT探针日线分片(shard=100,interval=3s)->daily_cache；"
-                "请保持国金QMT模型交易探针运行；失败可手工改跑 append_daily_cache_external"
-            )
-            return StepRunResult(ok=rc == 0, exit_code=rc, detail=detail)
+            # 进程失败也尽量检验/补齐，避免半成功留下空洞
+            try:
+                from utils.daily_cache_day_verify import verify_and_repair_trade_day
 
+                cov_ok, cov_det, _rep, _repair = verify_and_repair_trade_day(
+                    day, repair=True, notify=True
+                )
+            except Exception as e:
+                cov_ok, cov_det = False, f"日线检验异常: {e}"
+
+            detail = f"{sync_detail} | {cov_det}"
+            if rc != 0:
+                return StepRunResult(ok=False, exit_code=rc, detail=detail)
+            if not cov_ok:
+                return StepRunResult(ok=False, exit_code=1, detail=detail)
+            return StepRunResult(ok=True, exit_code=0, detail=detail)
 
 
         if step_id == "limit_up":

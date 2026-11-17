@@ -852,22 +852,27 @@ def _available_qty(st, day_d, from_t1):
 
 
 def _sell_day_index(st, day_d, trading_days):
-    """引擎序号（含买入日）：买入日=1。"""
+    """引擎序号（含买入日）：买入日=1。
+
+    接续卖出仿真窗口常从「买入次日」起，trading_days 不含买入日。
+    若只在窗口内计数，持有 N 日会对不齐（例：买 11-06、窗 11-09～10、
+    hold_n=3 时窗口内最多数到 2，末日清仓永不触发）。
+    因此以锚定买入日～as_of 的交易日跨度计数；trading_days 仅作节假日微调。
+    """
     anchor = st.get("last_buy_date") or st.get("entry_date")
     if isinstance(anchor, str):
         anchor = _parse_d(anchor)
     if anchor is None:
         return 0
-    idx = 0
-    for d in trading_days:
-        if d < anchor:
-            continue
-        if d > day_d:
-            break
-        idx += 1
-        if d == day_d:
-            return idx
-    return idx
+    if day_d < anchor:
+        return 0
+    span = _weekday_days(anchor, day_d)
+    known = [d for d in (trading_days or []) if anchor <= d <= day_d]
+    if known:
+        days = sorted(set(span) | set(known))
+    else:
+        days = span
+    return len(days)
 
 
 def _replay_best_sell(ticks, trigger, drop_pct, run_start_sec, run_end_sec):

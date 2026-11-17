@@ -458,6 +458,13 @@ def _make_rule_dict(
                         out["limit_up"] = round(lu, 4)
                 except (TypeError, ValueError):
                     pass
+        # 市价清仓开关：只透传到「涨停即清仓」(single_sell) 与「定时清仓」；
+        # 「开板突破卖」即使意图里带了该字段也不走市价。
+        if _truthy_flag(intent.get("use_market_order")):
+            rtype = str(out.get("type") or "").strip()
+            rname = str(out.get("name") or "")
+            if rtype in ("single_sell", "scheduled_clear") and "开板突破卖" not in rname:
+                out["use_market_order"] = True
         return out
 
     if rule_type == "breakthrough_buy":
