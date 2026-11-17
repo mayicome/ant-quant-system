@@ -528,6 +528,84 @@ def _disarm_task_in_rules_armed(task_id: str) -> None:
     print("[交易核心] 任务已结束，会话重载时保持关闭: %s" % tid)
 
 
+def _forget_finished(task_id, stock_code="", leg_key=""):
+    """去掉本进程已结束标记，供等资金再次执行后继续触发。"""
+    tid = str(task_id or "").strip()
+    if tid:
+        drop = [
+            k
+            for k in list(_SESSION_DONE_IDS)
+            if str(k) == tid or str(k).startswith(tid + "@g")
+        ]
+        for k in drop:
+            _SESSION_DONE_IDS.discard(k)
+    code = str(stock_code or "").strip().upper()
+    leg = str(leg_key or "").strip()
+    if not (code and leg) and tid:
+        t = _find_runner_task(tid)
+        if isinstance(t, dict):
+            if not code:
+                code = str(t.get("stock_code") or "").strip().upper()
+            if not leg:
+                leg = _task_leg_key(t)
+    if code and leg:
+        _SESSION_DONE_LEGS.discard((code, leg))
+
+
+def _reopen_cash_wait_task(task_id: str, stock_code: str = "", leg_key: str = "") -> None:
+    """从会话已结束和 runner done 中解开，让等资金任务能再次触发。"""
+    tid = str(task_id or "").strip()
+    if not tid:
+        return
+    prefix = tid + "@g"
+    _forget_finished(tid, stock_code, leg_key)
+    try:
+        if _RUNNER is not None:
+            for st in (_RUNNER._states or {}).values():
+                ids = getattr(st, "done_task_ids", None)
+                if not ids:
+                    continue
+                for k in [x for x in list(ids) if str(x) == tid or str(x).startswith(prefix)]:
+                    ids.discard(k)
+            if hasattr(_RUNNER, "dump_done_task_ids") and _RESULTS is not None:
+                _RESULTS["done_task_ids"] = _RUNNER.dump_done_task_ids()
+        elif isinstance(_RESULTS, dict) and isinstance(_RESULTS.get("done_task_ids"), list):
+            done = list(_RESULTS.get("done_task_ids") or [])
+            new_done = [
+                x for x in done if str(x) != tid and not str(x).startswith(prefix)
+            ]
+            if len(new_done) != len(done):
+                _RESULTS["done_task_ids"] = new_done
+    except Exception as e:
+        print("[交易核心] 解开等资金任务错误: %s" % e)
+
+
+def _task_cash_wait_open(task) -> bool:
+    """武装任务仍在等资金（剩余量够一手）。"""
+    if not isinstance(task, dict):
+        return False
+    tid = str(task.get("task_id") or "").strip()
+    rem = None
+    if tid and tid in _CASH_WAIT_REM:
+        try:
+            rem = int(_CASH_WAIT_REM[tid])
+        except (TypeError, ValueError):
+            rem = None
+    if rem is None:
+        for key in ("remaining_volume", "max_volume"):
+            if task.get(key) is None:
+                continue
+            try:
+                rem = int(task.get(key) or 0)
+                break
+            except (TypeError, ValueError):
+                rem = None
+    if not bool(task.get("cash_wait_active")) and not (tid and tid in _CASH_WAIT_REM):
+        return False
+    if rem is None:
+        return bool(task.get("cash_wait_active"))
+    return rem >= 100
+
 
 def _mark_grid_point_in_rules_armed(task_id: str, grid_index: int, all_done: bool = False) -> None:
     """网格点位记在本进程。全部完成才把整笔标成结束。不再写 rules_armed.json。"""
@@ -589,6 +667,12 @@ def _seed_done_from_results_orders() -> None:
                     key = "%s@g%d" % (tid, int(gi))
                 except (TypeError, ValueError):
                     key = tid
+            if st == "skipped":
+                sysid = str(o.get("order_sysid") or "")
+                cash_block = str(o.get("cash_block") or "")
+                if sysid in ("NO_CASH", "SKIPPED_MIN_BUY") or cash_block:
+                    if _task_cash_wait_open(_find_runner_task(tid)):
+                        continue
             if key not in ids:
                 ids.append(key)
     try:
@@ -596,6 +680,16 @@ def _seed_done_from_results_orders() -> None:
         _RESULTS["done_task_ids"] = _RUNNER.dump_done_task_ids()
     except Exception as e:
         print("[交易核心] 种子 done_task_ids 错误: %s" % e)
+    try:
+        for t in list(getattr(_RUNNER, "tasks", None) or []):
+            if _task_cash_wait_open(t):
+                _reopen_cash_wait_task(
+                    str(t.get("task_id") or ""),
+                    str(t.get("stock_code") or ""),
+                    _task_leg_key(t),
+                )
+    except Exception as e:
+        print("[交易核心] 解开等资金种子错误: %s" % e)
 
 
 def _as_date(d):
@@ -962,14 +1056,23 @@ def _poll_night_market_events():
 
 
 def _clear_done_task(stock_code: str, task_id: str) -> None:
-    """下单失败（如未绑定）时解锁，便于修复后同价重试。"""
-    if _RUNNER is None or not task_id:
+    """下单失败或等资金解锁，便于修复后同价重试。"""
+    tid_key = str(task_id or "").strip()
+    if not tid_key:
         return
     try:
-        st = _RUNNER._states.get(str(stock_code or "").strip().upper())
-        if st is not None and hasattr(st, "done_task_ids"):
-            st.done_task_ids.discard(str(task_id))
-            print("[交易核心] 解锁任务以便重试: %s" % task_id)
+        if "@g" in tid_key:
+            _SESSION_DONE_IDS.discard(tid_key)
+            if _RUNNER is not None:
+                for st in (_RUNNER._states or {}).values():
+                    ids = getattr(st, "done_task_ids", None)
+                    if ids is not None:
+                        ids.discard(tid_key)
+                if hasattr(_RUNNER, "dump_done_task_ids") and _RESULTS is not None:
+                    _RESULTS["done_task_ids"] = _RUNNER.dump_done_task_ids()
+        else:
+            _reopen_cash_wait_task(tid_key, str(stock_code or ""))
+        print("[交易核心] 解锁任务以便重试: %s" % tid_key)
     except Exception as e:
         print("[交易核心] 解锁任务错误: %s" % e)
 
@@ -3291,14 +3394,6 @@ def _merge_finished_into_rules(rules):
         tid = str(task.get("task_id") or "").strip()
         code = str(task.get("stock_code") or "").strip().upper()
         leg = _task_leg_key(task)
-        finished = bool(tid and tid in _SESSION_DONE_IDS)
-        if code and leg and (code, leg) in _SESSION_DONE_LEGS:
-            finished = True
-            if tid:
-                _SESSION_DONE_IDS.add(tid)
-        if finished and task.get("enabled", True):
-            task["enabled"] = False
-            held += 1
         if tid and tid in _CASH_WAIT_REM:
             rem = int(_CASH_WAIT_REM[tid])
             task["max_volume"] = rem
@@ -3306,6 +3401,23 @@ def _merge_finished_into_rules(rules):
             task["cash_wait_active"] = rem >= 100
             if rem < 100:
                 task["enabled"] = False
+        if tid and _task_cash_wait_open(task):
+            was_done = bool(
+                tid in _SESSION_DONE_IDS
+                or (code and leg and (code, leg) in _SESSION_DONE_LEGS)
+            )
+            _reopen_cash_wait_task(tid, code, leg)
+            if was_done:
+                print("[交易核心] 等资金再次执行，已解除保持关闭: %s" % tid)
+        else:
+            finished = bool(tid and tid in _SESSION_DONE_IDS)
+            if code and leg and (code, leg) in _SESSION_DONE_LEGS:
+                finished = True
+                if tid:
+                    _SESSION_DONE_IDS.add(tid)
+            if finished and task.get("enabled", True):
+                task["enabled"] = False
+                held += 1
         grids = []
         prefix = (tid + "@g") if tid else ""
         if prefix:
