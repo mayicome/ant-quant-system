@@ -44,7 +44,7 @@ class _ChartCanvasDoubleClickFilter(QObject):
     def eventFilter(self, obj, event):
         et = event.type()
         # 光标快速移出画布/任务图时，matplotlib 未必再发 inaxes=None 的 motion；
-        # 用 Qt Leave 强制清掉弹性悬停高亮（橙边/虚线/价签）。
+        # 用 Qt Leave 强制清掉弹性悬停高亮（放大节点/虚线/价签）。
         if et == QEvent.Leave:
             chart = self._chart
             if chart is not None and hasattr(chart, "_clear_elastic_hover_highlight"):
@@ -6686,24 +6686,26 @@ class StockChartWidget(QWidget):
                 if isinstance(item, dict):
                     rid = item.get("rule_id")
                     art = item.get("art")
-                    base_edge = item.get("edge", "black")
-                    base_lw = float(item.get("lw", 1.0) or 1.0)
                     base_zo = item.get("zorder", 90)
+                    base_size = float(item.get("size", 100) or 100)
                 else:
                     # 兼容旧二元组 (rule_id, art)
                     rid = item[0]
                     art = item[1]
-                    base_edge, base_lw, base_zo = "black", 1.0, 90
+                    base_zo = 90
+                    try:
+                        _sz = art.get_sizes()
+                        base_size = float(_sz[0]) if len(_sz) else 100.0
+                    except Exception:
+                        base_size = 100.0
                 if art is None:
                     continue
                 if hid and str(rid) == str(hid):
-                    art.set_linewidths(2.6)
-                    art.set_edgecolors("#ff6600")
+                    # 悬停只放大圆，不改描边颜色/线宽
+                    art.set_sizes([base_size * 1.5625])  # 直径约 1.25 倍
                     art.set_zorder(110)
                 else:
-                    # 恢复绘制时的底边（含已武装青边），勿硬编码 black
-                    art.set_linewidths(base_lw)
-                    art.set_edgecolors(base_edge)
+                    art.set_sizes([base_size])
                     try:
                         art.set_zorder(base_zo)
                     except Exception:
@@ -6718,7 +6720,7 @@ class StockChartWidget(QWidget):
                 pass
 
     def _clear_elastic_hover_highlight(self, draw=True):
-        """强制清除弹性悬停高亮（节点橙边、虚线提亮、价签）。leave / 快速移出时调用。"""
+        """强制清除弹性悬停高亮（放大节点、虚线提亮、价签）。leave / 快速移出时调用。"""
         if not getattr(self, "_highlighted_elastic_rule_id", None):
             return
         self._set_highlighted_elastic_rule(None, draw=draw)
@@ -12539,10 +12541,10 @@ class StockChartWidget(QWidget):
                                         "edge": edgecolors,
                                         "lw": float(linewidth),
                                         "zorder": circle_zorder,
+                                        "size": float(marker_size),
                                     })
                                     if _hid and _rid == str(_hid):
-                                        line.set_linewidths(2.6)
-                                        line.set_edgecolors("#ff6600")
+                                        line.set_sizes([float(marker_size) * 1.5625])
                                         line.set_zorder(max(circle_zorder, 110))
                                     break
                         except Exception:
