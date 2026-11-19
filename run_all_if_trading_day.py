@@ -50,8 +50,6 @@ FULL_EXTRA_JOBS: List[JobStep] = [
     ("tools/seal_rating_daily_verify.py", ("--auto-run",), "封单评级验证"),
     ("limit_up_gene_analysis_gui.py", ("--auto-run",), "涨停基因"),
     ("main_force_net_inflow_gui.py", ("--auto-run",), "主力净流入分析"),
-    ("lhb_analysis_gui.py", ("--auto-run",), "龙虎榜分析"),
-    ("tools/lhb_premium_daily_verify.py", ("--auto-run",), "龙虎榜溢价复盘"),
 ]
 
 
@@ -474,17 +472,20 @@ def _upload_wechat_draft_with_retry(
 
 
 def _select_jobs(live_only: bool) -> List[JobStep]:
-    """后续程序列表：实盘精简 = LIVE；全量 = LIVE头 + 研究GUI + F10 + 机构榜。
+    """后续程序列表：实盘精简 = LIVE；全量 = LIVE头 + 研究GUI + F10 + 机构榜 + 龙虎榜。
 
     实盘：东财 → 选股 → F10。
-    全量：东财 → 选股 → 研究GUI… → F10 → 机构榜。
+    全量：东财 → 选股 → 研究GUI… → F10 → 机构榜 → 龙虎榜分析 → 龙虎榜溢价复盘。
+    龙虎榜源数据常偏晚，放在 F10、机构榜之后。
     """
     if live_only:
         return list(LIVE_JOBS)
     head = LIVE_JOBS[:-1]
     f10 = LIVE_JOBS[-1]
     inst = ("inst_net_rank_gui.py", ("--auto-run",), "机构榜")
-    return list(head) + list(FULL_EXTRA_JOBS) + [f10, inst]
+    lhb = ("lhb_analysis_gui.py", ("--auto-run",), "龙虎榜分析")
+    lhb_premium = ("tools/lhb_premium_daily_verify.py", ("--auto-run",), "龙虎榜溢价复盘")
+    return list(head) + list(FULL_EXTRA_JOBS) + [f10, inst, lhb, lhb_premium]
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

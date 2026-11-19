@@ -206,13 +206,13 @@ def build_step_catalog(*, live_only: bool = False) -> List[PipelineStep]:
 
         PipelineStep("main_force_net_inflow", "主力净流入分析", full_only=True),
 
-        PipelineStep("lhb_analysis", "龙虎榜分析", full_only=True),
-
-        PipelineStep("lhb_premium", "龙虎榜溢价复盘", full_only=True),
-
         PipelineStep("stock_info_f10", "全A股票信息F10", selectable=True),
 
         PipelineStep("inst_net_rank", "机构榜", full_only=True),
+
+        PipelineStep("lhb_analysis", "龙虎榜分析", full_only=True),
+
+        PipelineStep("lhb_premium", "龙虎榜溢价复盘", full_only=True),
 
         PipelineStep(
 
