@@ -31,6 +31,19 @@ DEFAULT_WATCH_PATH = DEFAULT_WATCH_DIR / "current.py"
 
 _LAST_WATCH_PATH = None  # type: Optional[Path]
 _LAST_WATCH_ERROR = None  # type: Optional[Exception]
+
+
+def plan_qmt_tick_range(*args, **kwargs):
+    """与 mz1_qmt_fine.plan_qmt_tick_range 相同：结合可下窗口和本机已有 tick 给出区间方案。"""
+    try:
+        from strategy_generator_app.backtest.mz1_qmt_fine import (
+            plan_qmt_tick_range as _plan,
+        )
+    except ImportError:
+        from mz1_qmt_fine import plan_qmt_tick_range as _plan  # type: ignore
+    return _plan(*args, **kwargs)
+
+
 STRATEGY_IDS_MZ1_SELL = (
     "strategy_5a1fa73f",  # 开盘涨幅弹性半仓+近涨停弹性半仓
     "strategy_fd561fb3",  # 同上 + T点封板分支
@@ -242,7 +255,7 @@ def sell_variant_for(strategy_id: str = "", name: str = "") -> str:
 
 
 def parse_strategy_code_drop_constants(strategy_code: str = "") -> Dict[str, float]:
-    """从 strategy_code 解析 DROP_PERCENT_* / CLEAR_GAIN_* 等常量。
+    """从 strategy_code 解析 DROP_PERCENT_* / CLEAR_GAIN_* / STOP_LOSS_FROM_BUY_PCT 等常量。
 
     细回测不执行策略 run()，必须显式把代码里的调参常量灌进 CFG.params，
     否则只会吃到 strategy_params 里过期的 open_drop_percent 等字段。
@@ -259,6 +272,7 @@ def parse_strategy_code_drop_constants(strategy_code: str = "") -> Dict[str, flo
         "lu_high_offset": r"LU_HIGH_OFFSET\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "clear_drop_percent_main": r"DROP_PERCENT_CLEAR_MAIN\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "clear_drop_percent": r"DROP_PERCENT_CLEAR_GROWTH\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "stop_loss_from_buy_percent": r"STOP_LOSS_FROM_BUY_PCT\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "clear_gain_main": r"CLEAR_GAIN_MAIN\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "clear_gain_growth": r"CLEAR_GAIN_GROWTH\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "surge_gain_4": r"SURGE_GAIN_4\s*=\s*([-+]?\d+(?:\.\d+)?)",
@@ -443,6 +457,11 @@ def build_qmt_strategy_source(
         sp.setdefault("lu_high_offset", 0.01)
     if "lu_drop_percent" in code_drops_all and "lu_drop_percent" not in (params or {}):
         sp.setdefault("lu_drop_percent", float(code_drops_all["lu_drop_percent"]))
+    if "stop_loss_from_buy_percent" in code_drops_all:
+        # 以策略代码 STOP_LOSS_FROM_BUY_PCT 为准，避免细回测读不到该参数、0 与非 0 结果相同
+        sp["stop_loss_from_buy_percent"] = float(code_drops_all["stop_loss_from_buy_percent"])
+    else:
+        sp.setdefault("stop_loss_from_buy_percent", 0.0)
     sel_map_cfg = {}
     raw_sel = sp.get("selection_date_by_code") or {}
     if isinstance(raw_sel, dict):

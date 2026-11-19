@@ -124,6 +124,7 @@ from account_provider import (
     get_positions_total_volume,
     get_positions_baseline,
     get_positions_for_backtest,
+    get_positions_cost,
 )
 from strategy_runner import run_user_strategy
 
@@ -2639,7 +2640,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "通用策略：选择含选股日的选股文件做批量回测。\n"
             "【马总逻辑1】不再选手动选股文件：用回测页起止日期，\n"
             "按「批量导入选股文件」同款设置滚动建池，再生成 QMT 细回测脚本投递探针。\n"
-            "券商 tick 约近 1 个月；更早日期常缺 tick。\n"
+            "券商 tick 约近 1 个月；超出部分会先查看本机已有 tick 并提示，不再自动改成窗口全长。\n"
             "【买：马总盘中-满足条件单点】也不选手动文件：用回测起止日期 + 策略生成时间，\n"
             "读取 data\\ma_zong_intraday_candidates\\YYYY-MM-DD_HHMM.csv，\n"
             "按当时最新价+0.01 生成买入成交明细（不滤软门槛；仅买、暂无卖）。"
@@ -2696,7 +2697,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.backtest_mz1_qmt_gen_btn.setToolTip(
             "【马总逻辑1】按当前股票池/选股日与回测起止，生成细回测脚本并原子写入\n"
             "国金 QMT userdata\\mz1_qmt_fine_watch\\current.py；若模型交易里「探针」在跑会自动重载回测。\n"
-            "券商 tick 约近 1 个月，区间自动钳制。结果在 FormulaOutput（ANT_MZ1_BT|）。\n"
+            "券商 tick 约近 1 个月；超出部分会先查看本机已有 tick 并提示，不再自动改成窗口全长。结果在 FormulaOutput（ANT_MZ1_BT|）。\n"
             "首次：模型交易 → 新建策略 → Python → 粘贴/加载 python\\探针.py → 启动。"
         )
         self.backtest_mz1_qmt_gen_btn.clicked.connect(self._on_generate_mz1_qmt_fine_script)
@@ -2720,6 +2721,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "【马总逻辑1卖 / 盘中买入次日了结 / 盘中买入冲高卖出】用已载入的买入 CSV/批量接续状态，生成卖出细回测脚本并原子写入\n"
             "国金 QMT userdata\\mz1_qmt_fine_watch\\current.py（与买腿同一路径，覆盖）。\n"
             "需先「从买入成交明细CSV接续…」或「载入上一轮批量回测→本策略」。\n"
+            "券商 tick 约近 1 个月；超出部分会先查看本机已有 tick 并提示，不再自动改成窗口全长。\n"
             "结果在 FormulaOutput（ANT_MZ1_SELL_BT|）。不改「下一轮批量」引擎路径。"
         )
         self.backtest_mz1_qmt_sell_gen_btn.clicked.connect(self._on_generate_mz1_qmt_sell_fine_script)
@@ -7435,6 +7437,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
             except Exception:
                 params["positions_baseline"] = dict(params.get("positions_volume") or {})
             try:
+                params["positions_cost"] = get_positions_cost()
+            except Exception:
+                params["positions_cost"] = {}
+            try:
                 from utils.position_entry_dates import reconcile_with_positions
 
                 cleared = reconcile_with_positions(
@@ -7776,6 +7782,66 @@ class StrategyGeneratorMainWindow(QMainWindow):
         except Exception:
             return 0.0
 
+
+    def _confirm_qmt_fine_range(self, m, start_d, end_d, title):
+        """超出可下窗口时先提示本机已有 tick，而不是直接改成窗口全长。
+
+        返回 (start, end, plan)；取消则返回 None。plan 有 reason/start/end 供后续文案使用。
+        """
+        planner = getattr(m, "plan_qmt_tick_range", None)
+        if planner is None:
+            planner = self._mz1_qmt_fine_mod().plan_qmt_tick_range
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                plan = planner(start_d, end_d)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                title,
+                "检查本机 QMT tick 区间失败：%s\n将仍按你指定的 %s～%s 继续。"
+                % (e, start_d.isoformat(), end_d.isoformat()),
+            )
+            return start_d, end_d, type("Tmp", (), {"start": start_d, "end": end_d, "reason": "检查本机 tick 失败：%s" % e, "clamped": False})()
+        if getattr(plan, "mode", "") == "ok":
+            return plan.start, plan.end, plan
+
+        try:
+            from strategy_generator_app.backtest.mz1_qmt_fine import format_tick_range_prompt
+        except ImportError:
+            from backtest.mz1_qmt_fine import format_tick_range_prompt  # type: ignore
+        text = format_tick_range_prompt(plan)
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Question)
+        box.setText(text)
+        btn_local = None
+        btn_window = None
+        mode = getattr(plan, "mode", "")
+        if mode == "unavailable":
+            btn_window = box.addButton("使用当前可下窗口", QMessageBox.AcceptRole)
+            btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
+            box.setDefaultButton(btn_cancel)
+        else:
+            if mode == "local_only" or plan.start != start_d or plan.end != end_d:
+                btn_local = box.addButton("用本地已有日期", QMessageBox.AcceptRole)
+            else:
+                btn_local = box.addButton("按原区间继续", QMessageBox.AcceptRole)
+            btn_window = box.addButton("改用当前可下窗口", QMessageBox.ActionRole)
+            btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
+            box.setDefaultButton(btn_local)
+        box.exec_()
+        clicked = box.clickedButton()
+        if btn_local is not None and clicked == btn_local:
+            return plan.start, plan.end, plan
+        if btn_window is not None and clicked == btn_window:
+            chosen = plan.as_window_choice()
+            return chosen.start, chosen.end, chosen
+        return None
+
+
     def _on_generate_mz1_qmt_fine_script(self):
         """生成马总逻辑1 QMT 模型交易细回测脚本（3b）。"""
         m = self._mz1_qmt_fine_mod()
@@ -7870,20 +7936,37 @@ class StrategyGeneratorMainWindow(QMainWindow):
             d = m.parse_ymd(v)
             if d:
                 sel_days.append(d)
+        req_start, req_end = start_d, end_d
         if sel_days:
-            cr = m.clamp_selection_days(
-                sel_days, entry_window=entry_w, from_t1=from_t1
-            )
-            if cr.dropped_selection_days:
-                drop = set(cr.dropped_selection_days)
+            first, last = min(sel_days), max(sel_days)
+            req_start = first + timedelta(days=1 if from_t1 else 0)
+            req_end = last + timedelta(days=max(1, int(entry_w)) + 8)
+        decided = self._confirm_qmt_fine_range(m, req_start, req_end, "生成QMT细回测脚本")
+        if decided is None:
+            return
+        start_d, end_d, cr = decided
+        if sel_days:
+            drop = []
+            for sd in sorted(set(sel_days)):
+                s0 = sd + timedelta(days=1 if from_t1 else 0)
+                s1 = s0 + timedelta(days=max(1, int(entry_w)) + 8)
+                if s1 < start_d or s0 > end_d:
+                    drop.append(sd.isoformat())
+            if drop:
+                dropset = set(drop)
                 sel_map = {
-                    k: v for k, v in sel_map.items() if str(v)[:10] not in drop
+                    k: v for k, v in sel_map.items() if str(v)[:10] not in dropset
                 }
                 keep = set(sel_map.keys())
                 if keep:
                     codes = [c for c in codes if _normalize_code(c) in keep]
-        else:
-            cr = m.clamp_range(start_d, end_d)
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "生成QMT细回测脚本",
+                        "确认后的区间内没有可用选股日。",
+                    )
+                    return
         try:
             _mz1_fill_mode = "single_buy" if is_mz1_single else "best_buy"
             src = m.build_qmt_strategy_source(
@@ -8541,7 +8624,10 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if not codes and not merged_init and not merged_fills:
             QMessageBox.warning(self, "提示", "接续状态里没有可用持仓/买入成交。")
             return
-        cr = m.clamp_range(start_d, end_d)
+        decided = self._confirm_qmt_fine_range(m, start_d, end_d, "生成卖出QMT细回测")
+        if decided is None:
+            return
+        start_d, end_d, cr = decided
         params = {}
         if cfg is not None:
             try:
@@ -10240,9 +10326,12 @@ class StrategyGeneratorMainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # 钳制到券商 tick 可下窗口
-        cr = m.clamp_range(start_d, end_d)
-        start_d, end_d = cr.start, cr.end
+        decided = self._confirm_qmt_fine_range(
+            m, start_d, end_d, "确认QMT细回测（实盘对齐建池）"
+        )
+        if decided is None:
+            return
+        start_d, end_d, cr = decided
 
         try:
             from strategy_generator_app.trading_calendar import get_trading_dates_in_range_sorted
@@ -10397,6 +10486,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "确认QMT细回测（实盘对齐建池）",
             (
                 "马总逻辑1：按回测页起止滚动建池后交给 QMT 探针。\n\n"
+                "%s"
                 "区间：%s～%s（%d 个交易日）\n"
                 "建池：%s交易日选股文件（前缀 %s）\n"
                 "过滤：%s\n"
@@ -10406,6 +10496,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 "样例：%s\n\n是否继续？"
             )
             % (
+                (("说明：%s\n\n" % cr.reason) if getattr(cr, "reason", None) else ""),
                 start_d.isoformat(),
                 end_d.isoformat(),
                 len(asof_days),

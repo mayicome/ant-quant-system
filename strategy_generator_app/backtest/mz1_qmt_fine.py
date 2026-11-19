@@ -6,6 +6,7 @@
 结果用固定前缀 print 到 FormulaOutput，再回灌策略生成回测页。
 
 不解析 datadir 加密 .dat；不落全 A；不走本地 data/ticks 模拟撮合主路径。
+生成脚本前可按 {ymd}.dat 文件名清点本机已有 tick 日期（不读文件内容）。
 """
 from __future__ import annotations
 
@@ -140,6 +141,326 @@ def clamp_selection_days(
         extra = "丢掉 %d 个超窗选股日" % len(dropped)
         cr.reason = (cr.reason + "；" + extra) if cr.reason else extra
     return cr
+
+
+# --- inserted: plan QMT tick range with local datadir coverage ---
+
+def qmt_datadir_paths():
+    """返回本机可能的 QMT datadir（只认含 SH/0 或 SZ/0 的目录）。不解析 .dat 内容。"""
+    cands = [
+        DEFAULT_QMT_USERDATA.parent / "datadir",
+        Path(r"D:\国金证券QMT交易端2\datadir"),
+        Path(r"D:\国金证券QMT交易端\datadir"),
+    ]
+    seen = set()
+    out = []
+    for p in cands:
+        try:
+            key = str(p.resolve()).lower() if p.exists() else str(p).lower()
+        except Exception:
+            key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if (p / "SH" / "0").is_dir() or (p / "SZ" / "0").is_dir():
+            out.append(p)
+    return out
+
+
+@dataclass
+class LocalTickCoverage:
+    dates: List[date] = field(default_factory=list)
+    counts: Dict[date, int] = field(default_factory=dict)
+    datadir: Optional[Path] = None
+    scanned: bool = False
+    error: str = ""
+
+
+def scan_local_tick_coverage(
+    start: Optional[date],
+    end: Optional[date],
+    *,
+    datadir: Optional[Path] = None,
+) -> LocalTickCoverage:
+    """按文件名清点 datadir/{SH,SZ,BJ}/0/{code}/{YYYYMMDD}.dat，不读文件内容。"""
+    cov = LocalTickCoverage()
+    if start is None or end is None:
+        cov.error = "未指定区间"
+        return cov
+    if end < start:
+        start, end = end, start
+    roots = [datadir] if datadir is not None else qmt_datadir_paths()
+    if not roots:
+        cov.error = "未找到 QMT datadir，无法检查已下过的 tick"
+        return cov
+    counts = {}  # type: Dict[date, int]
+    lo = start.strftime("%Y%m%d")
+    hi = end.strftime("%Y%m%d")
+    try:
+        for root in roots:
+            if cov.datadir is None:
+                cov.datadir = root
+            for mkt in ("SH", "SZ", "BJ"):
+                p0 = root / mkt / "0"
+                if not p0.is_dir():
+                    continue
+                for entry in os.scandir(p0):
+                    if not entry.is_dir():
+                        continue
+                    try:
+                        for fn in os.listdir(entry.path):
+                            if not fn.lower().endswith(".dat"):
+                                continue
+                            ymd = fn[:8]
+                            if len(ymd) != 8 or not ymd.isdigit() or ymd < lo or ymd > hi:
+                                continue
+                            try:
+                                sz = os.path.getsize(os.path.join(entry.path, fn))
+                            except OSError:
+                                continue
+                            if sz <= 0:
+                                continue
+                            d = date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+                            counts[d] = counts.get(d, 0) + 1
+                    except OSError:
+                        continue
+        cov.scanned = True
+        cov.counts = counts
+        cov.dates = sorted(counts)
+    except Exception as exc:
+        cov.error = "扫描 datadir 失败：%s" % exc
+        cov.scanned = False
+    return cov
+
+
+def format_local_tick_summary(counts: Dict[date, int]) -> str:
+    """把按日股票数收成「日期～日期（N 个交易日，x～y 只）」短句。"""
+    if not counts:
+        return "本机 QMT datadir 没有该区间的 tick 文件"
+    days = sorted(counts)
+    groups = []
+    g0 = prev = days[0]
+    for d in days[1:]:
+        if d == prev + timedelta(days=1):
+            prev = d
+            continue
+        groups.append((g0, prev))
+        g0 = prev = d
+    groups.append((g0, prev))
+    parts = []
+    for a, b in groups:
+        span = [d for d in days if a <= d <= b]
+        cs = [counts[d] for d in span]
+        mn, mx = min(cs), max(cs)
+        if a == b:
+            parts.append("%s（%d 只）" % (a.isoformat(), counts[a]))
+        else:
+            if mn == mx:
+                stock_txt = "各 %d 只" % mn
+            else:
+                stock_txt = "%d～%d 只" % (mn, mx)
+            parts.append(
+                "%s～%s（%d 个交易日，%s）" % (a.isoformat(), b.isoformat(), len(span), stock_txt)
+            )
+    return "；".join(parts)
+
+
+@dataclass
+class TickRangePlan:
+    mode: str
+    start: Optional[date]
+    end: Optional[date]
+    requested_start: date
+    requested_end: date
+    window_start: date
+    window_end: date
+    reason: str = ""
+    local: LocalTickCoverage = field(default_factory=LocalTickCoverage)
+    clamped: bool = False
+
+    def as_window_choice(self) -> "TickRangePlan":
+        req = "%s～%s" % (self.requested_start.isoformat(), self.requested_end.isoformat())
+        win = "%s～%s" % (self.window_start.isoformat(), self.window_end.isoformat())
+        return TickRangePlan(
+            mode="window",
+            start=self.window_start,
+            end=self.window_end,
+            requested_start=self.requested_start,
+            requested_end=self.requested_end,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            reason="已按选择改用当前可下窗口 %s（原 %s）" % (win, req),
+            local=self.local,
+            clamped=True,
+        )
+
+
+def _fmt_span(a: Optional[date], b: Optional[date]) -> str:
+    if a is None or b is None:
+        return "（空）"
+    if a == b:
+        return a.isoformat()
+    return "%s～%s" % (a.isoformat(), b.isoformat())
+
+
+def plan_qmt_tick_range(
+    start: Optional[date],
+    end: Optional[date],
+    *,
+    as_of: Optional[date] = None,
+    depth_calendar_days: int = DEFAULT_TICK_DEPTH_CALENDAR_DAYS,
+    coverage: Optional[LocalTickCoverage] = None,
+) -> TickRangePlan:
+    """结合券商可下窗口和本机已有 tick，给出建议区间，不再在完全超窗时擅自改成窗口全长。
+
+    mode:
+      ok          指定区间完全落在可下窗口内
+      mixed       原区间可保留：一部分可新下，超出部分本机有 tick
+      adjusted    原区间两端有既不能新下、本地也没有的日子，建议收到可用段
+      local_only  完全在可下窗口之外，但本机还有该区间的 tick
+      unavailable 完全在可下窗口之外，本机也没有
+    """
+    w0, w1 = tick_window_bounds(as_of=as_of, depth_calendar_days=depth_calendar_days)
+    if start is None:
+        start = w0
+    if end is None:
+        end = w1
+    if end < start:
+        start, end = end, start
+    local = coverage if coverage is not None else scan_local_tick_coverage(start, end)
+    ns, ne = max(start, w0), min(end, w1)
+    window_overlap = ns <= ne
+    los = []
+    his = []
+    if window_overlap:
+        los.append(ns)
+        his.append(ne)
+    if local.dates:
+        los.append(min(local.dates))
+        his.append(max(local.dates))
+    if not los:
+        reason = "指定区间 %s 完全在可下窗口 %s 之外，本机也没有该区间 tick 文件" % (
+            _fmt_span(start, end),
+            _fmt_span(w0, w1),
+        )
+        if local.error:
+            reason += "（%s）" % local.error
+        return TickRangePlan(
+            mode="unavailable",
+            start=None,
+            end=None,
+            requested_start=start,
+            requested_end=end,
+            window_start=w0,
+            window_end=w1,
+            reason=reason,
+            local=local,
+            clamped=True,
+        )
+    lo, hi = min(los), max(his)
+    missing_notes = []
+    if lo > start:
+        missing_notes.append(
+            "原区间里 %s 既不能新下、本机也没有文件" % _fmt_span(start, lo - timedelta(days=1))
+        )
+    if hi < end:
+        missing_notes.append(
+            "原区间里 %s 既不能新下、本机也没有文件" % _fmt_span(hi + timedelta(days=1), end)
+        )
+    missing = "；".join(missing_notes)
+    if not window_overlap:
+        mode = "local_only"
+        reason = "指定区间 %s 完全在可下窗口 %s 之外；本机还留着 %s 的 tick，未改成窗口全长" % (
+            _fmt_span(start, end),
+            _fmt_span(w0, w1),
+            _fmt_span(lo, hi),
+        )
+        if missing:
+            reason += "。%s" % missing
+    elif (lo, hi) != (start, end):
+        mode = "adjusted"
+        reason = "已按可下窗口和本机已有 tick 调整为 %s（原 %s）" % (
+            _fmt_span(lo, hi),
+            _fmt_span(start, end),
+        )
+        if missing:
+            reason += "。%s" % missing
+    elif start < w0 or end > w1:
+        mode = "mixed"
+        reason = "区间 %s 中，超出可下窗口 %s 的部分将使用本机已有 tick" % (
+            _fmt_span(start, end),
+            _fmt_span(w0, w1),
+        )
+        if missing:
+            reason += "。%s" % missing
+    else:
+        mode = "ok"
+        reason = ""
+    return TickRangePlan(
+        mode=mode,
+        start=lo,
+        end=hi,
+        requested_start=start,
+        requested_end=end,
+        window_start=w0,
+        window_end=w1,
+        reason=reason,
+        local=local,
+        clamped=(lo != start or hi != end or mode != "ok"),
+    )
+
+
+def format_tick_range_prompt(plan: TickRangePlan) -> str:
+    """生成确认弹窗正文。"""
+    req = _fmt_span(plan.requested_start, plan.requested_end)
+    win = _fmt_span(plan.window_start, plan.window_end)
+    proposed = _fmt_span(plan.start, plan.end)
+    local_txt = format_local_tick_summary(plan.local.counts) if plan.local.counts else ""
+    if plan.local.error and not plan.local.scanned:
+        scan_note = "（%s）" % plan.local.error
+    else:
+        scan_note = ""
+    missing = ""
+    if plan.start and plan.requested_start < plan.start:
+        missing += "原区间里 %s 既不能新下、本机也没有文件。\n" % _fmt_span(
+            plan.requested_start, plan.start - timedelta(days=1)
+        )
+    if plan.end and plan.requested_end > plan.end:
+        missing += "原区间里 %s 既不能新下、本机也没有文件。\n" % _fmt_span(
+            plan.end + timedelta(days=1), plan.requested_end
+        )
+    if plan.mode == "unavailable":
+        return (
+            "你指定的区间 %s 已不在券商 tick 可下窗口（%s，约近 29 个自然日）内，不能再新下。\n\n"
+            "本机 QMT 也没有这段的 tick 文件%s，无法按原区间做细回测。\n\n"
+            "要改用当前可下窗口 %s 吗？"
+        ) % (req, win, scan_note, win)
+    if plan.mode == "local_only":
+        return (
+            "你指定的区间 %s 已不在券商 tick 可下窗口（%s）内，不能再新下。\n\n"
+            "本机 QMT 还留着这些日期：\n%s\n\n"
+            "%s"
+            "要用本地已有数据按 %s 继续吗？缺 tick 的日子会被跳过。"
+        ) % (req, win, local_txt, missing, proposed)
+    if plan.mode == "adjusted":
+        extra = ("本机已有：%s\n\n" % local_txt) if local_txt else ""
+        return (
+            "你指定的区间是 %s。\n"
+            "券商当前可下窗口是 %s。\n\n"
+            "已按可下窗口和本机已有 tick 调整为 %s。\n\n"
+            "%s%s"
+            "要按调整后的区间继续吗？"
+        ) % (req, win, proposed, extra, missing)
+    # mixed
+    extra = ("超出窗口的部分将使用本机已有 tick：\n%s\n\n" % local_txt) if local_txt else ""
+    return (
+        "你指定的区间 %s 不完全在券商当前可下窗口（%s）内。\n\n"
+        "%s%s"
+        "要按原区间继续吗？不能新下且本地也没有的日子会被跳过。"
+    ) % (req, win, extra, missing)
+
+
+# --- end inserted ---
 
 
 def _full_code(code6: str) -> str:

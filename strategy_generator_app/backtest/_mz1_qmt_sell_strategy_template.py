@@ -1162,6 +1162,7 @@ def _run_backtest(ContextInfo):
         NAME_CLEAR_MAIN = "马总1卖-主板涨幅弹性清仓"
         NAME_CLEAR_GROWTH = "马总1卖-非主板涨幅弹性清仓"
         sc_prefix = "马总1卖"
+        NAME_STOP_BUY = "马总1卖-跌破买入价止损"
 
     # 当前价回撤全仓：优先 open_drop_percent（常量名保留）
     try:
@@ -1194,6 +1195,16 @@ def _run_backtest(ContextInfo):
             clear_drop_growth = float(params.get("clear_drop_percent"))
     except Exception:
         pass
+
+    try:
+        if params.get("stop_loss_from_buy_percent") is not None:
+            stop_from_buy_pct = float(params.get("stop_loss_from_buy_percent"))
+        else:
+            stop_from_buy_pct = 0.0
+    except Exception:
+        stop_from_buy_pct = 0.0
+    if stop_from_buy_pct < 0:
+        stop_from_buy_pct = 0.0
 
     try:
         surge_g4 = float(params.get("surge_gain_4") if params.get("surge_gain_4") is not None else 0.04)
@@ -1582,6 +1593,26 @@ def _run_backtest(ContextInfo):
                                     "trigger": float(ct), "drop": clear_drop_main, "volume": int(avail),
                                     "is_clear": True,
                                 })
+
+            if (not is_ind) and (not is_surge) and stop_from_buy_pct > 1e-12 and avail >= 100:
+                try:
+                    _buy_cost = float(st.get("cost") or 0)
+                except Exception:
+                    _buy_cost = 0.0
+                if _buy_cost > 0:
+                    stop_px = _clamp_px(
+                        round(_buy_cost * (1.0 - float(stop_from_buy_pct) / 100.0), prec),
+                        limit_down,
+                        limit_up,
+                    )
+                    if stop_px > 0:
+                        day_intents.append({
+                            "kind": "breakthrough_sell",
+                            "name": NAME_STOP_BUY,
+                            "leg": "%s:STOP_BUY:%s" % (c6, ymd),
+                            "trigger": float(stop_px),
+                            "volume": int(avail),
+                        })
 
             di = _sell_day_index(st, day_d, trading_days)
             if hold_n is not None and di == int(hold_n) and avail >= 100:

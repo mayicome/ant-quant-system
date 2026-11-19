@@ -515,3 +515,40 @@ def get_positions_for_backtest() -> Dict[str, Dict[str, Any]]:
     finally:
         _safe_stop(trader)
     return out
+
+
+def get_positions_cost() -> Dict[str, float]:
+    """{6位代码: 持仓成本价}。优先 results.json 快照的 open_price/cost，取不到再走与回测导入相同的持仓查询。"""
+    out: Dict[str, float] = {}
+    try:
+        _, bt_map, _ = _builtin_snapshot_positions()
+        for c, row in (bt_map or {}).items():
+            try:
+                cost = float((row or {}).get("cost") or 0)
+            except (TypeError, ValueError):
+                cost = 0.0
+            if c and cost > 0:
+                out[str(c)] = cost
+    except Exception:
+        pass
+    if out:
+        return out
+    try:
+        bt = get_positions_for_backtest()
+        for c, row in (bt or {}).items():
+            if not isinstance(row, dict):
+                try:
+                    cost = float(row or 0)
+                except (TypeError, ValueError):
+                    cost = 0.0
+            else:
+                try:
+                    cost = float(row.get("cost") or row.get("open_price") or 0)
+                except (TypeError, ValueError):
+                    cost = 0.0
+            if c and cost > 0:
+                out[str(c)] = cost
+    except Exception:
+        pass
+    return out
+
