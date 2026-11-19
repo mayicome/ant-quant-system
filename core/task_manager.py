@@ -1253,6 +1253,8 @@ class TaskManager(QObject):
         """builtin/standalone 模式下，将任务与持仓同步到 rules_armed.json。
 
         任务有变化时，再把同一份写成 QMT 的会话文件。策略约 1 秒内自行重载。
+        仅弹性运行态（最高价/已触发等）变化时只更新 rules_armed.json，不重写会话，
+        避免 QMT 反复重载并闩上行情新鲜门，挡住已触发的卖出。
         同步后按武装集合确认「真运行中」（图表乐观启停的 ACK）。
         """
         if getattr(self, "_skip_rules_armed_sync", False):
@@ -1267,6 +1269,9 @@ class TaskManager(QObject):
                 _read_armed_tasks_from_disk,
             )
             changed = sync_rules_armed(self, self.qmt_adapter, logger=self.logger)
+            session_changed = bool(
+                getattr(self, "_rules_armed_session_changed", changed)
+            )
             try:
                 from utils.qmt_formula_result_log import poll as poll_formula
 
@@ -1344,7 +1349,7 @@ class TaskManager(QObject):
                 self._publish_qmt_session(ui_boot=True)
                 self._ui_boot_pending = False
                 return
-            if changed:
+            if session_changed:
                 self._publish_qmt_session()
         except Exception as e:
             self.logger.debug("sync rules_armed skipped: %s" % e)

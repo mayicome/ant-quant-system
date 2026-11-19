@@ -5,7 +5,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-SHADOW_VERSION = "20261103.2"
+SHADOW_VERSION = "20261119.1"
 SEED_INTERVAL_SEC = 3
 AUCTION_SEED_INTERVAL_SEC = 1.0
 # 盘中 quotes_recv_at(本机收到推送墙钟) 落后超过该秒数 → full_tick 补种
@@ -3515,8 +3515,11 @@ def _apply_reloaded_rules(ContextInfo, rules, allow_resubscribe=True, runner_rel
                 "[交易核心] 规则重载: 重新订阅已延迟 codes=%d"
                 % len(subscribe_codes)
             )
-    # 更新订阅列表后记锚点，再真正 subscribe/seed，避免首轮旧盘口开火
-    _arm_quote_fresh_gate("session_reload" if _SESSION_MODE else "rules_reload")
+    # 任务/订阅确实变了才闩门：仅弹性运行态回写造成的会话重载不应挡卖出
+    if tasks_changed or codes_changed or subscribe_changed or runner_reloaded:
+        _arm_quote_fresh_gate("session_reload" if _SESSION_MODE else "rules_reload")
+    else:
+        print("[交易核心] 规则重载: 任务与订阅未变，不闩行情新鲜门")
     if codes_changed or subscribe_changed:
         if allow_resubscribe:
             _subscribe_codes(ContextInfo, subscribe_codes)

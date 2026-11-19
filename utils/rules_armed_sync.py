@@ -217,6 +217,62 @@ def _elastic_runtime_export(rule: Dict[str, Any], kind: str) -> Dict[str, Any]:
     return out
 
 
+_ELASTIC_RUNTIME_KEYS = (
+    "triggered",
+    "highest_price",
+    "highest_tick_idx",
+    "tick_idx",
+    "pullback_hit_count",
+    "lowest_price",
+    "lowest_tick_idx",
+    "rebound_hit_count",
+)
+
+
+def _strip_elastic_runtime(tasks: Any) -> List[Any]:
+    """去掉弹性运行态，避免最高价抖动被当成任务变化去重写 QMT 会话。"""
+    out: List[Any] = []
+    for t in tasks or []:
+        if not isinstance(t, dict):
+            out.append(t)
+            continue
+        out.append({k: v for k, v in t.items() if k not in _ELASTIC_RUNTIME_KEYS})
+    return out
+
+
+def _armed_session_signature(
+    tasks: Any,
+    watch_codes: Any,
+    early_order_enabled: Any,
+    min_buy_amount: Any,
+    buy_shrink_min_ratio_pct: Any,
+    buy_block: Any,
+) -> str:
+    block = buy_block if isinstance(buy_block, dict) else {}
+    return json.dumps(
+        {
+            "tasks": _strip_elastic_runtime(tasks),
+            "watch_codes": watch_codes,
+            "early_order_enabled": bool(early_order_enabled),
+            "min_buy_amount": float(min_buy_amount or 0),
+            "buy_shrink_min_ratio_pct": float(buy_shrink_min_ratio_pct or 0),
+            "buy_block_window_enabled": bool(block.get("buy_block_window_enabled")),
+            "buy_block_start": str(block.get("buy_block_start") or ""),
+            "buy_block_end": str(block.get("buy_block_end") or ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _set_rules_armed_session_flag(task_manager, flag: bool) -> None:
+    try:
+        if task_manager is not None:
+            task_manager._rules_armed_session_changed = bool(flag)
+    except Exception:
+        pass
+
+
 def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
     """将运行中的单点买卖、突破买卖规则导出为 armed tasks。"""
     from core.trading_config import (
@@ -1436,7 +1492,11 @@ def sync_rules_armed(
     logger=None,
     project_root_override: Optional[str] = None,
 ) -> bool:
-    """写入 data/rules_armed.json；有变化时返回 True。"""
+    """写入 data/rules_armed.json；有变化时返回 True。
+
+    仅弹性运行态变化时仍写 json 并返回 True，但会把
+    task_manager._rules_armed_session_changed 设为 False，避免重写 QMT 会话。
+    """
     root = project_root_override or project_root()
     rules_path, _ = default_paths(root)
     # 策略生成器临时订阅超时未释放时，先清掉，避免数百只长期拖垮行情
@@ -1488,6 +1548,7 @@ def sync_rules_armed(
         "buy_block_end": str(buy_block.get("buy_block_end") or "09:31:30"),
     }
 
+    session_changed = True
     try:
         if os.path.isfile(rules_path):
             with open(rules_path, "r", encoding="utf-8") as f:
@@ -1524,7 +1585,27 @@ def sync_rules_armed(
             )
             if old_sig == new_sig:
                 _stash_last_armed(task_manager, tasks)
+                _set_rules_armed_session_flag(task_manager, False)
                 return False
+            session_changed = _armed_session_signature(
+                old.get("tasks"),
+                old.get("watch_codes"),
+                bool(old.get("early_order_enabled")),
+                float(old.get("min_buy_amount") or 0),
+                float(old.get("buy_shrink_min_ratio_pct") or 0),
+                {
+                    "buy_block_window_enabled": old.get("buy_block_window_enabled"),
+                    "buy_block_start": old.get("buy_block_start") or "",
+                    "buy_block_end": old.get("buy_block_end") or "",
+                },
+            ) != _armed_session_signature(
+                tasks,
+                watch_codes,
+                early_order_enabled,
+                min_buy_amount,
+                buy_shrink_min_ratio_pct,
+                buy_block,
+            )
     except (OSError, json.JSONDecodeError, TypeError):
         pass
 
@@ -1548,12 +1629,18 @@ def sync_rules_armed(
     try:
         save_json_atomic(rules_path, payload)
         _stash_last_armed(task_manager, tasks)
+        _set_rules_armed_session_flag(task_manager, session_changed)
         try:
             if task_manager is not None:
                 task_manager._rules_armed_published_at = time.time()
         except Exception:
             pass
         if logger is not None:
+            if not session_changed:
+                logger.info(
+                    "[rules_armed] 仅弹性运行态变化，已写 json，不同步 QMT 会话 "
+                    "tasks=%s" % len(tasks)
+                )
             logger.info(
                 f"[rules_armed] 已同步 tasks={len(tasks)} watch={len(watch_codes)} "
                 f"pool={len(pool_watch)} early={early_order_enabled} "
@@ -1567,6 +1654,7 @@ def sync_rules_armed(
     except OSError as e:
         # 写失败时仍用本次计算出的武装集做 UI 确认；必要时可读盘兜底
         _stash_last_armed(task_manager, tasks)
+        _set_rules_armed_session_flag(task_manager, False)
         if logger is not None:
             logger.error(f"[rules_armed] 写入失败: {e}")
         return False

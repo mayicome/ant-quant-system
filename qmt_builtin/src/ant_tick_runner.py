@@ -1359,7 +1359,7 @@ class ShadowTickRunner:
                         )
                         if tid:
                             st.done_task_ids.add(tid)
-                        self._best_buy.pop(tid, None)
+                        # 命中后只记 done，保留最低价。门闩或下单失败解锁后带着原峰值重试。
                     else:
                         if bbt.get("rebound_hit_count"):
                             bbt["rebound_hit_count"] = 0
@@ -1500,8 +1500,7 @@ class ShadowTickRunner:
                         )
                         if tid:
                             st.done_task_ids.add(tid)
-                        # 命中后清状态，避免重复
-                        self._best_sell.pop(tid, None)
+                        # 命中后只记 done，保留最高价。门闩或下单失败解锁后带着原峰值重试。
                     else:
                         if bst.get("pullback_hit_count"):
                             bst["pullback_hit_count"] = 0
