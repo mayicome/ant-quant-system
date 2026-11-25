@@ -59,6 +59,30 @@ except ImportError:
         compute_best_buy_rebound_from_rule = None  # type: ignore
 
 
+try:
+    from keep_half_utils import (
+        as_float as _kh_as_float,
+        classify_strength as _kh_classify_strength,
+        eval_no_new_high as _kh_eval_no_new_high,
+        rollover_and_update_high as _kh_rollover_and_update_high,
+        tick_session_high as _kh_tick_session_high,
+    )
+except ImportError:
+    try:
+        from qmt_builtin.keep_half_utils import (  # type: ignore
+            as_float as _kh_as_float,
+            classify_strength as _kh_classify_strength,
+            eval_no_new_high as _kh_eval_no_new_high,
+            rollover_and_update_high as _kh_rollover_and_update_high,
+            tick_session_high as _kh_tick_session_high,
+        )
+    except ImportError:
+        _kh_as_float = None  # type: ignore
+        _kh_classify_strength = None  # type: ignore
+        _kh_eval_no_new_high = None  # type: ignore
+        _kh_rollover_and_update_high = None  # type: ignore
+        _kh_tick_session_high = None  # type: ignore
+
 def _code6(stock_code: str) -> str:
     return (stock_code or "").strip().split(".")[0][:6]
 
@@ -139,6 +163,7 @@ class ShadowTickRunner:
         self._best_buy: Dict[str, Dict[str, Any]] = {}
         self._cage: Dict[str, Dict[str, Any]] = {}
         self._early: Dict[str, Dict[str, Any]] = {}
+        self._keep_half: Dict[str, Dict[str, Any]] = {}
         # code -> (limit_up, pre_close)，供近板缩小弹性；tick 缺字段时沿用
         self._limit_cache: Dict[str, Tuple[float, float]] = {}
         self.early_order_enabled = bool(rules.get("early_order_enabled"))
@@ -221,6 +246,11 @@ class ShadowTickRunner:
             base = str(ekey).split("@g")[0]
             if base and base not in live_ids:
                 self._early.pop(ekey, None)
+        for k in list(self._keep_half.keys()):
+            code = str((self._keep_half.get(k) or {}).get("stock_code") or "").strip().upper()
+            if code and code in new_codes:
+                continue
+            self._keep_half.pop(k, None)
         # 从武装任务回填 cage_entered，并合并导出的弹性运行态（不降峰值、不清已触发）
         for t in self.tasks:
             tid = str(t.get("task_id") or "")
@@ -235,6 +265,8 @@ class ShadowTickRunner:
                 self._merge_best_sell_from_task(tid, t)
             elif rtype == "best_buy":
                 self._merge_best_buy_from_task(tid, t)
+            if t.get("keep_half_id") or t.get("scheduled_clear_mode") or t.get("holding_period_high"):
+                self._seed_keep_half_from_task(t)
         return tasks_changed, codes_changed
 
     def hydrate_elastic_states(self, states: Optional[Dict[str, Any]]) -> None:
@@ -249,7 +281,9 @@ class ShadowTickRunner:
                     kind = "best_buy"
                 else:
                     kind = "best_sell"
-            if kind == "best_buy":
+            if kind == "keep_half" or str(tid).startswith("KH:"):
+                self._merge_keep_half_state(str(tid), st)
+            elif kind == "best_buy":
                 self._merge_best_buy_state(str(tid), st)
             else:
                 self._merge_best_sell_state(str(tid), st)
@@ -268,6 +302,12 @@ class ShadowTickRunner:
             row = dict(st)
             row["kind"] = "best_buy"
             out[str(tid)] = row
+        for kid, st in (self._keep_half or {}).items():
+            if not kid or not isinstance(st, dict):
+                continue
+            row = dict(st)
+            row["kind"] = "keep_half"
+            out[str(kid)] = row
         return out
 
     def dump_done_task_ids(self) -> List[str]:
@@ -442,6 +482,98 @@ class ShadowTickRunner:
             }
             self._best_sell[tid] = st
         return st
+
+    @staticmethod
+    def _keep_half_key(task: Dict[str, Any]) -> str:
+        kid = str((task or {}).get("keep_half_id") or "").strip()
+        if kid:
+            return kid if kid.startswith("KH:") else ("KH:" + kid)
+        code = str((task or {}).get("stock_code") or "").strip().upper()
+        return "KH:%s" % (code or "unknown")
+
+    def _merge_keep_half_state(self, key: str, incoming: Dict[str, Any]) -> None:
+        if not key or not isinstance(incoming, dict):
+            return
+        cur = self._keep_half.get(key)
+        if cur is None:
+            cur = {
+                "kind": "keep_half",
+                "period_high": None,
+                "period_high_prev": None,
+                "no_new_high_streak": 0,
+                "last_eval_date": "",
+                "high_date": "",
+                "keep_half_id": str(incoming.get("keep_half_id") or key),
+                "stock_code": str(incoming.get("stock_code") or "").strip().upper(),
+            }
+            self._keep_half[key] = cur
+        for fld in ("keep_half_id", "stock_code"):
+            val = str(incoming.get(fld) or "").strip()
+            if val and not cur.get(fld):
+                cur[fld] = val
+        try:
+            inc_hp = float(incoming["period_high"]) if incoming.get("period_high") not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            inc_hp = 0.0
+        try:
+            cur_hp = float(cur["period_high"]) if cur.get("period_high") not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            cur_hp = 0.0
+        if inc_hp > cur_hp:
+            cur["period_high"] = inc_hp
+        try:
+            inc_prev = float(incoming["period_high_prev"]) if incoming.get("period_high_prev") not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            inc_prev = 0.0
+        try:
+            cur_prev = float(cur["period_high_prev"]) if cur.get("period_high_prev") not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            cur_prev = 0.0
+        if inc_prev > cur_prev:
+            cur["period_high_prev"] = inc_prev
+        try:
+            inc_st = int(incoming.get("no_new_high_streak") or 0)
+            if inc_st > int(cur.get("no_new_high_streak") or 0):
+                cur["no_new_high_streak"] = inc_st
+        except (TypeError, ValueError):
+            pass
+        inc_date = str(incoming.get("high_date") or "").strip()
+        if inc_date and (not cur.get("high_date") or inc_date > str(cur.get("high_date") or "")):
+            cur["high_date"] = inc_date
+        inc_eval = str(incoming.get("last_eval_date") or "").strip()
+        if inc_eval and (not cur.get("last_eval_date") or inc_eval > str(cur.get("last_eval_date") or "")):
+            cur["last_eval_date"] = inc_eval
+        cur["kind"] = "keep_half"
+
+    def _seed_keep_half_from_task(self, task: Dict[str, Any]) -> None:
+        if not isinstance(task, dict):
+            return
+        key = self._keep_half_key(task)
+        incoming = {
+            "kind": "keep_half",
+            "keep_half_id": str(task.get("keep_half_id") or key),
+            "stock_code": str(task.get("stock_code") or "").strip().upper(),
+            "period_high": task.get("holding_period_high") or task.get("highest_price"),
+            "period_high_prev": task.get("holding_period_high") or task.get("highest_price"),
+        }
+        self._merge_keep_half_state(key, incoming)
+
+    def _update_keep_half_high(self, task: Dict[str, Any], row: Dict[str, Any], last_price: float, today: str) -> Dict[str, Any]:
+        key = self._keep_half_key(task)
+        self._seed_keep_half_from_task(task)
+        st = self._keep_half.get(key) or {}
+        seed = 0.0
+        if _kh_as_float is not None:
+            seed = _kh_as_float(task.get("holding_period_high") or task.get("highest_price"))
+            sess = _kh_tick_session_high(row, last_price) if _kh_tick_session_high is not None else last_price
+            nxt = _kh_rollover_and_update_high(st, today=today, session_high=sess, seed_high=seed)
+        else:
+            nxt = dict(st)
+        nxt["stock_code"] = str(task.get("stock_code") or nxt.get("stock_code") or "").strip().upper()
+        nxt["keep_half_id"] = str(task.get("keep_half_id") or nxt.get("keep_half_id") or key)
+        nxt["kind"] = "keep_half"
+        self._keep_half[key] = nxt
+        return nxt
 
     def _cage_state(self, tid: str) -> Dict[str, Any]:
         st = self._cage.get(tid)
@@ -851,12 +983,16 @@ class ShadowTickRunner:
                 trigger = float(task.get("trigger_price") or 0)
                 vol = int(task.get("max_volume") or 0)
                 want_mkt = self._task_wants_market_clear(task)
-                if trigger <= 0 or vol <= 0:
-                    continue
+                mode = str(task.get("scheduled_clear_mode") or "").strip()
                 from datetime import datetime as _dt
                 from datetime import time as _dt_time
 
-                now = _dt.now()
+                now = getattr(self, "_now_override", None) or _dt.now()
+                today = str(self.trade_date or now.strftime("%Y-%m-%d"))[:10]
+                if mode in ("strength_half_or_full", "no_new_high"):
+                    self._update_keep_half_high(task, row, lp, today)
+                if trigger <= 0 or vol <= 0:
+                    continue
                 eff = str(task.get("scheduled_clear_effective_date") or "").strip()
                 if eff and eff != now.strftime("%Y-%m-%d"):
                     continue
@@ -884,7 +1020,7 @@ class ShadowTickRunner:
                             "scheduled_clear_skip",
                             tick_time,
                             trigger,
-                            msg="\u5b9a\u65f6\u6e05\u4ed3\u8d85\u65f6",
+                            msg="定时清仓超时",
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
@@ -894,6 +1030,157 @@ class ShadowTickRunner:
                     )
                     st.done_task_ids.add(tid)
                     continue
+                if mode in ("strength_half_or_full", "no_new_high"):
+                    kh = self._keep_half.get(self._keep_half_key(task)) or {}
+                    ev_extra = {
+                        "keep_half_id": str(task.get("keep_half_id") or ""),
+                        "period_high": kh.get("period_high"),
+                        "period_high_prev": kh.get("period_high_prev"),
+                        "cost_price": task.get("cost_price"),
+                    }
+                    try:
+                        ev_extra["min_order_amount"] = float(task.get("min_order_amount") or 5000)
+                    except (TypeError, ValueError):
+                        ev_extra["min_order_amount"] = 5000.0
+                    if mode == "strength_half_or_full":
+                        cost = 0.0
+                        try:
+                            cost = float(task.get("cost_price") or 0)
+                        except (TypeError, ValueError):
+                            cost = 0.0
+                        try:
+                            profit_keep = float(task.get("profit_keep_pct") or 6)
+                        except (TypeError, ValueError):
+                            profit_keep = 6.0
+                        try:
+                            trail_pct = float(task.get("trail_pullback_pct") or 5)
+                        except (TypeError, ValueError):
+                            trail_pct = 5.0
+                        if _kh_classify_strength is None:
+                            cls = {
+                                "strong": False,
+                                "reason": "utils_missing",
+                                "clear_volume_mode": "remaining",
+                                "profit_pct": 0.0,
+                                "pullback_pct": 0.0,
+                                "period_high": kh.get("period_high"),
+                            }
+                        else:
+                            cls = _kh_classify_strength(
+                                lp, cost, kh.get("period_high"), profit_keep, trail_pct
+                            )
+                        if lp < trigger:
+                            ev = self._event(
+                                code,
+                                "scheduled_clear_hit",
+                                tick_time,
+                                trigger,
+                                msg="到期强弱留半或清仓",
+                                task_id=tid,
+                                last_price=lp,
+                                max_volume=vol,
+                                use_market_order=want_mkt,
+                                detail="mode=strength strong=%s reason=%s lp=%.4f hp=%s" % (
+                                    cls.get("strong"),
+                                    cls.get("reason"),
+                                    lp,
+                                    cls.get("period_high"),
+                                ),
+                            )
+                            ev["clear_volume_mode"] = cls.get("clear_volume_mode") or "remaining"
+                            ev.update({k: v for k, v in ev_extra.items() if v is not None and v != ""})
+                            ev["profit_pct"] = cls.get("profit_pct")
+                            ev["pullback_pct"] = cls.get("pullback_pct")
+                            ev["strength_reason"] = cls.get("reason")
+                            events.append(ev)
+                        else:
+                            events.append(
+                                self._event(
+                                    code,
+                                    "scheduled_clear_skip",
+                                    tick_time,
+                                    trigger,
+                                    msg="定时清仓价不满足",
+                                    task_id=tid,
+                                    last_price=lp,
+                                    max_volume=vol,
+                                    use_market_order=want_mkt,
+                                    detail="price_not_met lp=%.4f >= trig=%.4f" % (lp, trigger),
+                                )
+                            )
+                        st.done_task_ids.add(tid)
+                        continue
+                    # no_new_high
+                    try:
+                        need_days = int(task.get("no_new_high_days") or 3)
+                    except (TypeError, ValueError):
+                        need_days = 3
+                    already = str(kh.get("last_eval_date") or "") == today
+                    if already:
+                        evr = {
+                            "streak": int(kh.get("no_new_high_streak") or 0),
+                            "is_new_high": False,
+                            "should_clear": False,
+                            "reason": "already_eval_today",
+                            "need_days": need_days,
+                        }
+                    elif _kh_eval_no_new_high is None:
+                        evr = {
+                            "streak": int(kh.get("no_new_high_streak") or 0),
+                            "is_new_high": False,
+                            "should_clear": False,
+                            "reason": "utils_missing",
+                            "need_days": need_days,
+                        }
+                    else:
+                        evr = _kh_eval_no_new_high(
+                            kh.get("period_high"),
+                            kh.get("period_high_prev"),
+                            kh.get("no_new_high_streak") or 0,
+                            need_days,
+                        )
+                        kh["no_new_high_streak"] = evr.get("streak") or 0
+                        kh["last_eval_date"] = today
+                        self._keep_half[self._keep_half_key(task)] = kh
+                    ev_extra["no_new_high_streak"] = evr.get("streak")
+                    ev_extra["no_new_high_reason"] = evr.get("reason")
+                    if evr.get("should_clear") and lp < trigger:
+                        ev = self._event(
+                            code,
+                            "scheduled_clear_hit",
+                            tick_time,
+                            trigger,
+                            msg="连续不创新高清仓",
+                            task_id=tid,
+                            last_price=lp,
+                            max_volume=vol,
+                            use_market_order=want_mkt,
+                            detail="mode=no_new_high streak=%s need=%s" % (
+                                evr.get("streak"), evr.get("need_days")
+                            ),
+                        )
+                        ev["clear_volume_mode"] = "remaining"
+                        ev.update({k: v for k, v in ev_extra.items() if v is not None and v != ""})
+                        events.append(ev)
+                    else:
+                        ev = self._event(
+                            code,
+                            "scheduled_clear_skip",
+                            tick_time,
+                            trigger,
+                            msg="连续不创新高未达天数" if not evr.get("should_clear") else "定时清仓价不满足",
+                            task_id=tid,
+                            last_price=lp,
+                            max_volume=vol,
+                            use_market_order=want_mkt,
+                            detail="mode=no_new_high reason=%s streak=%s lp=%.4f" % (
+                                evr.get("reason"), evr.get("streak"), lp
+                            ),
+                        )
+                        ev.update({k: v for k, v in ev_extra.items() if v is not None and v != ""})
+                        events.append(ev)
+                    st.done_task_ids.add(tid)
+                    continue
                 if lp < trigger:
                     events.append(
                         self._event(
@@ -901,7 +1188,7 @@ class ShadowTickRunner:
                             "scheduled_clear_hit",
                             tick_time,
                             trigger,
-                            msg="\u5b9a\u65f6\u6e05\u4ed3\u89e6\u53d1",
+                            msg="定时清仓触发",
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
@@ -916,7 +1203,7 @@ class ShadowTickRunner:
                             "scheduled_clear_skip",
                             tick_time,
                             trigger,
-                            msg="\u5b9a\u65f6\u6e05\u4ed3\u4ef7\u4e0d\u6ee1",
+                            msg="定时清仓价不满足",
                             task_id=tid,
                             last_price=lp,
                             max_volume=vol,
@@ -1232,7 +1519,7 @@ class ShadowTickRunner:
                         st.done_task_ids.add(tid)
                 continue
 
-            # 突破卖出：与图表一致 —— 现价 < 触发价即卖（不要求先上破）
+            # 突破卖出：现价 < 触发价即卖（不要求先上破）。
             if rule_type == "breakthrough_sell":
                 r_lp = round_price_like_display(_code6(code), lp)
                 r_trig = round_price_like_display(_code6(code), trig)

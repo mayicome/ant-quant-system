@@ -5,7 +5,15 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-SHADOW_VERSION = "20261119.1"
+try:
+    from keep_half_utils import half_remaining_volume as _kh_half_remaining_volume
+except ImportError:
+    try:
+        from qmt_builtin.keep_half_utils import half_remaining_volume as _kh_half_remaining_volume  # type: ignore
+    except ImportError:
+        _kh_half_remaining_volume = None  # type: ignore
+
+SHADOW_VERSION = "20261120.1"
 SEED_INTERVAL_SEC = 3
 AUCTION_SEED_INTERVAL_SEC = 1.0
 # 盘中 quotes_recv_at(本机收到推送墙钟) 落后超过该秒数 → full_tick 补种
@@ -2638,6 +2646,28 @@ def _handle_order_events(ContextInfo, events, datas, quote_gate: bool = False) -
                     % (code, vol, avail)
                 )
                 vol = avail
+            mode = str(ev.get("clear_volume_mode") or "").strip()
+            if mode == "half_remaining":
+                try:
+                    moa = float(ev.get("min_order_amount") or 5000)
+                except (TypeError, ValueError):
+                    moa = 5000.0
+                if _kh_half_remaining_volume is None:
+                    print("[交易核心] 强势留半工具缺失，按剩余全卖 %s" % code)
+                    mode = "remaining"
+                else:
+                    half_vol, why = _kh_half_remaining_volume(avail, price=float(last_px or 0), min_order_amount=moa)
+                    half_vol = (int(half_vol or 0) // 100) * 100
+                    if half_vol <= 0:
+                        print("[交易核心] 定时清仓跳过 半仓无可用 %s avail=%s" % (code, avail))
+                        if tid:
+                            _disarm_task_in_rules_armed(tid)
+                        continue
+                    print(
+                        "[交易核心] scheduled_clear half_remaining %s avail=%s -> %s (%s)"
+                        % (code, avail, half_vol, why)
+                    )
+                    vol = half_vol
         if ev_type in (
             "single_sell_hit",
             "breakthrough_sell_hit",

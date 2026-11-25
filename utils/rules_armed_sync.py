@@ -106,6 +106,45 @@ def _armed_buy_extras(rule: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+
+def _copy_keep_half_fields(src, dst):
+    """把强势留半字段拷到武装任务（市价开关、弹性高点走原有函数）。"""
+    if not isinstance(src, dict) or not isinstance(dst, dict):
+        return dst
+    for sk in ("scheduled_clear_mode", "keep_half_id"):
+        sv = src.get(sk)
+        if sv is not None and str(sv).strip() != "":
+            dst[sk] = str(sv).strip()
+    if src.get("scheduled_clear_every_day"):
+        dst["scheduled_clear_every_day"] = True
+    if src.get("scheduled_clear_force"):
+        dst["scheduled_clear_force"] = True
+    for fk in (
+        "holding_period_high",
+        "cost_price",
+        "profit_keep_pct",
+        "trail_pullback_pct",
+        "min_order_amount",
+    ):
+        if src.get(fk) is None or str(src.get(fk)).strip() == "":
+            continue
+        try:
+            fv = float(src.get(fk))
+        except (TypeError, ValueError):
+            continue
+        if fk in ("holding_period_high", "cost_price", "min_order_amount") and fv <= 0:
+            continue
+        dst[fk] = fv
+    if src.get("no_new_high_days") is not None and str(src.get("no_new_high_days")).strip() != "":
+        try:
+            nv = int(float(src.get("no_new_high_days")))
+            if nv >= 1:
+                dst["no_new_high_days"] = nv
+        except (TypeError, ValueError):
+            pass
+    return dst
+
+
 def _armed_market_clear_flag(rule: Dict[str, Any]) -> Dict[str, Any]:
     """只把市价清仓开关带到 single_sell / scheduled_clear 武装任务。"""
     if not isinstance(rule, dict):
@@ -397,6 +436,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                     "metadata": _rule_meta(task_id, rule),
                 }
                 sc_row.update(_armed_market_clear_flag(rule))
+                _copy_keep_half_fields(rule, sc_row)
                 armed.append(normalize_armed_task(sc_row))
                 continue
             if rule_type in ("grid_buy", "grid_sell"):
@@ -565,6 +605,7 @@ def build_armed_tasks(task_manager) -> List[Dict[str, Any]]:
                     "metadata": _rule_meta(task_id, rule),
                 }
                 best_sell_row.update(_elastic_runtime_export(rule, "best_sell"))
+                _copy_keep_half_fields(rule, best_sell_row)
                 armed.append(normalize_armed_task(best_sell_row))
                 continue
             if rule_type == "best_buy":

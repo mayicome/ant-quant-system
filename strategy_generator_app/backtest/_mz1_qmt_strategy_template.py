@@ -10,6 +10,7 @@ Python 需 3.6 兼容；tick/日线只用大 QMT 内置 download_history_data + 
 from __future__ import print_function
 
 import json
+import os
 import time
 import traceback
 from datetime import date, datetime, timedelta
@@ -133,6 +134,225 @@ def _call_download(ContextInfo, full_code, period, start_s, end_s):
             return str(e)[:200]
     except Exception as e:
         return str(e)[:200]
+
+
+def _datadir_roots():
+    return (
+        r"D:\国金证券QMT交易端2\datadir",
+        r"D:\国金证券QMT交易端\datadir",
+    )
+
+
+def _market_of(full_code):
+    s = str(full_code or "").strip().upper()
+    if "." in s:
+        suf = s.split(".", 1)[1]
+        if suf in ("SH", "SZ", "BJ"):
+            return suf
+    c6 = _code6(s)
+    if c6.startswith(("5", "6", "9")):
+        return "SH"
+    if c6.startswith(("4", "8")):
+        return "BJ"
+    return "SZ"
+
+
+def _daily_ymds_from_dat(full_code):
+    """YYYYMMDD from datadir/{SH|SZ|BJ}/86400/{code}.DAT.
+
+    QMT daily file: 8-byte header, then 64-byte bars. Byte 0 of each bar is a
+    local Unix timestamp (uint32). None if the file cannot be read.
+    """
+    try:
+        c6 = _code6(full_code)
+        if not c6:
+            return None
+        mkt = _market_of(full_code)
+        saw = False
+        for root in _datadir_roots():
+            path = os.path.join(root, mkt, "86400", c6 + ".DAT")
+            if not os.path.isfile(path):
+                alt = os.path.join(root, mkt, "86400", c6 + ".dat")
+                if os.path.isfile(alt):
+                    path = alt
+                else:
+                    continue
+            saw = True
+            try:
+                import struct
+                fh = open(path, "rb")
+                try:
+                    data = fh.read()
+                finally:
+                    fh.close()
+            except OSError:
+                return None
+            if len(data) < 72:
+                return []
+            n = (len(data) - 8) // 64
+            out = []
+            seen_d = set()
+            for i in range(n):
+                v = struct.unpack_from("<I", data, 8 + i * 64)[0]
+                if v < 631152000 or v > 4102444800:
+                    continue
+                try:
+                    ymd = datetime.fromtimestamp(v).strftime("%Y%m%d")
+                except Exception:
+                    continue
+                if ymd not in seen_d:
+                    seen_d.add(ymd)
+                    out.append(ymd)
+            out.sort()
+            return out
+        if not saw:
+            return None
+        return []
+    except Exception:
+        return None
+
+
+def _api_daily_ymds(ContextInfo, full_code, start_s, end_s):
+    """Daily dates from get_market_data_ex. None means the read failed."""
+    try:
+        daily, err = _get_market(ContextInfo, full_code, "1d", start_s, end_s)
+        if err:
+            return None
+        ymds = []
+        seen = set()
+        seq = []
+        if hasattr(daily, "index"):
+            try:
+                seq = list(daily.index)
+            except Exception:
+                seq = []
+        parsed = _as_ymd_list(seq) if seq else []
+        if not any(parsed):
+            parsed = _as_ymd_list(_series(daily, "time", "stamp", "stime"))
+        for y in parsed:
+            if y and y not in seen:
+                seen.add(y)
+                ymds.append(y)
+        ymds.sort()
+        return ymds
+    except Exception:
+        return None
+
+
+def _local_daily_ymds(ContextInfo, full_code, start_s, end_s):
+    """Dates used by the skip check. A covering 86400 DAT wins over the API."""
+    disk = _daily_ymds_from_dat(full_code)
+    if disk and _daily_range_covered(disk, start_s, end_s):
+        return disk
+    api = _api_daily_ymds(ContextInfo, full_code, start_s, end_s)
+    if api and _daily_range_covered(api, start_s, end_s):
+        return api
+    if api:
+        return api
+    if disk is not None:
+        return disk
+    return api
+
+
+def _daily_range_covered(ymds, daily_start, end_s):
+    """True only when local daily bars reach the requested end and the lookback."""
+    if not ymds:
+        return False
+    if str(ymds[-1]) < str(end_s):
+        return False
+    first = str(ymds[0])
+    ask = str(daily_start)
+    if first <= ask:
+        return True
+    try:
+        d0 = date(int(first[0:4]), int(first[4:6]), int(first[6:8]))
+        d_ask = date(int(ask[0:4]), int(ask[4:6]), int(ask[6:8]))
+        gap = (d0 - d_ask).days
+        if 0 <= gap <= 10:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _local_tick_ymds(full_code):
+    """YYYYMMDD set of non-empty tick files. None if datadir cannot be listed."""
+    try:
+        c6 = _code6(full_code)
+        if not c6:
+            return None
+        mkt = _market_of(full_code)
+        saw_root = False
+        for root in _datadir_roots():
+            base = os.path.join(root, mkt, "0")
+            if not os.path.isdir(base):
+                continue
+            saw_root = True
+            folder = os.path.join(base, c6)
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                return set()
+            out = set()
+            for fn in names:
+                if len(fn) < 12 or not fn[:8].isdigit():
+                    continue
+                if not fn.lower().endswith(".dat"):
+                    continue
+                try:
+                    sz = os.path.getsize(os.path.join(folder, fn))
+                except OSError:
+                    return None
+                if sz > 0:
+                    out.add(fn[:8])
+            return out
+        if not saw_root:
+            return None
+        return set()
+    except Exception:
+        return None
+
+
+# mz1_qmt_fine.DEFAULT_TICK_DEPTH_CALENDAR_DAYS：自然日，不是交易日。
+DEFAULT_TICK_DEPTH_CALENDAR_DAYS = 29
+
+
+def _tick_depth_floor_ymd():
+    """Earliest day download_history_data(tick) can still fetch. date.today() inside QMT."""
+    try:
+        floor = date.today() - timedelta(days=DEFAULT_TICK_DEPTH_CALENDAR_DAYS)
+        return floor.strftime("%Y%m%d")
+    except Exception:
+        return ""
+
+
+def _tick_download_plan(tick_days, files, depth_ymd, req_start, req_end):
+    """Decide whether a tick download can add anything.
+
+    Returns ('skip', ''), ('skip_old', '') or ('download', start_ymd).
+    Days older than the broker depth are never requested. A download start
+    is clamped up to that floor; the end stays req_end.
+    """
+    missing_old = []
+    missing_in = []
+    known = files is not None
+    for ymd in tick_days or []:
+        if known and ymd in files:
+            continue
+        if depth_ymd and ymd < depth_ymd:
+            missing_old.append(ymd)
+        else:
+            missing_in.append(ymd)
+    if missing_in:
+        dl_start = req_start or depth_ymd or ""
+        if depth_ymd and (not dl_start or dl_start < depth_ymd):
+            dl_start = depth_ymd
+        if req_end and dl_start and dl_start > req_end:
+            return "skip_old", ""
+        return "download", dl_start
+    if missing_old:
+        return "skip_old", ""
+    return "skip", ""
 
 
 def _extract_payload(data, full_code):
@@ -631,7 +851,7 @@ def _already_touched_leg(ymds_ord, closes_ord, low_by_ymd, sel_d, entry_window, 
     return False
 
 
-def _run_backtest(ContextInfo):
+def iter_backtest(ContextInfo):
     codes = list(CFG.get("codes") or [])
     sel_map = CFG.get("selection_date_by_code") or {}
     daily_pools = CFG.get("daily_pools") or {}
@@ -709,18 +929,111 @@ def _run_backtest(ContextInfo):
                         else:
                             dl_codes.append(c6 + ".SZ")
 
-    for full_code in dl_codes:
-        err = _call_download(ContextInfo, full_code, "1d", daily_start, end_s)
-        if err:
-            _log("download 1d %s %s" % (full_code, err))
-        err = _call_download(ContextInfo, full_code, "tick", start_s, end_s)
-        if err:
-            _log("download tick %s %s" % (full_code, err))
-        time.sleep(0.05)
+    days = _weekday_days(start_d, end_d)
+    use_daily_pools = bool(isinstance(daily_pools, dict) and daily_pools)
+
+    def _tick_days_for(full_code):
+        """Entry-window days this code will actually read. Empty means unknown."""
+        c6 = _code6(full_code)
+        out = []
+        seen = set()
+
+        def _add(day):
+            ymd = day.strftime("%Y%m%d")
+            if ymd not in seen:
+                seen.add(ymd)
+                out.append(ymd)
+
+        if use_daily_pools:
+            for day in days:
+                info = daily_pools.get(day.isoformat()) or daily_pools.get(day.strftime("%Y-%m-%d"))
+                if not isinstance(info, dict):
+                    continue
+                hit = False
+                for raw in (info.get("codes") or []):
+                    if _code6(raw) == c6:
+                        hit = True
+                        break
+                if not hit:
+                    continue
+                day_sel = info.get("selection_date_by_code") or {}
+                sel_raw = day_sel.get(c6) or day_sel.get(full_code)
+                sel_d = _parse_d(sel_raw) if sel_raw else None
+                if sel_d:
+                    e0, e1 = _entry_bounds(sel_d, entry_window, from_t1)
+                else:
+                    e0, e1 = start_d, end_d
+                if e0 is None:
+                    e0, e1 = start_d, end_d
+                if day < e0 or day > e1:
+                    continue
+                _add(day)
+            return out
+        sel_raw = sel_map.get(c6) or sel_map.get(full_code)
+        sel_d = _parse_d(sel_raw) if sel_raw else None
+        if sel_d:
+            e0, e1 = _entry_bounds(sel_d, entry_window, from_t1)
+        else:
+            e0, e1 = start_d, end_d
+        if e0 is None:
+            e0, e1 = start_d, end_d
+        for day in days:
+            if e0 <= day <= e1:
+                _add(day)
+        return out
+
+    tick_depth_ymd = _tick_depth_floor_ymd()
+    n_dl = len(dl_codes)
+    n_skip_1d = 0
+    n_dl_1d = 0
+    n_skip_tick = 0
+    n_skip_tick_old = 0
+    n_dl_tick = 0
+    for i_dl, full_code in enumerate(dl_codes):
+        yield
+        ymds = _local_daily_ymds(ContextInfo, full_code, daily_start, end_s)
+        if ymds is None or not _daily_range_covered(ymds, daily_start, end_s):
+            err = _call_download(ContextInfo, full_code, "1d", daily_start, end_s)
+            n_dl_1d += 1
+            if err:
+                _log("download 1d %s %s" % (full_code, err))
+            else:
+                _log("download 1d %s" % full_code)
+            ymds = _local_daily_ymds(ContextInfo, full_code, daily_start, end_s)
+        else:
+            n_skip_1d += 1
+        tick_days = _tick_days_for(full_code)
+        if ymds is not None and _daily_range_covered(ymds, daily_start, end_s):
+            have = set(ymds)
+            tick_days = [y for y in tick_days if y in have]
+        files = _local_tick_ymds(full_code)
+        action, dl_tick_start = _tick_download_plan(
+            tick_days, files, tick_depth_ymd, start_s, end_s
+        )
+        if action == "download":
+            err = _call_download(ContextInfo, full_code, "tick", dl_tick_start, end_s)
+            n_dl_tick += 1
+            if err:
+                _log("download tick %s %s" % (full_code, err))
+            else:
+                _log("download tick %s" % full_code)
+        elif action == "skip_old":
+            n_skip_tick_old += 1
+        else:
+            n_skip_tick += 1
+        done_dl = i_dl + 1
+        if done_dl % 25 == 0 or done_dl == n_dl:
+            _log(
+                "progress download %d/%d %s skipped_1d=%d downloaded_1d=%d skipped_tick=%d skipped_tick_old=%d downloaded_tick=%d"
+                % (done_dl, n_dl, full_code, n_skip_1d, n_dl_1d, n_skip_tick, n_skip_tick_old, n_dl_tick)
+            )
+    _log(
+        "cache summary skipped_1d=%d downloaded_1d=%d skipped_tick=%d skipped_tick_old=%d downloaded_tick=%d"
+        % (n_skip_1d, n_dl_1d, n_skip_tick, n_skip_tick_old, n_dl_tick)
+    )
 
     filled = set(str(x) for x in (CFG.get("filled_legs") or []) if x)
     trades = []
-    days = _weekday_days(start_d, end_d)
     skip = {"no_ma": 0, "no_last": 0, "no_break": 0, "no_vol": 0, "days_checked": 0, "already": 0, "out_window": 0}
     # generation_time kept in CFG/START; trigger uses run_start/run_end only (align local simulator).
     _ = gen_hms
@@ -743,8 +1056,6 @@ def _run_backtest(ContextInfo):
         daily_cache[full_code] = (ymds_ord, closes_ord, low_by_ymd, err)
         return daily_cache[full_code]
 
-    use_daily_pools = bool(isinstance(daily_pools, dict) and daily_pools)
-
     if use_daily_pools:
         for day in days:
             day_key = day.isoformat()
@@ -756,6 +1067,7 @@ def _run_backtest(ContextInfo):
             if not day_codes:
                 continue
             for raw_code in day_codes:
+                yield
                 full_code = str(raw_code)
                 if "." not in full_code:
                     full_code = _full_from_c6(full_code)
@@ -843,6 +1155,7 @@ def _run_backtest(ContextInfo):
 
             ymds_ord, closes_ord, low_by_ymd, err = _ensure_daily(full_code)
             for day in days:
+                yield
                 if day < e0 or day > e1:
                     continue
                 ymd = day.strftime("%Y%m%d")
@@ -914,8 +1227,13 @@ def _run_backtest(ContextInfo):
 
 
 def run_backtest(ContextInfo):
-    """Entry for hot-reload probe (探针); also used by init for one-shot paste."""
-    _run_backtest(ContextInfo)
+    """One-shot paste entry. The probe drives iter_backtest() and yields between steps."""
+    gen = iter_backtest(ContextInfo)
+    try:
+        while True:
+            next(gen)
+    except StopIteration:
+        return
 
 
 def init(ContextInfo):

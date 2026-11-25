@@ -275,9 +275,12 @@ def parse_strategy_code_drop_constants(strategy_code: str = "") -> Dict[str, flo
         "stop_loss_from_buy_percent": r"STOP_LOSS_FROM_BUY_PCT\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "clear_gain_main": r"CLEAR_GAIN_MAIN\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "clear_gain_growth": r"CLEAR_GAIN_GROWTH\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "profit_keep_pct": r"PROFIT_KEEP_PCT\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "trail_pullback_pct": r"TRAIL_PULLBACK_PCT\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "surge_gain_4": r"SURGE_GAIN_4\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "surge_gain_6": r"SURGE_GAIN_6\s*=\s*([-+]?\d+(?:\.\d+)?)",
         "surge_gain_8": r"SURGE_GAIN_8\s*=\s*([-+]?\d+(?:\.\d+)?)",
+        "no_new_high_days": r"NO_NEW_HIGH_DAYS\s*=\s*([-+]?\d+(?:\.\d+)?)",
     }
     for key, pat in patterns.items():
         m = re.search(pat, text)
@@ -297,7 +300,35 @@ def parse_strategy_code_str_constants(strategy_code: str = "") -> Dict[str, str]
     m = re.search(r'CLEAR_BRANCH_AT\s*=\s*["\']([^"\']+)["\']', text)
     if m:
         out["clear_branch_at"] = str(m.group(1)).strip()
+    m = re.search(r'SCHEDULED_CLEAR_MODE\s*=\s*["\']([^"\']+)["\']', text)
+    if m:
+        out["scheduled_clear_mode"] = str(m.group(1)).strip()
+    for key, pat in (
+        ("strength_clear_name", r'NAME_STRENGTH_CLEAR\s*=\s*["\']([^"\']+)["\']'),
+        ("trail_rule_name", r'NAME_TRAIL\s*=\s*["\']([^"\']+)["\']'),
+        ("stop_cost_rule_name", r'NAME_STOP_COST\s*=\s*["\']([^"\']+)["\']'),
+        ("no_new_high_rule_name", r'NAME_NO_NEW_HIGH\s*=\s*["\']([^"\']+)["\']'),
+        ("open_rule_name", r'NAME_OPEN50\s*=\s*["\']([^"\']+)["\']'),
+        ("lu_rule_name", r'NAME_LU10\s*=\s*["\']([^"\']+)["\']'),
+    ):
+        m = re.search(pat, text)
+        if m:
+            out[key] = str(m.group(1)).strip()
     return out
+
+
+def strategy_uses_strength_keep(strategy_code: str = "") -> bool:
+    """卖：开盘涨幅弹性半仓+近涨停弹性半仓+强势留半。
+
+    run() 用 NAME_STRENGTH_CLEAR + UNCONDITIONAL_CLEAR_TRIGGER，不再挂涨停即清仓 / T 点。
+    文件里残留的 CLEAR_GAIN_* 只是旧解析兼容，不能当成还要挂那些清仓腿。
+    """
+    text = strategy_code or ""
+    if "NAME_STRENGTH_CLEAR" not in text or "UNCONDITIONAL_CLEAR_TRIGGER" not in text:
+        return False
+    if re.search(r'(?m)^\s*CLEAR_BRANCH_AT\s*=', text):
+        return False
+    return True
 
 
 def build_qmt_strategy_source(
@@ -462,6 +493,41 @@ def build_qmt_strategy_source(
         sp["stop_loss_from_buy_percent"] = float(code_drops_all["stop_loss_from_buy_percent"])
     else:
         sp.setdefault("stop_loss_from_buy_percent", 0.0)
+    code_strs_all = parse_strategy_code_str_constants(strategy_code)
+    strength_keep = variant == SELL_VARIANT_MZ1 and strategy_uses_strength_keep(strategy_code)
+    # 马总卖 fd561fb3 的清仓腿带 CLEAR_BRANCH_AT；5a1fa73f 没有。次日了结默认开。
+    # 强势留半这只策略明确不挂 T 点，残留常量也不能打开封板。
+    clear_branch_enabled = (not strength_keep) and (
+        variant == SELL_VARIANT_INTRADAY_NEXT_DAY or bool(code_strs_all.get("clear_branch_at"))
+    )
+    if strength_keep:
+        if "drop_percent" in code_drops_all:
+            sp["drop_percent"] = float(code_drops_all["drop_percent"])
+        if "lu_drop_percent" in code_drops_all:
+            sp["lu_drop_percent"] = float(code_drops_all["lu_drop_percent"])
+        if "no_new_high_days" in code_drops_all:
+            sp["no_new_high_days"] = int(code_drops_all["no_new_high_days"])
+        else:
+            sp.setdefault("no_new_high_days", 3)
+    if code_strs_all.get("clear_branch_at"):
+        sp["clear_branch_at"] = code_strs_all["clear_branch_at"]
+    elif clear_branch_enabled:
+        sp.setdefault("clear_branch_at", "09:50:00")
+    # 强势留半只属于强势那只策略。T 点等其它马总卖没写 SCHEDULED_CLEAR_MODE 时，
+    # 第 N 日按涨停外把剩余全部卖掉，不默认留半。代码里写了则跟代码。
+    clear_mode = str(code_strs_all.get("scheduled_clear_mode") or "").strip()
+    if not clear_mode and strength_keep:
+        clear_mode = "strength_half_or_full"
+    if "profit_keep_pct" in code_drops_all:
+        sp["profit_keep_pct"] = float(code_drops_all["profit_keep_pct"])
+    else:
+        sp.setdefault("profit_keep_pct", 6.0)
+    if "trail_pullback_pct" in code_drops_all:
+        sp["trail_pullback_pct"] = float(code_drops_all["trail_pullback_pct"])
+    else:
+        sp.setdefault("trail_pullback_pct", 5.0)
+    sp["scheduled_clear_mode"] = clear_mode
+
     sel_map_cfg = {}
     raw_sel = sp.get("selection_date_by_code") or {}
     if isinstance(raw_sel, dict):
@@ -492,6 +558,20 @@ def build_qmt_strategy_source(
         "strategy_id": str(strategy_id or ""),
         "strategy_name": str(strategy_name or ""),
         "clear_branch_at": str(sp.get("clear_branch_at") or "09:50:00"),
+        "clear_branch_enabled": bool(clear_branch_enabled),
+        "scheduled_clear_mode": str(clear_mode or ""),
+        "profit_keep_pct": float(sp.get("profit_keep_pct") or 6.0),
+        "trail_pullback_pct": float(sp.get("trail_pullback_pct") or 5.0),
+        "sell_profile": "strength_keep" if strength_keep else "",
+        "suppress_gain_clear": bool(strength_keep),
+        "strength_unconditional": bool(strength_keep),
+        "strength_clear_name": str(code_strs_all.get("strength_clear_name") or "马总1卖-到期强弱留半或清仓"),
+        "trail_rule_name": str(code_strs_all.get("trail_rule_name") or "马总1卖-持有期最高价回落清仓"),
+        "stop_cost_rule_name": str(code_strs_all.get("stop_cost_rule_name") or "马总1卖-到期后跌破买入价"),
+        "no_new_high_rule_name": str(code_strs_all.get("no_new_high_rule_name") or "马总1卖-连续不创新高清仓"),
+        "open_rule_name": str(code_strs_all.get("open_rule_name") or ""),
+        "lu_rule_name": str(code_strs_all.get("lu_rule_name") or ""),
+        "no_new_high_days": int(sp.get("no_new_high_days") or 3),
     }
     cfg_json = json.dumps(cfg, ensure_ascii=False, indent=2)
     tmpl = _TEMPLATE_PATH.read_text(encoding="utf-8")

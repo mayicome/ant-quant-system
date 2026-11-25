@@ -465,6 +465,38 @@ def _make_rule_dict(
             rname = str(out.get("name") or "")
             if rtype in ("single_sell", "scheduled_clear") and "开板突破卖" not in rname:
                 out["use_market_order"] = True
+        rtype = str(out.get("type") or "").strip()
+        if rtype in ("scheduled_clear", "best_sell"):
+            for sk in ("scheduled_clear_mode", "keep_half_id"):
+                sv = intent.get(sk)
+                if sv is not None and str(sv).strip() != "":
+                    out[sk] = str(sv).strip()
+            if _truthy_flag(intent.get("scheduled_clear_every_day")):
+                out["scheduled_clear_every_day"] = True
+            for fk in (
+                "highest_price",
+                "holding_period_high",
+                "cost_price",
+                "profit_keep_pct",
+                "trail_pullback_pct",
+                "min_order_amount",
+            ):
+                if intent.get(fk) is None or str(intent.get(fk)).strip() == "":
+                    continue
+                try:
+                    fv = float(intent.get(fk))
+                except (TypeError, ValueError):
+                    continue
+                if fk in ("highest_price", "holding_period_high", "cost_price", "min_order_amount") and fv <= 0:
+                    continue
+                out[fk] = fv
+            if intent.get("no_new_high_days") is not None and str(intent.get("no_new_high_days")).strip() != "":
+                try:
+                    nv = int(float(intent.get("no_new_high_days")))
+                    if nv >= 1:
+                        out["no_new_high_days"] = nv
+                except (TypeError, ValueError):
+                    pass
         return out
 
     if rule_type == "breakthrough_buy":

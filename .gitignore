@@ -93,5 +93,41 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 *.bak
+# .bak_20261103 / .bak.20261104 带日期标记的备份（*.bak 挡不住）
+*.bak_*
+*.bak.*
+# bak_xxx 备份目录/文件（任意层级），以及 baks/ 汇总目录
+bak_*
+baks/
+# _tmp_xxx / _patch_xxx 等临时文件与目录（任意层级）
+_tmp_*
+_patch_*
+_probe_*
+_fix_*
+_smoke_*
+_test_*
+_diag_out/
+# 调研/调试片段
+_agent_snip/
+_probe/
+# 崩溃转储与调试截图
+*.dmp
+debug_screenshot.png
+# 过渡产品压缩包
+ant-quant.zip
+# tools/ 下的一次性探测 / 验证脚本（非日常程序）
+tools/_em_*
+tools/_verify_*
+tools/_mz2_handler_snippet.py
+tools/em_zjlx_*
+tools/probe_*
+tools/smoke_*
+tools/verify_*
+# QMT 内置目录里的本机数据副本
+/qmt_builtin/src/data/
+# IDE 本地数据
+.antigravity/
+# 本项目记忆（本地性质，不进仓库）
+.workbuddy/
 *.old
 *.orig

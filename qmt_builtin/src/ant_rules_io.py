@@ -254,6 +254,42 @@ def normalize_armed_task(raw: Dict[str, Any]) -> Dict[str, Any]:
                 out[key] = int(raw.get(key) or 0)
             except (TypeError, ValueError):
                 pass
+
+    # 强势留半：到期强弱 / 连续不创新高 / 预置持有期高点
+    for sk in (
+        "scheduled_clear_mode",
+        "keep_half_id",
+    ):
+        sv = raw.get(sk)
+        if sv is not None and str(sv).strip() != "":
+            out[sk] = str(sv).strip()
+    if raw.get("scheduled_clear_every_day"):
+        out["scheduled_clear_every_day"] = True
+    if raw.get("scheduled_clear_force"):
+        out["scheduled_clear_force"] = True
+    for fk in (
+        "holding_period_high",
+        "cost_price",
+        "profit_keep_pct",
+        "trail_pullback_pct",
+        "min_order_amount",
+    ):
+        if raw.get(fk) is None or str(raw.get(fk)).strip() == "":
+            continue
+        try:
+            fv = float(raw.get(fk))
+        except (TypeError, ValueError):
+            continue
+        if fk in ("holding_period_high", "cost_price", "min_order_amount") and fv <= 0:
+            continue
+        out[fk] = fv
+    if raw.get("no_new_high_days") is not None and str(raw.get("no_new_high_days")).strip() != "":
+        try:
+            nv = int(float(raw.get("no_new_high_days")))
+            if nv >= 1:
+                out["no_new_high_days"] = nv
+        except (TypeError, ValueError):
+            pass
     return out
 
 

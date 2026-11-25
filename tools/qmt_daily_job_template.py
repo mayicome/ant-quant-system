@@ -2,7 +2,7 @@
 """QMT 探针热加载的日线拉取脚本（写入 userdata/qmt_daily_watch/current.py）。
 
 由 tools/run_qmt_daily_cache.py 原子覆盖本文件（内嵌 JOB）+ 同目录 job.json 旁路副本。
-探针加载后调用 run_backtest(ContextInfo)。
+探针按 iter_backtest() 分段驱动；run_backtest() 仍是一次性跑完的入口。
 
 约束：
 - Python 3.6.8；禁止 xtquant.xtdata（58610）
@@ -314,8 +314,8 @@ def _flush_rows(run_tag, rows_buf, emit_batch):
             _emit("BATCH", {"run_tag": run_tag, "rows": chunk})
 
 
-def run_backtest(ContextInfo):
-    """探针入口：用内嵌 JOB → 批量拉 1d → FormulaOutput ROW/BATCH → SUMMARY。"""
+def iter_backtest(ContextInfo):
+    """探针分段入口。yield 处交还主线程；run_backtest() 会把生成器跑完。"""
     t0 = time.time()
     job = None
     run_tag = ""
@@ -360,8 +360,10 @@ def run_backtest(ContextInfo):
         for batch in _chunks(codes, batch_size):
             if download_first:
                 for code in batch:
+                    yield
                     _call_download(ContextInfo, code, "1d", start_ymd, end_ymd)
 
+            yield
             data, gerr = _get_market_batch(ContextInfo, batch, "1d", start_ymd, end_ymd)
             if data is None:
                 for code in batch:
@@ -369,6 +371,7 @@ def run_backtest(ContextInfo):
                 data, gerr = _get_market_batch(ContextInfo, batch, "1d", start_ymd, end_ymd)
 
             for code in batch:
+                yield
                 payload = None
                 if isinstance(data, dict):
                     payload = data.get(code)
@@ -471,6 +474,16 @@ def run_backtest(ContextInfo):
         })
         _plog("error %s" % short)
         return None
+
+
+def run_backtest(ContextInfo):
+    """One-shot entry. The probe drives iter_backtest() and yields between steps."""
+    gen = iter_backtest(ContextInfo)
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return getattr(stop, "value", None)
 
 
 def make_fallback_tag():

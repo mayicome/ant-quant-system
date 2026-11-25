@@ -10,6 +10,7 @@ Python 需 3.6 兼容；tick/日线只用大 QMT 内置 download_history_data + 
 from __future__ import print_function
 
 import json
+import os
 import time
 import traceback
 from datetime import date, datetime, timedelta
@@ -141,6 +142,227 @@ def _call_download(ContextInfo, full_code, period, start_s, end_s):
         return str(e)[:200]
 
 
+def _datadir_roots():
+    return (
+        r"D:\国金证券QMT交易端2\datadir",
+        r"D:\国金证券QMT交易端\datadir",
+    )
+
+
+def _market_of(full_code):
+    s = str(full_code or "").strip().upper()
+    if "." in s:
+        suf = s.split(".", 1)[1]
+        if suf in ("SH", "SZ", "BJ"):
+            return suf
+    c6 = _code6(s)
+    if c6.startswith("6"):
+        return "SH"
+    if c6.startswith(("4", "8")):
+        return "BJ"
+    return "SZ"
+
+
+def _daily_ymds_from_dat(full_code):
+    """YYYYMMDD from datadir/{SH|SZ|BJ}/86400/{code}.DAT.
+
+    QMT daily file: 8-byte header, then 64-byte bars. Byte 0 of each bar is a
+    local Unix timestamp (uint32). None if the file cannot be read.
+    """
+    try:
+        c6 = _code6(full_code)
+        if not c6:
+            return None
+        mkt = _market_of(full_code)
+        saw = False
+        for root in _datadir_roots():
+            path = os.path.join(root, mkt, "86400", c6 + ".DAT")
+            if not os.path.isfile(path):
+                alt = os.path.join(root, mkt, "86400", c6 + ".dat")
+                if os.path.isfile(alt):
+                    path = alt
+                else:
+                    continue
+            saw = True
+            try:
+                import struct
+                fh = open(path, "rb")
+                try:
+                    data = fh.read()
+                finally:
+                    fh.close()
+            except OSError:
+                return None
+            if len(data) < 72:
+                return []
+            n = (len(data) - 8) // 64
+            out = []
+            seen_d = set()
+            for i in range(n):
+                v = struct.unpack_from("<I", data, 8 + i * 64)[0]
+                if v < 631152000 or v > 4102444800:
+                    continue
+                try:
+                    ymd = datetime.fromtimestamp(v).strftime("%Y%m%d")
+                except Exception:
+                    continue
+                if ymd not in seen_d:
+                    seen_d.add(ymd)
+                    out.append(ymd)
+            out.sort()
+            return out
+        if not saw:
+            return None
+        return []
+    except Exception:
+        return None
+
+
+def _api_daily_ymds(ContextInfo, full_code, start_s, end_s):
+    """Daily dates from get_market_data_ex. None means the read failed."""
+    try:
+        daily, err = _get_market(ContextInfo, full_code, "1d", start_s, end_s)
+        if err:
+            return None
+        ymds = []
+        seen = set()
+        seq = []
+        # Index is often a real datetime. The time column is often epoch ms;
+        # reading digits[:8] of that int is not a calendar day.
+        if hasattr(daily, "index"):
+            try:
+                seq = list(daily.index)
+            except Exception:
+                seq = []
+        parsed = _as_ymd_list(seq) if seq else []
+        if not any(parsed):
+            parsed = _as_ymd_list(_series(daily, "time", "stamp", "stime"))
+        for y in parsed:
+            if y and y not in seen:
+                seen.add(y)
+                ymds.append(y)
+        ymds.sort()
+        return ymds
+    except Exception:
+        return None
+
+
+def _local_daily_ymds(ContextInfo, full_code, start_s, end_s):
+    """Dates used by the skip check. A covering 86400 DAT wins over the API."""
+    disk = _daily_ymds_from_dat(full_code)
+    if disk and _daily_range_covered(disk, start_s, end_s):
+        return disk
+    api = _api_daily_ymds(ContextInfo, full_code, start_s, end_s)
+    if api and _daily_range_covered(api, start_s, end_s):
+        return api
+    if api:
+        return api
+    if disk is not None:
+        return disk
+    return api
+
+
+def _daily_range_covered(ymds, daily_start, end_s):
+    """True only when local daily bars reach the requested end and the lookback."""
+    if not ymds:
+        return False
+    if str(ymds[-1]) < str(end_s):
+        return False
+    first = str(ymds[0])
+    ask = str(daily_start)
+    if first <= ask:
+        return True
+    try:
+        d0 = date(int(first[0:4]), int(first[4:6]), int(first[6:8]))
+        d_ask = date(int(ask[0:4]), int(ask[4:6]), int(ask[6:8]))
+        gap = (d0 - d_ask).days
+        if 0 <= gap <= 10:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _local_tick_ymds(full_code):
+    """YYYYMMDD set of non-empty tick files. None if datadir cannot be listed."""
+    try:
+        c6 = _code6(full_code)
+        if not c6:
+            return None
+        mkt = _market_of(full_code)
+        saw_root = False
+        for root in _datadir_roots():
+            base = os.path.join(root, mkt, "0")
+            if not os.path.isdir(base):
+                continue
+            saw_root = True
+            folder = os.path.join(base, c6)
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                return set()
+            out = set()
+            for fn in names:
+                if len(fn) < 12 or not fn[:8].isdigit():
+                    continue
+                if not fn.lower().endswith(".dat"):
+                    continue
+                try:
+                    sz = os.path.getsize(os.path.join(folder, fn))
+                except OSError:
+                    return None
+                if sz > 0:
+                    out.add(fn[:8])
+            return out
+        if not saw_root:
+            return None
+        return set()
+    except Exception:
+        return None
+
+
+# mz1_qmt_fine.DEFAULT_TICK_DEPTH_CALENDAR_DAYS：自然日，不是交易日。
+DEFAULT_TICK_DEPTH_CALENDAR_DAYS = 29
+
+
+def _tick_depth_floor_ymd():
+    """Earliest day download_history_data(tick) can still fetch. date.today() inside QMT."""
+    try:
+        floor = date.today() - timedelta(days=DEFAULT_TICK_DEPTH_CALENDAR_DAYS)
+        return floor.strftime("%Y%m%d")
+    except Exception:
+        return ""
+
+
+def _tick_download_plan(tick_days, files, depth_ymd, req_start, req_end):
+    """Decide whether a tick download can add anything.
+
+    Returns ('skip', ''), ('skip_old', '') or ('download', start_ymd).
+    Days older than the broker depth are never requested. A download start
+    is clamped up to that floor; the end stays req_end.
+    """
+    missing_old = []
+    missing_in = []
+    known = files is not None
+    for ymd in tick_days or []:
+        if known and ymd in files:
+            continue
+        if depth_ymd and ymd < depth_ymd:
+            missing_old.append(ymd)
+        else:
+            missing_in.append(ymd)
+    if missing_in:
+        dl_start = req_start or depth_ymd or ""
+        if depth_ymd and (not dl_start or dl_start < depth_ymd):
+            dl_start = depth_ymd
+        if req_end and dl_start and dl_start > req_end:
+            return "skip_old", ""
+        return "download", dl_start
+    if missing_old:
+        return "skip_old", ""
+    return "skip", ""
+
+
 def _extract_payload(data, full_code):
     if data is None:
         return None
@@ -246,28 +468,71 @@ def _as_ymd_list(ts_list):
 
 
 def _tick_ymd(tm):
+    """Calendar day. Epoch ms/ns must not be sliced to the first 8 digits."""
     if tm is None:
         return None
     if isinstance(tm, datetime):
         return tm.strftime("%Y%m%d")
     if isinstance(tm, date):
         return tm.strftime("%Y%m%d")
-    s = str(tm).strip()
-    if not s:
-        return None
-    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-        return s[0:4] + s[5:7] + s[8:10]
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if len(digits) >= 8:
-        return digits[:8]
+    if type(tm).__name__ == "datetime64":
+        try:
+            import pandas as pd
+            return pd.Timestamp(tm).strftime("%Y%m%d")
+        except Exception:
+            pass
+    v = None
     try:
-        v = float(s)
-        if v >= 1e12:
-            return datetime.fromtimestamp(v / 1e3).strftime("%Y%m%d")
-        if v >= 1e9:
-            return datetime.fromtimestamp(v).strftime("%Y%m%d")
+        raw = tm.item() if hasattr(tm, "item") else tm
+        v = float(raw)
     except Exception:
-        pass
+        v = None
+    s = str(tm).strip()
+    if not s and v is None:
+        return None
+    if v is None and len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[0:4] + s[5:7] + s[8:10]
+    if v is None:
+        try:
+            v = float(s)
+        except Exception:
+            v = None
+    if v is not None and v == v:
+        try:
+            if v >= 1e17:
+                return datetime.fromtimestamp(v / 1e9).strftime("%Y%m%d")
+            if v >= 1e14:
+                return datetime.fromtimestamp(v / 1e6).strftime("%Y%m%d")
+            if v >= 1e13:
+                # YYYYMMDDHHMMSS, not epoch milliseconds
+                return str(int(v))[:8]
+            if v >= 1e12:
+                return datetime.fromtimestamp(v / 1e3).strftime("%Y%m%d")
+            if v >= 1e9:
+                return datetime.fromtimestamp(v).strftime("%Y%m%d")
+            if v >= 1e7:
+                y = str(int(v))[:8]
+                if y.startswith("19") or y.startswith("20"):
+                    return y
+        except Exception:
+            pass
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) >= 17:
+        try:
+            return datetime.fromtimestamp(float(digits) / 1e9).strftime("%Y%m%d")
+        except Exception:
+            return None
+    if len(digits) >= 14:
+        return digits[:8]
+    if len(digits) >= 13:
+        try:
+            return datetime.fromtimestamp(float(digits) / 1e3).strftime("%Y%m%d")
+        except Exception:
+            return None
+    if len(digits) >= 8:
+        y = digits[:8]
+        if y.startswith("19") or y.startswith("20"):
+            return y
     return None
 
 
@@ -335,6 +600,18 @@ def _is_growth_board(c6):
     if not c6:
         return False
     return c6.startswith("3") or c6.startswith("688") or c6.startswith("8") or c6.startswith("4")
+
+
+def _mz1_leg_has_clear_branch(is_growth, thr_main, drop_main, thr_growth, drop_growth):
+    """马总卖 run()：只有这两条清仓腿才写 clear_branch_at。
+
+    主板 CLEAR_GAIN_MAIN=0.10 且回落 0 → 涨停即清仓。
+    非主板 CLEAR_GAIN_GROWTH=0.20 且回落 0。
+    创业板/科创默认 13% + 回落 1.5% 不带 T 点，封住也不改开板突破卖。
+    """
+    if is_growth:
+        return abs(float(thr_growth) - 0.20) < 1e-9 and float(drop_growth) <= 1e-12
+    return abs(float(thr_main) - 0.10) < 1e-9 and float(drop_main) <= 1e-12
 
 
 def _limit_ratio(c6):
@@ -411,34 +688,160 @@ def _min_tick_prec(c6):
     return 0.01, 2
 
 
-def _replay_breakthrough_sell(ticks, price, run_start_sec, run_end_sec, after_sec=None):
-    """现价/最低 < 触发价（向下突破）成交。"""
+def _tick_row(t):
+    ask = 0
+    try:
+        if len(t) > 5:
+            ask = int(float(t[5] or 0))
+    except Exception:
+        ask = 0
+    return t[0], t[1], t[2], t[3], t[4], ask
+
+
+# core.rule_activation.PRICE_TOUCH_EPS / is_limit_up_sealed
+_SEAL_EPS = 0.011
+
+
+def _is_limit_up_sealed(last_price, limit_up, ask_vol=0):
+    """现价贴涨停且卖一量为 0。与 core.rule_activation.is_limit_up_sealed 一致。"""
+    try:
+        lp = float(last_price or 0)
+        lu = float(limit_up or 0)
+    except Exception:
+        return False
+    if lu <= 0 or lp <= 0:
+        return False
+    if lp < lu - _SEAL_EPS:
+        return False
+    try:
+        av = int(float(ask_vol or 0))
+    except Exception:
+        av = 0
+    return av <= 0
+
+
+def _replay_breakthrough_sell(ticks, price, run_start_sec, run_end_sec, after_sec=None, prec=2):
+    """向下突破：现价跌破触发价则按这一笔现价卖。开板不走这里。"""
     if price <= 0 or not ticks:
         return None
-    for sec, tm, last, hi, lo in ticks:
+    try:
+        prec = int(prec)
+    except Exception:
+        prec = 2
+    if prec < 0:
+        prec = 2
+    px = round(float(price), prec)
+    for sec, tm, last, _hi, _lo, _ask in (_tick_row(t) for t in ticks):
         if after_sec is not None and sec < after_sec:
             continue
         if run_start_sec is not None and sec < run_start_sec:
             continue
         if run_end_sec is not None and sec > run_end_sec:
             continue
-        use_lo = lo if lo > 0 else last
-        if last + 1e-9 < price or use_lo + 1e-9 < price:
-            return (sec, tm, last if last > 0 else use_lo)
+        if last <= 0:
+            continue
+        if round(float(last), prec) < px:
+            return (sec, tm, last)
+    return None
+
+
+def _replay_open_board_sell(ticks, limit_up, run_start_sec, run_end_sec, after_sec=None):
+    """开板突破卖：实盘只看现价 < 涨停价，不看最低价。"""
+    if limit_up <= 0 or not ticks:
+        return None
+    for sec, tm, last, hi, lo, _ask in (_tick_row(t) for t in ticks):
+        if after_sec is not None and sec < after_sec:
+            continue
+        if run_start_sec is not None and sec < run_start_sec:
+            continue
+        if run_end_sec is not None and sec > run_end_sec:
+            continue
+        if last + 1e-9 < float(limit_up):
+            return (sec, tm, last)
     return None
 
 
 def _resolve_clear_branch(ticks, branch_sec, limit_up):
-    """到 T 点首个 tick：贴涨停视为封板。返回 (resolved, sealed, after_sec)。"""
-    if not ticks or limit_up <= 0:
-        return True, False, branch_sec
-    for sec, tm, last, hi, lo in ticks:
+    """core.clear_branch.process_clear_branch_tick：T 后第一笔有效现价快照。
+
+    返回 (resolved, sealed, after_sec)。没有 T 后 tick 则未决议，清仓腿不能成交。
+    """
+    if limit_up <= 0:
+        return False, False, branch_sec
+    for sec, tm, last, hi, lo, ask in (_tick_row(t) for t in ticks or []):
         if sec < branch_sec:
             continue
-        sealed = bool(last + 1e-9 >= float(limit_up) * 0.999)
+        if last <= 0:
+            continue
+        sealed = _is_limit_up_sealed(last, limit_up, ask)
         return True, sealed, sec
-    # 整天无 T 后 tick：按未封板处理，允许原清仓（与墙钟补结算口径接近）
-    return True, False, branch_sec
+    return False, False, branch_sec
+
+
+def _half_remaining_volume(avail, price, min_order_amount):
+    """qmt_builtin.keep_half_utils.half_remaining_volume。"""
+    avail = _full_lot(avail)
+    if avail < 100:
+        return 0, "no_avail"
+    half = _half_lot(avail)
+    remain = avail - half
+    if remain < 100:
+        return avail, "absorb_lot"
+    if min_order_amount > 0 and price > 0 and remain * float(price) < float(min_order_amount):
+        return avail, "absorb_min_amount"
+    if half < 100:
+        return avail, "absorb_lot"
+    return half, "half"
+
+
+def _classify_strength(last_price, cost_price, period_high, profit_keep_pct, trail_pullback_pct):
+    """qmt_builtin.keep_half_utils.classify_strength。成本缺失视为弱势。"""
+    try:
+        lp = float(last_price or 0)
+    except Exception:
+        lp = 0.0
+    try:
+        cost = float(cost_price or 0)
+    except Exception:
+        cost = 0.0
+    try:
+        hp = float(period_high or 0)
+    except Exception:
+        hp = 0.0
+    if hp <= 0:
+        hp = lp
+    profit_pct = ((lp - cost) / cost * 100.0) if (cost > 0 and lp > 0) else 0.0
+    pullback_pct = ((hp - lp) / hp * 100.0) if (hp > 0 and lp > 0) else 0.0
+    if cost <= 0 or lp <= 0:
+        strong = False
+        reason = "no_cost_or_price"
+    else:
+        strong = (profit_pct + 1e-12 >= float(profit_keep_pct)) and (
+            pullback_pct <= float(trail_pullback_pct) + 1e-12
+        )
+        reason = "strong" if strong else "weak"
+    return {
+        "strong": bool(strong),
+        "reason": reason,
+        "clear_volume_mode": "half_remaining" if strong else "remaining",
+        "profit_pct": profit_pct,
+        "pullback_pct": pullback_pct,
+        "period_high": hp,
+    }
+
+
+def _first_scheduled_tick(ticks, clear_sec, window_sec=300):
+    """到点后 300 秒内的第一笔。超时则实盘记 scheduled_clear_skip，不成交。"""
+    if clear_sec is None:
+        return None
+    for t in ticks or []:
+        sec = t[0]
+        if sec < clear_sec:
+            continue
+        if sec > clear_sec + int(window_sec):
+            return None
+        return t
+    return None
 
 def _weekday_days(start_d, end_d):
     out = []
@@ -629,6 +1032,7 @@ def _ticks_for_day(ContextInfo, full_code, day_d, run_start_sec, run_end_sec):
     precloses = _series(payload, "lastClose", "preClose", "pre_close", "last_close")
     limit_ups = _series(payload, "highLimit", "upperLimit", "limitUp", "HighLimit")
     limit_dns = _series(payload, "lowLimit", "lowerLimit", "limitDown", "LowLimit")
+    asks = _series(payload, "askVol", "askVolume")
     if not times or not lasts:
         return [], "empty_tick_fields", meta
     # 昨收/涨停只扫前几十笔，避免整天 tick 上重复解析把内存打爆
@@ -687,7 +1091,16 @@ def _ticks_for_day(ContextInfo, full_code, day_d, run_start_sec, run_end_sec):
                 lo = float(lows[i])
         except Exception:
             pass
-        out.append((sec, times[i], last, hi, lo))
+        ask = 0
+        try:
+            if asks and i < len(asks):
+                raw_ask = asks[i]
+                if isinstance(raw_ask, (list, tuple)):
+                    raw_ask = raw_ask[0] if raw_ask else 0
+                ask = int(float(raw_ask or 0))
+        except Exception:
+            ask = 0
+        out.append((sec, times[i], last, hi, lo, ask))
     return out, "", meta
 
 
@@ -710,7 +1123,7 @@ def _px_at_generation(ticks, gen_sec):
     g_end = g + 59
     before = None
     after = None
-    for sec, tm, last, hi, lo in ticks:
+    for sec, tm, last, hi, lo, _ask in (_tick_row(t) for t in ticks):
         try:
             px = float(last or 0)
         except Exception:
@@ -875,65 +1288,348 @@ def _sell_day_index(st, day_d, trading_days):
     return len(days)
 
 
-def _replay_best_sell(ticks, trigger, drop_pct, run_start_sec, run_end_sec):
-    """先上破 trigger，再按峰值回落 drop% 成交；drop=0 则触价即成。返回 (sec, tm, px) 或 None。"""
+_ELASTIC_CFG = None
+
+
+def _elastic_cfg():
+    """与实盘 data/config.ini [Elastic] 一致。QMT 读不到文件时用同一组默认值。"""
+    global _ELASTIC_CFG
+    if _ELASTIC_CFG is not None:
+        return _ELASTIC_CFG
+    cfg = {
+        "confirm_ticks": 4,
+        "cooldown": 2,
+        "dynamic": 2,
+        "room_tight": 1.0,
+        "drop_tight": 0.5,
+        "limit_minus": 1.0,
+        "drop_scale": 0.35,
+        "max_drop": 3.5,
+    }
+    try:
+        import configparser
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "data", "config.ini",
+        )
+        if not os.path.isfile(path):
+            path = r"D:\蚂蚁量化系统\data\config.ini"
+        cp = configparser.ConfigParser()
+        cp.read(path, encoding="utf-8-sig")
+        if cp.has_section("Elastic"):
+            def _i(key, default):
+                try:
+                    return int(float(cp.get("Elastic", key)))
+                except Exception:
+                    return default
+
+            def _f(key, default):
+                try:
+                    return float(cp.get("Elastic", key))
+                except Exception:
+                    return default
+
+            cfg["confirm_ticks"] = _i("confirm_ticks", cfg["confirm_ticks"])
+            cfg["cooldown"] = _i("cooldown_after_extreme_ticks", cfg["cooldown"])
+            cfg["dynamic"] = _i("dynamic_thresholds", cfg["dynamic"])
+            cfg["room_tight"] = _f("room_tight_pp", cfg["room_tight"])
+            cfg["drop_tight"] = _f("drop_tight", cfg["drop_tight"])
+            cfg["limit_minus"] = _f("limit_minus_pp", cfg["limit_minus"])
+            cfg["drop_scale"] = _f("drop_scale", cfg["drop_scale"])
+            cfg["max_drop"] = _f("max_drop_percent", cfg["max_drop"])
+    except Exception:
+        pass
+    if cfg["confirm_ticks"] < 0:
+        cfg["confirm_ticks"] = 4
+    if cfg["confirm_ticks"] == 0:
+        cfg["confirm_ticks"] = 1
+    if cfg["cooldown"] < 0:
+        cfg["cooldown"] = 0
+    _ELASTIC_CFG = cfg
+    return cfg
+
+
+def _room_blend_start(drop_pct):
+    """ant_elastic_sell_lite.resolve_room_blend_start：回落 <=2.5% 时从距涨停 3 个百分点开始收紧。"""
+    try:
+        drop = float(drop_pct)
+    except Exception:
+        drop = 2.5
+    if drop <= 2.5:
+        return 3.0
+    if drop >= 5.0:
+        return 1.5
+    w = (drop - 2.5) / (5.0 - 2.5)
+    return 3.0 + w * (1.5 - 3.0)
+
+
+def _elastic_target(highest, trigger, drop_pct, limit_up, pre_close):
+    """compute_best_sell_fallback：靠近涨停时回落收到 drop_tight，否则用名义回落。"""
+    try:
+        highest = float(highest or 0)
+    except Exception:
+        highest = 0.0
+    if highest <= 0:
+        return 0.0
+    cfg = _elastic_cfg()
+    try:
+        drop_nom = float(drop_pct or 0)
+    except Exception:
+        drop_nom = 0.0
+    dyn = int(cfg["dynamic"])
+    if dyn <= 0:
+        return highest * (1.0 - drop_nom / 100.0)
+    if dyn == 1:
+        try:
+            trig = float(trigger or 0)
+            profit_pct = max(0.0, (highest / trig - 1.0) * 100.0) if trig > 0 else 0.0
+        except Exception:
+            profit_pct = 0.0
+        eff = min(float(cfg["max_drop"]), drop_nom + profit_pct * float(cfg["drop_scale"]))
+        return highest * (1.0 - eff / 100.0)
+    try:
+        lu = float(limit_up or 0)
+        pc = float(pre_close or 0)
+    except Exception:
+        lu, pc = 0.0, 0.0
+    if lu <= 0 or pc <= 0:
+        return highest * (1.0 - drop_nom / 100.0)
+    room_pp = (lu - highest) / pc * 100.0
+    room_tight = float(cfg["room_tight"])
+    drop_tight = float(cfg["drop_tight"])
+    blend_start = _room_blend_start(drop_nom)
+    if blend_start <= room_tight + 1e-9:
+        blend_start = room_tight + 0.5
+    if room_pp >= blend_start - 1e-9:
+        eff = drop_nom
+    elif room_pp <= room_tight + 1e-9:
+        eff = drop_tight
+    else:
+        w = (room_pp - room_tight) / (blend_start - room_tight)
+        eff = drop_tight + w * (drop_nom - drop_tight)
+    fb = highest * (1.0 - eff / 100.0)
+    if room_pp <= room_tight + 1e-9:
+        floor_px = highest - float(cfg["limit_minus"]) * pc / 100.0
+        fb = max(fb, floor_px)
+    return fb
+
+
+def _replay_best_sell(ticks, trigger, drop_pct, run_start_sec, run_end_sec, seed_high=0.0, limit_up=0.0, pre_close=0.0):
+    """弹性卖出，对齐实盘 ant_tick_runner：只看现价。
+
+    现价上破触发价才开始跟踪。新高后冷却 cooldown 笔，之后要连续 confirm 笔
+    现价 <= 目标价且低于最高价才卖。不用分笔里的当日最高价、最低价。
+    seed_high：已有持有期最高价。进入区间的第一笔只完成跟踪，不成交。
+    """
     if trigger <= 0 or not ticks:
         return None
-    armed = False
-    peak = 0.0
-    floor_mult = 1.0 - float(drop_pct) / 100.0
-    for sec, tm, last, hi, lo in ticks:
+    try:
+        pre_seed = float(seed_high or 0)
+    except Exception:
+        pre_seed = 0.0
+    cfg = _elastic_cfg()
+    confirm_ticks = int(cfg["confirm_ticks"])
+    cooldown_ticks = int(cfg["cooldown"])
+    triggered = False
+    highest = None
+    highest_idx = 0
+    pull_cnt = 0
+    tick_idx = 0
+    for sec, tm, last, _hi, _lo, _ask in (_tick_row(t) for t in ticks):
         if run_start_sec is not None and sec < run_start_sec:
             continue
         if run_end_sec is not None and sec > run_end_sec:
             continue
-        use_hi = hi if hi > 0 else last
-        use_lo = lo if lo > 0 else last
-        if not armed:
-            if use_hi + 1e-9 >= trigger or last + 1e-9 >= trigger:
-                armed = True
-                peak = max(use_hi, last, trigger)
-                if float(drop_pct) <= 1e-12:
-                    return (sec, tm, last if last > 0 else trigger)
+        if last <= 0:
             continue
-        peak = max(peak, use_hi, last)
-        pull = peak * floor_mult
-        if use_lo <= pull + 1e-9 or last <= pull + 1e-9:
-            px = last if last > 0 else pull
-            return (sec, tm, px)
+        tick_idx += 1
+        if pre_seed > 0 and not triggered:
+            triggered = True
+            highest = last if last > pre_seed else pre_seed
+            highest_idx = tick_idx
+            pull_cnt = 0
+            continue
+        if last > trigger:
+            if not triggered:
+                triggered = True
+                highest = last if pre_seed <= last else pre_seed
+                highest_idx = tick_idx
+                pull_cnt = 0
+                continue
+            if highest is None or last > highest:
+                highest = last
+                highest_idx = tick_idx
+                pull_cnt = 0
+                continue
+        if triggered and highest is not None and highest > 0:
+            if highest_idx > 0 and (tick_idx - highest_idx) <= cooldown_ticks:
+                continue
+            target = _elastic_target(highest, trigger, drop_pct, limit_up, pre_close)
+            if last <= target and last < float(highest):
+                pull_cnt += 1
+                if pull_cnt < confirm_ticks:
+                    continue
+                return (sec, tm, last)
+            pull_cnt = 0
     return None
 
 
+def _eval_no_new_high(period_high, period_high_prev, streak, need_days=3):
+    """keep_half_utils.eval_no_new_high。"""
+    try:
+        hp = float(period_high or 0)
+    except Exception:
+        hp = 0.0
+    try:
+        prev = float(period_high_prev or 0)
+    except Exception:
+        prev = 0.0
+    try:
+        streak = int(streak or 0)
+    except Exception:
+        streak = 0
+    if streak < 0:
+        streak = 0
+    try:
+        need = int(need_days or 3)
+    except Exception:
+        need = 3
+    if need < 1:
+        need = 1
+    if prev <= 0 or hp <= 0:
+        return streak, False
+    if hp > prev + 1e-12:
+        return 0, False
+    streak = streak + 1
+    return streak, streak >= need
+
+
 def _replay_single_sell(ticks, price, run_start_sec, run_end_sec):
+    """单点卖出，对齐实盘 ant_tick_runner：只看现价 >= 触发价。
+
+    分笔里的 high 是当日最高价。09:50 现价已经离开涨停时，不能用这个最高价
+    当成触价、再按更低的现价成交。
+    """
     if price <= 0 or not ticks:
         return None
-    for sec, tm, last, hi, lo in ticks:
+    for sec, tm, last, _hi, _lo, _ask in (_tick_row(t) for t in ticks):
         if run_start_sec is not None and sec < run_start_sec:
             continue
         if run_end_sec is not None and sec > run_end_sec:
             continue
-        use_hi = hi if hi > 0 else last
-        if use_hi + 1e-9 >= price or last + 1e-9 >= price:
-            return (sec, tm, last if last > 0 else price)
+        if last + 1e-9 >= price:
+            return (sec, tm, last)
     return None
 
 
 def _replay_scheduled_clear(ticks, clear_px, clear_sec, force, run_end_sec):
-    if not ticks:
+    """定时清仓：到点后 300 秒内的第一笔现价。低于触发价才卖，否则当天这腿作废。"""
+    if not ticks or clear_sec is None:
         return None
-    for sec, tm, last, hi, lo in ticks:
+    window_end = int(clear_sec) + 300
+    for sec, tm, last, _hi, _lo, _ask in (_tick_row(t) for t in ticks):
         if sec < clear_sec:
             continue
         if run_end_sec is not None and sec > run_end_sec:
             break
+        if sec > window_end:
+            return None
+        if last <= 0:
+            continue
         if force:
             return (sec, tm, last)
         if clear_px > 0 and last + 1e-9 < clear_px:
             return (sec, tm, last)
+        return None
     return None
 
 
-def _run_backtest(ContextInfo):
+def _quote_intent_fill(intent, ticks, run_start_sec, run_end_sec, prec, clear_sec, limit_up, prev_close):
+    """这条规则若单独看整天，会在哪一笔成交。不扣仓。"""
+    kind = intent.get("kind")
+    after_sec = intent.get("after_sec")
+    if kind == "best_sell":
+        _seed = float(intent.get("seed_high") or 0)
+        if after_sec is not None:
+            ticks_use = [t for t in ticks if t[0] >= int(after_sec)]
+            return _replay_best_sell(
+                ticks_use, float(intent["trigger"]), float(intent["drop"]),
+                run_start_sec, run_end_sec, seed_high=_seed,
+                limit_up=limit_up, pre_close=prev_close,
+            )
+        return _replay_best_sell(
+            ticks, float(intent["trigger"]), float(intent["drop"]),
+            run_start_sec, run_end_sec, seed_high=_seed,
+            limit_up=limit_up, pre_close=prev_close,
+        )
+    if kind == "single_sell":
+        if after_sec is not None:
+            ticks_use = [t for t in ticks if t[0] > int(after_sec)]
+            return _replay_single_sell(
+                ticks_use, float(intent["trigger"]), run_start_sec, run_end_sec,
+            )
+        return _replay_single_sell(
+            ticks, float(intent["trigger"]), run_start_sec, run_end_sec,
+        )
+    if kind == "breakthrough_sell":
+        if intent.get("seal_open"):
+            return _replay_open_board_sell(
+                ticks, float(intent["trigger"]), run_start_sec, run_end_sec,
+                after_sec=after_sec,
+            )
+        return _replay_breakthrough_sell(
+            ticks, float(intent["trigger"]), run_start_sec, run_end_sec,
+            after_sec=after_sec, prec=prec,
+        )
+    if kind == "scheduled_clear":
+        preset = intent.get("preset_fill")
+        if preset:
+            return preset
+        return _replay_scheduled_clear(
+            ticks, float(intent.get("trigger") or 0), clear_sec,
+            bool(intent.get("force")), run_end_sec,
+        )
+    return None
+
+
+def _skip_lu_ex_div(yords, close_by, open_by, ymd, quote_prev, limit_ratio, day_open=0.0):
+    """除权日不挂近涨停腿。日线是不复权，昨收或今开相对缓存昨收跳空才跳过。"""
+    prevs = [y for y in (yords or []) if y and y < ymd]
+    if not prevs:
+        return False
+    try:
+        cache_close = float((close_by or {}).get(max(prevs)) or 0)
+    except Exception:
+        cache_close = 0.0
+    if cache_close <= 0:
+        return False
+    try:
+        quote_prev = float(quote_prev or 0)
+    except Exception:
+        quote_prev = 0.0
+    if quote_prev > 0 and abs(quote_prev / cache_close - 1.0) + 1e-12 >= 0.08:
+        return True
+    o = 0.0
+    try:
+        o = float(day_open or 0)
+    except Exception:
+        o = 0.0
+    if o <= 0:
+        try:
+            o = float((open_by or {}).get(ymd) or 0)
+        except Exception:
+            o = 0.0
+    if o <= 0:
+        return False
+    gap = (o / cache_close) - 1.0
+    try:
+        thr = -(float(limit_ratio) + 0.005)
+    except Exception:
+        thr = -0.105
+    return gap < thr
+
+
+def iter_backtest(ContextInfo):
     t0 = time.time()
     start_d = _parse_d(CFG.get("start"))
     end_d = _parse_d(CFG.get("end"))
@@ -1098,14 +1794,68 @@ def _run_backtest(ContextInfo):
     # download window: pad daily history for LU10 / prev_close
     dl_start = (start_d - timedelta(days=40)).strftime("%Y%m%d")
     dl_end = end_d.strftime("%Y%m%d")
-    for c6 in codes:
+    tick_lo = start_d.strftime("%Y%m%d")
+    tick_depth_ymd = _tick_depth_floor_ymd()
+    n_dl = len(codes)
+    n_skip_1d = 0
+    n_dl_1d = 0
+    n_skip_tick = 0
+    n_skip_tick_old = 0
+    n_dl_tick = 0
+    for i_dl, c6 in enumerate(codes):
+        yield
         fc = _full_from_c6(c6)
-        e1 = _call_download(ContextInfo, fc, "1d", dl_start, dl_end)
-        e2 = _call_download(ContextInfo, fc, "tick", start_d.strftime("%Y%m%d"), dl_end)
-        _log("download %s 1d=%s tick=%s" % (c6, e1 or "ok", e2 or "ok"))
+        ymds = _local_daily_ymds(ContextInfo, fc, dl_start, dl_end)
+        if ymds is None or not _daily_range_covered(ymds, dl_start, dl_end):
+            e1 = _call_download(ContextInfo, fc, "1d", dl_start, dl_end)
+            n_dl_1d += 1
+            if e1:
+                _log("download 1d %s %s" % (c6, e1))
+            else:
+                _log("download 1d %s" % c6)
+            ymds = _local_daily_ymds(ContextInfo, fc, dl_start, dl_end)
+        else:
+            n_skip_1d += 1
+        tick_days = []
+        if ymds is not None and _daily_range_covered(ymds, dl_start, dl_end):
+            for ymd in ymds:
+                if tick_lo <= ymd <= dl_end:
+                    tick_days.append(ymd)
+        if not tick_days:
+            dcur = start_d
+            while dcur <= end_d:
+                if dcur.weekday() < 5:
+                    tick_days.append(dcur.strftime("%Y%m%d"))
+                dcur += timedelta(days=1)
+        files = _local_tick_ymds(fc)
+        action, dl_tick_start = _tick_download_plan(
+            tick_days, files, tick_depth_ymd, tick_lo, dl_end
+        )
+        if action == "download":
+            e2 = _call_download(ContextInfo, fc, "tick", dl_tick_start, dl_end)
+            n_dl_tick += 1
+            if e2:
+                _log("download tick %s %s" % (c6, e2))
+            else:
+                _log("download tick %s" % c6)
+        elif action == "skip_old":
+            n_skip_tick_old += 1
+        else:
+            n_skip_tick += 1
+        done_dl = i_dl + 1
+        if done_dl % 25 == 0 or done_dl == n_dl:
+            _log(
+                "progress download %d/%d %s skipped_1d=%d downloaded_1d=%d skipped_tick=%d skipped_tick_old=%d downloaded_tick=%d"
+                % (done_dl, n_dl, c6, n_skip_1d, n_dl_1d, n_skip_tick, n_skip_tick_old, n_dl_tick)
+            )
+    _log(
+        "cache summary skipped_1d=%d downloaded_1d=%d skipped_tick=%d skipped_tick_old=%d downloaded_tick=%d"
+        % (n_skip_1d, n_dl_1d, n_skip_tick, n_skip_tick_old, n_dl_tick)
+    )
 
     daily_cache = {}
     for c6 in codes:
+        yield
         fc = _full_from_c6(c6)
         maps, yords, err = _daily_maps(ContextInfo, fc, dl_start, dl_end)
         daily_cache[c6] = (maps, yords, err)
@@ -1144,6 +1894,23 @@ def _run_backtest(ContextInfo):
 
     NAME_OPEN50 = "马总1卖-开盘涨幅弹性半仓"
     NAME_LU10 = "马总1卖-涨停后最高价下半仓"
+    strength_keep = str(CFG.get("sell_profile") or "") == "strength_keep"
+    suppress_gain_clear = bool(CFG.get("suppress_gain_clear")) or strength_keep
+    strength_uncond = bool(CFG.get("strength_unconditional")) or strength_keep
+    if CFG.get("open_rule_name"):
+        NAME_OPEN50 = str(CFG.get("open_rule_name"))
+    if CFG.get("lu_rule_name"):
+        NAME_LU10 = str(CFG.get("lu_rule_name"))
+    strength_clear_name = str(CFG.get("strength_clear_name") or "马总1卖-到期强弱留半或清仓")
+    trail_rule_name = str(CFG.get("trail_rule_name") or "马总1卖-持有期最高价回落清仓")
+    stop_cost_rule_name = str(CFG.get("stop_cost_rule_name") or "马总1卖-到期后跌破买入价")
+    no_new_high_rule_name = str(CFG.get("no_new_high_rule_name") or "马总1卖-连续不创新高清仓")
+    try:
+        no_new_high_days = int(CFG.get("no_new_high_days") or params.get("no_new_high_days") or 3)
+    except Exception:
+        no_new_high_days = 3
+    if no_new_high_days < 1:
+        no_new_high_days = 1
     NAME_OPEN_PULL = "盘中次日了结-当前价回撤弹性全仓"
     NAME_SURGE4 = "盘中冲高卖出-涨幅4%三分之一"
     NAME_SURGE6 = "盘中冲高卖出-涨幅6%三分之一"
@@ -1183,6 +1950,21 @@ def _run_backtest(ContextInfo):
         or "09:50:00"
     ).strip() or "09:50:00"
     branch_sec = _parse_hms(branch_at_s) or (9 * 3600 + 50 * 60)
+    if CFG.get("clear_branch_enabled") is None:
+        clear_branch_on = bool(is_ind)
+    else:
+        clear_branch_on = bool(CFG.get("clear_branch_enabled"))
+    clear_mode = str(
+        CFG.get("scheduled_clear_mode") or params.get("scheduled_clear_mode") or ""
+    ).strip()
+    try:
+        profit_keep_pct = float(CFG.get("profit_keep_pct") if CFG.get("profit_keep_pct") is not None else params.get("profit_keep_pct") or 6.0)
+    except Exception:
+        profit_keep_pct = 6.0
+    try:
+        trail_pullback_pct = float(CFG.get("trail_pullback_pct") if CFG.get("trail_pullback_pct") is not None else params.get("trail_pullback_pct") or 5.0)
+    except Exception:
+        trail_pullback_pct = 5.0
 
     # 模板内 clear_drop_* 已读；盘中策略 JSON 别名再兜一层
     try:
@@ -1247,6 +2029,7 @@ def _run_backtest(ContextInfo):
             _apply_buy_fill(state, c6, vol, price, day_d, blotter)
 
         for c6 in codes:
+            yield
             st = state.get(c6)
             if not st or int(st.get("volume") or 0) < 100:
                 continue
@@ -1272,6 +2055,12 @@ def _run_backtest(ContextInfo):
                 ContextInfo, fc, day_d, tick_load_from_sec, run_end_sec
             )
             if not ticks:
+                try:
+                    dh = float((high_by or {}).get(ymd) or 0)
+                except Exception:
+                    dh = 0.0
+                if dh > float(st.get("period_high") or 0):
+                    st["period_high"] = dh
                 skip_no_tick += 1
                 _emit("SKIP_NO_TICK", {"code": c6, "date": day_d.isoformat(), "err": terr or "empty"})
                 continue
@@ -1330,6 +2119,8 @@ def _run_backtest(ContextInfo):
                 )
 
             day_intents = []
+            di = _sell_day_index(st, day_d, trading_days)
+            post_expiry = bool(strength_keep and hold_n is not None and di > int(hold_n))
 
             if is_surge:
                 # ---- 盘中买入冲高卖出：昨收+4/6/8% 各三分之一单点 + 末日定时清仓（无T点清仓分支） ----
@@ -1440,8 +2231,12 @@ def _run_backtest(ContextInfo):
                         })
 
                 # T 点封板分支 → 决定清仓腿形态（仅 T 后可成交）
-                _bres, sealed, after_sec = _resolve_clear_branch(ticks, branch_sec, limit_up)
-                if avail >= 100 and prev_close > 0:
+                _bres, sealed, after_sec = (False, False, branch_sec)
+                if clear_branch_on:
+                    _bres, sealed, after_sec = _resolve_clear_branch(ticks, branch_sec, limit_up)
+                if clear_branch_on and not _bres:
+                    sealed = False
+                elif avail >= 100 and prev_close > 0:
                     if sealed:
                         day_intents.append({
                             "kind": "breakthrough_sell",
@@ -1452,6 +2247,7 @@ def _run_backtest(ContextInfo):
                             "volume": int(avail),
                             "is_clear": True,
                             "after_sec": after_sec,
+                            "seal_open": True,
                         })
                     elif _is_growth_board(c6):
                         if thr_clear_growth > 0:
@@ -1502,8 +2298,10 @@ def _run_backtest(ContextInfo):
                                     "is_clear": True,
                                     "after_sec": after_sec,
                                 })
-            else:
-                # ---- 马总逻辑1卖：开盘涨幅半仓 + 近10日涨停半仓 + 清仓（无 T 点细模拟，保持旧口径） ----
+            elif not post_expiry:
+                # ---- 马总逻辑1卖：开盘涨幅半仓 + 近涨停半仓。
+                # T 点只跟实盘 run()：主板 10%+回落0，或非主板 20%+回落0。
+                # 强势留半策略 suppress_gain_clear：不挂涨停即清仓 / 涨幅弹性清仓。 ----
                 thr = open_gain_growth if _is_growth_board(c6) else open_gain_main
                 open_ref = _clamp_px(round(prev_close * (1.0 + thr), 2), limit_down, limit_up) if prev_close > 0 else 0.0
                 _sel_raw = sel_map.get(c6) or sel_map.get(_full_from_c6(c6))
@@ -1516,6 +2314,10 @@ def _run_backtest(ContextInfo):
                     lu_px = round(float(lu_raw), 2)
                     if not (limit_up > 0 and lu_px > limit_up):
                         lu_ref = _clamp_px(lu_px, limit_down, limit_up)
+                if lu_ref > 0 and _skip_lu_ex_div(
+                    yords, close_by, open_by, ymd, prev_close, lr
+                ):
+                    lu_ref = 0.0
 
                 leg_open = "%s:OPEN50:%s" % (c6, ymd)
                 leg_lu = "%s:LU10" % c6
@@ -1567,8 +2369,29 @@ def _run_backtest(ContextInfo):
                         "trigger": lu_trig, "drop": lu_drop, "volume": int(lu_vol),
                     })
 
-                if avail >= 100 and prev_close > 0:
-                    if _is_growth_board(c6):
+                leg_branch = bool(clear_branch_on and _mz1_leg_has_clear_branch(
+                    _is_growth_board(c6),
+                    thr_clear_main, clear_drop_main,
+                    thr_clear_growth, clear_drop_growth,
+                ))
+                mz_ok, mz_sealed, mz_after = True, False, None
+                if leg_branch:
+                    mz_ok, mz_sealed, mz_after = _resolve_clear_branch(ticks, branch_sec, limit_up)
+                if (not suppress_gain_clear) and avail >= 100 and prev_close > 0 and mz_ok:
+                    if leg_branch and mz_sealed and limit_up > 0:
+                        _orig_clear = NAME_CLEAR_GROWTH if _is_growth_board(c6) else NAME_CLEAR_LU
+                        day_intents.append({
+                            "kind": "breakthrough_sell",
+                            "name": _orig_clear + "·开板突破卖",
+                            "leg": "%s:CLEAR_BRK:%s" % (c6, ymd),
+                            "trigger": float(limit_up),
+                            "drop": 0.0,
+                            "volume": int(avail),
+                            "is_clear": True,
+                            "after_sec": mz_after,
+                            "seal_open": True,
+                        })
+                    elif _is_growth_board(c6):
                         if thr_clear_growth > 0:
                             ct = _clamp_px(round(prev_close * (1.0 + thr_clear_growth), 2), limit_down, limit_up)
                             if ct > 0:
@@ -1576,6 +2399,7 @@ def _run_backtest(ContextInfo):
                                     "kind": "best_sell", "name": NAME_CLEAR_GROWTH, "leg": "%s:CLEAR_G:%s" % (c6, ymd),
                                     "trigger": float(ct), "drop": clear_drop_growth, "volume": int(avail),
                                     "is_clear": True,
+                                    "after_sec": mz_after if leg_branch else None,
                                 })
                     elif thr_clear_main > 0:
                         ct = _clamp_px(round(prev_close * (1.0 + thr_clear_main), 2), limit_down, limit_up)
@@ -1586,15 +2410,17 @@ def _run_backtest(ContextInfo):
                                     "kind": "single_sell", "name": NAME_CLEAR_LU, "leg": "%s:CLEAR_LU:%s" % (c6, ymd),
                                     "trigger": float(ct), "drop": 0.0, "volume": int(avail),
                                     "is_clear": True,
+                                    "after_sec": mz_after if leg_branch else None,
                                 })
                             else:
                                 day_intents.append({
                                     "kind": "best_sell", "name": NAME_CLEAR_MAIN, "leg": "%s:CLEAR_M:%s" % (c6, ymd),
                                     "trigger": float(ct), "drop": clear_drop_main, "volume": int(avail),
                                     "is_clear": True,
+                                    "after_sec": mz_after if leg_branch else None,
                                 })
 
-            if (not is_ind) and (not is_surge) and stop_from_buy_pct > 1e-12 and avail >= 100:
+            if (not is_ind) and (not is_surge) and (not post_expiry) and stop_from_buy_pct > 1e-12 and avail >= 100:
                 try:
                     _buy_cost = float(st.get("cost") or 0)
                 except Exception:
@@ -1614,19 +2440,132 @@ def _run_backtest(ContextInfo):
                             "volume": int(avail),
                         })
 
-            di = _sell_day_index(st, day_d, trading_days)
-            if hold_n is not None and di == int(hold_n) and avail >= 100:
+            if strength_keep and post_expiry and avail >= 100:
+                seed_hp = float(st.get("period_high") or 0)
+                day_intents.append({
+                    "kind": "best_sell",
+                    "name": trail_rule_name,
+                    "leg": "%s:TRAIL:%s" % (c6, ymd),
+                    "trigger": 0.01,
+                    "drop": float(trail_pullback_pct),
+                    "volume": int(avail),
+                    "seed_high": seed_hp,
+                    "is_clear": True,
+                })
+                try:
+                    _cost_px = float(st.get("cost") or 0)
+                except Exception:
+                    _cost_px = 0.0
+                if _cost_px > 0:
+                    stop_px = _clamp_px(round(_cost_px, prec), limit_down, limit_up)
+                    if stop_px > 0:
+                        day_intents.append({
+                            "kind": "breakthrough_sell",
+                            "name": stop_cost_rule_name,
+                            "leg": "%s:STOP_COST:%s" % (c6, ymd),
+                            "trigger": float(stop_px),
+                            "volume": int(avail),
+                            "is_clear": True,
+                        })
+                hit = _first_scheduled_tick(ticks, clear_sec, 300)
+                if hit is not None:
+                    hsec, htm, hlast = hit[0], hit[1], hit[2]
+                    today_hp = hlast
+                    for _t in ticks:
+                        if _t[0] > hsec:
+                            break
+                        if _t[2] > today_hp:
+                            today_hp = _t[2]
+                        if len(_t) > 3 and _t[3] and _t[3] > today_hp:
+                            today_hp = _t[3]
+                    hp_now = max(seed_hp, float(today_hp or 0))
+                    streak, do_clear = _eval_no_new_high(
+                        hp_now, seed_hp, st.get("nh_streak") or 0, no_new_high_days
+                    )
+                    st["nh_streak"] = streak
+                    if do_clear and hlast > 0:
+                        day_intents.append({
+                            "kind": "scheduled_clear",
+                            "name": no_new_high_rule_name,
+                            "leg": "%s:NHIGH:%s" % (c6, ymd),
+                            "trigger": 99999.0,
+                            "drop": 0.0,
+                            "volume": int(avail),
+                            "force": False,
+                            "is_clear": True,
+                            "preset_fill": (hsec, htm, hlast),
+                        })
+            elif hold_n is not None and di == int(hold_n) and avail >= 100:
                 clear_px = round(float(limit_up) - float(tick_sz), prec) if limit_up > 0 else 0.0
                 force = clear_px <= 0
                 nm = "%s-第%d日%s" % (sc_prefix, ui_n, "无条件清仓" if force else "涨停外清仓")
-                day_intents.append({
-                    "kind": "scheduled_clear", "name": nm, "leg": "%s:SCLEAR:%s" % (c6, ymd),
-                    "trigger": float(clear_px), "drop": 0.0, "volume": int(avail),
-                    "force": force, "is_clear": True,
-                })
+                if strength_keep and strength_uncond:
+                    nm = "%s-第%d日" % (strength_clear_name, ui_n)
+                    clear_px = 99999.0
+                    force = False
+                if clear_mode == "strength_half_or_full" and (not force) and clear_px > 0:
+                    hit = _first_scheduled_tick(ticks, clear_sec, 300)
+                    if hit is not None:
+                        hsec, htm, hlast, hhi = hit[0], hit[1], hit[2], hit[3]
+                        sess = hlast
+                        for _t in ticks:
+                            if _t[0] > hsec:
+                                break
+                            if _t[2] > sess:
+                                sess = _t[2]
+                            if len(_t) > 3 and _t[3] and _t[3] > sess:
+                                sess = _t[3]
+                        hp = max(float(st.get("period_high") or 0), float(sess or 0), float(hhi or 0))
+                        if hlast + 1e-9 < clear_px:
+                            try:
+                                _cost = float(st.get("cost") or 0)
+                            except Exception:
+                                _cost = 0.0
+                            cls = _classify_strength(
+                                hlast, _cost, hp, profit_keep_pct, trail_pullback_pct
+                            )
+                            if cls.get("clear_volume_mode") == "half_remaining":
+                                vol_sc, _why = _half_remaining_volume(avail, hlast, min_amt)
+                                nm_sc = nm if strength_keep else (nm + "·强势留半")
+                            else:
+                                vol_sc = _full_lot(avail)
+                                nm_sc = nm
+                            if vol_sc >= 100:
+                                day_intents.append({
+                                    "kind": "scheduled_clear",
+                                    "name": nm_sc,
+                                    "leg": "%s:SCLEAR:%s" % (c6, ymd),
+                                    "trigger": float(clear_px),
+                                    "drop": 0.0,
+                                    "volume": int(vol_sc),
+                                    "force": False,
+                                    "is_clear": True,
+                                    "preset_fill": (hsec, htm, hlast),
+                                })
+                else:
+                    day_intents.append({
+                        "kind": "scheduled_clear", "name": nm, "leg": "%s:SCLEAR:%s" % (c6, ymd),
+                        "trigger": float(clear_px), "drop": 0.0, "volume": int(avail),
+                        "force": force, "is_clear": True,
+                    })
 
-            # replay in order; reduce avail/hold after each fill
-            for intent in day_intents:
+            # 同一天多条规则先各自找出成交点，再按时间先后扣仓。
+            # 挂在前面、但下午才成交的弹性，不能抢走早上已经触发的止损。
+            # 同一秒仍按挂出顺序：开盘弹性先于止损。
+            planned = []
+            for _idx, intent in enumerate(day_intents):
+                fill = _quote_intent_fill(
+                    intent, ticks, run_start_sec, run_end_sec, prec, clear_sec,
+                    limit_up, prev_close,
+                )
+                if not fill:
+                    continue
+                sec, tm, px = fill
+                if px <= 0:
+                    continue
+                planned.append((int(sec), _idx, intent, fill))
+            planned.sort(key=lambda item: (item[0], item[1]))
+            for _sec, _idx, intent, fill in planned:
                 hold = _full_lot(int(st.get("volume") or 0))
                 avail = _available_qty(st, day_d, from_t1)
                 if avail < 100 or hold < 100:
@@ -1635,48 +2574,7 @@ def _run_backtest(ContextInfo):
                 vol = _full_lot(vol)
                 if vol < 100:
                     continue
-                kind = intent.get("kind")
-                fill = None
-                after_sec = intent.get("after_sec")
-                if kind == "best_sell":
-                    # 清仓腿带 after_sec：T 点前不撮合
-                    if after_sec is not None:
-                        # 复用 breakthrough 的 after 过滤：临时截断 ticks
-                        ticks_use = [t for t in ticks if t[0] >= int(after_sec)]
-                        fill = _replay_best_sell(
-                            ticks_use, float(intent["trigger"]), float(intent["drop"]),
-                            run_start_sec, run_end_sec,
-                        )
-                    else:
-                        fill = _replay_best_sell(
-                            ticks, float(intent["trigger"]), float(intent["drop"]),
-                            run_start_sec, run_end_sec,
-                        )
-                elif kind == "single_sell":
-                    if after_sec is not None:
-                        ticks_use = [t for t in ticks if t[0] >= int(after_sec)]
-                        fill = _replay_single_sell(
-                            ticks_use, float(intent["trigger"]), run_start_sec, run_end_sec,
-                        )
-                    else:
-                        fill = _replay_single_sell(
-                            ticks, float(intent["trigger"]), run_start_sec, run_end_sec,
-                        )
-                elif kind == "breakthrough_sell":
-                    fill = _replay_breakthrough_sell(
-                        ticks, float(intent["trigger"]), run_start_sec, run_end_sec,
-                        after_sec=after_sec,
-                    )
-                elif kind == "scheduled_clear":
-                    fill = _replay_scheduled_clear(
-                        ticks, float(intent.get("trigger") or 0), clear_sec,
-                        bool(intent.get("force")), run_end_sec,
-                    )
-                if not fill:
-                    continue
                 sec, tm, px = fill
-                if px <= 0:
-                    continue
                 taken = _consume_available_lots(st, vol, day_d, from_t1)
                 if taken < 100:
                     continue
@@ -1709,6 +2607,14 @@ def _run_backtest(ContextInfo):
                 # clear legs consume all — stop further for this code/day
                 if intent.get("is_clear"):
                     break
+            day_hi = float(st.get("period_high") or 0)
+            for _t in ticks:
+                if _t[2] > day_hi:
+                    day_hi = _t[2]
+                if len(_t) > 3 and _t[3] and _t[3] > day_hi:
+                    day_hi = _t[3]
+            if day_hi > 0:
+                st["period_high"] = day_hi
 
     _emit("SUMMARY", {
         "run_tag": run_tag,
@@ -1723,13 +2629,17 @@ def _run_backtest(ContextInfo):
 
 
 def run_backtest(ContextInfo):
-    """Entry for hot-reload probe (探针); also used by init for one-shot paste."""
+    """One-shot paste entry. The probe drives iter_backtest() and yields between steps."""
     tag = str(CFG.get("run_tag") or "")
     if tag and tag in _DONE_RUN_TAGS:
         _log("SKIP_ALREADY_DONE|%s" % tag)
         return
     try:
-        _run_backtest(ContextInfo)
+        gen = iter_backtest(ContextInfo)
+        while True:
+            next(gen)
+    except StopIteration:
+        return
     except Exception as e:
         _emit("ERROR", {"msg": str(e)[:500], "trace": traceback.format_exc()[:1500]})
 

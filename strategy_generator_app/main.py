@@ -2009,6 +2009,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
                 "本策略股票池（勾选后可删）。列：选股日、入场进度（选股日T+1起第几天/运行交易日数）、"
                 "窗口状态、已执行分支（params._filled_legs + data/filled_legs.json + 当日任务已成交规则）。"
                 "导入时：仅「进行中」保留原选股日；「已结束」「未开窗」改用新选股日并清除该票旧已执行分支。"
+                "「检查」按开盘前即可确定的跳过条件标注两腿是否还会挂；"
+                "出窗口/除权/两腿都已买过或已跌破的会勾选，未开窗只标注不勾选，不自动删池。"
             )
         )
         add_row = QHBoxLayout()
@@ -2028,15 +2030,26 @@ class StrategyGeneratorMainWindow(QMainWindow):
             "按当前策略参数 selection_date_by_code、运行交易日数，以及当日任务已执行分支重算进度。"
         )
         self.pool_refresh_status_btn.clicked.connect(self._on_pool_refresh_status)
+        self.pool_preopen_check_btn = QPushButton("检查")
+        self.pool_preopen_check_btn.setToolTip(
+            "按当前选中的「买：马总逻辑1-涨停后跌破MA10/20各1/2」或「…-单点」\n"
+            "生成策略时开盘前就能确定的条件，逐只核对两腿是否还会挂：\n"
+            "已出买入窗口、近20日疑似除权、该腿已买过、\n"
+            "选股日之后至今天之前日线已跌破早盘均线。结果写在「检查结果」列；\n"
+            "确实不会再挂的勾上前面的复选框，方便接着删除，但不会自动删。\n"
+            "今天刚选出、窗口还没开始的只标注「未开窗」，不勾选，先不要删。"
+        )
+        self.pool_preopen_check_btn.clicked.connect(self._on_pool_preopen_check)
         pool_sel_row = QHBoxLayout()
         pool_sel_row.addWidget(self.pool_select_all_cb)
         pool_sel_row.addWidget(self.pool_refresh_status_btn)
+        pool_sel_row.addWidget(self.pool_preopen_check_btn)
         pool_sel_row.addStretch()
         pool_tab_layout.addLayout(pool_sel_row)
         self.pool_list = QTableWidget()
-        self.pool_list.setColumnCount(7)
+        self.pool_list.setColumnCount(8)
         self.pool_list.setHorizontalHeaderLabels(
-            ["选", "代码", "名称", "选股日", "入场进度", "窗口", "已执行分支"]
+            ["选", "代码", "名称", "选股日", "入场进度", "窗口", "已执行分支", "检查结果"]
         )
         self.pool_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.pool_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -2055,7 +2068,8 @@ class StrategyGeneratorMainWindow(QMainWindow):
         hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(6, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(7, QHeaderView.Stretch)
         self.pool_list.itemChanged.connect(self._on_pool_item_changed)
         pool_tab_layout.addWidget(self.pool_list)
         pool_btn_row = QHBoxLayout()
@@ -2111,7 +2125,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         self.pool_export_btn = QPushButton("导出…")
         self.pool_export_btn.setToolTip(
             "将当前股票池表格全部行导出为 CSV（UTF-8 带 BOM，便于 Excel 打开）。\n"
-            "含代码、名称、选股日/建仓日、进度、窗口、已执行分支（不含勾选列）。"
+            "含代码、名称、选股日/建仓日、进度、窗口、已执行分支、检查结果（不含勾选列）。"
         )
         self.pool_export_btn.clicked.connect(self._on_export_pool_csv)
         pool_btn_row.addWidget(self.pool_copy_btn)
@@ -3155,7 +3169,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
         if self._current_strategy_is_sell_pool():
             labels = ["选", "代码", "名称", "选股日", "建仓日", "持有进度", "窗口", "已执行分支"]
         else:
-            labels = ["选", "代码", "名称", "选股日", "入场进度", "窗口", "已执行分支"]
+            labels = ["选", "代码", "名称", "选股日", "入场进度", "窗口", "已执行分支", "检查结果"]
         if t.columnCount() != len(labels):
             t.setColumnCount(len(labels))
         t.setHorizontalHeaderLabels(labels)
@@ -3602,6 +3616,7 @@ class StrategyGeneratorMainWindow(QMainWindow):
             t.setItem(r, 4, _readonly_item(prog))
             t.setItem(r, 5, _readonly_item(win))
             t.setItem(r, 6, _readonly_item(leg_txt))
+            t.setItem(r, 7, _readonly_item(""))
 
     def _fill_pool_list(self, codes, set_original=True, load_task_legs: bool = True):
         """用代码列表填充股票池状态表，每行可勾选。
@@ -3698,6 +3713,177 @@ class StrategyGeneratorMainWindow(QMainWindow):
     def _on_pool_refresh_status(self):
         codes = self._get_pool_codes_from_list()
         self._fill_pool_list(codes, set_original=False)
+
+    def _on_pool_preopen_check(self) -> None:
+        """按马总逻辑1生成时的开盘前跳过条件检查股票池，只标注和勾选，不删票。"""
+        sid = self._get_selected_strategy_id()
+        if not sid:
+            QMessageBox.information(self, "提示", "请先在左侧选择一个策略。")
+            return
+        cfg = self._find_strategy_by_id(sid)
+        if not cfg:
+            return
+        try:
+            from utils.mz1_preopen_skip import (
+                check_mz1_pool_preopen,
+                is_mz1_buy_strategy,
+                should_check_for_removal,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "检查失败", "无法加载检查模块：%s" % e)
+            return
+        if self._current_strategy_is_sell_pool() or not is_mz1_buy_strategy(
+            strategy_id=getattr(cfg, "id", "") or sid,
+            name=getattr(cfg, "name", "") or "",
+            strategy_code=getattr(cfg, "strategy_code", "") or "",
+            params=getattr(cfg, "strategy_params", None),
+        ):
+            QMessageBox.information(
+                self,
+                "检查不适用",
+                "「检查」按「买：马总逻辑1-涨停后跌破MA10/20各1/2」或"
+                "「买：马总逻辑1-涨停后跌破MA10/20各1/2-单点」生成策略时"
+                "开盘前就能确定的跳过条件，逐只核对 MA10/MA20 两腿是否还会挂。\n"
+                "当前策略没有这两腿和买入窗口逻辑，未执行检查，也未改勾选。",
+            )
+            return
+        codes = list(self._get_pool_codes_from_list())
+        if not codes:
+            QMessageBox.information(self, "提示", "股票池为空。")
+            return
+        sp = dict(getattr(cfg, "strategy_params", None) or {})
+        if getattr(self, "param_entry_window_spin", None) is not None:
+            try:
+                sp["entry_window_trading_days"] = max(
+                    1, int(self.param_entry_window_spin.value())
+                )
+            except (TypeError, ValueError):
+                pass
+        names = {}
+        t = self.pool_list
+        for r in range(t.rowCount()):
+            code_item = t.item(r, 1) or t.item(r, 0)
+            c6 = ""
+            if code_item is not None:
+                c6 = _normalize_code(code_item.data(Qt.UserRole) or code_item.text())
+            if not c6:
+                continue
+            name_item = t.item(r, 2)
+            nm = (name_item.text() if name_item is not None else "") or ""
+            if nm:
+                names[c6] = nm
+        name_fn = _get_stock_name_fn()
+        if name_fn is not None:
+            for c6 in codes:
+                if names.get(c6):
+                    continue
+                try:
+                    nm = name_fn(c6) or ""
+                except Exception:
+                    nm = ""
+                if nm and nm != "未知名称":
+                    names[c6] = nm
+
+        err = None
+        rows = []
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            rows = check_mz1_pool_preopen(
+                codes,
+                sp,
+                project_root=self._project_root(),
+                names=names,
+                strategy_id=getattr(cfg, "id", "") or sid,
+                name=getattr(cfg, "name", "") or "",
+                strategy_code=getattr(cfg, "strategy_code", "") or "",
+            )
+        except Exception as e:
+            err = e
+        finally:
+            QApplication.restoreOverrideCursor()
+        if err is not None:
+            QMessageBox.critical(self, "检查失败", str(err))
+            return
+        self._apply_pool_preopen_check_rows(rows)
+        def _check_select(r):
+            if "check_select" in r:
+                return bool(r.get("check_select"))
+            return bool(should_check_for_removal(r))
+
+        n_both = sum(1 for r in rows if _check_select(r))
+        n_pending = sum(
+            1
+            for r in rows
+            if (not _check_select(r))
+            and str(r.get("window_status") or "") == "not_started"
+        )
+        n_one = sum(
+            1
+            for r in rows
+            if (not r.get("skip_both"))
+            and (not _check_select(r))
+            and any((r.get("legs") or {}).get(leg, {}).get("reasons") for leg in ("MA10", "MA20"))
+        )
+        QMessageBox.information(
+            self,
+            "检查结果",
+            "已按开盘前条件核对 %d 只。\n"
+            "两腿都不会再挂：%d 只（已勾选，未从池中删除）。\n"
+            "今天未开窗（选股日当天不买）：%d 只（已标注，不勾选，先不要删）。\n"
+            "仅一腿不挂：%d 只（只标注、不勾选）。"
+            % (len(rows), n_both, n_pending, n_one),
+        )
+
+    def _apply_pool_preopen_check_rows(self, rows) -> None:
+        """把检查标注写进「检查结果」列。确实不会再挂的勾上复选框；未开窗只标注不勾选。不清掉用户已勾的其它行（但会清掉本次判定为未开窗、不应勾选的自动勾选）。"""
+        t = self.pool_list
+        if t is None:
+            return
+        # 买入池才有「检查结果」列
+        last = t.columnCount() - 1
+        header = t.horizontalHeaderItem(last)
+        note_col = last if header is not None and "检查" in (header.text() or "") else None
+        if note_col is None:
+            for c in range(t.columnCount()):
+                hi = t.horizontalHeaderItem(c)
+                if hi is not None and (hi.text() or "") == "检查结果":
+                    note_col = c
+                    break
+        by_code = {str(r.get("code") or ""): r for r in (rows or []) if r.get("code")}
+        self._pool_filling = True
+        t.blockSignals(True)
+        try:
+            for r in range(t.rowCount()):
+                code_item = t.item(r, 1) or t.item(r, 0)
+                c6 = ""
+                if code_item is not None:
+                    c6 = _normalize_code(code_item.data(Qt.UserRole) or code_item.text())
+                info = by_code.get(c6) or {}
+                label = str(info.get("label") or "")
+                if note_col is not None:
+                    it = QTableWidgetItem(label)
+                    it.setFlags(
+                        (it.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                        & ~Qt.ItemIsEditable
+                    )
+                    t.setItem(r, note_col, it)
+                    it.setToolTip(label)
+                chk = t.item(r, 0)
+                if chk is not None and info:
+                    if "check_select" in info:
+                        mark = bool(info.get("check_select"))
+                    else:
+                        from utils.mz1_preopen_skip import should_check_for_removal as _scr
+
+                        mark = bool(_scr(info))
+                    if mark:
+                        chk.setCheckState(Qt.Checked)
+                    elif str(info.get("window_status") or "") == "not_started":
+                        # 纠正此前把「未开窗」自动勾上的结果；不改用户勾的其它行
+                        chk.setCheckState(Qt.Unchecked)
+        finally:
+            t.blockSignals(False)
+            self._pool_filling = False
 
     def _on_pool_item_changed(self, item) -> None:
         """手改股票池「选股日」列：写回策略 selection_date_by_code + 持久库。"""
